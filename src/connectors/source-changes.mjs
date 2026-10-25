@@ -34,6 +34,7 @@ import {
   projectLine,
   storyLine,
 } from './source-lines.mjs';
+import { interruptedCarries, planCarries } from './source-carries.mjs';
 
 export const sourceChangesConnector = Object.freeze({
   id: 'local-source-changes',
@@ -1889,6 +1890,8 @@ async function finishIntegration(runtime, task, review, candidate) {
     review.id,
     `Integrated the reviewed change, merged onto ${journal.repository.branch} at ${journal.repository.head.slice(0, 7)}, formatted and tested, as commit ${journal.commit.slice(0, 7)}.${runtime.selfHosted ? ' Restart the controller to load changed modules.' : ''}`,
   );
+  // A fix on an older line is carried forward to the newer ones (1.1 step 4).
+  planCarries(store, store.task(task.id), review.id, result);
   return result;
 }
 function commitMessage(store, review, candidate, journal) {
@@ -1938,6 +1941,8 @@ export function interruptedSourceIntegrations(runtime) {
       `Source integration stopped part-way when the controller stopped (during ${journal.interrupted}); reservations retained. Use Reconcile source integration.`,
     );
   }
+  // Carries cut off the same way (1.1 step 4) are reconciled at once from git history.
+  interruptedCarries(runtime);
 }
 // An integration by merge writes the development copy only by fast-forwarding it to the
 // recorded commit, so git history says whether it landed. Nothing is restored or replayed.
@@ -1960,6 +1965,7 @@ function reconcileMerge(runtime, task, review, journal) {
       review.id,
       `Reconciled: the reviewed change had reached ${journal.repository.branch} as commit ${journal.commit.slice(0, 7)}.${runtime.selfHosted ? ' Restart the controller to load changed modules.' : ''}`,
     );
+    planCarries(store, store.task(task.id), review.id, result);
     return result;
   }
   // Verification never writes the development copy. A fast-forward refuses local edits to the

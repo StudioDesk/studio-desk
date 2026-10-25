@@ -21,6 +21,7 @@ import {
 } from './connectors/source-changes.mjs';
 import { stopIntegrationProcess } from './connectors/source-integration.mjs';
 import { addProjectLine, retireProjectLine } from './connectors/source-lines.mjs';
+import { approveCarry, skipCarry } from './connectors/source-carries.mjs';
 import {
   addWaitingIdea,
   editMilestone,
@@ -1465,6 +1466,21 @@ export function createStudio({
               start = { ok: false, reason: error.message };
             }
             return json(res, { ...merged, start }, 202);
+          }
+          // Carry to <branch> and Not needed on <branch> (1.1 step 4): the director approves a fix's next carry, which
+          // runs when the project's source is free, or skips that line with a reason.
+          if (action === 'carry' || action === 'carry-skip') {
+            const allowed = action === 'carry' ? ['projectId', 'line'] : ['projectId', 'line', 'reason'];
+            if (Object.keys(data).some(key => !allowed.includes(key))) fail('Unsupported carry fields.');
+            let carry;
+            try {
+              carry =
+                action === 'carry' ? approveCarry(store, t, data.line) : skipCarry(store, t, data.line, data.reason);
+            } catch (error) {
+              fail(error.message);
+            }
+            runner.autonomy.tryCarries();
+            return json(res, { carry, carries: store.attempt(t.sourceStage.review.attemptId).sourceCarries }, 202);
           }
           // The director approves commands Claude Code refused to the employee, which then apply to every
           // Claude employee's future attempts, and starts the work again from what it left (v1.0 item 22).

@@ -14,6 +14,7 @@ import { sendWaitingIdea } from './idea-intake.mjs';
 import { compareVersions, parseVersion, projectMilestones } from '../connectors/source-milestones.mjs';
 import { projectLine } from '../connectors/source-lines.mjs';
 import { mergeSourceStory, sourceStoryIntegrated } from '../connectors/source-changes.mjs';
+import { approveCarry, nextCarry, runCarry } from '../connectors/source-carries.mjs';
 
 const INTEGRATION = 'autonomy-integration';
 const RESTART = 'planned-restart';
@@ -33,7 +34,10 @@ export class Autonomy {
     // An integration that was waiting when the controller stopped starts once the controller is running, unless
     // it closed first.
     setImmediate(() => {
-      if (!this.runner.closing && this.store.db.isOpen) this.tryIntegration();
+      if (!this.runner.closing && this.store.db.isOpen) {
+        this.tryIntegration();
+        this.tryCarries();
+      }
     });
   }
   policy(task) {
@@ -74,6 +78,7 @@ export class Autonomy {
         this.attention(task, error.message);
       }
     this.tryIntegration();
+    this.tryCarries();
     this.sendWaiting(recordProject(task));
   }
   reviewed(task, policy) {
@@ -386,6 +391,7 @@ export class Autonomy {
       if (!this.mergeConflict(task, pending, result))
         this.attention(task, `Integration did not complete${stays(pending)}. ${result?.error || result?.state}`);
       this.tryIntegration();
+      this.tryCarries();
       return;
     }
     const integrated = this.store.task(task.id);
@@ -415,7 +421,56 @@ export class Autonomy {
       );
     this.resumePlan(plan, `Integrated from ${task.id}; the pipeline continues without a restart.`);
     this.tryIntegration();
+    this.tryCarries();
     this.sendWaiting(pending.projectId);
+  }
+
+  // Carries waiting their turn (1.1 step 4): the policy approves a carry when it integrates after a passing review,
+  // as it would the integration, and an approved carry runs once no integration or carry runs, none is waiting and
+  // the project's source is free. One at a time, oldest story first.
+  tryCarries() {
+    if (
+      this.runner.closing ||
+      !this.store.db.isOpen ||
+      this.runner.sourceIntegrationRun ||
+      this.store.setting(INTEGRATION)
+    )
+      return;
+    for (const story of this.store.tasks()) {
+      if (story.kind !== 'studio-development:change' || story.status !== 'done' || !story.sourceStage?.review) continue;
+      let review;
+      try {
+        review = this.store.attempt(story.sourceStage.review.attemptId);
+      } catch {
+        continue;
+      }
+      const carry = nextCarry(review);
+      if (carry?.state !== 'waiting') continue;
+      if (!carry.approvedBy) {
+        const policy = this.policy(story);
+        if (!policy.enabled || kindMode(policy, story.kind).integrate !== 'auto') continue;
+        approveCarry(this.store, story, carry.line, {
+          type: 'policy',
+          revision: policy.revision,
+          reason: 'Carried as integration is: after a passing review.',
+        });
+      }
+      try {
+        runCarry(this.runner, story, result => this.carrySettled(story, result));
+        return;
+      } catch (error) {
+        if (error.busy) return;
+        this.attention(story, `The carry to ${carry.line} could not start: ${error.message}`);
+      }
+    }
+  }
+  carrySettled(story, result) {
+    if (this.runner.closing) return;
+    if (result?.state === 'merging') this.queue([this.store.task(result.storyId)]);
+    else if (['rejected', 'needs-reconciliation'].includes(result?.state))
+      this.attention(story, `Carrying the fix to ${result.line} did not complete. ${result.error}`);
+    this.tryIntegration();
+    this.tryCarries();
   }
 
   // A story whose integration stopped on a conflict goes back to its editor with its change merged onto the current

@@ -148,9 +148,10 @@ export function cleanSourceWorktrees(runtime, parent) {
         (attempt.status === 'interrupted' && !attempt.reconciledAt))
     )
       kept.add(path.basename(attempt.sourceWorktree.path));
-    const journal = attempt.sourceIntegration;
-    if (journal?.worktree && ['verifying', 'committing', 'needs-reconciliation'].includes(journal.state))
-      kept.add(path.basename(journal.worktree));
+    // An integration's worktree, and a carry's (1.1 step 4), stay while they run or wait to be reconciled.
+    for (const journal of [attempt.sourceIntegration, ...(attempt.sourceCarries || [])])
+      if (journal?.worktree && ['verifying', 'committing', 'needs-reconciliation'].includes(journal.state))
+        kept.add(path.basename(journal.worktree));
   }
   const repositories = new Set([runtime.sourceChangeRoot]);
   for (const name of fs.readdirSync(parent)) {

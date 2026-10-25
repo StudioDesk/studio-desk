@@ -269,6 +269,21 @@ export class Store {
   resourceConflict(resource, ownerAttemptId) {
     const integration = ownerAttemptId.startsWith('source-integration:');
     let reason = `Waiting for resource ${resource} to become available.`;
+    // A fix being carried to a newer line (1.1 step 4) holds its project's source as an integration does.
+    const carry = /^source-carry:(.+):\d+$/.exec(ownerAttemptId);
+    if (carry)
+      try {
+        const review = this.attempt(carry[1]),
+          task = this.task(review.taskId),
+          line = review.sourceCarries?.find(item => item.id === ownerAttemptId)?.line;
+        return {
+          reason: `Waiting for the carry of ${task.id} (${task.title})${line ? ` to ${line}` : ''} to finish.`,
+          resource,
+          ownerAttemptId,
+        };
+      } catch {
+        return { reason, resource, ownerAttemptId };
+      }
     // Diagnostics must remain useful for historical or incomplete records without
     // changing ownership or treating a synthetic integration owner as an employee.
     try {
