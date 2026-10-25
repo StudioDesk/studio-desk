@@ -358,7 +358,8 @@ export function traceRows(trace: AttemptTrace, attempt?: AttemptSummary): TraceR
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
 }
 
-// The source phases worth a line: editing starting, the candidate committed, packages installed and the tests.
+// The source phases worth a line: editing starting, the candidate committed, packages installed, the build and the
+// tests.
 function phaseRow(phase: TracePhase, attempt?: AttemptSummary): TraceRow | null {
   const key = `p${phase.phaseId}${phase.boundary}${phase.at}`,
     took = span(phase.durationMs),
@@ -376,6 +377,11 @@ function phaseRow(phase: TracePhase, attempt?: AttemptSummary): TraceRow | null 
       failed
         ? `Installing packages failed${took ? ` after ${took}` : ''}`
         : `Installed packages${took ? ` in ${took}` : ''}`,
+      failed ? 'bad' : 'ok',
+    );
+  if (phase.phaseId === 'build')
+    return row(
+      failed ? `The build failed${took ? ` after ${took}` : ''}` : `Built the candidate${took ? ` in ${took}` : ''}`,
       failed ? 'bad' : 'ok',
     );
   if (phase.phaseId === 'integration.verification')

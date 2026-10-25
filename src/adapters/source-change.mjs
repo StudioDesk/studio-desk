@@ -29,6 +29,15 @@ import { builtInSandboxReady, noBuiltInSandbox } from './built-in-sandbox.mjs';
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
 import { runInstallStep } from '../connectors/package-installs.mjs';
 import { git, installTimeoutMs, testTimeoutMs } from '../connectors/source-integration.mjs';
+import {
+  buildCommand,
+  buildOutputBytes,
+  buildPassed,
+  buildTail,
+  buildText,
+  buildTimeoutMs,
+  changedByBuild,
+} from '../connectors/source-build.mjs';
 import { continuationFile, prepareSourceContinuation } from '../core/attempt-continuation.mjs';
 import { closeEmployeeTests, employeeTestsCommand, openEmployeeTests } from '../connectors/employee-tests.mjs';
 
@@ -332,6 +341,10 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     runtime.store.finishPhase(commitPhase, 'succeeded', { commit });
     a.sourceCandidate = { ...sourcePlan(candidate, profileOf(scope.source)), commit, diffStat: sourceDiffStat(diff) };
     a.sourceCandidate.command = candidateTestCommand(a.sourceCandidate, a.configuration);
+    // The project's build, when its settings name one, runs before the tests and is wrapped as they are (1.1).
+    const build = buildCommand(profileOf(scope.source));
+    if (build)
+      a.sourceCandidate.build = candidateTestCommand({ root: a.sourceCandidate.root, command: build }, a.configuration);
     a.sourceCandidate.sandbox = sandboxRecord(a.configuration);
     runtime.store.updateAttempt(a);
     const manifest = {
@@ -353,7 +366,7 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         entry.timedOut = true;
         runtime.stop(a.id);
       },
-      runtime.candidateTimeoutMs ?? installTimeoutMs + testTimeoutMs,
+      runtime.candidateTimeoutMs ?? installTimeoutMs + (build ? buildTimeoutMs : 0) + testTimeoutMs,
     );
     runtime.store.event(
       'candidate_checks',
@@ -367,8 +380,8 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     // Only the copied test harness consumes this marker. Controller runtime
     // code never selects a termination policy from an environment variable.
     environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-    // The candidate gets its installed packages first (MP-026), then the tests run on it.
-    runInstallStep(runtime, entry, candidate, installsPackages(profileOf(scope.source)), environment, () => {
+    // The candidate gets its installed packages first (MP-026), then its build (1.1), then the tests run on it.
+    const tests = () => {
       let stdout = '',
         stderr = '';
       const testPhase = runtime.startPhase(entry, 'test', () => {
@@ -398,8 +411,16 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
             signal: checkSignal,
             fixture: !!runtime.sourceCheckCommand,
           };
-          const report = checkReport(a.sourceCandidate, a.checkExecution, stdout, stderr);
-          runtime.store.finishPhase(testPhase, report.passed ? 'succeeded' : 'failed', testPhaseEvidence(stdout));
+          const report = checkReport(a.sourceCandidate, a.checkExecution, stdout, stderr, built),
+            { totals } = report,
+            testsPassed =
+              code === 0 && !checkSignal && !totals.fail && !totals.cancelled && !totals.skipped && !totals.todo,
+            buildSentence = report.build
+              ? report.build.passed
+                ? 'the build passed; '
+                : `the build failed (${built.execution.timedOut ? 'time limit reached' : `exit ${built.execution.exitCode ?? built.execution.signal}`}); `
+              : '';
+          runtime.store.finishPhase(testPhase, testsPassed ? 'succeeded' : 'failed', testPhaseEvidence(stdout));
           a.failedTests = failedTests(stdout);
           fs.writeFileSync(path.join(entry.output, 'test-output.txt'), stdout);
           fs.writeFileSync(path.join(entry.output, 'test-errors.txt'), stderr);
@@ -407,7 +428,7 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
           return {
             ...result,
             summary:
-              `${report.passed ? 'Passing' : 'Negative'} isolated source candidate: ${report.totals.pass}/${report.totals.tests} tests passed. ${result.summary}`.slice(
+              `${report.passed ? 'Passing' : 'Negative'} isolated source candidate: ${buildSentence}${totals.pass}/${totals.tests} tests passed. ${result.summary}`.slice(
                 0,
                 4000,
               ),
@@ -421,13 +442,24 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
               { path: 'check-report.json', kind: 'source-check-report' },
               { path: 'test-output.txt', kind: 'test-log' },
               { path: 'test-errors.txt', kind: 'test-log' },
+              ...(report.build ? [{ path: 'build-output.txt', kind: 'build-log' }] : []),
             ],
             checks: [
               ...result.checks,
+              // A failing build's last lines, so its editor's next try reads why (1.1).
+              ...(report.build
+                ? [
+                    {
+                      name: 'Candidate build',
+                      status: report.build.passed ? 'pass' : 'fail',
+                      evidence: `${buildText(profileOf(scope.source))}, ${sandboxLabel(a.configuration)}: ${buildSentence.slice(0, -2)}.${report.build.passed ? '' : `\n${buildTail(built.output)}`}`,
+                    },
+                  ]
+                : []),
               {
                 name: 'Candidate Node test suite',
-                status: report.passed ? 'pass' : 'fail',
-                evidence: `${a.checkExecution.fixture ? 'Protocol fixture' : `Measured candidate tests ${sandboxLabel(a.configuration)}`}: ${JSON.stringify(report.totals)}${report.totals.tests ? '' : '; no tests ran (the repository has none yet)'}`,
+                status: testsPassed ? 'pass' : 'fail',
+                evidence: `${a.checkExecution.fixture ? 'Protocol fixture' : `Measured candidate tests ${sandboxLabel(a.configuration)}`}: ${JSON.stringify(totals)}${totals.tests ? '' : '; no tests ran (the repository has none yet)'}`,
               },
             ],
             handoff:
@@ -442,6 +474,45 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
       entry.child.stderr.on('data', chunk => {
         stderr += chunk;
       });
-    });
+    };
+    // The build, when the settings name one, as its own phase. A failing build still lets the tests run, so the
+    // editor reads both at once; a build that changes the files the settings cover stops the attempt.
+    let built = null;
+    const buildStep = () => {
+      if (!a.sourceCandidate.build) return tests();
+      const phase = runtime.startPhase(entry, 'build'),
+        startedAt = new Date().toISOString();
+      let output = '';
+      runtime.runNative(entry, a.sourceCandidate.build.executable, a.sourceCandidate.build.args, '', () => null, {
+        cwd: candidate,
+        environment,
+        resultOnFailure: true,
+        onComplete: (outcome, code, signal) => {
+          const execution = {
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            exitCode: code,
+            signal: signal ?? null,
+            timedOut: false,
+          };
+          built = { execution, output };
+          a.buildExecution = execution;
+          runtime.store.updateAttempt(a);
+          fs.writeFileSync(path.join(entry.output, 'build-output.txt'), output);
+          runtime.store.finishPhase(phase, buildPassed(execution) ? 'succeeded' : 'failed');
+          try {
+            verifyCopy(a.sourceCandidate, candidate);
+          } catch {
+            throw new Error(changedByBuild);
+          }
+          tests();
+        },
+      });
+      for (const channel of ['stdout', 'stderr'])
+        entry.child[channel].on('data', chunk => {
+          output = (output + chunk).slice(-buildOutputBytes);
+        });
+    };
+    runInstallStep(runtime, entry, candidate, installsPackages(profileOf(scope.source)), environment, buildStep);
   };
 }

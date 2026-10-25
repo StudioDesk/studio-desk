@@ -34,6 +34,7 @@ const phaseNames = {
   attempt: 'Attempt',
   'source.edit': 'Source editing',
   install: 'Installing packages',
+  build: 'Build',
   'candidate.commit': 'Candidate commit',
   test: 'Tests',
   'integration.prepare': 'Integration preparation',

@@ -84,6 +84,7 @@ export class OrganizationPresetRegistry {
   'project',
   'workflowReference',
   'checkExecution',
+  'buildExecution',
   'sourceEditExecution',
   'sourceCandidate',
   'sourceWorktree',

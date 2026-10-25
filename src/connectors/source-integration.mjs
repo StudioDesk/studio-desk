@@ -11,6 +11,7 @@ import { hash } from '../core/contracts.mjs';
 import { sourcePlan, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, studioDeskProfile } from './source-profile.mjs';
 import { installStep, lastLine } from './package-installs.mjs';
+import { buildCommand, buildPassed, buildTail, buildText, buildTimeoutMs, changedByBuild } from './source-build.mjs';
 
 // Studio desk's formatter. Keep in step with the "format" script in package.json (checked by a test).
 export const sourceFormatter = studioDeskProfile.formatter.package;
@@ -443,6 +444,51 @@ export async function verifyIntegration(runtime, journal, directory, configurati
             },
           );
       }
+      // The project's build, when its settings name one, runs before the tests, wrapped as they are (1.1). A failing
+      // build stops the verification there; a build must leave the verified source as it was.
+      const build = buildCommand(profile);
+      let built = null;
+      if (build) {
+        const wrapped = candidateTestCommand({ root: worktree, command: build }, configuration);
+        let result;
+        try {
+          result = await run(runtime, wrapped.executable, wrapped.args, {
+            cwd: worktree,
+            environment,
+            timeoutMs: buildTimeoutMs,
+            phase,
+          });
+        } catch (error) {
+          throw new Error(
+            `The build command could not start: ${error.message}. npm, npx and node run with the controller's Node.js; another program must be on the PATH.`,
+          );
+        }
+        fs.writeFileSync(path.join(directory, 'build-output.txt'), result.stdout + result.stderr);
+        const passed = buildPassed(result);
+        built = {
+          name: 'Integration build',
+          status: passed ? 'pass' : 'fail',
+          evidence: `${buildText(profile)}, ${sandboxLabel(configuration)}: ${result.timedOut ? 'time limit reached' : `exit ${result.exitCode ?? result.signal}`}.${passed ? '' : `\n${buildTail(result.stdout + result.stderr)}`}`,
+        };
+        if (!passed)
+          throw Object.assign(
+            new Error(
+              result.timedOut
+                ? 'The build ran out of time.'
+                : `The build failed: ${lastLine(result.stderr) || lastLine(result.stdout) || 'exit ' + (result.exitCode ?? result.signal)}`,
+            ),
+            {
+              verification: {
+                phaseId: 'integration.verification',
+                timedOut: result.timedOut,
+                exitCode: result.exitCode,
+                signal: result.signal,
+                checks: [built],
+              },
+            },
+          );
+        if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash) throw new Error(changedByBuild);
+      }
       const test = runtime.sourceCheckCommand || candidateTestCommand(plan, configuration);
       // Same command-local test profile and copied-harness marker as candidate tests.
       environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
@@ -474,6 +520,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
         phaseId: 'integration.verification',
         failedTests,
         checks: [
+          ...(built ? [built] : []),
           {
             name: 'Integration Node test suite',
             status: passed ? 'pass' : 'fail',

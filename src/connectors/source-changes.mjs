@@ -1154,6 +1154,15 @@ export function validateSourceChange(attempt, read, result = attempt.result) {
         (sandbox === 'none' ? first !== '--test' : path.basename(first) !== path.basename(builtInSandboxRunner))
   )
     throw new Error('Candidate tests require the recorded source sandbox.');
+  // A project whose settings name a build ran it before the tests, wrapped as they were (1.1).
+  if (
+    !!profileOf(scope.source).build !== !!candidate.build ||
+    (candidate.build &&
+      sandbox !== 'none' &&
+      (candidate.build.executable !== candidate.command.executable ||
+        candidate.build.args[0] !== candidate.command.args[0]))
+  )
+    throw new Error("The candidate's build does not match its repository settings and test sandbox.");
   if (
     !equal(manifest, {
       schemaVersion: 'source-change-v1',
@@ -1174,6 +1183,7 @@ export function validateSourceChange(attempt, read, result = attempt.result) {
     attempt.checkExecution,
     read('test-output.txt').toString(),
     read('test-errors.txt').toString(),
+    candidate.build ? { execution: attempt.buildExecution, output: read('build-output.txt').toString() } : undefined,
   );
   // Since MP-016 slice 2 the reviewer reads the change as a diff, checked by applying it in reverse
   // to the candidate's files. Earlier candidates carry full before/after copies instead.
@@ -1207,6 +1217,7 @@ export function validateSourceChange(attempt, read, result = attempt.result) {
     'check-report.json',
     'test-output.txt',
     'test-errors.txt',
+    ...(candidate.build ? ['build-output.txt'] : []),
     diffed ? 'change.diff' : 'change-context.json',
     ...changes.filter(item => item.artifact).map(item => item.artifact),
   ];

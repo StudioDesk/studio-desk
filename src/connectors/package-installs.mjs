@@ -28,14 +28,15 @@ export function installKey(directory) {
     .slice(0, 16);
 }
 
-function npmCli() {
+// npm's own script beside the Node.js that runs the controller, run with that Node.js so no shell is needed.
+export function npmCli(purpose = 'the packages cannot be installed') {
   const base = path.dirname(process.execPath);
   for (const candidate of [
     path.join(base, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
     path.join(base, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
   ])
     if (fs.existsSync(candidate)) return candidate;
-  throw new Error('npm was not found beside Node.js, so the packages cannot be installed.');
+  throw new Error(`npm was not found beside Node.js, so ${purpose}.`);
 }
 
 // The process that brings <data>/node_modules in line with a copy's lockfile, or null when the copy installs

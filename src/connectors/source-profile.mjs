@@ -1,11 +1,12 @@
 // A source profile says how the source pipeline works on one repository (1.0 item 8): the paths a
 // snapshot covers, which of them stories may change, the names no story may touch, the documents the
 // breakdown and reviews read, which files the Node test runner runs, the formatter integration
-// applies and the snapshot limits. Studio desk's own values are its profile. A plan or check records
+// applies, the build that runs before the tests (1.1) and the snapshot limits. Studio desk's own values are its profile. A plan or check records
 // its profile unless it is Studio desk's first revision, so records from before profiles, and from
 // before the second revision, keep their exact shape and meaning.
 
 export const maxProfileEntries = 50;
+export const maxBuildArguments = 19;
 const segment = /^[a-zA-Z0-9_-][a-zA-Z0-9_.-]*$/;
 
 const contextFiles = Object.freeze([
@@ -156,6 +157,7 @@ export function validateSourceProfile(profile) {
     'tests',
     'formatter',
     'install',
+    'build',
     'limits',
   ];
   if (!profile || typeof profile !== 'object' || Array.isArray(profile))
@@ -204,6 +206,21 @@ export function validateSourceProfile(profile) {
   // Whether every tested copy gets the packages installed from the repository's lockfile (MP-026).
   if ('install' in profile && ![null, 'npm-ci'].includes(profile.install))
     problems.push('install must be null or npm-ci');
+  // The command the project builds or type-checks with before its tests (1.1, MP-028): a program's name and its
+  // arguments, run without a shell, so no argument is ever read as shell syntax.
+  const build = profile.build;
+  if (
+    build !== undefined &&
+    build !== null &&
+    (!Array.isArray(build) ||
+      !build.length ||
+      build.length > maxBuildArguments + 1 ||
+      typeof build[0] !== 'string' ||
+      build[0].length > 64 ||
+      !segment.test(build[0]) ||
+      !build.slice(1).every(arg => typeof arg === 'string' && arg.length <= 500 && !/[\0-\x1f\x7f]/.test(arg)))
+  )
+    problems.push(`build must be null or a program's name and up to ${maxBuildArguments} arguments`);
   // What a larger repository needs, and what breaks first (record size, copy time), is decided with
   // step 4b's defaults; here limits only need to be positive whole numbers.
   const limits = profile.limits;

@@ -64,6 +64,7 @@ test('a blocked command says what the CLI refused, and the phases and handoff jo
       {
         phases: [
           { at: at(19, 59), phaseId: 'source.edit', boundary: 'start' },
+          { at: at(24, 50), phaseId: 'build', boundary: 'finish', outcome: 'failed', durationMs: 12000 },
           { at: at(25), phaseId: 'test', boundary: 'finish', outcome: 'failed', durationMs: 341000 },
         ],
         handoff: { at: at(24, 36), outcome: 'completed', summary: 'Added the history module.' },
@@ -76,11 +77,12 @@ test('a blocked command says what the CLI refused, and the phases and handoff jo
     ['blocked', 'Tried to run the new tests in a scratch copy'],
     ['shell', 'Run the tests'],
     ['handoff', 'Handed off its work'],
+    ['phase', 'The build failed after 12 s'],
     ['phase', 'Sandbox tests: 605 of 611 passed in 5 min 41 s'],
   ]);
   expect(rows[1]!.reason).toBe("Claude Code refused it: a variable in this command can't be checked before it runs.");
   expect(rows[2]!.reason).toBe('It ended with exit code 1.');
-  expect(rows[4]!.tone).toBe('bad');
+  expect([rows[4]!.tone, rows[5]!.tone]).toEqual(['bad', 'bad']);
 });
 
 test('chapters follow the work: oriented, the change, trying it and handing off, then the controller', () => {

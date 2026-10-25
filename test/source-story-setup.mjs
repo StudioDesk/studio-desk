@@ -390,15 +390,16 @@ export async function setup(
     return { ids, planning: store.attempt(planning.id), data, checked: checkedAttempt };
   };
   // Another accepted measured check and source review with its approved story (1.1 step 1). With a branch, the checks
-  // measured that branch's tip commit, as they do for an idea sent to a release line. Returns the story's ID.
-  c.propose = async (name, { branch, files = ['src/core/workflows.mjs'] } = {}) => {
-    let measured = sourcePlan(root);
+  // measured that branch's tip commit, as they do for an idea sent to a release line; with a profile, they measured
+  // under it, as for a project's own repository settings. Returns the story's ID.
+  c.propose = async (name, { branch, files = ['src/core/workflows.mjs'], profile } = {}) => {
+    let measured = sourcePlan(root, profile);
     if (branch) {
       const commit = git(root, ['rev-parse', `refs/heads/${branch}`]),
         worktree = path.join(directory, `m-${name}`);
       git(root, ['worktree', 'add', '--quiet', '--detach', worktree, commit]);
       try {
-        measured = { ...sourcePlan(worktree), root: fs.realpathSync(root), base: { commit, branch } };
+        measured = { ...sourcePlan(worktree, profile), root: fs.realpathSync(root), base: { commit, branch } };
       } finally {
         git(root, ['worktree', 'remove', '--force', worktree]);
       }

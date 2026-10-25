@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hash } from '../core/contracts.mjs';
 import { studioDeskProfile, profileOf, recordedProfile, snapshotPaths, isTestFile } from './source-profile.mjs';
+import { buildPassed } from './source-build.mjs';
 
 export const studioSourceRoot = fileURLToPath(new URL('../../', import.meta.url));
 // Every path a Studio desk snapshot covers; other profiles list theirs (snapshotPaths).
@@ -187,9 +188,22 @@ const reportSource = plan => ({
   hash: plan.sourceHash,
   files: plan.files,
 });
-export function validateCheckReport(report, plan, execution, stdout, stderr) {
+// What a candidate's build adds to its report (1.1): the command, how it ended and its output's hash. The report
+// passes only when the build and the tests both pass.
+function buildReport(plan, build) {
+  if (!build?.execution) throw new Error("The candidate's build has no recorded execution.");
+  return {
+    command: plan.build,
+    execution: build.execution,
+    passed: buildPassed(build.execution),
+    outputHash: hash(build.output),
+  };
+}
+export function validateCheckReport(report, plan, execution, stdout, stderr, build) {
   const totals = testTotals(stdout),
+    built = plan.build ? buildReport(plan, build) : null,
     passed =
+      (!built || built.passed) &&
       execution.exitCode === 0 &&
       !execution.signal &&
       !totals.fail &&
@@ -205,6 +219,7 @@ export function validateCheckReport(report, plan, execution, stdout, stderr) {
     execution,
     totals,
     ...(report.failedTests !== undefined ? { failedTests: failedTests(stdout) } : {}),
+    ...(built ? { build: built } : {}),
     passed,
     stdoutHash: hash(stdout),
     stderrHash: hash(stderr),
@@ -217,8 +232,9 @@ export function validateCheckReport(report, plan, execution, stdout, stderr) {
 // How measured totals read in summaries: a repository without tests says so rather than "0/0 passed".
 export const testsSentence = totals =>
   totals.tests ? `${totals.pass}/${totals.tests} tests passed` : 'no tests ran (the repository has none yet)';
-export function checkReport(plan, execution, stdout, stderr) {
-  const totals = testTotals(stdout);
+export function checkReport(plan, execution, stdout, stderr, build) {
+  const totals = testTotals(stdout),
+    built = plan.build ? buildReport(plan, build) : null;
   return {
     schemaVersion: 'source-check-report-v1',
     connector: plan.connector,
@@ -228,7 +244,9 @@ export function checkReport(plan, execution, stdout, stderr) {
     execution,
     totals,
     failedTests: failedTests(stdout),
+    ...(built ? { build: built } : {}),
     passed:
+      (!built || built.passed) &&
       execution.exitCode === 0 &&
       !execution.signal &&
       !totals.fail &&

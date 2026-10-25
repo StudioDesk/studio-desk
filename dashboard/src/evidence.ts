@@ -4,7 +4,7 @@ import type { AttemptSummary } from './api';
 
 // While a code editor's attempt runs, whether it is editing or its candidate is being committed and tested, from
 // the innermost source phase still open (attempt-record.tsx reads the same events).
-export const testingPhases = ['install', 'candidate.commit', 'test'];
+export const testingPhases = ['install', 'candidate.commit', 'build', 'test'];
 
 // A CLI's effort level in words, as the canvas writes it: "extra-high".
 export const effortWords = (effort: string) => ({ xhigh: 'extra-high' })[effort] ?? effort;

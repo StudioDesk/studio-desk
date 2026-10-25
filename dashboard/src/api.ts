@@ -83,6 +83,8 @@ export interface SourceProfile {
   tests: { directory: string; suffix: string };
   formatter: { package: string; args: string[] } | null;
   install?: 'npm-ci' | null;
+  // The build that runs before the tests, a program and its arguments (1.1); the dialog keeps it as recorded.
+  build?: string[] | null;
   limits: { files: number; fileBytes: number; totalBytes: number };
 }
 
