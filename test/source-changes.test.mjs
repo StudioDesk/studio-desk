@@ -1282,6 +1282,9 @@ test("a breakdown's and a source review's instructions name the paths of the pro
     store = {
       task: () => ({ acceptedAttemptId: 'attempt-check' }),
       attempt: () => ({ sourceCheck: { profile: fieldNotes } }),
+      // No run and no milestones, so the breakdown is told nothing about releases (1.1 step 2b).
+      run: () => undefined,
+      setting: () => undefined,
     };
   for (const [kind, title] of [
     ['studio-development:breakdown', 'Source breakdown contract'],

@@ -171,8 +171,9 @@ const breakdownShape = {
   ],
 };
 // What a breakdown is told about releases (1.1 step 2b): its idea's release, how it was chosen and the project's open
-// milestones. A project with neither is told nothing new.
+// milestones. A project with neither is told nothing new, nor is a description of the task type with no task.
 function releaseLayers(store, task) {
+  if (!store || !task) return [];
   const release = store.run(runIdOf(task))?.release,
     open = projectMilestones(store, recordProject(task)).filter(item => item.state === 'open');
   if (!release && !open.length) return [];
