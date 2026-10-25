@@ -27,6 +27,7 @@
     "format:check": "npx --yes prettier@3.3.3 --check ."
   },
   "devDependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.81",
     "@eslint/js": "10.0.1",
     "@fontsource-variable/bricolage-grotesque": "5.3.0",
     "@fontsource-variable/figtree": "5.3.0",

@@ -25,6 +25,7 @@ import {
   worktreeName,
 } from '../connectors/source-worktrees.mjs';
 import { candidateTestCommand, chosenTestSandbox, sandboxLabel, sandboxRecord } from './source-test-sandbox.mjs';
+import { builtInSandboxReady, noBuiltInSandbox } from './built-in-sandbox.mjs';
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
 import { runInstallStep } from '../connectors/package-installs.mjs';
 import { installTimeoutMs, testTimeoutMs } from '../connectors/source-integration.mjs';
@@ -37,7 +38,7 @@ const SCOPE =
 // An isolated source change made by whichever model the employee uses. The model
 // edits approved copies under changes/ through the model contract (workspace or
 // text delivery); the controller then builds and measures a candidate in the test
-// sandbox the director chose (the Codex CLI sandbox command by default), with no model call.
+// sandbox the director chose (the built-in sandbox once it is set up), with no model call.
 export const sourceChangeAdapter = {
   id: 'source-change',
   version: 'source-change-adapter-v2',
@@ -55,6 +56,7 @@ export const sourceChangeAdapter = {
     runtime.sourceFormatCommand = options.sourceFormatCommand; // trusted model-free test seam, never exposed by HTTP
     runtime.packageInstallCommand = options.packageInstallCommand; // trusted model-free stand-in for npm ci, never exposed by HTTP
     runtime.sourceWorktreeRoot = options.sourceWorktreeRoot; // defaults to <data>/wt, a short path
+    runtime.builtInSandbox = options.builtInSandbox || noBuiltInSandbox; // the controller's start probes this computer
   },
   status: () => ({ available: true, label: 'Isolated source edit by the employee’s model; measured candidate tests' }),
   blockReason(runtime, verifyAuth, task, worker) {
@@ -64,10 +66,14 @@ export const sourceChangeAdapter = {
     } catch (error) {
       return error.message;
     }
+    const sandbox = chosenTestSandbox(runtime.store.organization(), runtime.codexBinary, builtInSandboxReady(runtime));
     // Without a sandbox, by the director's choice or because Codex CLI isn't installed, candidate tests need no
-    // other CLI.
-    if (chosenTestSandbox(runtime.store.organization(), runtime.codexBinary) === 'none')
-      return model.blockReason(runtime, verifyAuth, task, worker);
+    // other CLI; the built-in sandbox needs only its one-time setup.
+    if (sandbox === 'none') return model.blockReason(runtime, verifyAuth, task, worker);
+    if (sandbox === 'built-in')
+      return builtInSandboxReady(runtime)
+        ? model.blockReason(runtime, verifyAuth, task, worker)
+        : "Candidate tests run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose another place for the tests there.";
     // Only a director who chose the Codex sandbox gets here without Codex CLI.
     if (!runtime.codexBinary)
       return "Candidate tests run in the Codex CLI sandbox, and Codex CLI isn't installed. Install Codex CLI and restart the controller, or choose No sandbox under Settings → Candidate tests.";
@@ -83,7 +89,7 @@ export const sourceChangeAdapter = {
   },
   configuration(runtime, worker, task) {
     const model = modelAdapter(runtime.adapters, worker),
-      testSandbox = chosenTestSandbox(runtime.store.organization(), runtime.codexBinary),
+      testSandbox = chosenTestSandbox(runtime.store.organization(), runtime.codexBinary, builtInSandboxReady(runtime)),
       editor = model.configuration(runtime, worker, task);
     return {
       ...editor,

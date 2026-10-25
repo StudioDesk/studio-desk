@@ -3,9 +3,11 @@
 // ignores): the commit checked out in a worktree, the packages installed from its lockfile as the pipeline
 // installs them, and the plan's fixed test command in a candidate's environment. It makes no model call.
 //   --as candidate (the default): as candidate tests and the check before merging run, in a worktree and in
-//     the test sandbox that Settings → Candidate tests names (--sandbox codex, the default, or none).
-//   --as checks: as an idea's first checks run, on a copy of the commit at a job's depth, with no sandbox.
-// Usage: npm run verify -- [--as candidate|checks] [--sandbox codex|none] [commit]
+//     the test sandbox that Settings → Candidate tests names (--sandbox built-in, codex or none; without it,
+//     the built-in sandbox once it is set up on this computer, then Codex's where it is installed, then none).
+//   --as checks: as an idea's first checks run, on a copy of the commit at a job's depth: in the built-in
+//     sandbox when that is where the tests run (1.0.1), and otherwise with no sandbox.
+// Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|codex|none] [commit]
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -20,16 +22,21 @@ import { installsPackages, snapshotPaths, studioDeskProfile } from '../src/conne
 import { installStep, packageBoundary } from '../src/connectors/package-installs.mjs';
 import { createSourceWorktree, removeSourceWorktree, worktreeName } from '../src/connectors/source-worktrees.mjs';
 import { snapshotCommit } from '../src/adapters/source-snapshot.mjs';
+import { builtInSandboxCommand, readBuiltInSandboxStatus } from '../src/adapters/built-in-sandbox.mjs';
 
-const usage = 'Usage: npm run verify -- [--as candidate|checks] [--sandbox codex|none] [commit]';
-const options = { as: 'candidate', sandbox: 'codex', commit: 'HEAD' };
+const usage = 'Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|codex|none] [commit]';
+const options = { as: 'candidate', sandbox: undefined, commit: 'HEAD' };
 for (let i = 2; i < process.argv.length; i++) {
   const argument = process.argv[i];
   if (argument === '--as' || argument === '--sandbox') options[argument.slice(2)] = process.argv[++i];
   else if (argument.startsWith('-')) fail(usage);
   else options.commit = argument;
 }
+const builtInReady = readBuiltInSandboxStatus().state === 'ready';
+options.sandbox ??= builtInReady ? 'built-in' : locateCodex() ? 'codex' : 'none';
 if (!['candidate', 'checks'].includes(options.as) || !testSandboxes.includes(options.sandbox)) fail(usage);
+if (options.sandbox === 'built-in' && !builtInReady)
+  fail('The built-in sandbox is not set up on this computer. Set it up under Settings → Candidate tests.');
 
 const root = studioSourceRoot,
   profile = studioDeskProfile,
@@ -47,7 +54,7 @@ if (git(root, ['status', '--porcelain', '--', ...snapshotPaths(profile)]))
 // Where the tests run, as the pipeline records it on an attempt.
 const configuration =
   options.as === 'checks'
-    ? { testSandbox: 'none' }
+    ? { testSandbox: options.sandbox === 'built-in' ? 'built-in' : 'none' }
     : {
         testSandbox: options.sandbox,
         ...(options.sandbox === 'codex' && process.platform === 'win32'
@@ -65,9 +72,11 @@ for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete en
 
 let copy, plan, cleanup;
 if (options.as === 'checks') {
-  // An idea's checks measure the commit in a worktree, test a copy of it in the job folder, and set no marker.
+  // An idea's checks measure the commit in a worktree and test a copy of it in the job folder; only in the
+  // built-in sandbox do they set the marker, as candidates do.
   copy = path.join(data, 'projects', 'project-studio-desk', 'jobs', id, 'source');
   plan = snapshotCommit(root, path.join(data, 'wt'), 'c-' + worktreeName(id), { commit }, copy, undefined, profile);
+  if (configuration.testSandbox === 'built-in') environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
   cleanup = () => fs.rmSync(path.join(data, 'projects'), { recursive: true, force: true });
 } else {
   // A candidate and the check before merging test a worktree, and only the copied test harness reads the marker.
@@ -86,11 +95,13 @@ try {
   const install = installStep({ store: { directory: data } }, copy, installsPackages(profile));
   if (install && (await run(install.executable, install.args, installTimeoutMs, false)).code !== 0)
     throw new Error('Installing the packages failed, so no tests ran.');
-  const test = options.as === 'checks' ? plan.command : candidateTestCommand(codex, plan, configuration),
-    where =
-      options.as === 'checks'
-        ? "without a sandbox, as an idea's checks run"
-        : `${sandboxLabel(configuration)}, as candidate tests run`,
+  const test =
+      options.as !== 'checks'
+        ? candidateTestCommand(codex, plan, configuration)
+        : configuration.testSandbox === 'built-in'
+          ? builtInSandboxCommand({ root: copy, command: plan.command })
+          : plan.command,
+    where = `${sandboxLabel(configuration)}, as ${options.as === 'checks' ? "an idea's checks run" : 'candidate tests run'}`,
     started = Date.now();
   console.log(`Testing ${commit.slice(0, 8)} ${where}.`);
   const result = await run(test.executable, test.args, testTimeoutMs, true);

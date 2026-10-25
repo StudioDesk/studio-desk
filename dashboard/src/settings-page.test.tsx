@@ -184,7 +184,63 @@ test('with only Claude Code, Settings never mentions Codex and says the candidat
   expect(within(tools).getByText('Claude Code CLI')).toBeTruthy();
   expect(tools.textContent).not.toMatch(/codex/i);
   expect(within(tools).queryByRole('group', { name: 'Where candidate tests run' })).toBeNull();
-  expect(within(tools).getByText(/^On this computer, without a sandbox: code an agent wrote runs/)).toBeTruthy();
+  expect(
+    within(tools).getByText(/^Code an agent wrote runs on this computer with your account’s full access/),
+  ).toBeTruthy();
+});
+
+test('the built-in sandbox is set up from Settings: Windows asks, the card waits, and it says how it went (1.0.1)', async () => {
+  const user = userEvent.setup();
+  controller.shell = {
+    ...controller.shell,
+    testSandbox: 'none',
+    builtInSandbox: { state: 'not-set-up' },
+    adapters: {
+      codex: { ...controller.shell.adapters!.codex!, available: false },
+      claude: { id: 'claude', name: 'Claude Code CLI', available: true, subscription: true, modes: ['workspace'] },
+    },
+  };
+  const settings = async () => {
+    cleanup();
+    open('/p/project-x/settings');
+    await screen.findByRole('heading', { level: 1, name: 'Settings' });
+    return screen.getByRole('region', { name: 'Command-line tools' });
+  };
+  let tools = await settings();
+  // Two places to choose from, and still no word of Codex for someone who uses only Claude.
+  const choices = within(tools).getByRole('group', { name: 'Where candidate tests run' });
+  expect(
+    within(choices)
+      .getAllByRole('button')
+      .map(button => button.textContent),
+  ).toEqual(['Built-in sandbox', 'No sandbox']);
+  expect(tools.textContent).not.toMatch(/codex/i);
+  expect(within(tools).getByText(/^One-time setup on this computer\. Windows asks for an administrator/)).toBeTruthy();
+  await user.click(within(tools).getByRole('button', { name: 'Set up the sandbox' }));
+  await waitFor(() => expect(commands()).toHaveLength(1));
+  expect(commands()[0]).toEqual({ url: '/api/built-in-sandbox', method: 'POST', body: { projectId: 'project-x' } });
+  // While Windows asks, the button waits and says what to do.
+  controller.shell = { ...controller.shell, builtInSandbox: { state: 'not-set-up', setup: { state: 'running' } } };
+  tools = await settings();
+  expect((within(tools).getByRole('button', { name: 'Setting up…' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(within(tools).getByText('Windows is asking for an administrator. Answer its prompt to finish.')).toBeTruthy();
+  // A setup that did not finish says why, in the setup's own last words, and can be tried again.
+  controller.shell = {
+    ...controller.shell,
+    builtInSandbox: {
+      state: 'not-set-up',
+      setup: { state: 'failed', exitCode: 1, output: 'Elevating…\nThe administrator prompt was declined.' },
+    },
+  };
+  tools = await settings();
+  expect(within(tools).getByRole('button', { name: 'Try again' })).toBeTruthy();
+  expect(within(tools).getByText('The setup didn’t finish: The administrator prompt was declined.')).toBeTruthy();
+  // Set up, it is where the tests run.
+  controller.shell = { ...controller.shell, testSandbox: 'built-in', builtInSandbox: { state: 'ready' } };
+  tools = await settings();
+  expect(within(tools).getByText('Built-in sandbox set up on this computer')).toBeTruthy();
+  expect(within(tools).getByText(/^The built-in sandbox runs tests as a separate Windows account/)).toBeTruthy();
+  expect(within(tools).getByRole('button', { name: 'Built-in sandbox' }).getAttribute('aria-pressed')).toBe('true');
 });
 
 test("the project's name, goal and direction save against the revision they were read at", async () => {

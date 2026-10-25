@@ -31,6 +31,7 @@ import {
 } from './connectors/source-projects.mjs';
 import { testsSentence } from './connectors/source-checks.mjs';
 import { chosenTestSandbox, testSandboxes } from './adapters/source-test-sandbox.mjs';
+import { builtInSandbox, builtInSandboxReady } from './adapters/built-in-sandbox.mjs';
 import { applyAgentPermissions, approveCommands, commandRule, taskAutoMode } from './core/agent-permissions.mjs';
 import { employeeTestsAllowed, runEmployeeTests } from './connectors/employee-tests.mjs';
 import { attemptTrace } from './core/attempt-trace.mjs';
@@ -313,8 +314,10 @@ export function createStudio({
       // Each workflow's graph (saved step lists read as chains) and each run's recorded graph.
       workflows: store.workflows(projectId).map(workflow => ({ ...workflow, graph: workflowGraph(workflow) })),
       adapters: registries.adapters.describe(runner),
-      // Where the next candidate tests run: the director's choice, or Codex's sandbox where it is installed.
-      testSandbox: chosenTestSandbox(store.organization(), runner.codexBinary),
+      // Where the next candidate tests run: the director's choice, or the built-in sandbox once it is set up,
+      // or Codex's sandbox where it is installed; and where the built-in sandbox stands on this computer.
+      testSandbox: chosenTestSandbox(store.organization(), runner.codexBinary, builtInSandboxReady(runner)),
+      builtInSandbox: runner.builtInSandbox.status(),
       modelFreeProviders: registries.adapters.modelFree(),
       roles: [...registries.workflows.roles.values()],
       operations: registries.connectors?.describe() || [],
@@ -711,6 +714,24 @@ export function createStudio({
           } catch (error) {
             fail(error.message);
           }
+        }
+        // Set up the built-in sandbox on this computer (1.0.1): the runtime's own setup, which asks Windows for an
+        // administrator, so the director answers Windows' prompt. One at a time; its state is in the shell and state.
+        if (url.pathname === '/api/built-in-sandbox' && req.method === 'POST') {
+          if (Object.keys(data).some(key => key !== 'projectId')) fail('The sandbox setup takes no settings.');
+          const started = runner.builtInSandbox.setup(status =>
+            store.event(
+              'control',
+              null,
+              null,
+              status.state === 'ready'
+                ? 'The built-in sandbox is set up on this computer.'
+                : 'The built-in sandbox setup did not finish; Settings → Candidate tests says why.',
+            ),
+          );
+          if (!started)
+            fail('The built-in sandbox is set up already, its setup is running, or it is not available here.', 409);
+          return json(res, { ok: true, builtInSandbox: runner.builtInSandbox.status() });
         }
         // Create a project (item 10): a git repository checked first, or general work.
         if (url.pathname === '/api/projects' && req.method === 'POST') {
@@ -1743,7 +1764,8 @@ export function createStudio({
           }
           // Where candidate tests and integration verification run; attempts already started keep theirs.
           if (data.testSandbox !== undefined) {
-            if (!testSandboxes.includes(data.testSandbox)) fail('Choose codex or none for where candidate tests run.');
+            if (!testSandboxes.includes(data.testSandbox))
+              fail('Choose built-in, codex or none for where candidate tests run.');
             org.testSandbox = data.testSandbox;
           }
           // Approved commands and the auto mode default for Claude employees (v1.0 item 22).
@@ -1768,11 +1790,13 @@ export function createStudio({
                   ? `Claude employees from the next attempt: auto mode ${org.agentPermissions.auto ? 'on' : 'off'} by default, ${org.agentPermissions.commands.length} approved command${org.agentPermissions.commands.length === 1 ? '' : 's'}.`
                   : data.testSandbox === 'none'
                     ? 'Candidate tests now run without a sandbox, with this account’s full access, from the next attempt.'
-                    : data.testSandbox
-                      ? 'Candidate tests now run in the Codex CLI sandbox from the next attempt.'
-                      : org.paused
-                        ? 'New dispatch paused; active work continues.'
-                        : 'Dispatch resumed.',
+                    : data.testSandbox === 'built-in'
+                      ? 'Candidate tests now run in the built-in sandbox from the next attempt.'
+                      : data.testSandbox
+                        ? 'Candidate tests now run in the Codex CLI sandbox from the next attempt.'
+                        : org.paused
+                          ? 'New dispatch paused; active work continues.'
+                          : 'Dispatch resumed.',
           );
           return json(res, { ok: true });
         }
@@ -1900,7 +1924,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     local = localConfiguration();
   const app = createStudio({
     directory: local.dataDirectory,
-    runnerOptions: local.sourceRoot ? { sourceChangeRoot: local.sourceRoot } : {},
+    // Only the controller itself looks at this computer's built-in sandbox; tests pass their own.
+    runnerOptions: {
+      ...(local.sourceRoot ? { sourceChangeRoot: local.sourceRoot } : {}),
+      builtInSandbox: builtInSandbox(),
+    },
     restart: supervised ? () => app.close().then(() => process.exit(75)) : null,
   });
   try {

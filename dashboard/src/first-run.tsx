@@ -213,7 +213,7 @@ function CliCard({
           {unsandboxed && (
             <p className="sd-meta" style={{ margin: 0 }}>
               A code project’s tests run on this computer, without a sandbox, with your account’s access to your files.
-              A built-in sandbox is coming in an update.
+              Set up the built-in sandbox under Settings → Candidate tests to keep them apart.
             </p>
           )}
         </>

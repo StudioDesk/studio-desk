@@ -14,6 +14,13 @@ import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
 import { runInstallStep } from '../connectors/package-installs.mjs';
 import { snapshotCommit } from './source-snapshot.mjs';
 import { subscriptionEnvironment } from './process.mjs';
+import { chosenTestSandbox } from './source-test-sandbox.mjs';
+import { builtInSandboxCommand, builtInSandboxReady } from './built-in-sandbox.mjs';
+
+// An idea's first checks run in the built-in sandbox when candidate tests do (1.0.1), so the pipeline
+// tests in one place; otherwise they run as they always have, on a copy without a sandbox.
+const checksSandbox = runtime =>
+  chosenTestSandbox(runtime.store.organization(), runtime.codexBinary, builtInSandboxReady(runtime)) === 'built-in';
 
 export const sourceChecksAdapter = {
   id: 'source-checks',
@@ -27,11 +34,15 @@ export const sourceChecksAdapter = {
   },
   status: () => ({ available: true, label: 'Node tests on an allowlisted copy of the current commit; no model calls' }),
   blockReason: (runtime, verifyAuth, task) =>
-    runtime.workflows.get(task.kind).requiredCapabilities.includes('source-checks')
-      ? ''
-      : 'A registered source-check assignment is required.',
+    !runtime.workflows.get(task.kind).requiredCapabilities.includes('source-checks')
+      ? 'A registered source-check assignment is required.'
+      : checksSandbox(runtime) && !builtInSandboxReady(runtime)
+        ? "An idea's checks run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose another place for the tests there."
+        : '',
   configuration: (runtime, worker) => ({
     ...structuredClone(worker),
+    // Recorded only when the checks run in the built-in sandbox; earlier checks ran without one.
+    ...(checksSandbox(runtime) ? { testSandbox: 'built-in' } : {}),
     executionAdapter: 'source-checks',
     connector: sourceChecksConnector,
   }),
@@ -55,10 +66,15 @@ export const sourceChecksAdapter = {
       profileOf(a.sourceCheck),
     );
     runtime.store.updateAttempt(a);
-    const command = runtime.sourceCheckCommand || a.sourceCheck.command;
+    const sandboxed = a.configuration.testSandbox === 'built-in',
+      command =
+        runtime.sourceCheckCommand ||
+        (sandboxed ? builtInSandboxCommand({ root: snapshot, command: a.sourceCheck.command }) : a.sourceCheck.command);
     const environment = subscriptionEnvironment();
     // Snapshot tests must not inherit live provider/engine overrides.
     for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
+    // In a sandbox the copied harness runs as candidate tests do; only it reads this marker.
+    if (sandboxed) environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
     // The copy gets its installed packages first (MP-026), then the tests run on it.
     runInstallStep(runtime, entry, snapshot, installsPackages(profileOf(a.sourceCheck)), environment, () =>
       runTests(runtime, entry, a, command, snapshot, environment),

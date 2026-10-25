@@ -12,6 +12,7 @@ import { repositoryOrganization } from '../organizations/studio-development/proj
 import { startIdeaIntake } from './idea-intake.mjs';
 import { autonomyPolicy, recommendedKinds, saveAutonomyPolicy } from './autonomy.mjs';
 import { chosenTestSandbox } from '../adapters/source-test-sandbox.mjs';
+import { builtInSandboxReady } from '../adapters/built-in-sandbox.mjs';
 
 const cliLabels = { claude: 'Claude Code', codex: 'Codex CLI' };
 const mediaTypes = { md: 'text/markdown', js: 'text/plain', txt: 'text/plain' };
@@ -51,7 +52,8 @@ export function listTemplates(store, runner) {
     firstRun: store.projects().length === 0 && !store.setting('projectCreated', false),
     ...setupStatus(runner),
     // Where a code project's candidate tests will run, which the screen says when it is not a sandbox (item 25).
-    testSandbox: chosenTestSandbox(org, runner.codexBinary),
+    testSandbox: chosenTestSandbox(org, runner.codexBinary, builtInSandboxReady(runner)),
+    builtInSandbox: runner.builtInSandbox?.status() ?? { state: 'unsupported' },
     // Where a sample's folder is made unless the director chooses another folder.
     samples: path.join(store.directory, 'samples'),
     templates: projectTemplates.map(template => ({

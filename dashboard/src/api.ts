@@ -139,12 +139,21 @@ export interface ProjectTemplate {
   suggestions: string[];
   houseRules: string;
 }
+// Where candidate tests run (v1.0 item 20): the built-in sandbox (1.0.1), Codex CLI's, or none.
+export type TestSandbox = 'built-in' | 'codex' | 'none';
+// The built-in sandbox on this computer (src/adapters/built-in-sandbox.mjs): its one-time setup asks Windows for
+// an administrator; `missing` means the packages are not installed, `unsupported` that it is not Windows.
+export interface BuiltInSandbox {
+  state: 'ready' | 'not-set-up' | 'outdated' | 'missing' | 'unsupported';
+  setup?: { state: 'running' | 'failed'; startedAt?: string; exitCode?: number; output?: string };
+}
 export interface FirstRunTemplates {
   firstRun: boolean;
   clis: { id: string; label: string }[];
   git: { found: boolean; version: string | null };
   /** Where a code project's candidate tests will run (v1.0 item 25). */
-  testSandbox?: 'codex' | 'none';
+  testSandbox?: TestSandbox;
+  builtInSandbox?: BuiltInSandbox;
   /** Where a sample's folder is made unless the director chooses another folder: the data folder's samples. */
   samples: string;
   templates: ProjectTemplate[];
@@ -300,8 +309,10 @@ export interface Shell {
   quota?: Record<string, unknown>;
   leases?: { resource: string; attemptId: string; token: number }[];
   sprints?: { id: string; name: string }[];
-  // Where the next candidate tests run: the director's choice, or Codex's sandbox where Codex CLI is installed.
-  testSandbox?: 'codex' | 'none';
+  // Where the next candidate tests run: the director's choice, or the built-in sandbox once it is set up, or
+  // Codex's sandbox where Codex CLI is installed; and where the built-in sandbox stands on this computer.
+  testSandbox?: TestSandbox;
+  builtInSandbox?: BuiltInSandbox;
   // Approved commands for Claude Code employees, and whether auto mode is the default (v1.0 item 22).
   agentPermissions?: { auto?: boolean; commands?: string[] };
   organizationConfiguration?: OrganizationConfiguration | null;
