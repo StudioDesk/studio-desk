@@ -11,7 +11,7 @@ import { recordProject } from '../core/projects.mjs';
 import { subscriptionEnvironment } from '../adapters/process.mjs';
 import { snapshotCommit } from '../adapters/source-snapshot.mjs';
 import { failedTests, sourcePlan, testTotals } from './source-checks.mjs';
-import { git, repositoryState } from './source-integration.mjs';
+import { git, gitRefusal, repositoryState } from './source-integration.mjs';
 import { maxProfileEntries, studioDeskProfile, validateSourceProfile } from './source-profile.mjs';
 import { sourceWorktreeRoot } from './source-worktrees.mjs';
 
@@ -52,10 +52,13 @@ export function projectRepository(store, projectId, root, runtime) {
   } catch {
     throw new Error('The repository folder does not exist.');
   }
-  // A folder git finds no repository in is refused in plain words; a subfolder of one is refused below.
+  // A folder git finds no repository in is refused in plain words; a subfolder of one is refused below. A folder git
+  // refuses for another reason (another user's repository without safe.directory) is refused in git's own words.
   try {
     git(real, ['rev-parse', '--show-toplevel']);
-  } catch {
+  } catch (error) {
+    const refusal = gitRefusal(error);
+    if (refusal) throw new Error(refusal);
     throw new Error(
       'This folder is not a git repository. This version of Studio desk works on git repositories; ' +
         'leave the folder empty to make a project for work that is not code.',

@@ -164,3 +164,17 @@ test('a folder that is not a git repository is refused in plain words', t => {
     /The repository folder does not exist/,
   );
 });
+
+// 1.1 (MP-028): a repository git refuses for another reason, such as another user's repository without
+// safe.directory or a broken configuration, is refused in git's own words rather than as no repository.
+test("a repository git refuses for another reason is refused in git's own words", t => {
+  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-refused-'))),
+    folder = path.join(directory, 'broken');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.mkdirSync(folder);
+  git(folder, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  fs.appendFileSync(path.join(folder, '.git', 'config'), '[core\n');
+  assert.throws(() => inspectRepository({ projects: () => [] }, folder, runtime(folder)), {
+    message: /^Git refused this folder: bad config line \d+ in file /,
+  });
+});

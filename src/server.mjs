@@ -19,6 +19,7 @@ import {
   editSourceStory,
 } from './connectors/source-changes.mjs';
 import { stopIntegrationProcess } from './connectors/source-integration.mjs';
+import { addProjectLine, retireProjectLine } from './connectors/source-lines.mjs';
 import { listFolders } from './connectors/folders.mjs';
 import { packageBoundary } from './connectors/package-installs.mjs';
 import {
@@ -663,9 +664,9 @@ export function createStudio({
             Array.isArray(data) ||
             !Object.hasOwn(data, 'projectId') ||
             !Object.hasOwn(data, 'idea') ||
-            Object.keys(data).some(key => !['projectId', 'idea', 'files', 'autoMode'].includes(key))
+            Object.keys(data).some(key => !['projectId', 'idea', 'files', 'autoMode', 'line'].includes(key))
           )
-            fail('Idea intake accepts projectId, idea, optional files and optional autoMode.');
+            fail('Idea intake accepts projectId, idea, optional files, optional autoMode and an optional line.');
           const projectId = data.projectId;
           store.project(projectId);
           let started;
@@ -680,6 +681,7 @@ export function createStudio({
                 files: data.files,
                 autoMode: data.autoMode,
                 general: url.pathname === '/api/intake',
+                line: data.line,
               },
               sampleIdeaFiles,
             );
@@ -904,7 +906,7 @@ export function createStudio({
           const { projectId: selected, ...config } = data;
           return json(res, saveProjectOrganization(store, registries, projectId, config));
         }
-        if (parts[1] === 'projects' && parts[2] && req.method === 'PATCH') {
+        if (parts[1] === 'projects' && parts[2] && !parts[3] && req.method === 'PATCH') {
           if (parts[2] !== projectId) fail('Select this project before editing it.');
           if (
             Object.keys(data).some(
@@ -985,6 +987,27 @@ export function createStudio({
             projectId,
           );
           return json(res, edited);
+        }
+        // A project's release lines (1.1 step 1): a line for a branch, or for a new branch made at a tag, branch or
+        // commit (POST), and retiring a line or keeping it again (PATCH).
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'lines' && !parts[4]) {
+          if (parts[2] !== projectId) fail('Select this project before changing its lines.');
+          if (req.method === 'POST') {
+            if (Object.keys(data).some(key => !['projectId', 'branch', 'from'].includes(key)))
+              fail('A line takes a branch and an optional starting point.');
+            try {
+              return json(res, { lines: addProjectLine(store, projectId, runner, data) }, 201);
+            } catch (error) {
+              fail(error.message);
+            }
+          }
+          if (Object.keys(data).some(key => !['projectId', 'branch', 'retired'].includes(key)))
+            fail('Retiring a line takes its branch and whether it is retired.');
+          try {
+            return json(res, { lines: retireProjectLine(store, projectId, data) });
+          } catch (error) {
+            fail(error.message);
+          }
         }
         if (parts[1] === 'workflows') {
           if (parts[3] === 'run' && req.method === 'POST') {

@@ -17,24 +17,23 @@ import { builtInSandboxRunner } from '../adapters/built-in-sandbox.mjs';
 import {
   commitIntegration,
   committedIntegration,
-  fastForward,
   integrationTrailer,
-  landed,
-  repositoryState,
   statusPaths,
   verifyCandidateCommit,
   verifyIntegration,
   observeIntegrationPhase,
 } from './source-integration.mjs';
+import { createSourceWorktree, removeSourceWorktree, sourceWorktreeRoot, worktreeName } from './source-worktrees.mjs';
 import {
-  committedPaths,
-  createSourceWorktree,
-  ignoredPaths,
-  removeSourceWorktree,
-  sourceBase,
-  sourceWorktreeRoot,
-  worktreeName,
-} from './source-worktrees.mjs';
+  lineBase,
+  lineFiles,
+  lineReached,
+  lineRepository,
+  measureLine,
+  moveLine,
+  projectLine,
+  storyLine,
+} from './source-lines.mjs';
 
 export const sourceChangesConnector = Object.freeze({
   id: 'local-source-changes',
@@ -45,6 +44,17 @@ export const sourceChangesConnector = Object.freeze({
 // with its own repository holds that repository's (sourceResources).
 export const sourceIntegrationResources = studioDeskSourceResources;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// Where a release line that is not checked out is measured, in a worktree removed at once (src/connectors/source-lines.mjs).
+const measureParent = store => path.join(store.directory, 'wt');
+// The source a story's scope is checked against: its project's line as its measured checks recorded it.
+function storySource(store, projectId, root, sourceCheck, profile) {
+  const line = projectLine(store, projectId, sourceCheck.base?.branch);
+  return {
+    line,
+    current: measureLine(root, line, profile, measureParent(store)),
+    files: lineFiles(root, line, profile, measureParent(store)),
+  };
+}
 function closedFields(value, allowed, name) {
   if (
     !value ||
@@ -289,7 +299,13 @@ export function breakdownEvidence(store, attempt, projectId, storyKey, pathsOf =
   const report = JSON.parse(fs.readFileSync(artifactPath(store, attempt, 'source-breakdown.json')));
   validateBreakdown(report, source);
   const checked = store.attempt(source.attemptId),
-    current = sourcePlan(checked.sourceCheck.root, profileOf(checked.sourceCheck));
+    { current, files } = storySource(
+      store,
+      projectId,
+      checked.sourceCheck.root,
+      checked.sourceCheck,
+      profileOf(checked.sourceCheck),
+    );
   // Validate every story before common intake writes even the first draft.
   if (storyKey !== undefined && !report.stories.some(story => story.key === storyKey))
     throw new Error('The exact proposalReference.key is missing from the accepted breakdown.');
@@ -313,6 +329,7 @@ export function breakdownEvidence(store, attempt, projectId, storyKey, pathsOf =
     verifyStoryScope(pathsOf(story), current, source.files, {
       integrated,
       created: integratedChanges(store, siblings),
+      files,
     });
   }
   return { report, source, checkedReference: acceptedReference(store, source.taskId, source.attemptId, projectId) };
@@ -324,14 +341,15 @@ const named = files => files.slice(0, 5).join(', ') + (files.length > 5 ? ` and 
 // differ from the measured bytes by a change an integrated story committed (MP-016 slice 4), whose
 // hash an integration into this source left, or by any change committed on the development copy's
 // branch (MP-021): the editor starts from the current commit and integration merges. A listed file
-// that is gone, or that holds uncommitted edits, still stops the story. A new file the story's
+// that is gone, or that holds uncommitted edits, still stops the story. `files` reads the line the
+// story measured (src/connectors/source-lines.mjs), by default the checked-out folder. A new file the story's
 // integrated prerequisite stories created is edited like any other existing file (MP-014 slice 4);
 // other new files must still be absent, and not ignored by git.
 function verifyStoryScope(
   paths,
   current,
   original,
-  { integrated = new Map(), created: prerequisites = new Map() } = {},
+  { integrated = new Map(), created: prerequisites = new Map(), files: line = lineFiles(current.root) } = {},
   stale = staleBreakdown,
 ) {
   validateStoryPaths(paths, original, undefined, profileOf(current));
@@ -347,7 +365,7 @@ function verifyStoryScope(
         item && (item.hash !== before.hash || item.bytes !== before.bytes) && !integrated.get(file)?.has(item.hash)
       );
     }),
-    committed = committedPaths(current.root, drifted),
+    committed = line.committed(drifted),
     uncommitted = drifted.filter(file => !committed.includes(file));
   if (missing.length) throw new Error(`Approved source files no longer exist: ${named(missing)}. ${stale.action}`);
   if (uncommitted.length)
@@ -358,12 +376,12 @@ function verifyStoryScope(
   for (const file of absent)
     if (newPathProblem(file, taken))
       throw new Error(`${file} now exists or collides with an existing path, so it cannot be created. ${stale.action}`);
-  const ignored = ignoredPaths(current.root, absent);
+  const ignored = line.ignored(absent);
   if (ignored.length)
     throw new Error(`git ignores ${ignored.join(', ')}, so a story cannot create it. Choose another path.`);
   const allowedFiles = [...files, ...created];
   for (const file of allowedFiles) {
-    const bytes = fs.readFileSync(path.join(current.root, file));
+    const bytes = line.read(file);
     if (bytes.includes(0) || !Buffer.from(bytes.toString('utf8')).equals(bytes))
       throw new Error('Approved source files must be UTF-8 text.');
   }
@@ -509,12 +527,14 @@ function breakdownChangeScope(store, task, root, dryRun) {
   });
   // The story is measured with the profile its idea's checks used.
   const profile = profileOf(evidence),
-    current = sourcePlan(root, profile);
-  if (current.root !== store.attempt(evidence.attemptId).sourceCheck.root)
+    checkedSource = store.attempt(evidence.attemptId).sourceCheck,
+    { line, current, files } = storySource(store, recordProject(task), root, checkedSource, profile);
+  if (current.root !== checkedSource.root)
     throw new Error('The controller source target changed. Request fresh measured evidence and a new breakdown.');
   const paths = verifyStoryScope(storyPaths(task, story), current, evidence.files, {
     integrated: integratedSourceChanges(store, current.root),
     created: integratedChanges(store, siblings),
+    files,
   });
   return {
     connector: sourceChangesConnector,
@@ -522,7 +542,7 @@ function breakdownChangeScope(store, task, root, dryRun) {
     reviewedSourceHash: evidence.sourceHash,
     proposal: structuredClone(story),
     source: current,
-    ...(dryRun ? {} : { base: sourceBase(root, profile) }),
+    ...(dryRun ? {} : { base: lineBase(root, line, profile) }),
     ...paths,
     acceptedInputs: [ref, checkedReference, ...siblingInputs],
     ...storyScopeExtras(store, task, paths, current),
@@ -564,14 +584,18 @@ function integratedChanges(store, storyIds, seen = new Set(), files = new Map())
 // A started story holds the live source from its first edit until it is integrated, so its
 // candidate stays buildable on the source it will be integrated into (MP-014 slice 4). It
 // lets go when it is denied, cancelled, failed, or its review sent it back without a retry.
+// A project with release lines (1.1 step 1) holds each line separately, so a fix on an older
+// release does not wait for a feature story on the newest line.
 export function sourceStoryInFlight(store, task) {
+  const line = storyLine(store, task);
   return store.tasks().find(other => {
     if (
       other.id === task.id ||
       other.kind !== 'studio-development:change' ||
       recordProject(other) !== recordProject(task) ||
       ['denied', 'cancelled', 'failed', 'backlog'].includes(other.status) ||
-      sourceStoryIntegrated(other)
+      sourceStoryIntegrated(other) ||
+      (line !== undefined && storyLine(store, other) !== line)
     )
       return false;
     // A live edit holds the source, including a story from before stages.
@@ -831,12 +855,12 @@ export function changeScope(store, task, root, { dryRun = false } = {}) {
   // changes only the proposal's paths, each unchanged since the measured checks but for changes
   // integrated stories committed.
   const profile = profileOf(checked.sourceCheck),
-    source = sourcePlan(root, profile),
+    { line, current: source, files } = storySource(store, recordProject(task), root, checked.sourceCheck, profile),
     paths = verifyStoryScope(
       storyPaths(task, proposal),
       source,
       checked.sourceCheck.files,
-      { integrated: integratedSourceChanges(store, source.root) },
+      { integrated: integratedSourceChanges(store, source.root), files },
       { since: 'the proposal', action: 'Request fresh evidence.' },
     );
   return {
@@ -845,7 +869,7 @@ export function changeScope(store, task, root, { dryRun = false } = {}) {
     reviewedSourceHash: checked.sourceCheck.sourceHash,
     proposal: structuredClone(proposal),
     source,
-    ...(dryRun ? {} : { base: sourceBase(root, profile) }),
+    ...(dryRun ? {} : { base: lineBase(root, line, profile) }),
     ...paths,
     ...storyScopeExtras(store, task, paths, source),
   };
@@ -1577,14 +1601,18 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
   if (previous?.state === 'verifying' && runtime.sourceIntegrationRun?.id === previous.id) return previous;
   if (previous && !['rejected', 'abandoned'].includes(previous.state))
     throw new Error('Reconcile the recorded source integration before another mutation.');
-  // The story integrates into the repository its scope measured: its project's (1.0 item 9).
+  // The story integrates into the repository its scope measured: its project's (1.0 item 9), onto
+  // the line its scope started from (1.1 step 1).
   const root = candidate.sourceChange?.source?.root || runtime.sourceChangeRoot,
-    commit = candidate.sourceCandidate?.commit;
+    commit = candidate.sourceCandidate?.commit,
+    repository = lineRepository(root, projectLine(store, recordProject(task), candidate.sourceChange?.base?.branch));
   // A controller that develops its own source replaces its running modules, so it integrates
-  // only while paused and idle, then restarts. Otherwise integration holds only its resources.
+  // onto its checked-out branch only while paused and idle, then restarts. Otherwise integration
+  // holds only its resources.
   if (
     runtime.selfHosted &&
     root === runtime.sourceChangeRoot &&
+    repository.live !== false &&
     (!store.organization().paused || runtime.active.size || store.leases().length)
   )
     throw new Error('Pause dispatch and finish or reconcile active work before integrating source.');
@@ -1611,7 +1639,7 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
     candidateHash: manifest.candidateHash,
     candidateCommit: commit,
     changes: manifest.changes,
-    repository: repositoryState(root, 'integrating source', { clean: false }),
+    repository,
     worktree: path.join(sourceWorktreeRoot(runtime), 'i-' + worktreeName(review.id)),
     startedAt: new Date().toISOString(),
     approvedBy: approval,
@@ -1638,7 +1666,7 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
     'source_verifying',
     task.id,
     review.id,
-    `Integration approved${override ? ` over the review's ${verdict.verdict} verdict, by the director: ${override.reason}` : approval.type === 'policy' ? ` by autonomy policy revision ${approval.revision} after the independent review passed` : ' by the director'}. The controller is merging the reviewed change onto ${journal.repository.branch} at ${journal.repository.head.slice(0, 7)} in its own worktree, then formatting and testing it; the development copy is unchanged until it passes.`,
+    `Integration approved${override ? ` over the review's ${verdict.verdict} verdict, by the director: ${override.reason}` : approval.type === 'policy' ? ` by autonomy policy revision ${approval.revision} after the independent review passed` : ' by the director'}. The controller is merging the reviewed change onto ${journal.repository.branch} at ${journal.repository.head.slice(0, 7)} in its own worktree, then formatting and testing it; ${journal.repository.live === false ? journal.repository.branch : 'the development copy'} is unchanged until it passes.`,
   );
   sourceIntegrationProgress(runtime, task, journal);
   const promise = finishIntegration(runtime, task, review, candidate)
@@ -1751,14 +1779,14 @@ async function finishIntegration(runtime, task, review, candidate) {
   };
   try {
     observeIntegrationPhase(runtime, journal, 'integration.fast-forward', () => {
-      fastForward(root, journal);
-      if (!landed(root, journal.commit))
+      moveLine(root, journal);
+      if (!lineReached(root, journal))
         throw Object.assign(new Error('The development copy did not reach the integration commit.'), { partial: true });
     });
   } catch (error) {
     return error.partial ? attention(error.message) : reject(error.message);
   }
-  if (!landed(root, journal.commit)) return attention('The development copy did not reach the integration commit.');
+  if (!lineReached(root, journal)) return attention('The development copy did not reach the integration commit.');
   const result = settle(store, review, journal, 'integrated', {
     repository: { ...journal.repository, commit: journal.commit },
   });
@@ -1828,7 +1856,7 @@ function reconcileMerge(runtime, task, review, journal) {
         removeSourceWorktree(journal.root, journal.worktree);
       } catch {}
     };
-  if (journal.commit && landed(journal.root, journal.commit)) {
+  if (journal.commit && lineReached(journal.root, journal)) {
     const result = settle(store, review, journal, 'integrated', {
       repository: { ...journal.repository, commit: journal.commit },
     });
@@ -1844,7 +1872,8 @@ function reconcileMerge(runtime, task, review, journal) {
   }
   // Verification never writes the development copy. A fast-forward refuses local edits to the
   // changed files, so edits there now may be what an interrupted one left: the director decides.
-  if ((journal.interrupted ?? journal.state) !== 'verifying') {
+  // A line that is not checked out moves in one step and leaves no files behind.
+  if ((journal.interrupted ?? journal.state) !== 'verifying' && journal.repository?.live !== false) {
     const edited = statusPaths(
       journal.root,
       journal.changes.map(item => item.path),

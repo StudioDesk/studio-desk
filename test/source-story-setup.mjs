@@ -389,5 +389,66 @@ export async function setup(
     const ids = stageProposedWork(store, c.app.runner.registries, planned, store.attempt(planning.id));
     return { ids, planning: store.attempt(planning.id), data, checked: checkedAttempt };
   };
+  // Another accepted measured check and source review with its approved story (1.1 step 1). With a branch, the checks
+  // measured that branch's tip commit, as they do for an idea sent to a release line. Returns the story's ID.
+  c.propose = async (name, { branch, files = ['src/core/workflows.mjs'] } = {}) => {
+    let measured = sourcePlan(root);
+    if (branch) {
+      const commit = git(root, ['rev-parse', `refs/heads/${branch}`]),
+        worktree = path.join(directory, `m-${name}`);
+      git(root, ['worktree', 'add', '--quiet', '--detach', worktree, commit]);
+      try {
+        measured = { ...sourcePlan(worktree), root: fs.realpathSync(root), base: { commit, branch } };
+      } finally {
+        git(root, ['worktree', 'remove', '--force', worktree]);
+      }
+    }
+    const checks = {
+      ...structuredClone({ ...checked, artifacts: [], outputFolder: undefined }),
+      id: `${name}-checked-attempt`,
+      taskId: `${name}-checked-task`,
+      sourceCheck: measured,
+      result: { ...checked.result, taskId: `${name}-checked-task`, artifacts: [] },
+    };
+    seed(
+      checks,
+      checkReport(
+        measured,
+        checks.checkExecution,
+        'TAP version 13\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n',
+        '',
+      ),
+      'check-report.json',
+      'source-check-report',
+    );
+    const reference = {
+        taskId: checks.taskId,
+        attemptId: checks.id,
+        path: 'check-report.json',
+        hash: checks.artifacts[0].hash,
+        sourceHash: measured.sourceHash,
+      },
+      proposed = {
+        ...structuredClone({ ...review, artifacts: [], outputFolder: undefined }),
+        id: `${name}-review-attempt`,
+        taskId: `${name}-review-task`,
+        sourceReview: { ...reference, passed: true, files: measured.files.map(item => item.path) },
+        result: { ...review.result, taskId: `${name}-review-task`, artifacts: [] },
+      };
+    seed(
+      proposed,
+      { ...proposal, source: reference, proposal: { ...proposal.proposal, title: `Improve ${name}`, files } },
+      'source-review.json',
+      'source-review',
+    );
+    const [id] = stageProposedWork(
+      store,
+      c.app.runner.registries,
+      store.task(proposed.taskId),
+      store.attempt(proposed.id),
+    );
+    assert.equal((await c.request(`/api/tasks/${id}/approve-work`)).status, 200);
+    return id;
+  };
   return c;
 }

@@ -7,10 +7,18 @@ import { directorInputsOf, stageIdeaInputs, validateIdeaFiles } from './idea-inp
 import { materializeWorkflow } from './workflows.mjs';
 import { intakeSteps } from '../packs/studio-development/index.mjs';
 import { generalIntakeSteps } from '../packs/general-work/index.mjs';
+import { ideaLine } from '../connectors/source-lines.mjs';
 
 // `general` is true on the general intake route, which also takes a source project's ideas; the Studio desk route
-// only checks and breaks down. `sampleFiles` reads a sample's waiting files as wire files when the idea takes them.
-export function startIdeaIntake(store, registries, runner, { projectId, idea, files, autoMode, general }, sampleFiles) {
+// only checks and breaks down. `sampleFiles` reads a sample's waiting files as wire files when the idea takes them. A
+// source idea lands on `line`, one of the project's release lines, or its newest line (1.1 step 1).
+export function startIdeaIntake(
+  store,
+  registries,
+  runner,
+  { projectId, idea, files, autoMode, general, line },
+  sampleFiles,
+) {
   store.project(projectId);
   if (typeof idea !== 'string' || !idea.trim() || idea.trim().length > 4000)
     throw new Error('Idea must be nonempty text of at most 4000 characters after trimming.');
@@ -24,6 +32,8 @@ export function startIdeaIntake(store, registries, runner, { projectId, idea, fi
     throw new Error(
       'This project has no idea intake. Enable Plan the work and Do the work, or the Studio desk source workflow, in Edit the teams (Agents, then Teams).',
     );
+  if (planned && line !== undefined) throw new Error('Only a project on the source workflow keeps release lines.');
+  const branch = planned ? undefined : ideaLine(store, projectId, runner, line);
   const sample = store.project(projectId).sample,
     given = sample?.filesWaiting && sampleFiles ? [...sampleFiles(sample), ...(files ?? [])] : files;
   const ideaFiles = validateIdeaFiles(given),
@@ -39,6 +49,7 @@ export function startIdeaIntake(store, registries, runner, { projectId, idea, fi
           steps,
         },
     { runId, tasks, budget, run } = materializeWorkflow(store, registries, workflow, { brief, ideaFiles });
+  if (branch !== undefined) run.line = branch;
   if (typeof autoMode === 'boolean') {
     run.autoMode = autoMode;
     for (const task of tasks) task.autoMode = autoMode;

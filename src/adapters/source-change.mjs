@@ -130,8 +130,6 @@ function prepareSourceJob(runtime, entry) {
     scope = a.sourceChange,
     baseline = path.join(entry.job, 'source');
   if (!scope.base?.commit) throw new Error('This source scope has no base commit. Start a new attempt.');
-  // The read-only context copy the employee reads at ../source.
-  copySource(scope.source, baseline);
   // The candidate is built in its own git worktree of the story's repository (the root its scope
   // measured), from the story's base commit (MP-016), and removed when the attempt finishes.
   cleanSourceWorktrees(runtime, sourceWorktreeRoot(runtime));
@@ -152,6 +150,9 @@ function prepareSourceJob(runtime, entry) {
   } catch {
     throw new Error('The base commit does not match the approved source snapshot. Start a new attempt.');
   }
+  // The read-only context copy the employee reads at ../source, from that commit: the story's line
+  // may be a branch the project's folder does not have checked out (1.1 step 1).
+  copySource({ ...scope.source, root: candidate }, baseline);
   for (const file of scope.allowedFiles) {
     const destination = path.join(entry.output, 'changes', file);
     fs.mkdirSync(path.dirname(destination), { recursive: true });

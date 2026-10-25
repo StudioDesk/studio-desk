@@ -56,20 +56,24 @@ export function git(root, args, { raw = false } = {}) {
 }
 // The live source must be the root of a git repository on a branch with a commit identity.
 // A story starts only from a clean tree; integration fast-forwards, and git refuses that
-// rather than overwrite uncommitted edits, so it leaves other local edits alone.
-export function repositoryState(root, action = 'integrating source', { clean = true } = {}) {
+// rather than overwrite uncommitted edits, so it leaves other local edits alone. Work on a
+// release line that is not checked out (src/connectors/source-lines.mjs) needs no branch
+// checked out (attached false; branch is then null when HEAD is detached).
+export function repositoryState(root, action = 'integrating source', { clean = true, attached = true } = {}) {
   let top;
   try {
     top = git(root, ['rev-parse', '--show-toplevel']);
-  } catch {
-    throw new Error(`The live source must be a git repository before ${action}.`);
+  } catch (error) {
+    throw new Error(
+      gitRefusal(error, 'the live source') || `The live source must be a git repository before ${action}.`,
+    );
   }
   if (!samePath(top, root)) throw new Error('The live source must be the root of its git repository.');
-  let branch;
+  let branch = null;
   try {
     branch = git(root, ['symbolic-ref', '--short', 'HEAD']);
   } catch {
-    throw new Error(`Check out a branch before ${action}; HEAD is detached.`);
+    if (attached) throw new Error(`Check out a branch before ${action}; HEAD is detached.`);
   }
   if (clean && git(root, ['status', '--porcelain', '--untracked-files=no']))
     throw new Error(`Commit or stash tracked changes in the live source before ${action}.`);
@@ -83,6 +87,15 @@ export function repositoryState(root, action = 'integrating source', { clean = t
   if (!configured('user.name') || !configured('user.email'))
     throw new Error(`Configure git user.name and user.email before ${action}.`);
   return { branch, head: git(root, ['rev-parse', 'HEAD']) };
+}
+// What to say when git refuses a folder for a reason other than that no repository is there (another user's
+// repository without safe.directory, a broken configuration, no git at all), in git's own words; null otherwise.
+export function gitRefusal(error, folder = 'this folder') {
+  const reason = error.message.replace(/^git [\w-]+ failed: /, '').trim();
+  if (/ENOENT/.test(reason)) return 'Git could not be started. Install git, or put it on the PATH, then try again.';
+  return !reason || /not a git repository/i.test(reason)
+    ? null
+    : `Git refused ${folder}: ${reason.replace(/^fatal: /, '')}`;
 }
 // Stages the files that exist; committing the listed paths also records the deleted ones.
 export function stageFiles(root, files) {
@@ -297,10 +310,10 @@ export function fastForward(root, journal) {
     );
   }
 }
-// Whether a commit has reached the development copy's checked-out branch.
-export function landed(root, commit) {
+// Whether a commit has reached the development copy's checked-out branch, or another ref (a line's branch).
+export function landed(root, commit, ref = 'HEAD') {
   try {
-    git(root, ['merge-base', '--is-ancestor', commit, 'HEAD']);
+    git(root, ['merge-base', '--is-ancestor', commit, ref]);
     return true;
   } catch {
     return false;

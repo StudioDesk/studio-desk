@@ -35,7 +35,8 @@ import {
   maxScopePaths,
 } from '../../connectors/source-changes.mjs';
 import { sourceDiffLimit } from '../../connectors/source-diff.mjs';
-import { sourceHead } from '../../connectors/source-worktrees.mjs';
+import { lineHead, projectLine, storyLine } from '../../connectors/source-lines.mjs';
+import { runIdOf } from '../../core/graph.mjs';
 import { projectSource, sourceResources, sourceRoot } from '../../connectors/source-projects.mjs';
 import { profileOf, recordedProfile, storyPathScope, studioDeskProfile } from '../../connectors/source-profile.mjs';
 
@@ -220,8 +221,10 @@ export const studioDevelopmentPack = {
       // The commit to measure is fixed at dispatch, in the project's repository with its source
       // profile; the adapter measures it before the tests start.
       prepareAttempt: ({ runtime, store, task }) => {
-        const { root, profile } = projectSource(store, recordProject(task), runtime);
-        return { sourceCheck: { root, base: sourceHead(root), ...recordedProfile(profile) } };
+        const projectId = recordProject(task),
+          { root, profile } = projectSource(store, projectId, runtime),
+          line = projectLine(store, projectId, store.run(runIdOf(task))?.line);
+        return { sourceCheck: { root, base: lineHead(root, line), ...recordedProfile(profile) } };
       },
       instructions: () => ({
         scopeNote:
@@ -462,12 +465,14 @@ export const studioDevelopmentPack = {
         },
       },
       validateInputs({ store, task, runtime, verifyAuth }) {
-        // One source story at a time, from its first edit until it is integrated.
+        // One source story at a time, from its first edit until it is integrated, on each release line.
         const holder = sourceStoryInFlight(store, task);
-        if (holder)
+        if (holder) {
+          const line = storyLine(store, task);
           throw new Error(
-            `Waiting for ${holder.id} (“${holder.title}”) to be integrated: source stories run one at a time.`,
+            `Waiting for ${holder.id} (“${holder.title}”) to be integrated: source stories${line === undefined ? '' : ` on ${line}`} run one at a time.`,
           );
+        }
         changeScope(store, task, sourceRoot(store, task, runtime));
         // Scope remains a project choice; new registrations never expand an
         // existing project's configured catalog automatically.
