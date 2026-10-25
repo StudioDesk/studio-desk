@@ -447,7 +447,15 @@ test('leftover worktrees are removed through the repository each belongs to', t 
     createSourceWorktree(root, parent, name, git(root, ['rev-parse', 'HEAD']), notesProfile);
   assert.equal(worktreeRepository(path.join(parent, 'left-b')), fs.realpathSync(second.root));
   assert.equal(worktreeRepository(first.root), null, 'A repository root is not a linked worktree.');
-  cleanSourceWorktrees({ store: { allAttempts: () => [] }, active: new Map(), sourceChangeRoot: first.root }, parent);
+  cleanSourceWorktrees(
+    {
+      // No attempts, and no milestones whose releases keep a worktree (1.1 step 5).
+      store: { allAttempts: () => [], projects: () => [], setting: () => undefined },
+      active: new Map(),
+      sourceChangeRoot: first.root,
+    },
+    parent,
+  );
   assert.deepEqual(fs.readdirSync(parent), []);
   for (const { root } of [first, second])
     assert.equal(git(root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
