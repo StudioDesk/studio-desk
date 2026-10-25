@@ -24,7 +24,7 @@ import {
   sourceIntegrationFailure,
   integrateSource,
   restoreSourceIntegration,
-  sourceStoryInFlight,
+  sourceStoriesInFlight,
   reviewedArtifacts,
   validateStoryPaths,
   validateBreakdown,
@@ -1517,6 +1517,10 @@ test('closing a story that will not be integrated keeps its records and lets the
   for (const id of ids) approveWork(store, registries, store.task(id));
   c.app.runner.start(ids[0]);
   const { review } = await c.toReview(ids[0]);
+  // Two stories hold the line (1.1 step 3), so the next one waits for a place.
+  const other = await c.propose('other');
+  c.app.runner.start(other);
+  await c.toReview(other);
   assert.equal(c.app.runner.queueStart(ids[1]).queued, true);
   // A recorded integration must be reconciled before the story can be closed.
   const recorded = store.attempt(review.id);
@@ -3355,7 +3359,10 @@ test('saving a change task from before stages leaves its record as it was; a liv
   // A story from before stages that is restarted still holds the live source while it runs.
   c.app.runner.putTask(legacy({ status: 'running', proposedTaskIds: ['T-legacy-review'] }));
   assert.equal(store.task('T-legacy').sourceStage, undefined);
-  assert.equal(sourceStoryInFlight(store, store.task(ids[1]))?.id, 'T-legacy');
+  assert.deepEqual(
+    sourceStoriesInFlight(store, store.task(ids[1])).map(item => item.id),
+    ['T-legacy'],
+  );
   // A new story still gains its stage when the controller saves it.
   c.app.runner.putTask(store.task(ids[1]));
   assert.equal(store.task(ids[1]).sourceStage.phase, 'implementing');
