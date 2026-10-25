@@ -9,7 +9,7 @@
 // reviewed. One that conflicts becomes a carry story on its line: the fix merged onto that line for its editor to
 // resolve (step 3), reviewed and integrated, after which the chain continues from its commit. Each fix is carried as
 // its own commit rather than by merging the older line, so a conflicted carry resolved by an agent is never carried
-// again (v1.1.md, step 4).
+// again.
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
