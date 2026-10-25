@@ -7,7 +7,7 @@ import { createStudio } from './model-free-studio.mjs';
 import { describeTask, waitFor } from './wait-for.mjs';
 import { createRegistries } from '../src/registry.mjs';
 import { hash, validateComplexity } from '../src/core/contracts.mjs';
-import { stageProposedWork, startSprint, approveWork, denyWork, closeStartedWork } from '../src/core/proposals.mjs';
+import { stageProposedWork, approveWork, denyWork, closeStartedWork } from '../src/core/proposals.mjs';
 import { acceptAttempt } from '../src/core/acceptance.mjs';
 import { validatePlan } from '../src/core/planning.mjs';
 import { validateBreakdown, validateStoryPaths } from '../src/connectors/source-changes.mjs';
@@ -212,38 +212,30 @@ test('individual work decisions preserve denied history and project boundaries w
   assert.equal(c.app.store.task(source.ids[0]).status, 'denied');
 });
 
-test('sprint selection is atomic, starts only selected eligible work and pins exact accepted proposal inputs', async t => {
+// Sprints are retired (1.1): approved work starts when the director starts it.
+test('approved work starts only when started, waits for accepted prerequisites and pins exact accepted proposal inputs', async t => {
   const c = await setup(t),
     source = await c.source();
   await c.accept(source.task.id);
-  const sprint = taskIds => c.request('/api/sprints', { name: 'Bounded sprint', taskIds });
-  assert.equal(
-    (await sprint([source.ids[1]])).status,
-    400,
-    'An unapproved planned prerequisite must also be selected.',
-  );
-  assert.equal((await sprint([source.ids[0], 'missing-task'])).status, 400);
-  assert.equal(c.app.store.task(source.ids[0]).approval.status, 'pending');
-  assert.equal(c.app.store.setting('sprint-missing'), null);
-  const selected = await sprint([source.ids[0]]);
-  assert.equal(selected.status, 201, JSON.stringify(selected.data));
+  const start = id => c.request(`/api/tasks/${id}/start`);
+  assert.equal((await c.request('/api/sprints', { name: 'Retired', taskIds: [source.ids[0]] })).status, 404);
+  assert.equal((await c.request(`/api/tasks/${source.ids[0]}/approve-work`)).status, 200);
+  assert.equal(c.app.store.attempts(source.ids[0]).length, 0, 'Approval alone starts nothing.');
+  assert.equal((await start(source.ids[0])).status, 202);
   const first = await c.wait(source.ids[0]);
   assert.equal(first.inputReferences[0].attemptId, source.attempt.id);
   assert.equal(first.inputReferences[0].artifacts[0].hash, source.evidence.proposalHash);
   assert.equal(c.app.store.task(source.ids[1]).status, 'backlog');
   assert.equal(c.app.store.attempts(source.ids[1]).length, 0);
-  assert.equal((await sprint([source.ids[0]])).status, 400, 'A retry cannot duplicate sprint membership.');
-  const secondSprint = await sprint([source.ids[1]]);
-  assert.equal(secondSprint.status, 201);
+  assert.equal((await c.request(`/api/tasks/${source.ids[1]}/approve-work`)).status, 200);
+  assert.equal((await start(source.ids[1])).status, 202);
   assert.equal(
     c.app.store.attempts(source.ids[1]).length,
     0,
-    'An approved sprint still waits for accepted prerequisite results.',
+    'Started work still waits for accepted prerequisite results.',
   );
   await c.accept(source.ids[0]);
   await c.wait(source.ids[1]);
-  const state = await (await fetch(c.origin + '/api/state')).json();
-  assert.equal(state.sprints.length, 2);
   await c.app.close();
   c.app = createStudio({ directory: c.directory, port: 0, runnerOptions: { registries: c.registries } });
   await c.connect();
@@ -251,26 +243,21 @@ test('sprint selection is atomic, starts only selected eligible work and pins ex
   assert.equal(c.app.store.organization().pipelineEnabled, false);
 });
 
-test('changed proposal artifacts and changed employee scope reject sprint approval without partial state', async t => {
+test('changed proposal artifacts reject approval without partial state', async t => {
   const c = await setup(t),
     source = await c.source();
   await c.accept(source.task.id);
   const file = path.join(source.attempt.outputFolder, 'proposal.json'),
     original = fs.readFileSync(file);
   fs.writeFileSync(file, JSON.stringify({ tasks: [] }));
-  assert.equal((await c.request('/api/sprints', { name: 'Reject corruption', taskIds: source.ids })).status, 400);
+  for (const id of source.ids) assert.equal((await c.request(`/api/tasks/${id}/approve-work`)).status, 400);
   assert.ok(source.ids.every(id => c.app.store.task(id).approval.status === 'pending'));
   assert.equal((await c.request(`/api/tasks/${source.task.id}/propose-work`, source.evidence)).status, 400);
   fs.writeFileSync(file, original);
-  const org = c.app.store.organization();
-  org.workers.find(worker => worker.id === 'W-04').model = 'changed';
-  c.app.store.setOrganization(org);
-  assert.equal((await c.request('/api/sprints', { name: 'Reject changed scope', taskIds: source.ids })).status, 400);
-  assert.ok(source.ids.every(id => c.app.store.task(id).approval.status === 'pending'));
   assert.equal(c.app.store.leases().length, 0);
 });
 
-test('director-created Planned work supports bounded sprint selection without inventing worker evidence', async t => {
+test('director-created Planned work is approved and denied one at a time without inventing worker evidence', async t => {
   const c = await setup(t),
     create = title =>
       c.request('/api/tasks', {
@@ -286,16 +273,7 @@ test('director-created Planned work supports bounded sprint selection without in
     second = (await create('Director draft two')).data;
   assert.equal(first.status, 'backlog');
   assert.equal(first.proposalReference, undefined);
-  assert.equal(
-    (await c.request('/api/sprints', { name: 'Excessive budget', taskIds: [first.id, second.id] })).status,
-    400,
-  );
-  assert.equal(c.app.store.task(first.id).approval.status, 'pending');
   assert.equal((await c.request(`/api/tasks/${second.id}/deny-work`)).status, 200);
-  assert.equal(
-    (await c.request('/api/sprints', { name: 'Atomic denial', taskIds: [first.id, second.id] })).status,
-    400,
-  );
   assert.equal(c.app.store.task(first.id).approval.status, 'pending');
   assert.equal((await c.request(`/api/tasks/${first.id}/approve-work`)).status, 200);
   assert.equal(c.app.store.attempts(first.id).length, 0);
@@ -409,10 +387,12 @@ test('Morgan source proposals create one Planned improvement; approval cannot by
   });
   assert.equal(ids.length, 1);
   assert.equal(c.app.store.task(ids[0]).status, 'backlog');
-  const sprint = await c.request('/api/sprints', { name: 'Source scope fixture', taskIds: ids });
-  assert.equal(sprint.status, 201, JSON.stringify(sprint.data));
-  await c.wait(ids[0], 'blocked');
-  assert.match(c.app.store.task(ids[0]).reason, /source-check evidence is missing/);
+  const approved = await c.request(`/api/tasks/${ids[0]}/approve-work`);
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  // Starting it is refused with the reason, before anything is dispatched.
+  const started = await c.request(`/api/tasks/${ids[0]}/start`);
+  assert.equal(started.status, 400);
+  assert.match(started.data.error, /source-check evidence is missing/);
   assert.equal(c.app.store.attempts(ids[0]).length, 0);
   assert.equal(c.app.store.leases().length, 0);
 });
@@ -440,9 +420,9 @@ test('source story complexity materializes exact Planned limits and invalid comp
   }
 });
 
-test('recorded historical source-review-v1 proposals remain approvable and selectable without rewriting evidence', async t => {
+test('recorded historical source-review-v1 proposals remain approvable without rewriting evidence', async t => {
   const c = await setup(t);
-  for (const mode of ['approve', 'sprint']) {
+  for (const mode of ['approve']) {
     const { source, attempt, bytes, output } = seedSourceReview(c, undefined, 'source-review-v1', mode),
       original = JSON.stringify(c.app.store.attempt(attempt.id)),
       [id] = stageProposedWork(c.app.store, c.registries, source, attempt),
@@ -455,14 +435,8 @@ test('recorded historical source-review-v1 proposals remain approvable and selec
     assert.equal((await c.request(`/api/tasks/${id}/approve-work`)).status, 400);
     assert.equal(c.app.store.task(id).approval.status, 'pending');
     fs.writeFileSync(path.join(output, 'source-review.json'), bytes);
-    if (mode === 'approve') {
-      const result = await c.request(`/api/tasks/${id}/approve-work`);
-      assert.equal(result.status, 200, JSON.stringify(result.data));
-    } else {
-      const result = await c.request('/api/sprints', { name: 'Historical proposal', taskIds: [id] });
-      assert.equal(result.status, 201, JSON.stringify(result.data));
-      assert.equal(result.data.totalAttemptSeconds, 1200);
-    }
+    const result = await c.request(`/api/tasks/${id}/approve-work`);
+    assert.equal(result.status, 200, JSON.stringify(result.data));
     assert.equal(c.app.store.task(id).approval.status, 'approved');
     assert.deepEqual(c.app.store.task(id).proposalReference, draft.proposalReference);
     assert.equal(JSON.stringify(c.app.store.attempt(attempt.id)), original);
@@ -539,7 +513,7 @@ test('plan complexity limits are per story while legacy attempt products retain 
   assert.throws(() => validatePlan(plan([story]), { ...context, proposalSource: undefined }), /unsupported fields/);
 });
 
-function seedSprintTask(c, id, overrides = {}) {
+function seedPlannedTask(c, id, overrides = {}) {
   const task = {
     ...jobs[0],
     id,
@@ -556,7 +530,7 @@ function seedSprintTask(c, id, overrides = {}) {
 test('resolved work decisions clear current attention while rejected decisions and history retain it', async t => {
   const c = await setup(t, true),
     { store, runner } = c.app,
-    task = seedSprintTask(c, 'attention', {
+    task = seedPlannedTask(c, 'attention', {
       reason: 'Awaiting approval.',
       autonomyNote: 'Approve or deny proposed work.',
     });
@@ -576,7 +550,7 @@ test('resolved work decisions clear current attention while rejected decisions a
   assert.equal(store.task(task.id).reason, 'No longer needed.');
   assert.ok(store.events().some(event => event.seq === history.seq && event.message === history.message));
 
-  const reviewed = seedSprintTask(c, 'review-attention', {
+  const reviewed = seedPlannedTask(c, 'review-attention', {
     approval: { status: 'approved' },
     status: 'review',
     lastAttemptId: 'review-attention-attempt',
@@ -600,138 +574,6 @@ test('resolved work decisions clear current attention while rejected decisions a
   assert.equal(store.task(reviewed.id).reason, 'Stopped deliberately.');
   assert.equal(store.attempt(reviewed.lastAttemptId).status, 'closed');
   assert.equal(store.attempt(reviewed.lastAttemptId).instructions.text, 'Original instructions');
-});
-
-test('sprint selection validates exact complexity and legacy per-task limits before any write', async t => {
-  const c = await setup(t, true),
-    store = c.app.store,
-    task = seedSprintTask(c, 'complexity', { complexity: 8, ...validateComplexity(8) });
-  // Exercise selection without enabling asynchronous execution.
-  let enabled = 0;
-  const runner = { registries: c.registries, enablePipeline: () => enabled++ },
-    select = ids => startSprint(store, runner, 'project-legacy', 'Complexity sprint', ids);
-  for (const approval of ['pending', 'approved']) {
-    for (const changes of [
-      { maxSeconds: 2701 },
-      { maxSeconds: 900 },
-      { maxAttempts: 4 },
-      { maxAttempts: 2 },
-      { complexity: 13 },
-      { complexity: '8' },
-    ]) {
-      const invalid = {
-        ...task,
-        status: approval === 'pending' ? 'backlog' : 'ready',
-        approval: { status: approval },
-        ...changes,
-      };
-      store.putTask(invalid);
-      assert.throws(() => select([task.id]), /complexity/);
-      assert.deepEqual(store.task(task.id), invalid);
-    }
-  }
-  store.putTask(task);
-  const extra = seedSprintTask(c, 'legacy', { maxSeconds: 600, maxAttempts: 3 });
-  for (const changes of [
-    { maxSeconds: 601 },
-    { maxSeconds: 4 },
-    { maxSeconds: 30.5 },
-    { maxAttempts: 4 },
-    { maxAttempts: 0 },
-    { maxAttempts: 1.5 },
-  ]) {
-    const invalid = { ...extra, ...changes };
-    store.putTask(invalid);
-    assert.throws(() => select([task.id, extra.id]), { message: 'Sprint exceeds a task execution limit.' });
-    assert.deepEqual(store.task(task.id), task);
-    assert.deepEqual(store.task(extra.id), invalid);
-  }
-  assert.equal(enabled, 0);
-  assert.deepEqual(store.state().sprints, []);
-  store.putTask(extra);
-  const selected = select([task.id, extra.id]);
-  assert.equal(selected.totalAttemptSeconds, 9900);
-  assert.equal(enabled, 1);
-  for (const id of [task.id, extra.id]) {
-    assert.equal(store.task(id).approval.status, 'approved');
-    assert.equal(store.task(id).sprintId, selected.id);
-    assert.equal(store.task(id).queued, true);
-  }
-  assert.equal(store.attempts(task.id).length, 0);
-  assert.equal(store.leases().length, 0);
-});
-
-test('a sprint can select three 5-point stories with their exact individual limits', async t => {
-  const c = await setup(t, true),
-    store = c.app.store,
-    ids = Array.from(
-      { length: 3 },
-      (_, i) => seedSprintTask(c, 'five-' + i, { complexity: 5, ...validateComplexity(5) }).id,
-    );
-  let enabled = 0;
-  const selected = startSprint(
-    store,
-    { registries: c.registries, enablePipeline: () => enabled++ },
-    'project-legacy',
-    'Three stories',
-    ids,
-  );
-  assert.equal(selected.totalAttemptSeconds, 16200);
-  assert.deepEqual(selected.taskIds, ids);
-  assert.deepEqual(store.setting(selected.id), selected);
-  assert.equal(enabled, 1);
-  for (const id of ids) {
-    assert.equal(store.task(id).approval.status, 'approved');
-    assert.equal(store.task(id).queued, true);
-    assert.equal(store.attempts(id).length, 0);
-  }
-});
-
-test('sprints retain the 1800-second legacy aggregate in legacy-only and mixed selections atomically', async t => {
-  const c = await setup(t, true),
-    store = c.app.store;
-  for (const mixed of [false, true]) {
-    const prefix = mixed ? 'mixed-' : 'legacy-',
-      legacy = [0, 1].map(i => seedSprintTask(c, prefix + i, { maxSeconds: 300, maxAttempts: 3 }).id),
-      complexity = mixed ? [seedSprintTask(c, 'eight', { complexity: 8, ...validateComplexity(8) }).id] : [],
-      extra = seedSprintTask(c, prefix + 'extra', { maxSeconds: 5, maxAttempts: 1 }),
-      ids = [...complexity, ...legacy],
-      before = { tasks: store.tasks(), sprints: store.state().sprints, events: store.events() };
-    let enabled = 0;
-    const runner = { registries: c.registries, enablePipeline: () => enabled++ };
-    assert.throws(() => startSprint(store, runner, 'project-legacy', 'Over budget', [...ids, extra.id]), {
-      message: 'Sprint exceeds the 1800-second attempt budget.',
-    });
-    assert.deepEqual({ tasks: store.tasks(), sprints: store.state().sprints, events: store.events() }, before);
-    assert.equal(enabled, 0);
-    const selected = startSprint(store, runner, 'project-legacy', 'At budget', ids);
-    assert.equal(selected.totalAttemptSeconds, mixed ? 9900 : 1800);
-    assert.equal(enabled, 1);
-    assert.deepEqual(store.task(extra.id), extra);
-  }
-});
-
-test('sprints reject eleven tasks without partial state and accept ten complexity stories', async t => {
-  const c = await setup(t, true),
-    store = c.app.store,
-    ids = Array.from(
-      { length: 11 },
-      (_, i) => seedSprintTask(c, 'story-' + i, { complexity: 8, ...validateComplexity(8) }).id,
-    ),
-    before = store.tasks();
-  let enabled = 0;
-  const runner = { registries: c.registries, enablePipeline: () => enabled++ };
-  assert.throws(() => startSprint(store, runner, 'project-legacy', 'Too many stories', ids), /1 to 10 distinct tasks/);
-  assert.deepEqual(store.tasks(), before);
-  assert.deepEqual(store.state().sprints, []);
-  assert.equal(enabled, 0);
-  const selected = startSprint(store, runner, 'project-legacy', 'Ten stories', ids.slice(0, 10));
-  assert.equal(selected.totalAttemptSeconds, 81000);
-  assert.equal(enabled, 1);
-  assert.deepEqual(
-    store.task(ids[10]),
-    before.find(task => task.id === ids[10]),
-  );
 });
 
 function seedBreakdown(c, mutate = () => {}) {

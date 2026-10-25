@@ -306,7 +306,7 @@ function approvedTask(store, registries, task) {
   task.status = 'ready';
   task.reason = '';
   delete task.autonomyNote;
-  // A passed gate resumes its run; other approved work waits for a sprint or an explicit start.
+  // A passed gate resumes its run; other approved work waits for an explicit start.
   task.queued = !!task.queueOnApproval;
   return task;
 }
@@ -334,7 +334,7 @@ export function approveWork(store, registries, task, by = { type: 'director' }) 
       ? `Approved by autonomy policy revision ${by.revision}: ${by.reason}`
       : approved.queued
         ? 'Director passed the gate; the work is queued and its run continues.'
-        : 'Director approved this work. Add it to a sprint or start it explicitly.',
+        : 'Director approved this work. Start it when it should run.',
   );
   return { ok: true };
 }
@@ -467,84 +467,4 @@ export function sendBackWork(store, registries, task, note = '', { refuse } = {}
     );
     return { ok: true, direction: current.direction };
   });
-}
-
-export function startSprint(store, runner, projectId, name, taskIds) {
-  if (
-    typeof name !== 'string' ||
-    !name.trim() ||
-    name.length > 160 ||
-    !Array.isArray(taskIds) ||
-    !taskIds.length ||
-    taskIds.length > 10 ||
-    new Set(taskIds).size !== taskIds.length
-  )
-    throw new Error('Choose a sprint name and 1 to 10 distinct tasks.');
-  const selected = new Set(taskIds),
-    tasks = taskIds.map(id => {
-      const task = store.task(id);
-      assertProject(store, task, projectId);
-      if (task.sprintId || store.attempts(id).length)
-        throw new Error('Choose work that has not entered a sprint or started.');
-      if (task.approval?.status === 'pending') return approvedTask(store, runner.registries, task);
-      if (task.approval?.status !== 'approved' || !['ready', 'blocked'].includes(task.status))
-        throw new Error('Choose Planned or approved unstarted work.');
-      assertProjectKind(store, runner.registries, projectId, task.kind);
-      const worker = projectOrganization(store, projectId).workers.find(
-        worker => worker.id === task.workerId && worker.enabled,
-      );
-      if (!worker || worker.team !== task.team)
-        throw new Error('Approved project ownership changed. Scope and approve new work before sprint selection.');
-      validateTaskProject(store, task);
-      validateAcceptedReferences(store, task.acceptedInputs || [], projectId);
-      return task;
-    });
-  for (const task of tasks) {
-    if (Object.hasOwn(task, 'complexity')) validateComplexityLimits(task);
-    else if (
-      !Number.isInteger(task.maxSeconds) ||
-      task.maxSeconds < 5 ||
-      task.maxSeconds > 600 ||
-      !Number.isInteger(task.maxAttempts) ||
-      task.maxAttempts < 1 ||
-      task.maxAttempts > 3
-    )
-      throw new Error('Sprint exceeds a task execution limit.');
-  }
-  const budget = tasks.reduce((seconds, task) => seconds + task.maxSeconds * task.maxAttempts, 0),
-    legacySeconds = tasks
-      .filter(task => !Object.hasOwn(task, 'complexity'))
-      .reduce((seconds, task) => seconds + task.maxSeconds * task.maxAttempts, 0);
-  if (legacySeconds > 1800) throw new Error('Sprint exceeds the 1800-second attempt budget.');
-  for (const task of tasks)
-    for (const id of task.dependencies) {
-      const dependency = store.task(id);
-      if (dependency.approval && dependency.approval.status !== 'approved' && !selected.has(id))
-        throw new Error('Include or approve the proposed prerequisite before starting this sprint.');
-    }
-  const sprint = {
-    id: 'sprint-' + randomUUID(),
-    projectId,
-    name: name.trim(),
-    taskIds,
-    totalAttemptSeconds: budget,
-    createdAt: new Date().toISOString(),
-  };
-  store.tx(() => {
-    store.putSetting(sprint.id, sprint);
-    for (const task of tasks) {
-      task.sprintId = sprint.id;
-      task.queued = true;
-      store.putTask(task);
-    }
-    runner.enablePipeline(projectId);
-  });
-  store.event(
-    'sprint_started',
-    null,
-    null,
-    `Director selected ${tasks.length} tasks for ${sprint.name}. Eligible work starts; results require acceptance.`,
-    projectId,
-  );
-  return sprint;
 }

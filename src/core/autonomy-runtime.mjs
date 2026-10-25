@@ -10,6 +10,10 @@ import { approveWork } from './proposals.mjs';
 import { materializeWorkflow } from './workflows.mjs';
 import { expandRun, runIdOf } from './graph.mjs';
 import { autonomyPolicy, kindMode, evaluateAttempt, cycleRunsToday, recordCycleRun } from './autonomy.mjs';
+import { sendWaitingIdea } from './idea-intake.mjs';
+import { compareVersions, parseVersion, projectMilestones } from '../connectors/source-milestones.mjs';
+import { projectLine } from '../connectors/source-lines.mjs';
+import { sourceStoryIntegrated } from '../connectors/source-changes.mjs';
 
 const INTEGRATION = 'autonomy-integration';
 const RESTART = 'planned-restart';
@@ -70,6 +74,7 @@ export class Autonomy {
         this.attention(task, error.message);
       }
     this.tryIntegration();
+    this.sendWaiting(recordProject(task));
   }
   reviewed(task, policy) {
     const attempt = this.store.attempt(task.lastAttemptId),
@@ -123,6 +128,7 @@ export class Autonomy {
       this.queue(approved);
       this.integrateAccepted(this.store.task(taskId), policy);
     }
+    this.sendWaiting(recordProject(task));
     this.runner.schedule();
   }
 
@@ -397,6 +403,7 @@ export class Autonomy {
       );
     this.resumePlan(plan, `Integrated from ${task.id}; the pipeline continues without a restart.`);
     this.tryIntegration();
+    this.sendWaiting(pending.projectId);
   }
 
   requestRestart(marker) {
@@ -485,5 +492,56 @@ export class Autonomy {
     );
     this.runner.schedule();
     return runId;
+  }
+
+  // Sends a milestone's next waiting idea when the project's policy says so and its line is free (1.1 step 2a): one
+  // idea per line, in the order of the milestones' versions and then the order the ideas were written. A line is free
+  // when nothing on it is open: every task of every idea on it accepted, denied, cancelled or closed, and every story
+  // integrated or closed. An idea that cannot be sent goes back and waits for the director.
+  sendWaiting(projectId) {
+    if (this.runner.closing || !projectId) return;
+    const policy = autonomyPolicy(this.store, projectId);
+    if (!policy.enabled || !policy.sendWaiting) return;
+    const lines = new Set(),
+      milestones = projectMilestones(this.store, projectId)
+        .filter(milestone => milestone.state === 'open' && milestone.waiting.length)
+        .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)));
+    for (const milestone of milestones) {
+      const line = projectLine(this.store, projectId, milestone.line ?? undefined);
+      if (lines.has(line) || this.lineBusy(projectId, line)) continue;
+      lines.add(line);
+      try {
+        sendWaitingIdea(
+          this.store,
+          this.runner.registries,
+          this.runner,
+          projectId,
+          milestone.id,
+          milestone.waiting[0].id,
+          {
+            type: 'policy',
+            revision: policy.revision,
+          },
+        );
+      } catch (error) {
+        this.store.event(
+          'autonomy_attention',
+          null,
+          null,
+          `Waiting for the director: the next idea waiting in milestone ${milestone.version} could not be sent. ${error.message}`,
+          projectId,
+        );
+      }
+    }
+  }
+  lineBusy(projectId, line) {
+    return this.store.tasks().some(task => {
+      if (recordProject(task) !== projectId) return false;
+      const on = projectLine(this.store, projectId, task.release?.line ?? this.store.run(runIdOf(task))?.line);
+      if (on !== line) return false;
+      if (task.kind === 'studio-development:change' && task.status === 'done')
+        return !['integrated', 'closed'].includes(task.sourceStage?.current) && !sourceStoryIntegrated(task);
+      return !['done', 'denied', 'cancelled'].includes(task.status);
+    });
   }
 }

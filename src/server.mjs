@@ -20,6 +20,14 @@ import {
 } from './connectors/source-changes.mjs';
 import { stopIntegrationProcess } from './connectors/source-integration.mjs';
 import { addProjectLine, retireProjectLine } from './connectors/source-lines.mjs';
+import {
+  addWaitingIdea,
+  editMilestone,
+  makeMilestone,
+  moveStory,
+  projectMilestones,
+  takeWaitingIdea,
+} from './connectors/source-milestones.mjs';
 import { listFolders } from './connectors/folders.mjs';
 import { packageBoundary } from './connectors/package-installs.mjs';
 import {
@@ -42,7 +50,7 @@ import { validatePlan } from './planning.mjs';
 import { createRegistries } from './registry.mjs';
 import { bootstrapFactory } from './core/bootstrap.mjs';
 import { createProject } from './core/project-creation.mjs';
-import { startIdeaIntake } from './core/idea-intake.mjs';
+import { sendWaitingIdea, startIdeaIntake } from './core/idea-intake.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
@@ -74,7 +82,6 @@ import {
   closeWork,
   closeStartedWork,
   sendBackWork,
-  startSprint,
 } from './core/proposals.mjs';
 import { acceptAttempt } from './core/acceptance.mjs';
 import { applyWorkerExecution, taskExecution } from './core/execution.mjs';
@@ -664,9 +671,13 @@ export function createStudio({
             Array.isArray(data) ||
             !Object.hasOwn(data, 'projectId') ||
             !Object.hasOwn(data, 'idea') ||
-            Object.keys(data).some(key => !['projectId', 'idea', 'files', 'autoMode', 'line'].includes(key))
+            Object.keys(data).some(
+              key => !['projectId', 'idea', 'files', 'autoMode', 'line', 'milestone'].includes(key),
+            )
           )
-            fail('Idea intake accepts projectId, idea, optional files, optional autoMode and an optional line.');
+            fail(
+              'Idea intake accepts projectId, idea, optional files, optional autoMode and an optional line or milestone.',
+            );
           const projectId = data.projectId;
           store.project(projectId);
           let started;
@@ -682,6 +693,7 @@ export function createStudio({
                 autoMode: data.autoMode,
                 general: url.pathname === '/api/intake',
                 line: data.line,
+                milestone: data.milestone,
               },
               sampleIdeaFiles,
             );
@@ -758,15 +770,12 @@ export function createStudio({
         }
         const projectId = data.projectId ?? LEGACY_PROJECT;
         store.project(projectId);
-        if (url.pathname === '/api/sprints' && req.method === 'POST') {
-          if (Object.keys(data).some(key => !['projectId', 'name', 'taskIds'].includes(key)))
-            fail('Unsupported sprint fields.');
-          return json(res, startSprint(store, runner, projectId, data.name, data.taskIds), 201);
-        }
         if (url.pathname === '/api/tasks/close' && req.method === 'POST') {
           if (Object.keys(data).some(key => !['projectId', 'taskIds', 'reason'].includes(key)))
             fail('Unsupported close fields.');
-          return json(res, closeWork(store, projectId, data.taskIds, data.reason ?? ''));
+          const closed = closeWork(store, projectId, data.taskIds, data.reason ?? '');
+          runner.autonomy.sendWaiting(projectId);
+          return json(res, closed);
         }
         if (url.pathname === '/api/studio-development' && req.method === 'POST') {
           if (Object.keys(data).some(key => key !== 'projectId'))
@@ -886,8 +895,11 @@ export function createStudio({
         }
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'autonomy' && !parts[4]) {
           if (parts[2] !== projectId) fail('Select this project before editing its autonomy policy.');
-          const { projectId: selected, ...policy } = data;
-          return json(res, saveAutonomyPolicy(store, registries, projectId, policy));
+          const { projectId: selected, ...policy } = data,
+            saved = saveAutonomyPolicy(store, registries, projectId, policy);
+          // Turning on the setting that sends waiting ideas sends one at once to a line that is free (1.1 step 2a).
+          runner.autonomy.sendWaiting(projectId);
+          return json(res, saved);
         }
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'organization' && !parts[4]) {
           if (parts[2] !== projectId) fail('Select this project before editing its organization.');
@@ -1007,6 +1019,68 @@ export function createStudio({
             return json(res, { lines: retireProjectLine(store, projectId, data) });
           } catch (error) {
             fail(error.message);
+          }
+        }
+        // A project's milestones (1.1 step 2a): one made for a version (POST) and its goal edited (PATCH); an idea
+        // written into one to send later, and a waiting idea sent now or dropped.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'milestones') {
+          if (parts[2] !== projectId) fail('Select this project before changing its milestones.');
+          const settle = fn => {
+            try {
+              return fn();
+            } catch (error) {
+              fail(error.message);
+            }
+          };
+          if (!parts[4] && req.method === 'POST') {
+            if (Object.keys(data).some(key => !['projectId', 'version', 'goal'].includes(key)))
+              fail('A milestone takes a version and an optional goal.');
+            const milestone = settle(() =>
+              makeMilestone(store, projectId, runner, { version: data.version, goal: data.goal ?? '' }),
+            );
+            return json(res, { milestone, milestones: projectMilestones(store, projectId) }, 201);
+          }
+          if (!parts[4] && req.method === 'PATCH') {
+            if (Object.keys(data).some(key => !['projectId', 'id', 'goal'].includes(key)))
+              fail('Editing a milestone takes its ID and goal.');
+            return json(res, { milestone: settle(() => editMilestone(store, projectId, data)) });
+          }
+          if (parts[4] && parts[5] === 'ideas' && !parts[6] && req.method === 'POST') {
+            if (Object.keys(data).some(key => !['projectId', 'idea', 'autoMode'].includes(key)))
+              fail('A waiting idea takes its words and an optional auto mode.');
+            const waiting = settle(() =>
+              addWaitingIdea(store, projectId, { milestoneId: parts[4], idea: data.idea, autoMode: data.autoMode }),
+            );
+            runner.autonomy.sendWaiting(projectId);
+            return json(res, waiting, 201);
+          }
+          if (
+            parts[4] &&
+            parts[5] === 'ideas' &&
+            parts[6] &&
+            ['send', 'remove'].includes(parts[7]) &&
+            !parts[8] &&
+            req.method === 'POST'
+          ) {
+            if (Object.keys(data).some(key => key !== 'projectId')) fail('Unsupported waiting idea fields.');
+            if (parts[7] === 'remove') {
+              const { milestone } = settle(() => takeWaitingIdea(store, projectId, parts[4], parts[6]));
+              store.event(
+                'idea_removed',
+                null,
+                null,
+                `A waiting idea was taken out of milestone ${milestone.version}.`,
+                projectId,
+              );
+              return json(res, { milestones: projectMilestones(store, projectId) });
+            }
+            return json(
+              res,
+              settle(() =>
+                sendWaitingIdea(store, registries, runner, projectId, parts[4], parts[6], { type: 'director' }),
+              ),
+              201,
+            );
           }
         }
         if (parts[1] === 'workflows') {
@@ -1335,13 +1409,20 @@ export function createStudio({
             runner.autonomy.approved(t.id);
             return json(res, approved);
           }
-          if (action === 'deny-work') return json(res, denyWork(store, t, data.reason || ''));
+          // Work denied or closed may free its line for a milestone's next waiting idea (1.1 step 2a).
+          if (action === 'deny-work') {
+            const denied = denyWork(store, t, data.reason || '');
+            runner.autonomy.sendWaiting(projectId);
+            return json(res, denied);
+          }
           if (action === 'close') {
             if (Object.keys(data).some(key => !['projectId', 'reason'].includes(key)))
               fail('Unsupported close fields.');
             if (runner.autonomy.pendingIntegration()?.taskId === t.id)
               fail('Integration is approved for this work and waiting to run; it cannot be closed now.', 409);
-            return json(res, closeStartedWork(store, registries, t, data.reason ?? ''));
+            const closed = closeStartedWork(store, registries, t, data.reason ?? '');
+            runner.autonomy.sendWaiting(projectId);
+            return json(res, closed);
           }
           // Back to implementation with the review's findings, then queued like Start.
           if (action === 'send-back') {
@@ -1439,7 +1520,7 @@ export function createStudio({
               'work_proposed',
               t.id,
               a.id,
-              'Proposed work is in Planned. Approve tasks individually or select a sprint; nothing was dispatched.',
+              'Proposed work is in Planned. Approve or deny each task; nothing was dispatched.',
             );
             return json(res, { taskIds: prepared.taskIds });
           }
@@ -1513,7 +1594,7 @@ export function createStudio({
             }
             const drafts = (t.proposedTaskIds || []).map(id => store.task(id));
             if (drafts.some(task => task.approval?.status !== 'pending'))
-              fail('Proposed work already has individual decisions. Use sprint selection.', 409);
+              fail('Proposed work already has individual decisions. Approve or deny the rest one at a time.', 409);
             const ids = new Map(
                 proposal.tasks.map(job => [
                   job.key,
@@ -1630,6 +1711,13 @@ export function createStudio({
               if (typeof data.hold !== 'boolean') fail('Hold must be true or false.');
               t.hold = data.hold;
             }
+            // The release a story is for, changed until it starts (1.1 step 2a).
+            if (data.release !== undefined)
+              try {
+                moveStory(store, runner, t, data.release);
+              } catch (error) {
+                fail(error.message);
+              }
             // Auto mode for this task's future attempts; null follows the Settings (v1.0 item 22).
             if (data.autoMode !== undefined) {
               try {

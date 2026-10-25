@@ -225,9 +225,10 @@ function storyChecks(store, task) {
   }
   return null;
 }
-// The line a source story works on (see projectLine).
+// The line a source story works on (see projectLine): the one the director moved it to before it started (1.1 step 2a),
+// or its checks'.
 export const storyLine = (store, task) =>
-  projectLine(store, recordProject(task), storyChecks(store, task)?.sourceCheck?.base?.branch);
+  projectLine(store, recordProject(task), task.release?.line ?? storyChecks(store, task)?.sourceCheck?.base?.branch);
 
 // A branch name git accepts as written. check-ref-format --branch would also expand @{-1} to the branch checked out
 // before, which is not a name.
@@ -248,7 +249,7 @@ const sourceRoot = (store, projectId, runtime) => {
 };
 // Adds a line for an existing branch, or for a new branch made at `from` (a tag, branch or commit). The first line
 // added also records the branch the folder has checked out as the newest line; later lines go before the newest one,
-// in the order they were made.
+// release lines in version order and others in the order they were made.
 export function addProjectLine(store, projectId, runtime, { branch, from } = {}) {
   const root = sourceRoot(store, projectId, runtime);
   branch = branchName(root, branch);
@@ -284,9 +285,22 @@ export function addProjectLine(store, projectId, runtime, { branch, from } = {})
     } catch {
       throw new Error(`The repository has no branch named ${branch}. Give a tag, branch or commit to start it from.`);
     }
+  // A release line (release/x.y) goes before the first newer one, so lines stay oldest first whichever order they
+  // were made in; any other goes just before the newest line.
+  const older = lines.slice(0, -1),
+    series = name => /^release\/(\d+)\.(\d+)$/.exec(name)?.slice(1).map(Number),
+    mine = series(branch),
+    newer = mine
+      ? older.findIndex(line => {
+          const theirs = series(line.branch);
+          return theirs && (theirs[0] - mine[0] || theirs[1] - mine[1]) > 0;
+        })
+      : -1,
+    at_ = newer < 0 ? older.length : newer;
   project.lines = [
-    ...lines.slice(0, -1),
+    ...older.slice(0, at_),
     { branch, state: 'maintained', at, ...(from !== undefined ? { from } : {}) },
+    ...older.slice(at_),
     lines.at(-1),
   ];
   store.putProject(project);

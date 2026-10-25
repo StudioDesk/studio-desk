@@ -308,7 +308,6 @@ export interface Shell {
   maxParallel?: number;
   quota?: Record<string, unknown>;
   leases?: { resource: string; attemptId: string; token: number }[];
-  sprints?: { id: string; name: string }[];
   // Where the next candidate tests run (the built-in sandbox unless the director chose none) and where the
   // built-in sandbox stands on this computer.
   testSandbox?: TestSandbox;

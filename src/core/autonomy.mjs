@@ -65,7 +65,7 @@ export function applyRecommendedHouseRules(store, registries, projectId) {
 
 export function saveAutonomyPolicy(store, registries, projectId, data) {
   store.project(projectId);
-  fields(data, ['expectedRevision', 'enabled', 'kinds', 'retries', 'cycle'], 'autonomy policy');
+  fields(data, ['expectedRevision', 'enabled', 'kinds', 'retries', 'cycle', 'sendWaiting'], 'autonomy policy');
   const previous = autonomyPolicy(store, projectId);
   if (data.expectedRevision !== previous.revision) throw new Error('Autonomy policy changed. Refresh before saving.');
   if (typeof data.enabled !== 'boolean') throw new Error('Choose whether autonomy is enabled.');
@@ -112,12 +112,17 @@ export function saveAutonomyPolicy(store, registries, projectId, data) {
     const workflow = store.workflow(cycle.workflowId);
     if (workflow.projectId !== projectId) throw new Error('Choose a saved workflow from this project.');
   } else if (cycle.enabled) throw new Error('Choose the workflow that starts each cycle.');
+  // Send a milestone's next waiting idea when its line is free (1.1 step 2a): off unless chosen, and a policy saved
+  // without the field keeps its choice.
+  const sendWaiting = data.sendWaiting ?? previous.sendWaiting ?? false;
+  if (typeof sendWaiting !== 'boolean') throw new Error('Choose whether waiting ideas are sent automatically.');
   const policy = {
     revision: previous.revision + 1,
     enabled: data.enabled,
     kinds,
     retries: data.retries,
     cycle: { enabled: cycle.enabled, workflowId: cycle.workflowId, maxPerDay: cycle.maxPerDay },
+    ...(sendWaiting ? { sendWaiting } : {}),
     savedAt: new Date().toISOString(),
   };
   policy.history = [...(previous.history || []), { ...structuredClone(policy), history: undefined }].slice(-50);

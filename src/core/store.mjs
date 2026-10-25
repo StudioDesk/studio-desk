@@ -159,7 +159,7 @@ export class Store {
       'DELETE FROM settings WHERE id=?',
       this.workflows(projectId).map(workflow => 'workflow:' + workflow.id),
     );
-    for (const prefix of ['project-organization:', 'project-autonomy:', 'project-autonomy-runs:'])
+    for (const prefix of ['project-organization:', 'project-autonomy:', 'project-autonomy-runs:', 'milestones:'])
       this.db.prepare('DELETE FROM settings WHERE id=?').run(prefix + projectId);
     this.db.prepare('DELETE FROM settings WHERE id LIKE ?').run(`run-archive:${projectId}:%`);
     this.db.prepare('DELETE FROM counters WHERE resource LIKE ?').run(`source:${projectId}:%`);
@@ -561,11 +561,6 @@ export class Store {
       projects: this.projects(),
       project,
       workflows: this.workflows(projectId),
-      sprints: this.db
-        .prepare('SELECT data FROM settings WHERE id LIKE ? ORDER BY rowid')
-        .all('sprint-%')
-        .map(row => JSON.parse(row.data))
-        .filter(sprint => sprint.projectId === projectId),
       leases: this.leases(),
     };
   }
@@ -583,11 +578,6 @@ export class Store {
         ? ids.has(event.task_id)
         : !this.setting('event-project:' + event.seq) || this.setting('event-project:' + event.seq) === projectId,
     );
-    const sprints = this.db
-      .prepare('SELECT data FROM settings WHERE id LIKE ? ORDER BY rowid')
-      .all('sprint-%')
-      .map(row => JSON.parse(row.data))
-      .filter(sprint => sprint.projectId === projectId);
     const phases = mode === 'full' ? this.phaseEventsByAttempt() : null;
     return {
       ...org,
@@ -597,7 +587,6 @@ export class Store {
       projects: this.projects(),
       project,
       workflows: this.workflows(projectId),
-      sprints,
       tasks,
       attempts:
         mode === 'dashboard'

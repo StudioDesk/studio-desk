@@ -1,5 +1,5 @@
 // A task's own settings on its page: its owner and its execution settings, each asking the controller for one
-// recorded step. New work comes in through the idea box; sprints and milestones are after 1.0.
+// recorded step. New work comes in through the idea box; sprints are retired (1.1).
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -26,7 +26,6 @@ beforeEach(() => {
       general: { label: 'General task', available: true, creatable: true },
       plan: { label: 'Plan', available: true },
     },
-    sprints: [{ id: 'sprint-1', name: 'Sprint 1' }],
   };
   controller.tasks = [
     taskFixture('T-planned', { title: 'Planned work', status: 'backlog', approval: { status: 'pending' } }),

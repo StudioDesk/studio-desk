@@ -392,7 +392,7 @@ export function TaskDecisions({
 }
 
 // What the decisions wait on or lead to, under "Where it stands": the step whose result this one needs, the
-// tasks it proposed, the step it was proposed from, its sprint and its task type's notice.
+// tasks it proposed, the step it was proposed from and its task type's notice.
 export function DecisionNotes({ projectId, task, studio }: { projectId: string; task: Task; studio: StudioState }) {
   // Approval is separate from accepting the report that proposed the work, which matters only while it waits for
   // approval; a task type's notice is about starting, so it shows only before the first attempt.
@@ -400,11 +400,8 @@ export function DecisionNotes({ projectId, task, studio }: { projectId: string; 
     proposedFrom =
       approval?.status === 'pending' ? (task.proposalReference as { taskId?: string } | undefined)?.taskId : undefined,
     proposed = (task.proposedTaskIds as string[] | undefined) ?? [],
-    notice = task.lastAttemptId ? undefined : studio.taskKinds[task.kind]?.executionNotice,
-    sprint = task.sprintId
-      ? (studio.sprints?.find(item => item.id === task.sprintId)?.name ?? String(task.sprintId))
-      : null;
-  if (!awaited && !proposedFrom && !proposed.length && !notice && !sprint && !task.queued) return null;
+    notice = task.lastAttemptId ? undefined : studio.taskKinds[task.kind]?.executionNotice;
+  if (!awaited && !proposedFrom && !proposed.length && !notice && !task.queued) return null;
   return (
     <div className="sd-meta" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
       {task.queued && <span>Queued for automatic dispatch after prerequisites and your approval.</span>}
@@ -444,7 +441,6 @@ export function DecisionNotes({ projectId, task, studio }: { projectId: string; 
           . Work approval is separate from accepting that report.
         </span>
       )}
-      {sprint && <span>Sprint: {sprint}</span>}
       {notice && <span>{notice}</span>}
     </div>
   );

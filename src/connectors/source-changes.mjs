@@ -46,9 +46,10 @@ export const sourceIntegrationResources = studioDeskSourceResources;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // Where a release line that is not checked out is measured, in a worktree removed at once (src/connectors/source-lines.mjs).
 const measureParent = store => path.join(store.directory, 'wt');
-// The source a story's scope is checked against: its project's line as its measured checks recorded it.
-function storySource(store, projectId, root, sourceCheck, profile) {
-  const line = projectLine(store, projectId, sourceCheck.base?.branch);
+// The source a story's scope is checked against: its project's line as its measured checks recorded it, or the one the
+// director moved the story to before it started (1.1 step 2a).
+function storySource(store, projectId, root, sourceCheck, profile, task) {
+  const line = projectLine(store, projectId, task?.release?.line ?? sourceCheck.base?.branch);
   return {
     line,
     current: measureLine(root, line, profile, measureParent(store)),
@@ -528,7 +529,7 @@ function breakdownChangeScope(store, task, root, dryRun) {
   // The story is measured with the profile its idea's checks used.
   const profile = profileOf(evidence),
     checkedSource = store.attempt(evidence.attemptId).sourceCheck,
-    { line, current, files } = storySource(store, recordProject(task), root, checkedSource, profile);
+    { line, current, files } = storySource(store, recordProject(task), root, checkedSource, profile, task);
   if (current.root !== checkedSource.root)
     throw new Error('The controller source target changed. Request fresh measured evidence and a new breakdown.');
   const paths = verifyStoryScope(storyPaths(task, story), current, evidence.files, {
@@ -855,7 +856,11 @@ export function changeScope(store, task, root, { dryRun = false } = {}) {
   // changes only the proposal's paths, each unchanged since the measured checks but for changes
   // integrated stories committed.
   const profile = profileOf(checked.sourceCheck),
-    { line, current: source, files } = storySource(store, recordProject(task), root, checked.sourceCheck, profile),
+    {
+      line,
+      current: source,
+      files,
+    } = storySource(store, recordProject(task), root, checked.sourceCheck, profile, task),
     paths = verifyStoryScope(
       storyPaths(task, proposal),
       source,

@@ -32,7 +32,7 @@ export function developmentOrganization(org) {
           ? 'Assess measured source evidence and propose bounded software improvements.'
           : workerId === checker.id
             ? 'Run reproducible source checks and report measured results.'
-            : 'Refine project goals into bounded tasks for director sprint selection.';
+            : 'Refine project goals into bounded tasks for director approval.';
     // Staffing roles the Studio desk task types name (MP-015); one person may hold several.
     const roles = [
       ...(workerId === product.id ? ['product-owner'] : []),
