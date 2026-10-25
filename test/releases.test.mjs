@@ -31,6 +31,31 @@ const make = async (c, version) => {
   return made.data.milestone;
 };
 const milestone = (c, id) => projectMilestones(c.app.store, project).find(item => item.id === id);
+// Whether git can push to a repository in a folder here. Every such push runs git's receiving side through its shell,
+// which the Codex test sandbox does not let git start, so there Push refuses with git's own reason instead.
+function pushesToAFolder(directory) {
+  const probe = path.join(directory, 'push-probe'),
+    bare = path.join(directory, 'push-probe.git');
+  git(directory, ['init', '--quiet', '--bare', bare]);
+  git(directory, ['-c', 'init.defaultBranch=main', 'init', '--quiet', probe]);
+  git(probe, [
+    '-c',
+    'user.name=Probe',
+    '-c',
+    'user.email=probe@example.invalid',
+    'commit',
+    '--quiet',
+    '--allow-empty',
+    '-m',
+    'Probe',
+  ]);
+  try {
+    git(probe, ['push', '--quiet', bare, 'HEAD:refs/heads/main']);
+    return true;
+  } catch {
+    return false;
+  }
+}
 const move = (c, id, to) =>
   fetch(`${c.origin}/api/tasks/${id}`, {
     method: 'PATCH',
@@ -110,14 +135,23 @@ test('Release moves open work on when asked, the planner drafts the notes, and a
   assert.match((await push({ confirm: true })).data.error, /several remotes and none is origin/);
   git(c.root, ['remote', 'rename', 'upstream', 'origin']);
   const pushed = await push({ confirm: true });
-  assert.equal(pushed.status, 200, JSON.stringify(pushed.data));
-  assert.equal(pushed.data.pushed.remote, 'origin');
-  assert.equal(git(remote, ['rev-parse', 'refs/heads/release/1.0']), tip);
-  assert.equal(git(remote, ['rev-parse', 'refs/tags/v1.0.1^{commit}']), tip);
-  assert.throws(
-    () => git(remote, ['rev-parse', '--verify', '--quiet', 'refs/heads/main']),
-    'Only the released line goes.',
-  );
+  if (pushesToAFolder(c.directory)) {
+    assert.equal(pushed.status, 200, JSON.stringify(pushed.data));
+    assert.equal(pushed.data.pushed.remote, 'origin');
+    assert.equal(git(remote, ['rev-parse', 'refs/heads/release/1.0']), tip);
+    assert.equal(git(remote, ['rev-parse', 'refs/tags/v1.0.1^{commit}']), tip);
+    assert.throws(
+      () => git(remote, ['rev-parse', '--verify', '--quiet', 'refs/heads/main']),
+      'Only the released line goes.',
+    );
+  } else {
+    assert.equal(pushed.status, 400);
+    assert.match(
+      pushed.data.error,
+      /^Git could not push release\/1\.0 and v1\.0\.1 to origin: .+ Run it yourself with git push origin release\/1\.0 v1\.0\.1\.$/s,
+    );
+    assert.equal(milestone(c, fix.id).release.pushed, undefined, 'A refused push records nothing.');
+  }
   assert.match((await release({})).data.error, /already released/);
 });
 
