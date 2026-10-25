@@ -1,0 +1,22 @@
+# Runtime records (SQLite, job folders, logs). Back up separately; never commit.
+data/
+*.log
+
+# Disposable controller/test folders created by scripts and development checks, and the temporary folder a
+# sandboxed test run uses inside its copy (Node's compile cache lands there)
+.studio-*/
+.source-integration-backup/
+.source-integration-checks/
+/.tmp/
+
+# No trailing slash: the pipeline links installed packages into a copy as a node_modules junction.
+node_modules
+
+# The built dashboard and its tools' cache (MP-026), outside the folders a source snapshot covers.
+# Releases ship the build; the repository does not. `npm start` builds it.
+/dist/
+/.dist-*/
+/.vite-cache/
+
+# Per-install settings, such as a stable copy pointing at the development copy
+studio.local.json

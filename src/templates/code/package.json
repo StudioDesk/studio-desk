@@ -1,0 +1,10 @@
+{
+  "name": "todo-list-sample",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small to-do list library to try Studio desk on.",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  }
+}
