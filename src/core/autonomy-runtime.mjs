@@ -105,6 +105,15 @@ export class Autonomy {
       org.pipelineEnabled = true;
       this.store.setOrganization(org);
     }
+    // The task type acts on its accepted result first (a breakdown's stories go to their releases, 1.1 step 2b), so
+    // the policy approves only what stays.
+    const after = this.runner.registries.workflows.get(task.kind).afterAccept;
+    if (after && task.status === 'done')
+      try {
+        after({ store: this.store, runtime: this.runner, task: this.store.task(taskId) });
+      } catch (error) {
+        this.attention(task, `The accepted result could not be routed: ${error.message}`);
+      }
     if (policy.enabled) {
       const approved = [];
       for (const id of task.proposedTaskIds || []) {

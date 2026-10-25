@@ -106,9 +106,21 @@ export function validateBreakdown(plan, source) {
         'files',
         'newFiles',
         'deleteFiles',
+        'release',
+        'releaseReason',
       ],
       'Breakdown story',
     );
+    // The release a story belongs on (1.1 step 2b), as a version, with why; the controller decides what it does.
+    if (
+      story.release !== undefined &&
+      (typeof story.release !== 'string' || !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(story.release))
+    )
+      throw new Error(`Story ${story.key}: release must be a version such as 1.1.3.`);
+    if (story.releaseReason !== undefined) {
+      if (story.release === undefined) throw new Error(`Story ${story.key}: give releaseReason only with a release.`);
+      boundedText(story.releaseReason, 1000, `Story ${story.key} releaseReason`);
+    }
     if (
       typeof story.key !== 'string' ||
       !/^[a-zA-Z0-9_-]{1,40}$/.test(story.key) ||

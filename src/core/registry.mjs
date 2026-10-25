@@ -93,6 +93,9 @@ export class OrganizationPresetRegistry {
   'proposedConfiguration',
   'proposedTaskIds',
   'sprintId',
+  'release',
+  'movedTo',
+  'releasesRouted',
   'organization',
   'organizationReference',
   'ownerHistory',
@@ -227,6 +230,10 @@ export class WorkflowRegistry {
         (task.autoProposeWork && !task.proposeWork)
       )
         throw new Error('Proposed work needs a synchronous trusted task hook.');
+      // A task type may act on its accepted result before the policy approves what it proposed (afterAccept): a source
+      // breakdown sends stories to the release the planner chose (1.1 step 2b).
+      if (task.afterAccept !== undefined && typeof task.afterAccept !== 'function')
+        throw new Error('afterAccept must be a synchronous trusted task hook.');
       // A task type may say how a blocked attempt's scope request is applied (scopeRequest), and
       // only then may the policy approve such requests ('scope' mode). Likewise, a task type with an
       // integration step may say when its accepted result is ready to integrate (integration), and

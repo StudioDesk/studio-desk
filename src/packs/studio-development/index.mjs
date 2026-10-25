@@ -37,6 +37,8 @@ import {
 import { sourceDiffLimit } from '../../connectors/source-diff.mjs';
 import { lineHead, projectLine, storyLine } from '../../connectors/source-lines.mjs';
 import { runIdOf } from '../../core/graph.mjs';
+import { projectMilestones } from '../../connectors/source-milestones.mjs';
+import { routeBreakdownReleases } from '../../core/release-routing.mjs';
 import { projectSource, sourceResources, sourceRoot } from '../../connectors/source-projects.mjs';
 import { profileOf, recordedProfile, storyPathScope, studioDeskProfile } from '../../connectors/source-profile.mjs';
 
@@ -168,6 +170,39 @@ const breakdownShape = {
     },
   ],
 };
+// What a breakdown is told about releases (1.1 step 2b): its idea's release, how it was chosen and the project's open
+// milestones. A project with neither is told nothing new.
+function releaseLayers(store, task) {
+  const release = store.run(runIdOf(task))?.release,
+    open = projectMilestones(store, recordProject(task)).filter(item => item.state === 'open');
+  if (!release && !open.length) return [];
+  const list = open
+      .map(
+        item => `${item.version} (${item.line ?? 'the newest line'}${item.goal ? `: ${item.goal.slice(0, 200)}` : ''})`,
+      )
+      .join('; '),
+    fixed = ['director', 'planner'].includes(release?.by?.type),
+    how = !release
+      ? ''
+      : release.by.type === 'director'
+        ? ', which the director chose'
+        : release.by.type === 'planner'
+          ? ', where the planner moved this part of an idea'
+          : release.by.type === 'idea'
+            ? `, which its words name ("${release.by.named}")`
+            : ', the next release';
+  return [
+    {
+      title: 'Releases',
+      text:
+        (release ? `This idea is for release ${release.version}${how}. ` : 'This idea has no release yet. ') +
+        (list ? `The project's open milestones: ${list}. ` : '') +
+        (fixed
+          ? 'Keep every story on it and leave release out. If you think a story belongs on another release, you may give release and releaseReason; the controller keeps this choice and shows your suggestion.'
+          : `A story may add release (a version such as 1.1.3) and releaseReason when it belongs on another release, such as a fix to an older one: name the next patch of the release it fixes, or one of the milestones above; the controller makes a release that does not exist yet. Linked stories share a release. A story whose release is on another branch leaves this idea and is checked and planned again on that branch, so name another release only when this idea's release is wrong for it. A story without release stays on ${release?.version ?? "the idea's release"}.`),
+    },
+  ];
+}
 // Data formats carried between Studio desk steps. Content checks stay in each step's
 // validateOutput, which also verifies provenance against controller records.
 const formats = [
@@ -683,8 +718,11 @@ export const studioDevelopmentPack = {
               scopeRules(checkedProfile(store, task)) +
               ' A story may list under newFiles a file its prerequisite story creates; once that story is integrated, the file is edited like any other. Only studio-development:change is allowed. No extra fields, commands, resources, maxSeconds or maxAttempts. Controller budgets and graph/roster/catalog/source checks apply to the entire breakdown before intake. Stage intent only; never approve or execute it. The controller runs linked stories after their prerequisites are integrated and one source story at a time; a story may build on files any integrated story changed. Other overlapping stale scope needs fresh measured evidence.',
           },
+          ...releaseLayers(store, task),
         ],
       }),
+      // The planner's call on each story's release (1.1 step 2b), before the policy approves what it proposed.
+      afterAccept: ({ store, runtime, task }) => routeBreakdownReleases(store, runtime, task),
       prompt:
         'Use the recorded instructions and exact accepted measured check report/source context. Follow the delivery-specific planning guidance in Granted scope. Break down the director idea in brief/direction using the Source breakdown contract. Return source-breakdown.json only and the common result. Do not change source or execute stories.',
       validateOutput({ attempt, readArtifact, checks }) {

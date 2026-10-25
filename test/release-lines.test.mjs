@@ -98,8 +98,15 @@ test('a project adds release lines from a tag or a branch, retires and keeps the
   added = await addLine(c, { branch: 'release/0.9' });
   assert.deepEqual(
     added.data.lines.map(line => line.branch),
-    ['release/1.0', 'release/0.9', 'main'],
-    'Lines added later go before the newest one, in the order they were made.',
+    ['release/0.9', 'release/1.0', 'main'],
+    'Release lines go before the newest one, oldest first whatever order they were made in (1.1 step 2a).',
+  );
+  // A line that is not a release line goes just before the newest one.
+  git(c.root, ['branch', 'hotfix', released]);
+  added = await addLine(c, { branch: 'hotfix' });
+  assert.deepEqual(
+    added.data.lines.map(line => line.branch),
+    ['release/0.9', 'release/1.0', 'hotfix', 'main'],
   );
 
   // An idea lands on the line it names, or on the newest line.

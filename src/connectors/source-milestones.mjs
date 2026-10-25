@@ -172,8 +172,8 @@ export function namedRelease(milestones, tags, text, lines = []) {
 
 // The release and line a new idea takes (intake): the milestone or line the director picked, a version the idea
 // names, or the next release on the newest line. `release.by` records which, so the planner (step 2b) never moves a
-// release the director picked.
-export function ideaRelease(store, projectId, runtime, { milestone, line, idea }) {
+// release the director picked; `by` names the chooser of `milestone` when the controller sends an idea for the planner.
+export function ideaRelease(store, projectId, runtime, { milestone, line, idea, by: chooser }) {
   const milestones = projectMilestones(store, projectId);
   const chosen = (picked, by) => {
     if (!open(picked)) throw new Error(`Milestone ${picked.version} is released, so no new idea lands on it.`);
@@ -190,7 +190,7 @@ export function ideaRelease(store, projectId, runtime, { milestone, line, idea }
         : findMilestone(store, projectId, milestone);
     if (line !== undefined && line !== (picked.line ?? projectLine(store, projectId, undefined)))
       throw new Error(`Milestone ${picked.version} lands on ${picked.line ?? 'the newest line'}, not ${line}.`);
-    return chosen(picked, { type: 'director' });
+    return chosen(picked, chooser ?? { type: 'director' });
   }
   if (line !== undefined) {
     const branch = ideaLine(store, projectId, runtime, line),

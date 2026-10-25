@@ -12,12 +12,13 @@ import { ideaRelease, restoreWaitingIdea, takeWaitingIdea } from '../connectors/
 // `general` is true on the general intake route, which also takes a source project's ideas; the Studio desk route
 // only checks and breaks down. `sampleFiles` reads a sample's waiting files as wire files when the idea takes them. A
 // source idea lands on a milestone or line the director picked (`milestone`, `line`), or one its words name, or the
-// next release (1.1 steps 1 and 2a); `waiting` names the waiting idea it was sent from.
+// next release (1.1 steps 1 and 2a); `waiting` names the waiting idea it was sent from, and `releaseBy` records who
+// chose its milestone when the controller sends it for the planner (step 2b).
 export function startIdeaIntake(
   store,
   registries,
   runner,
-  { projectId, idea, files, autoMode, general, line, milestone, waiting },
+  { projectId, idea, files, autoMode, general, line, milestone, waiting, releaseBy },
   sampleFiles,
 ) {
   store.project(projectId);
@@ -54,7 +55,7 @@ export function startIdeaIntake(
   // milestone it names is made here, after everything else about the idea has been checked.
   const { line: branch, release } = planned
     ? {}
-    : ideaRelease(store, projectId, runner, { milestone, line, idea: brief });
+    : ideaRelease(store, projectId, runner, { milestone, line, idea: brief, by: releaseBy });
   if (branch !== undefined) run.line = branch;
   if (release) run.release = { ...release, ...(waiting ? { waiting } : {}) };
   if (typeof autoMode === 'boolean') {
@@ -86,9 +87,11 @@ export function startIdeaIntake(
             ? `, which the idea names ("${by.named}")`
             : by.type === 'default'
               ? ', the next release'
-              : run.release.waiting
-                ? ', the milestone it waited in'
-                : ''
+              : by.type === 'planner'
+                ? ', where the planner moved it'
+                : run.release.waiting
+                  ? ', the milestone it waited in'
+                  : ''
         }.`
       : run.line !== undefined
         ? ` It lands on ${run.line}.`
