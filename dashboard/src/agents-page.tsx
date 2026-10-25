@@ -1,11 +1,13 @@
 // The agents (the canvas's Employees board, v1.0 item 23): the project's agents beside the one chosen, with what it
 // is doing now, what it is told, how it runs, its work and its recent runs. An agent is a set of instructions and a
-// CLI; each run is its own process, one at a time for each agent, as the controller reserves it.
+// CLI; each run is its own process, one at a time for each agent, as the controller reserves it. Any agent can be
+// renamed here; one made in this project (1.0.1) can also be deleted, and its past work keeps its name.
 import { useMutation } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { useMemo, useState } from 'react';
 import { send, type AttemptSummary, type Execution, type Worker } from './api';
 import { AgentAvatar } from './design/avatar';
+import { Dialog } from './design/dialog';
 import { FacePicker } from './design/face-picker';
 import { agentState } from './faces';
 import type { AgentLook } from './design/agent-kit.js';
@@ -188,7 +190,10 @@ function AgentDetail({
     settled = useSettled(projectId, 'accepted', true, { workerId: worker.id }),
     toast = useToast(),
     [picking, setPicking] = useState(false),
+    [renaming, setRenaming] = useState(false),
+    [deleting, setDeleting] = useState(false),
     name = worker.displayName ?? worker.id,
+    own = worker.projectId === projectId,
     running = state.attempts.filter(
       item => item.workerId === worker.id && ['running', 'stopping'].includes(item.status),
     ),
@@ -266,11 +271,38 @@ function AgentDetail({
               {accepted} {plural(accepted, 'result')} accepted
             </span>
           </span>
+          <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
+            <button type="button" className="sd-btn sd-btn--sm sd-btn--ghost" onClick={() => setRenaming(true)}>
+              <Icon name="pencil" size={16} />
+              Rename
+            </button>
+            {own && (
+              <button type="button" className="sd-btn sd-btn--sm sd-btn--danger" onClick={() => setDeleting(true)}>
+                <Icon name="trash" size={16} />
+                Delete {name}
+              </button>
+            )}
+          </span>
         </div>
         <p className="sd-agenthead__note">
-          {name} is a set of instructions and a CLI. Each run is its own process in its own folder; {name} runs one at a
-          time, and the studio&apos;s limit in Settings caps how many agents run together.
+          {name} is a set of instructions and a CLI.{' '}
+          {own
+            ? `${name} belongs to this project, so changing ${name} changes nothing anywhere else.`
+            : `${name} is shared by every project: a new name, face or CLI shows wherever ${name} works, and what ${name} is told here is this project's own.`}{' '}
+          Each run is its own process in its own folder; {name} runs one at a time, and the studio&apos;s limit in
+          Settings caps how many agents run together.
         </p>
+        <Rename projectId={projectId} worker={worker} name={name} open={renaming} onClose={() => setRenaming(false)} />
+        {own && (
+          <DeleteAgent
+            projectId={projectId}
+            state={state}
+            worker={worker}
+            name={name}
+            open={deleting}
+            onClose={() => setDeleting(false)}
+          />
+        )}
       </section>
       <div className="sd-agentgrid">
         <Work projectId={projectId} state={state} worker={worker} tasks={tasks} />
@@ -537,7 +569,10 @@ function HowItRuns({
             save.mutate();
           }}
         >
-          <span className="sd-meta">For future runs. A run already going keeps the settings it started with.</span>
+          <span className="sd-meta">
+            For future runs{worker.projectId ? '' : `, in every project ${name} works in`}. A run already going keeps
+            the settings it started with.
+          </span>
           <ExecutionFields adapters={adapters} value={value} onChange={setValue} />
           <span style={{ display: 'flex', gap: 'var(--space-10)', alignItems: 'center' }}>
             <Toggle label={`Pause new work for ${name}`} on={paused} onChange={() => setPaused(!paused)} />
@@ -604,5 +639,177 @@ function RecentRuns({ attempts }: { attempts: AttemptSummary[] }) {
         <span className="sd-meta">No runs yet.</span>
       )}
     </section>
+  );
+}
+
+// A new name for the agent. A shared agent's shows in every project, so it is checked against every agent. The form
+// is mounted only while the dialog is open, so it starts from the current name each time.
+function Rename({
+  projectId,
+  worker,
+  name,
+  open,
+  onClose,
+}: {
+  projectId: string;
+  worker: Worker;
+  name: string;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const save = useMutation({
+    mutationFn: (value: string) =>
+      send(
+        `/api/workers/${encodeURIComponent(worker.id)}`,
+        { projectId, displayName: value, expectedVersion: worker.configVersion ?? 1 },
+        'PATCH',
+      ),
+    onSuccess: (_, value) => {
+      toast(`${name} is now called ${value.trim()}.`);
+      onClose();
+    },
+  });
+  const close = () => {
+    save.reset();
+    onClose();
+  };
+  return (
+    <Dialog open={open} label={`Rename ${name}`} busy={save.isPending} onClose={close}>
+      <RenameForm
+        name={name}
+        shared={!worker.projectId}
+        saving={save.isPending}
+        error={save.error}
+        onSave={value => save.mutate(value)}
+        onClose={close}
+      />
+    </Dialog>
+  );
+}
+
+function RenameForm({
+  name,
+  shared,
+  saving,
+  error,
+  onSave,
+  onClose,
+}: {
+  name: string;
+  shared: boolean;
+  saving: boolean;
+  error: Error | null;
+  onSave: (value: string) => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(name);
+  return (
+    <form
+      className="sd-dialog__form"
+      onSubmit={event => {
+        event.preventDefault();
+        onSave(value);
+      }}
+    >
+      <h2 className="sd-dialog__title">Rename {name}</h2>
+      <div className="sd-field">
+        <label className="sd-field__label" htmlFor="agent-name">
+          Name
+        </label>
+        <input
+          id="agent-name"
+          className="sd-input"
+          value={value}
+          required
+          maxLength={40}
+          autoComplete="off"
+          onChange={event => setValue(event.target.value)}
+        />
+        {shared && <span className="sd-meta">{name} is shared, so the new name shows in every project.</span>}
+      </div>
+      {error && (
+        <p role="alert" className="sd-meta" style={{ margin: 0, color: 'var(--bad)' }}>
+          {error.message}
+        </p>
+      )}
+      <div className="sd-dialog__actions">
+        <button type="submit" className="sd-btn sd-btn--primary" disabled={saving || !value.trim()}>
+          Rename
+        </button>
+        <button type="button" className="sd-btn sd-btn--ghost" disabled={saving} onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// Deleting an agent made in this project: it leaves the project's teams for good, and the work it did keeps its
+// name. The controller refuses while it runs or has open work, and for the project's last agent, and says why.
+function DeleteAgent({
+  projectId,
+  state,
+  worker,
+  name,
+  open,
+  onClose,
+}: {
+  projectId: string;
+  state: StudioState;
+  worker: Worker;
+  name: string;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const toast = useToast(),
+    navigate = useNavigate();
+  const remove = useMutation({
+    mutationFn: () =>
+      send(`/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(worker.id)}/delete`, {
+        projectId,
+        expectedRevision: state.organizationConfiguration?.revision ?? 0,
+      }),
+    onSuccess: () => {
+      toast(`Deleted ${name}. The work ${name} did keeps ${name}'s name.`);
+      onClose();
+      void navigate({ to: '/p/$projectId/agents', params: { projectId } });
+    },
+  });
+  const close = () => {
+    remove.reset();
+    onClose();
+  };
+  return (
+    <Dialog open={open} label={`Delete ${name}?`} busy={remove.isPending} onClose={close}>
+      <div className="sd-dialog__form">
+        <h2 className="sd-dialog__title">Delete {name}?</h2>
+        <p style={{ margin: 0 }}>
+          {name} leaves {state.project.name}&apos;s teams for good. The work {name} did stays on the record under {name}
+          &apos;s name. It can&apos;t be undone.
+        </p>
+        <p className="sd-meta" style={{ margin: 0 }}>
+          Work {name} is doing or has open has to finish or be closed first.
+        </p>
+        {remove.error && (
+          <p role="alert" className="sd-meta" style={{ margin: 0, color: 'var(--bad)' }}>
+            {remove.error.message}
+          </p>
+        )}
+        <div className="sd-dialog__actions">
+          <button
+            type="button"
+            className="sd-btn sd-btn--danger"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate()}
+          >
+            {remove.isPending ? 'Deleting…' : `Delete ${name}`}
+          </button>
+          <button type="button" className="sd-btn sd-btn--ghost" disabled={remove.isPending} onClick={close}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </Dialog>
   );
 }

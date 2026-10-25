@@ -43,6 +43,7 @@ import { createProject } from './core/project-creation.mjs';
 import { startIdeaIntake } from './core/idea-intake.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
+import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
 import { LEGACY_PROJECT, recordProject, assertProject, validateTaskProject } from './core/projects.mjs';
 import {
   finishedRuns,
@@ -769,7 +770,13 @@ export function createStudio({
                 createdAt: new Date().toISOString(),
               };
               store.putProject(project);
-              saveProjectOrganization(store, registries, id, developmentOrganization(store.organization()), true);
+              saveProjectOrganization(
+                store,
+                registries,
+                id,
+                developmentOrganization(sharedAgents(store.organization())),
+                true,
+              );
             }
             if (!workflow) {
               const steps = developmentSteps(projectOrganization(store, id)),
@@ -832,6 +839,17 @@ export function createStudio({
             );
           return json(res, { runId: parts[4], projectId, archive });
         }
+        // A project's own agents (1.0.1): a new one joins one of its teams; deleting one keeps its record.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'agents' && req.method === 'POST') {
+          if (parts[2] !== projectId) fail('Select this project before changing its agents.');
+          try {
+            if (!parts[4]) return json(res, createProjectAgent(store, registries, projectId, data), 201);
+            if (parts[5] === 'delete' && !parts[6])
+              return json(res, deleteProjectAgent(store, registries, projectId, parts[4], data));
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+        }
         // Deleting a project (v1.0 item 24): its name typed back confirms it.
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'delete' && !parts[4] && req.method === 'POST') {
           if (parts[2] !== projectId) fail('Select this project before deleting it.');
@@ -858,7 +876,7 @@ export function createStudio({
               fail('Unknown project organization preset.');
             if (store.setting('project-organization:' + projectId))
               fail('Project defaults cannot replace an existing configuration. Edit its teams and roles instead.');
-            const config = developmentOrganization(store.organization());
+            const config = developmentOrganization(sharedAgents(store.organization()));
             config.expectedRevision = data.expectedRevision;
             return json(res, saveProjectOrganization(store, registries, projectId, config));
           }
@@ -1589,21 +1607,18 @@ export function createStudio({
         if (parts[1] === 'workers' && parts[3] === 'look' && !parts[4] && req.method === 'POST') {
           const org = store.organization(),
             w = org.workers.find(w => w.id === parts[2]);
-          if (!w) fail('Employee not found.');
+          if (!w || w.deletedAt) fail('Employee not found.');
+          // An agent that belongs to a project changes only from that project (1.0.1).
+          if (w.projectId && w.projectId !== projectId) fail(`${w.displayName ?? w.id} belongs to another project.`);
           if (Object.keys(data).some(key => !['projectId', 'look'].includes(key))) fail('A face is its look alone.');
-          const slots = ['body', 'color', 'eyes', 'mouth', 'top', 'detail'],
-            look = data.look;
-          if (
-            look !== null &&
-            (!look ||
-              typeof look !== 'object' ||
-              Array.isArray(look) ||
-              Object.keys(look).length !== slots.length ||
-              slots.some(part => !Number.isInteger(look[part]) || look[part] < 0 || look[part] > 9))
-          )
-            fail('A face is six part numbers from 0 to 9: body, color, eyes, mouth, top and detail.');
+          let look;
+          try {
+            look = validFace(data.look);
+          } catch (error) {
+            fail(error.message);
+          }
           if (look === null) delete w.look;
-          else w.look = Object.fromEntries(slots.map(part => [part, look[part]]));
+          else w.look = look;
           store.setOrganization(org);
           store.event('worker_look', null, null, `${w.displayName}: face changed.`);
           return json(res, { ok: true, look: w.look ?? null });
@@ -1611,10 +1626,15 @@ export function createStudio({
         if (parts[1] === 'workers' && req.method === 'PATCH') {
           const org = store.organization(),
             w = org.workers.find(w => w.id === parts[2]);
-          if (!w) fail('Employee not found.');
+          if (!w || w.deletedAt) fail('Employee not found.');
+          if (w.projectId && w.projectId !== projectId) fail(`${w.displayName ?? w.id} belongs to another project.`);
           if (data.expectedVersion !== (w.configVersion || 1))
             fail('Employee configuration changed. Refresh before saving.', 409);
+          // A new name (1.0.1): a shared agent's is distinct among every agent, a project's own among that project's.
+          let renamed = null;
           try {
+            if (data.displayName !== undefined)
+              renamed = agentName(org, data.displayName, { projectId: w.projectId, except: w.id });
             applyWorkerExecution(registries.adapters, w, data);
           } catch (error) {
             fail(error.message);
@@ -1623,8 +1643,12 @@ export function createStudio({
             if (typeof data.paused !== 'boolean') fail('Pause must be true or false.');
             w.paused = data.paused;
           }
+          const before = w.displayName;
+          if (renamed !== null && renamed !== before) w.displayName = renamed;
           w.configVersion = (w.configVersion || 1) + 1;
           store.setOrganization(org);
+          if (w.displayName !== before)
+            store.event('worker_renamed', null, null, `${before} is now called ${w.displayName}.`);
           store.event('worker_updated', null, null, `${w.displayName}: configuration updated for future attempts.`);
           return json(res, w);
         }
@@ -1706,8 +1730,9 @@ export function createStudio({
           // limit above the number of employees would never be reached. Running attempts are never stopped by a
           // lower limit; new ones wait for a slot under it.
           if (data.maxParallel !== undefined) {
-            if (!Number.isInteger(data.maxParallel) || data.maxParallel < 1 || data.maxParallel > org.workers.length)
-              fail(`Choose from 1 to ${org.workers.length} attempts at the same time.`);
+            const agents = org.workers.filter(worker => !worker.deletedAt).length;
+            if (!Number.isInteger(data.maxParallel) || data.maxParallel < 1 || data.maxParallel > agents)
+              fail(`Choose from 1 to ${agents} attempts at the same time.`);
             org.maxParallel = data.maxParallel;
           }
           if (data.clearQuota !== undefined) {

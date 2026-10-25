@@ -43,6 +43,10 @@ export function deleteProject(store, projectId, name) {
   const jobs = attempts.map(attempt => jobDirectory(store, attempt));
   store.tx(() => {
     store.deleteProjectRecords(projectId, [...taskIds], [...attemptIds]);
+    // The project's own agents go with it (1.0.1): no record outside it names them.
+    const org = store.organization();
+    if (org.workers.some(worker => worker.projectId === projectId))
+      store.setOrganization({ ...org, workers: org.workers.filter(worker => worker.projectId !== projectId) });
     store.event('project_deleted', null, null, `Project deleted: ${project.name}.`);
   });
   // Folders go after the commit; one that cannot be removed now is left, never a record without its files' owner.

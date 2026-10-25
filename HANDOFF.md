@@ -15,6 +15,7 @@ The dashboard (`dashboard/`, React with a Vite build) is served by the controlle
 
 - Projects for git repositories and for general work, started from the dashboard or from the Code and Writing samples.
 - Teams, agents and instructions at three levels (everyone, a team, one agent), each with drafts and published revisions; every attempt records the instructions, configuration and inputs it ran with.
+- Since 1.0.1 (in progress), agents made for one project, which work only there, and renaming and deleting agents (`src/core/project-agents.mjs`, the Teams and Agents pages).
 - Ready → Working → Review → Accepted for every story and step, with independent review, send-back and retries that see earlier attempts.
 - House rules for what runs on its own and what waits for the director.
 - Recovery after a restart: interrupted attempts and integrations are reconciled from the dashboard, never replayed blindly.

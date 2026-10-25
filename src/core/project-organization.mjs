@@ -87,12 +87,15 @@ export function organizationConfiguration(store, projectId) {
     revision: 0,
     inherited: true,
     teams: clone(org.teams),
-    members: org.workers.map(worker => ({
-      workerId: worker.id,
-      teamId: org.teams.find(team => team.name === worker.team).id,
-      role: worker.jobTitle || worker.role,
-      responsibility: worker.responsibility,
-    })),
+    // Only the shared agents: one that belongs to a project never joins another (1.0.1).
+    members: org.workers
+      .filter(worker => !worker.projectId && !worker.deletedAt)
+      .map(worker => ({
+        workerId: worker.id,
+        teamId: org.teams.find(team => team.name === worker.team).id,
+        role: worker.jobTitle || worker.role,
+        responsibility: worker.responsibility,
+      })),
     taskKinds: null,
     kindOwners: {},
   };
@@ -142,12 +145,12 @@ export function saveProjectOrganization(store, registries, projectId, data, with
   const employees = new Set();
   const members = data.members.map(member => {
     fields(member, ['workerId', 'teamId', 'role', 'responsibility', 'roles']);
-    if (
-      !org.workers.some(worker => worker.id === member.workerId) ||
-      employees.has(member.workerId) ||
-      !ids.has(member.teamId)
-    )
+    const worker = org.workers.find(item => item.id === member.workerId);
+    if (!worker || worker.deletedAt || employees.has(member.workerId) || !ids.has(member.teamId))
       throw new Error('Each project member must be one existing employee in one selected team.');
+    // An agent made in a project works only there (1.0.1).
+    if (worker.projectId && worker.projectId !== projectId)
+      throw new Error(`${worker.displayName ?? worker.id} belongs to another project.`);
     employees.add(member.workerId);
     // Staffing roles are stable IDs that nodes name (MP-015). An editor that omits them keeps
     // the member's saved roles; an empty list clears them.

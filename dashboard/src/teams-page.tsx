@@ -1,18 +1,27 @@
 // The teams (v1.0 item 23; the canvas has no board for them, so they are built in the redesign's language): the
 // project's teams as cards with their agents' faces, and a team's own page with its goal, its agents and its work.
 // Edit the teams turns the same cards into the project's organization, edited in place: each team's fields, its
-// agents with a + for one the studio already has, an Add a team card, and below them the kinds of work the project
-// takes and the model tiers. A team groups agents; it grants no tools. A change reaches work that starts after it
+// agents with a + for one the studio already has or a new one that belongs to this project (1.0.1), an Add a team
+// card, and below them the kinds of work the project takes and the model tiers. A team groups agents; it grants no tools. A change reaches work that starts after it
 // is saved, and recorded attempts keep what they ran with.
 import { useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useMemo, useRef, useState, type ReactNode } from 'react';
-import { send, type Adapter, type PeopleSummary, type Task, type Team, type Tiers, type Worker } from './api';
+import {
+  send,
+  type Adapter,
+  type Execution,
+  type PeopleSummary,
+  type Task,
+  type Team,
+  type Tiers,
+  type Worker,
+} from './api';
 import type { AgentLook } from './design/agent-kit.js';
 import { AgentAvatar } from './design/avatar';
 import { Dialog } from './design/dialog';
 import { Icon } from './design/icons';
-import { modeLabels, offeredModes } from './execution-fields';
+import { cleanExecution, ExecutionFields, modeLabels, offeredModes } from './execution-fields';
 import { agentState } from './faces';
 import { Heading } from './layout';
 import { usePeople, useSettled, useStudio } from './records';
@@ -393,6 +402,15 @@ const tierFields = (adapter: Adapter): TierField[] => [
 ];
 const agentName = (worker: Worker) => worker.displayName ?? worker.id;
 const teamName = (team: Team) => team.name.trim() || 'New team';
+// Staffing roles as typed, "reviewer, engineer", as the list the controller takes.
+const roleList = (text: string) => [
+  ...new Set(
+    text
+      .split(/[\s,]+/)
+      .map(role => role.trim())
+      .filter(Boolean),
+  ),
+];
 
 // Each edit starts from the saved organization: every agent the studio has, in a team or not in this project.
 function savedDraft(state: StudioState, directory: Worker[]): Draft {
@@ -440,16 +458,24 @@ function TeamsEdit({
   looks: ReturnType<typeof useLooks>;
   onDone: () => void;
 }) {
+  // The agents this project can have, without deleted ones, and any made during this edit before the state shows
+  // them.
   const config = state.organizationConfiguration ?? {},
-    directory = state.employeeDirectory?.length ? state.employeeDirectory : state.workers,
+    [made, setMade] = useState<Worker[]>([]),
+    listed = (state.employeeDirectory?.length ? state.employeeDirectory : state.workers).filter(
+      worker => !worker.deletedAt,
+    ),
+    directory = [...listed, ...made.filter(worker => !listed.some(item => item.id === worker.id))],
     toast = useToast(),
     [draft, setDraft] = useState<Draft>(() => savedDraft(state, directory)),
     // The kinds of work the project took when the edit began come first, and the rest wait behind their own line,
     // so a kind turned on or off stays where it is.
     [taken] = useState(() => new Set(draft.taskKinds)),
-    // The agent whose part in its team is open, and the team an agent is being brought into.
+    // The agent whose part in its team is open, the team an agent is being brought into, and the team a new agent
+    // is being made for.
     [part, setPart] = useState<string | null>(null),
     [adding, setAdding] = useState<string | null>(null),
+    [making, setMaking] = useState<string | null>(null),
     // A team just added takes the cursor in its name.
     fresh = useRef<string | null>(null);
   const save = useMutation({
@@ -502,25 +528,16 @@ function TeamsEdit({
     save.mutate({
       expectedRevision: draft.expectedRevision,
       teams: draft.teams.map(team => ({ ...team, leadId: team.leadId || null })),
-      members: directory
-        .filter(worker => placed(worker.id))
-        .map(worker => {
-          const member = draft.members[worker.id]!;
-          return {
-            workerId: worker.id,
-            teamId: member.teamId,
-            role: member.role,
-            responsibility: member.responsibility,
-            roles: [
-              ...new Set(
-                member.roles
-                  .split(/[\s,]+/)
-                  .map(role => role.trim())
-                  .filter(Boolean),
-              ),
-            ],
-          };
-        }),
+      // Every placed agent in the draft, a new one included even before the state lists it.
+      members: Object.entries(draft.members)
+        .filter(([, member]) => member.teamId)
+        .map(([workerId, member]) => ({
+          workerId,
+          teamId: member.teamId,
+          role: member.role,
+          responsibility: member.responsibility,
+          roles: roleList(member.roles),
+        })),
       taskKinds: draft.taskKinds,
       kindOwners: Object.fromEntries(draft.taskKinds.filter(kind => ownerOf(kind)).map(kind => [kind, ownerOf(kind)])),
       // An explicit empty object clears saved tiers; with no agent's CLI shown they are left untouched.
@@ -622,7 +639,8 @@ function TeamsEdit({
     };
   const partWorker = directory.find(worker => worker.id === part && placed(worker.id)),
     partTeam = partWorker && draft.teams.find(team => team.id === draft.members[partWorker.id]!.teamId),
-    addingTeam = draft.teams.find(team => team.id === adding);
+    addingTeam = draft.teams.find(team => team.id === adding),
+    makingTeam = draft.teams.find(team => team.id === making);
   return (
     <>
       <form
@@ -900,8 +918,8 @@ function TeamsEdit({
           </section>
         )}
         <p className="sd-meta" style={{ margin: 0 }}>
-          What each team and agent is told is in Instructions, with its own drafts. How each agent runs is on its page,
-          and is the same in every project.
+          What each team and agent is told is in Instructions, with its own drafts. How each agent runs is on its page:
+          an agent made in this project runs only here, and a shared one runs the same way in every project.
         </p>
         <div className="sd-editbar">
           {save.error ? (
@@ -971,11 +989,53 @@ function TeamsEdit({
             agents={directory.filter(worker => draft.members[worker.id]?.teamId !== addingTeam.id)}
             members={draft.members}
             looks={looks}
+            saved={(config.teams ?? []).some(team => team.id === addingTeam.id)}
             onPick={id => {
               place(id, addingTeam.id);
               setAdding(null);
             }}
+            onNew={() => {
+              setAdding(null);
+              setMaking(addingTeam.id);
+            }}
             onClose={() => setAdding(null)}
+          />
+        )}
+      </Dialog>
+      <Dialog
+        open={!!makingTeam}
+        label={makingTeam ? `A new agent for ${teamName(makingTeam)}` : ''}
+        size="wide"
+        onClose={() => setMaking(null)}
+      >
+        {makingTeam && (
+          <NewAgent
+            projectId={projectId}
+            state={state}
+            team={makingTeam}
+            expectedRevision={draft.expectedRevision}
+            onMade={({ worker, revision }, roles) => {
+              // The agent is saved as the organization's next revision; the rest of the draft still waits.
+              setMade(current => [...current, worker]);
+              setDraft(current => ({
+                ...current,
+                expectedRevision: revision,
+                members: {
+                  ...current.members,
+                  [worker.id]: {
+                    teamId: makingTeam.id,
+                    role: worker.jobTitle ?? '',
+                    responsibility: worker.responsibility ?? '',
+                    roles,
+                  },
+                },
+              }));
+              setMaking(null);
+              toast(
+                `${agentName(worker)} joined ${teamName(makingTeam)}. Your other changes still wait for you to save.`,
+              );
+            }}
+            onClose={() => setMaking(null)}
           />
         )}
       </Dialog>
@@ -1053,14 +1113,18 @@ function PartFields({
   );
 }
 
-// The agents the studio already has, to bring into a team: from another team, or from outside this project.
+// The agents to bring into a team: a new one that belongs to this project, or one the studio already has, from
+// another team or from outside this project. A new agent joins a team that is saved, so a team added in this edit
+// is saved first.
 function AgentPicker({
   team,
   teams,
   agents,
   members,
   looks,
+  saved,
   onPick,
+  onNew,
   onClose,
 }: {
   team: Team;
@@ -1068,12 +1132,36 @@ function AgentPicker({
   agents: Worker[];
   members: Record<string, MemberDraft>;
   looks: ReturnType<typeof useLooks>;
+  saved: boolean;
   onPick: (id: string) => void;
+  onNew: () => void;
   onClose: () => void;
 }) {
   return (
     <div className="sd-dialog__form">
       <h2 className="sd-dialog__title">Add an agent to {teamName(team)}</h2>
+      <div className="sd-agentpick">
+        <button
+          type="button"
+          className="sd-agentrow"
+          disabled={!saved}
+          style={saved ? undefined : { opacity: 0.6, cursor: 'default' }}
+          onClick={onNew}
+        >
+          <span className="sd-agentrow__add" aria-hidden="true">
+            <Icon name="plus" size={18} />
+          </span>
+          <span className="sd-agentrow__text">
+            <b>New agent</b>
+            <span className="sd-meta">
+              {saved
+                ? 'Made for this project: its name, CLI and instructions change nothing anywhere else'
+                : 'Save the teams first, then make a new agent for this one'}
+            </span>
+          </span>
+        </button>
+      </div>
+      {agents.length > 0 && <span className="sd-eyebrow">Agents the studio has</span>}
       {agents.length ? (
         <div className="sd-agentpick">
           {agents.map(worker => {
@@ -1084,7 +1172,13 @@ function AgentPicker({
                 {look && <AgentAvatar look={look} size={40} ring={false} />}
                 <span className="sd-agentrow__text">
                   <b>{agentName(worker)}</b>
-                  <span className="sd-meta">{from ? `Moves from ${teamName(from)}` : 'Not in this project yet'}</span>
+                  <span className="sd-meta">
+                    {from
+                      ? `Moves from ${teamName(from)}`
+                      : worker.projectId
+                        ? 'Not on a team'
+                        : 'Not in this project yet'}
+                  </span>
                 </span>
               </button>
             );
@@ -1092,7 +1186,7 @@ function AgentPicker({
         </div>
       ) : (
         <p className="sd-meta" style={{ margin: 0 }}>
-          Every agent is already on this team.
+          Every agent the studio has is already on this team.
         </p>
       )}
       <div className="sd-dialog__actions">
@@ -1101,5 +1195,176 @@ function AgentPicker({
         </button>
       </div>
     </div>
+  );
+}
+
+// The CLI a new agent starts on: the one most of the project's agents run on, else the first signed-in CLI.
+function usualProvider(state: StudioState) {
+  const adapters = state.adapters ?? {},
+    choices = Object.values(adapters).filter(adapter => adapter.workerSelectable && adapter.id !== 'mock'),
+    counts = new Map<string, number>();
+  for (const worker of state.workers)
+    if (worker.provider && choices.some(adapter => adapter.id === worker.provider))
+      counts.set(worker.provider, (counts.get(worker.provider) ?? 0) + 1);
+  return (
+    [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ??
+    choices.find(adapter => adapter.available)?.id ??
+    choices[0]?.id ??
+    Object.keys(adapters)[0] ??
+    ''
+  );
+}
+
+// A new agent for one of the project's teams: its name, its job here, the CLI it runs on and what it is told. It is
+// saved at once as the organization's next revision and belongs to this project; its face is the agent kit's until
+// one is chosen on its page.
+function NewAgent({
+  projectId,
+  state,
+  team,
+  expectedRevision,
+  onMade,
+  onClose,
+}: {
+  projectId: string;
+  state: StudioState;
+  team: Team;
+  expectedRevision: number;
+  onMade: (made: { worker: Worker; revision: number }, roles: string) => void;
+  onClose: () => void;
+}) {
+  const adapters = state.adapters ?? {},
+    [name, setName] = useState(''),
+    [title, setTitle] = useState(''),
+    [responsibility, setResponsibility] = useState(''),
+    [roles, setRoles] = useState(''),
+    [instructions, setInstructions] = useState(''),
+    [execution, setExecution] = useState<Execution>(() => ({
+      provider: usualProvider(state),
+      model: '',
+      effort: '',
+      mode: '',
+    }));
+  const make = useMutation({
+    mutationFn: () =>
+      send<{ worker: Worker; revision: number }>(`/api/projects/${encodeURIComponent(projectId)}/agents`, {
+        projectId,
+        expectedRevision,
+        displayName: name,
+        jobTitle: title,
+        responsibility,
+        teamId: team.id,
+        roles: roleList(roles),
+        ...cleanExecution(adapters, execution),
+        instructions,
+      }),
+    onSuccess: made => onMade(made, roleList(roles).join(', ')),
+  });
+  return (
+    <form
+      className="sd-dialog__form"
+      onSubmit={event => {
+        event.preventDefault();
+        make.mutate();
+      }}
+    >
+      <h2 className="sd-dialog__title">A new agent for {teamName(team)}</h2>
+      <p className="sd-meta" style={{ margin: 0 }}>
+        It belongs to {state.project.name}: its name, CLI and instructions change nothing in any other project.
+      </p>
+      <div className="sd-fieldgrid">
+        <div className="sd-field">
+          <label className="sd-field__label" htmlFor="new-agent-name">
+            Name
+          </label>
+          <input
+            id="new-agent-name"
+            className="sd-input"
+            value={name}
+            required
+            maxLength={40}
+            autoComplete="off"
+            onChange={event => setName(event.target.value)}
+          />
+        </div>
+        <div className="sd-field">
+          <label className="sd-field__label" htmlFor="new-agent-title">
+            Job title
+          </label>
+          <input
+            id="new-agent-title"
+            className="sd-input"
+            value={title}
+            required
+            maxLength={160}
+            placeholder="For example: Copywriter"
+            autoComplete="off"
+            onChange={event => setTitle(event.target.value)}
+          />
+        </div>
+      </div>
+      <div className="sd-field">
+        <label className="sd-field__label" htmlFor="new-agent-responsibility">
+          What it is responsible for
+        </label>
+        <textarea
+          id="new-agent-responsibility"
+          className="sd-textarea"
+          value={responsibility}
+          maxLength={4000}
+          onChange={event => setResponsibility(event.target.value)}
+        />
+      </div>
+      <ExecutionFields adapters={adapters} value={execution} onChange={setExecution} />
+      <div className="sd-field">
+        <label className="sd-field__label" htmlFor="new-agent-roles">
+          Staffing roles
+        </label>
+        <input
+          id="new-agent-roles"
+          className="sd-input"
+          value={roles}
+          list="staffing-roles-new"
+          maxLength={2000}
+          placeholder="For example: writer"
+          onChange={event => setRoles(event.target.value)}
+        />
+        <datalist id="staffing-roles-new">
+          {(state.roles ?? []).map(role => (
+            <option key={role.id} value={role.id}>
+              {role.label}
+            </option>
+          ))}
+        </datalist>
+        <span className="sd-meta">The names a plan's steps can ask for, so the planner can give this agent work.</span>
+      </div>
+      <div className="sd-field">
+        <label className="sd-field__label" htmlFor="new-agent-instructions">
+          What it is told
+        </label>
+        <textarea
+          id="new-agent-instructions"
+          className="sd-textarea"
+          rows={6}
+          value={instructions}
+          maxLength={48000}
+          placeholder="Its own instructions, after the project's and its team's. Edit them later in Instructions."
+          onChange={event => setInstructions(event.target.value)}
+        />
+      </div>
+      {make.error && (
+        <p role="alert" className="sd-meta" style={{ margin: 0, color: 'var(--bad)' }}>
+          {make.error.message}
+        </p>
+      )}
+      <div className="sd-dialog__actions">
+        <button type="submit" className="sd-btn sd-btn--primary" disabled={make.isPending}>
+          {make.isPending ? 'Making…' : 'Make the agent'}
+        </button>
+        <button type="button" className="sd-btn sd-btn--ghost" disabled={make.isPending} onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+    </form>
   );
 }

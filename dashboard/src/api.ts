@@ -170,6 +170,10 @@ export interface Worker extends Execution {
   configVersion?: number;
   // The face the director chose (POST /api/workers/:id/look); without one, the agent kit's pick.
   look?: AgentLook;
+  // The project an agent was made in, where alone it works (1.0.1); the starting agents have none and are shared.
+  projectId?: string;
+  // When it was deleted: it stays in the directory so the work it did keeps its name.
+  deletedAt?: string;
 }
 
 export interface Team {

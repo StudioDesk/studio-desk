@@ -7,6 +7,7 @@ import { testsSentence } from '../connectors/source-checks.mjs';
 import { genericProjectConfiguration, saveProjectOrganization } from './project-organization.mjs';
 import { applyRecommendedHouseRules } from './autonomy.mjs';
 import { repositoryOrganization } from '../organizations/studio-development/project.mjs';
+import { sharedAgents } from './project-agents.mjs';
 
 const text = (value, field, max = 24000, required = false) => {
   if (typeof value !== 'string' || value.length > max || (required && !value.trim()))
@@ -64,7 +65,8 @@ export async function createProject(store, registries, runner, data, { configura
     store.putProject(project);
     if (repository)
       recordProjectSource(store, project.id, { root: repository.root, profile: repository.profile }, runner);
-    const org = store.organization();
+    // A new project's team is made from the shared agents; another project's own never join it.
+    const org = sharedAgents(store.organization());
     saveProjectOrganization(
       store,
       registries,

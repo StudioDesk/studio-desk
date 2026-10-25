@@ -777,7 +777,7 @@ function RunningWork({ projectId, state }: { projectId: string; state: StudioSta
     holds = usageHolds(state),
     limit = state.maxParallel ?? 1,
     // Each agent runs one attempt at a time, so the limit goes no higher than the agents on this computer.
-    most = Math.max(1, (state.employeeDirectory ?? state.workers).length);
+    most = Math.max(1, (state.employeeDirectory ?? state.workers).filter(worker => !worker.deletedAt).length);
   const control = useMutation({
     mutationFn: (body: Record<string, unknown>) => send('/api/control', { projectId, ...body }),
     onError: error => toast(error.message),

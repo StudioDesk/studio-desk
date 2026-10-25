@@ -1,5 +1,10 @@
 # Release notes
 
+## 1.0.1 (not released yet)
+
+- **Make agents for a project.** Add a new agent to any of a project's teams, with its own name, AI tool, model and instructions. It works only in that project, so tailoring it never changes the agents your other projects use.
+- **Rename any agent, and delete the ones you made** once their work is done. What an agent did stays on the record under its name.
+
 ## 1.0.0
 
 **Studio desk 1.0 is here.** Hand an idea to a team of AI agents and get back work that's been planned, built, tested and reviewed, with you making the calls along the way. It runs entirely on your computer, on the AI subscription you already have. See the [README](README.md) to get started.

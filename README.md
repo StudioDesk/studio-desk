@@ -16,7 +16,7 @@ It works on code in your git repositories, and on anything else you can describe
 
 ## Your team, your way
 
-Studio desk is a pipeline, not a fixed crew. Every project has a team, and every team has roles: a **planner** who turns ideas into work, **agents** who do it, **checks** that run your tests, and a **reviewer** who signs off. You choose who's on the team, which AI tool and model each agent uses, and what they're told. A new install comes with a starting team, so you can jump right in.
+Studio desk is a pipeline, not a fixed crew. Every project has a team, and every team has roles: a **planner** who turns ideas into work, **agents** who do it, **checks** that run your tests, and a **reviewer** who signs off. You choose who's on the team, which AI tool and model each agent uses, and what they're told. A new install comes with a starting team, so you can jump right in. When a project needs a specialist, like a copywriter or a designer, make one just for that project: it never touches the agents your other projects rely on.
 
 ## Get started
 

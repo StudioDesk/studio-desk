@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { LEGACY_PROJECT, projectIdentity, recordProject } from './projects.mjs';
 import { projectOrganization, organizationConfiguration } from './project-organization.mjs';
+import { directoryFor } from './project-agents.mjs';
 import { assertUnchangedDirectorInputs, directorInputsOf } from './idea-inputs.mjs';
 import { dashboardAttempt, dashboardOpenPhases, dashboardTimings } from './dashboard-state.mjs';
 
@@ -555,7 +556,7 @@ export class Store {
     return {
       ...org,
       organizationConfiguration: compact,
-      employeeDirectory: this.organization().workers,
+      employeeDirectory: directoryFor(this.organization(), projectId),
       pipelineEnabled: !!org.pipelineEnabled && !project.dispatchPaused,
       projects: this.projects(),
       project,
@@ -591,7 +592,7 @@ export class Store {
     return {
       ...org,
       organizationConfiguration: organizationConfiguration(this, projectId),
-      employeeDirectory: this.organization().workers,
+      employeeDirectory: directoryFor(this.organization(), projectId),
       pipelineEnabled: !!org.pipelineEnabled && !project.dispatchPaused,
       projects: this.projects(),
       project,
