@@ -284,6 +284,16 @@ export class Store {
       } catch {
         return { reason, resource, ownerAttemptId };
       }
+    // So does a milestone's release (1.1 step 5).
+    const release = /^source-release:(.+):(milestone-[\w-]+)$/.exec(ownerAttemptId);
+    if (release) {
+      const version = (this.setting('milestones:' + release[1]) || []).find(item => item.id === release[2])?.version;
+      return {
+        reason: `Waiting for the release${version ? ` of ${version}` : ''} to finish.`,
+        resource,
+        ownerAttemptId,
+      };
+    }
     // Diagnostics must remain useful for historical or incomplete records without
     // changing ownership or treating a synthetic integration owner as an employee.
     try {

@@ -15,6 +15,7 @@ import { compareVersions, parseVersion, projectMilestones } from '../connectors/
 import { projectLine } from '../connectors/source-lines.mjs';
 import { mergeSourceStory, sourceStoryIntegrated } from '../connectors/source-changes.mjs';
 import { approveCarry, nextCarry, runCarry } from '../connectors/source-carries.mjs';
+import { notesAccepted, runRelease } from '../connectors/source-releases.mjs';
 
 const INTEGRATION = 'autonomy-integration';
 const RESTART = 'planned-restart';
@@ -37,6 +38,7 @@ export class Autonomy {
       if (!this.runner.closing && this.store.db.isOpen) {
         this.tryIntegration();
         this.tryCarries();
+        this.tryReleases();
       }
     });
   }
@@ -79,6 +81,7 @@ export class Autonomy {
       }
     this.tryIntegration();
     this.tryCarries();
+    this.tryReleases();
     this.sendWaiting(recordProject(task));
   }
   reviewed(task, policy) {
@@ -88,7 +91,8 @@ export class Autonomy {
       mode = kindMode(policy, view.kind),
       by = reason => ({ type: 'policy', revision: policy.revision, reason });
     if (verdict.ok) {
-      if (mode.accept !== 'auto') return;
+      // A release's notes are the director's to approve: accepting them tags the release (1.1 step 5).
+      if (mode.accept !== 'auto' || task.releaseOf) return;
       acceptAttempt(this.store, this.runner.registries, task, by(verdict.reason));
       this.accepted(task.id);
     } else if (verdict.retryUpstream && mode.accept === 'auto') {
@@ -109,6 +113,15 @@ export class Autonomy {
       const org = this.store.organization();
       org.pipelineEnabled = true;
       this.store.setOrganization(org);
+    }
+    // Accepted release notes release their milestone (1.1 step 5), when the project's source is free.
+    if (task.releaseOf && task.status === 'done') {
+      try {
+        notesAccepted(this.store, task);
+      } catch (error) {
+        this.attention(task, `The release could not start: ${error.message}`);
+      }
+      this.tryReleases();
     }
     // The task type acts on its accepted result first (a breakdown's stories go to their releases, 1.1 step 2b), so
     // the policy approves only what stays.
@@ -392,6 +405,7 @@ export class Autonomy {
         this.attention(task, `Integration did not complete${stays(pending)}. ${result?.error || result?.state}`);
       this.tryIntegration();
       this.tryCarries();
+      this.tryReleases();
       return;
     }
     const integrated = this.store.task(task.id);
@@ -422,6 +436,7 @@ export class Autonomy {
     this.resumePlan(plan, `Integrated from ${task.id}; the pipeline continues without a restart.`);
     this.tryIntegration();
     this.tryCarries();
+    this.tryReleases();
     this.sendWaiting(pending.projectId);
   }
 
@@ -471,6 +486,46 @@ export class Autonomy {
       this.attention(story, `Carrying the fix to ${result.line} did not complete. ${result.error}`);
     this.tryIntegration();
     this.tryCarries();
+    this.tryReleases();
+  }
+
+  // Releases whose notes the director accepted (1.1 step 5) run once no integration, carry or release runs or waits
+  // and their project's source is free, one at a time.
+  tryReleases() {
+    if (
+      this.runner.closing ||
+      !this.store.db.isOpen ||
+      this.runner.sourceIntegrationRun ||
+      this.store.setting(INTEGRATION)
+    )
+      return;
+    for (const project of this.store.projects())
+      for (const milestone of projectMilestones(this.store, project.id)) {
+        if (milestone.state !== 'open' || milestone.release?.state !== 'ready') continue;
+        try {
+          runRelease(this.runner, project.id, milestone.id, result =>
+            this.releaseSettled(project.id, milestone, result),
+          );
+          return;
+        } catch (error) {
+          if (error.busy) return;
+          this.attention(
+            this.store.task(milestone.release.notesTaskId),
+            `The release could not start: ${error.message}`,
+          );
+        }
+      }
+  }
+  releaseSettled(projectId, milestone, result) {
+    if (this.runner.closing) return;
+    if (['rejected', 'needs-reconciliation'].includes(result?.state))
+      this.attention(
+        this.store.task(milestone.release.notesTaskId),
+        `The release of ${milestone.version} did not complete. ${result.error}`,
+      );
+    this.tryIntegration();
+    this.tryCarries();
+    this.tryReleases();
   }
 
   // A story whose integration stopped on a conflict goes back to its editor with its change merged onto the current

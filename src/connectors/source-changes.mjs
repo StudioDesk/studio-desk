@@ -35,6 +35,7 @@ import {
   storyLine,
 } from './source-lines.mjs';
 import { interruptedCarries, planCarries } from './source-carries.mjs';
+import { interruptedReleases } from './source-releases.mjs';
 
 export const sourceChangesConnector = Object.freeze({
   id: 'local-source-changes',
@@ -1941,8 +1942,9 @@ export function interruptedSourceIntegrations(runtime) {
       `Source integration stopped part-way when the controller stopped (during ${journal.interrupted}); reservations retained. Use Reconcile source integration.`,
     );
   }
-  // Carries cut off the same way (1.1 step 4) are reconciled at once from git history.
+  // Carries and releases cut off the same way (1.1 steps 4 and 5) are reconciled at once from git history.
   interruptedCarries(runtime);
+  interruptedReleases(runtime);
 }
 // An integration by merge writes the development copy only by fast-forwarding it to the
 // recorded commit, so git history says whether it landed. Nothing is restored or replayed.

@@ -9,7 +9,7 @@
 // with none, and no release tags, takes ideas exactly as before.
 import { randomUUID } from 'node:crypto';
 import { git } from './source-integration.mjs';
-import { addProjectLine, branchCommit, ideaLine, projectLine, projectLines } from './source-lines.mjs';
+import { addProjectLine, branchCommit, checkedOut, ideaLine, projectLine, projectLines } from './source-lines.mjs';
 import { projectSource } from './source-projects.mjs';
 import { projectCatalog } from '../core/project-organization.mjs';
 import { recordProject } from '../core/projects.mjs';
@@ -44,14 +44,29 @@ export function releaseTags(root) {
 const seriesTags = (tags, [x, y]) => tags.filter(tag => tag.version[0] === x && tag.version[1] === y);
 
 // Where a new milestone's work would land: its line (null for the newest line) and, for a patch line that does not
-// exist yet, the tag it starts from.
-export function milestoneTarget(root, lines, version, tags = releaseTags(root)) {
+// exist yet, the tag it starts from. The first release of a new major, while the newest line holds an older one,
+// starts it there and moves the older major to a line of its own (`major`, Start 2.0); a later minor of that older
+// major lands on its line.
+export function milestoneTarget(root, lines, version, tags = releaseTags(root), milestones = []) {
   const text = versionText(version);
   if (tags.some(tag => compareVersions(tag.version, version) === 0)) throw new Error(`${text} is already released.`);
   if (version[2] === 0) {
+    const own = `release/${version[0]}.x`;
+    if (lines.some(line => line.branch === own)) return { line: own };
     const newest = tags.at(-1);
     if (newest && compareVersions(newest.version, version) > 0)
       throw new Error(`${text} is older than ${versionText(newest.version)}, the newest release.`);
+    const onNewest = [
+        ...tags.map(tag => tag.version),
+        ...milestones
+          .filter(item => item.state === 'open' && item.line === null)
+          .map(item => parseVersion(item.version)),
+      ],
+      older = onNewest.filter(other => other[0] < version[0]);
+    if (version[1] === 0 && older.length && !onNewest.some(other => other[0] >= version[0])) {
+      const previous = Math.max(...older.map(other => other[0]));
+      return { line: null, major: { line: `release/${previous}.x`, previous } };
+    }
     return { line: null };
   }
   const series = seriesTags(tags, version),
@@ -73,7 +88,42 @@ export function makeMilestone(store, projectId, runtime, { version, goal = '', b
     throw new Error('A milestone goal is text of at most 2000 characters.');
   const existing = projectMilestones(store, projectId).find(item => item.version === versionText(parsed));
   if (existing) return existing;
-  const target = milestoneTarget(root, projectLines(store.project(projectId)), parsed);
+  const target = milestoneTarget(
+    root,
+    projectLines(store.project(projectId)),
+    parsed,
+    releaseTags(root),
+    projectMilestones(store, projectId),
+  );
+  // Start 2.0: the older major continues on its own line, made from the newest line's tip, with its open milestones.
+  if (target.major) {
+    const newest = projectLine(store, projectId, undefined) ?? checkedOut(root);
+    if (!newest) throw new Error('Check out the branch new releases are made on before starting a new major release.');
+    let exists = true;
+    try {
+      branchCommit(root, target.major.line);
+    } catch {
+      exists = false;
+    }
+    addProjectLine(
+      store,
+      projectId,
+      runtime,
+      exists ? { branch: target.major.line } : { branch: target.major.line, from: newest },
+    );
+    const all = projectMilestones(store, projectId);
+    for (const item of all)
+      if (item.state === 'open' && item.line === null && parseVersion(item.version)[0] <= target.major.previous)
+        item.line = target.major.line;
+    save(store, projectId, all);
+    store.event(
+      'major_started',
+      null,
+      null,
+      `${versionText(parsed)} starts on ${newest}; ${target.major.previous}.x continues on ${target.major.line}, made from ${newest}'s tip.`,
+      projectId,
+    );
+  }
   if (target.from !== undefined) {
     let exists = true;
     try {

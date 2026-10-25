@@ -22,6 +22,7 @@ import {
 import { stopIntegrationProcess } from './connectors/source-integration.mjs';
 import { addProjectLine, retireProjectLine } from './connectors/source-lines.mjs';
 import { approveCarry, skipCarry } from './connectors/source-carries.mjs';
+import { pushRelease, releaseAgain, startRelease } from './connectors/source-releases.mjs';
 import {
   addWaitingIdea,
   editMilestone,
@@ -1046,6 +1047,36 @@ export function createStudio({
             if (Object.keys(data).some(key => !['projectId', 'id', 'goal'].includes(key)))
               fail('Editing a milestone takes its ID and goal.');
             return json(res, { milestone: settle(() => editMilestone(store, projectId, data)) });
+          }
+          // Release on a milestone and Push (1.1 step 5): Release asks the planner for the notes, and moves open work on
+          // when moveOpen is set; accepting the notes tags it. Release again after it stopped. Push, confirmed.
+          if (parts[4] && parts[5] === 'release' && req.method === 'POST') {
+            if (!parts[6]) {
+              if (Object.keys(data).some(key => !['projectId', 'moveOpen'].includes(key)))
+                fail('Release takes moveOpen, whether to move open work to the next milestone.');
+              let task;
+              try {
+                task = startRelease(store, runner, projectId, parts[4], { moveOpen: data.moveOpen === true });
+              } catch (error) {
+                fail(error.message, error.status);
+              }
+              return json(res, { task, milestones: projectMilestones(store, projectId) }, 201);
+            }
+            if (parts[6] === 'again' && !parts[7]) {
+              if (Object.keys(data).some(key => key !== 'projectId')) fail('Unsupported release fields.');
+              const release = settle(() => releaseAgain(store, projectId, parts[4]));
+              runner.autonomy.tryReleases();
+              return json(res, release, 202);
+            }
+          }
+          if (parts[4] && parts[5] === 'push' && !parts[6] && req.method === 'POST') {
+            if (Object.keys(data).some(key => !['projectId', 'confirm'].includes(key)))
+              fail('Push takes confirm: true.');
+            try {
+              return json(res, await pushRelease(store, runner, projectId, parts[4], { confirm: data.confirm }));
+            } catch (error) {
+              fail(error.message);
+            }
           }
           if (parts[4] && parts[5] === 'ideas' && !parts[6] && req.method === 'POST') {
             if (Object.keys(data).some(key => !['projectId', 'idea', 'autoMode'].includes(key)))

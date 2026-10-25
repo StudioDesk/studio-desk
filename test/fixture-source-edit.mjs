@@ -68,6 +68,11 @@ if (mode === 'hang') {
       }),
     );
     artifacts = [{ path: 'source-change-review.json', kind: 'source-change-review' }];
+  } else if (assignment.kind === 'general') {
+    // A release's notes (1.1 step 5), for the version its title names.
+    const version = /Draft the (\S+) release notes/.exec(assignment.title)?.[1] || 'unknown';
+    fs.writeFileSync('release-notes.md', `## ${version}\n\n- Fixture notes for ${version}.\n`);
+    artifacts = [{ path: 'release-notes.md', kind: 'release-notes' }];
   } else {
     const scope = JSON.parse(fs.readFileSync('source-scope.json'));
     if (mode === 'input') fs.writeFileSync('../inputs/' + assignment.dependencies[0] + '/0-source-review.json', '{}');

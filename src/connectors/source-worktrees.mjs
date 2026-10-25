@@ -153,6 +153,13 @@ export function cleanSourceWorktrees(runtime, parent) {
       if (journal?.worktree && ['verifying', 'committing', 'needs-reconciliation'].includes(journal.state))
         kept.add(path.basename(journal.worktree));
   }
+  // So do a release's two worktrees, its draft and its verification (1.1 step 5), recorded on its milestone.
+  for (const project of runtime.store.projects())
+    for (const milestone of runtime.store.setting('milestones:' + project.id) || []) {
+      const release = milestone.release;
+      if (release?.worktree && ['verifying', 'committing', 'needs-reconciliation'].includes(release.state))
+        for (const worktree of [release.worktree, `${release.worktree}d`]) kept.add(path.basename(worktree));
+    }
   const repositories = new Set([runtime.sourceChangeRoot]);
   for (const name of fs.readdirSync(parent)) {
     if (kept.has(name)) continue;
