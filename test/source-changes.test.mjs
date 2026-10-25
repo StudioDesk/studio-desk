@@ -1489,30 +1489,7 @@ test('a story accepts a file any integrated story changed, not only its prerequi
   }
 });
 
-test('one source story holds the live source from its first edit until it is integrated', async t => {
-  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),
-    store = c.app.store,
-    { ids } = await c.breakdown([
-      { files: ['src/core/workflows.mjs'], dependencies: [] },
-      { files: ['src/core/projects.mjs'], dependencies: [] },
-    ]);
-  for (const id of ids) approveWork(store, c.app.runner.registries, store.task(id));
-  c.app.runner.start(ids[0]);
-  const { review } = await c.toReview(ids[0]);
-  // Waiting for integration still holds the source; the independent story is queued behind it.
-  const queued = c.app.runner.queueStart(ids[1]);
-  assert.equal(queued.queued, true);
-  assert.equal(
-    queued.reason,
-    `Waiting for ${ids[0]} (“Refine workflow fixture”) to be integrated: source stories run one at a time.`,
-  );
-  assert.equal(store.attempts(ids[1]).length, 0);
-  c.integrated(ids[0], review, 'src/core/workflows.mjs', '// Integrated\n');
-  c.app.runner.schedule();
-  const second = await c.wait(ids[1]);
-  assert.deepEqual(second.sourceChange.allowedFiles, ['src/core/projects.mjs']);
-});
-
+// Two stories hold a line at once since 1.1 step 3: test/parallel-stories.test.mjs.
 test('a tier set on a story applies to its edit; its independent review keeps the review default', async t => {
   const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),
     store = c.app.store,

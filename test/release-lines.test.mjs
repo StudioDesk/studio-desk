@@ -12,7 +12,11 @@ import { createStudio } from './model-free-studio.mjs';
 import { setup } from './source-story-setup.mjs';
 import { hash } from '../src/core/contracts.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
-import { sourceIntegrationResources, sourceStoryInFlight } from '../src/connectors/source-changes.mjs';
+import {
+  sourceIntegrationResources,
+  sourceStoriesInFlight,
+  sourceStoryInFlight,
+} from '../src/connectors/source-changes.mjs';
 import { measureLine } from '../src/connectors/source-lines.mjs';
 import { studioDeskProfile } from '../src/connectors/source-profile.mjs';
 
@@ -198,13 +202,22 @@ test('each line holds its own story, so a fix on an older release does not wait 
   await c.start();
   await c.wait(fix);
   assert.deepEqual([store.task(feature).status, store.task(fix).status], ['review', 'review'], 'Both are in flight.');
-  assert.equal(sourceStoryInFlight(store, store.task(next))?.id, fix);
+  // Two stories hold a line at once (1.1 step 3): the next fix starts too, and one more on that line waits.
+  assert.equal(sourceStoryInFlight(store, store.task(next)), undefined);
+  c.taskId = next;
+  await c.start();
+  await c.wait(next);
+  const last = await c.propose('last', { branch: 'release/1.0', files: ['src/core/projects.mjs'] });
+  assert.equal(sourceStoryInFlight(store, store.task(last))?.id, fix);
   assert.equal(
-    c.app.runner.blockReason(store.task(next)),
-    `Waiting for ${fix} (“Improve fix”) to be integrated: source stories on release/1.0 run one at a time.`,
+    c.app.runner.blockReason(store.task(last)),
+    `Waiting for ${fix} (“Improve fix”) and ${next} (“Improve next”) to be integrated: source stories on release/1.0 run two at a time.`,
   );
-  // A story whose checks recorded no line works on the newest one.
-  assert.equal(sourceStoryInFlight(store, store.task(seeded))?.id, feature);
+  // A story whose checks recorded no line works on the newest one, where only the feature holds it.
+  assert.deepEqual(
+    sourceStoriesInFlight(store, store.task(seeded)).map(item => item.id),
+    [feature],
+  );
 });
 
 test('integration onto a line refuses while a worktree has its branch checked out or it moved, and an interrupted one is reconciled from the line', async t => {

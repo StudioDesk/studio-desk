@@ -28,7 +28,7 @@ import { candidateTestCommand, chosenTestSandbox, sandboxLabel, sandboxRecord } 
 import { builtInSandboxReady, noBuiltInSandbox } from './built-in-sandbox.mjs';
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
 import { runInstallStep } from '../connectors/package-installs.mjs';
-import { installTimeoutMs, testTimeoutMs } from '../connectors/source-integration.mjs';
+import { git, installTimeoutMs, testTimeoutMs } from '../connectors/source-integration.mjs';
 import { continuationFile, prepareSourceContinuation } from '../core/attempt-continuation.mjs';
 import { closeEmployeeTests, employeeTestsCommand, openEmployeeTests } from '../connectors/employee-tests.mjs';
 
@@ -169,6 +169,8 @@ function prepareSourceJob(runtime, entry) {
       path.join(entry.output, 'changes', item.path),
       continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
     );
+  // A story merged onto the current source (1.1 step 3) starts from its earlier change applied to this base by git.
+  if (scope.merge) mergeEarlierChange(scope.merge, candidate, entry.output);
   // Neither development AGENTS.md nor the full source tree is placed inside
   // the employee's writable workspace. Retain the job-local instruction scope.
   const scopeFile = path.join(entry.output, 'source-scope.json'),
@@ -190,11 +192,46 @@ function prepareSourceJob(runtime, entry) {
   return { baseline, candidate, startedAt: new Date().toISOString() };
 }
 
+// Applies a story's earlier candidate to the candidate worktree's base with git, as integration applies it, copies
+// the merged files it changed into changes/ (the parts git could not combine marked in them) and resets the worktree,
+// which the candidate is built in. A file deleted on one side and changed on the other cannot be marked; that stops
+// the attempt for the director.
+function mergeEarlierChange(merge, worktree, output) {
+  try {
+    try {
+      git(worktree, ['cherry-pick', '--no-commit', merge.candidateCommit]);
+    } catch {}
+    const unmerged = git(worktree, ['status', '--porcelain', '-z', '--untracked-files=no'], { raw: true })
+      .split('\0')
+      .filter(entry => /^(DD|AU|UD|UA|DU|AA|UU) /.test(entry));
+    const unmarked = unmerged.filter(entry => !/^(UU|AA) /.test(entry)).map(entry => entry.slice(3));
+    if (unmarked.length)
+      throw new Error(
+        `${unmarked.join(', ')} was deleted on one side and changed on the other since this story started, which a merge cannot mark. Resolve it in the repository by hand, or close the story and send the idea again.`,
+      );
+    for (const file of merge.files) {
+      const source = path.join(worktree, file),
+        target = path.join(output, 'changes', file);
+      if (!fs.existsSync(source)) continue;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(source, target);
+    }
+  } finally {
+    git(worktree, ['reset', '--hard', '--quiet']);
+  }
+}
+// The lines git writes around a part it could not combine.
+const conflictMarkers = /^(<{7}|>{7})( |$)/m;
+
 // Carried work stays part of the change even when the editor does not return it, unless the
-// editor restored the file to its source bytes or removed a carried new file.
+// editor restored the file to its source bytes or removed a carried new file. A merged change's
+// files are carried the same way.
 function withCarriedWork(scope, result, output, baseline) {
   const returned = new Set(result.artifacts.map(item => item.path)),
-    carried = (scope.continueFrom?.files || []).filter(({ path: file }) => {
+    carried = [
+      ...(scope.continueFrom?.files || []),
+      ...(scope.merge?.files || []).map(file => ({ path: file })),
+    ].filter(({ path: file }) => {
       const staged = path.join(output, 'changes', file),
         original = path.join(baseline, file);
       return (
@@ -238,6 +275,18 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     if (result.taskId !== a.taskId) throw new Error('Source edit belongs to another assignment.');
     validateProtectedFiles(entry);
     const changes = stagedChanges(scope, result, name => fs.readFileSync(artifactPath(runtime.store, a, name)));
+    // A merged change goes no further while any part git could not combine is still marked (1.1 step 3).
+    if (scope.merge) {
+      const marked = changes.filter(
+        item =>
+          item.afterHash !== null &&
+          conflictMarkers.test(fs.readFileSync(artifactPath(runtime.store, a, item.artifact), 'utf8')),
+      );
+      if (marked.length)
+        throw new Error(
+          `Conflict markers remain in ${marked.map(item => item.path).join(', ')}. Resolve every conflict between the current source and the earlier change, remove the markers and return the files.`,
+        );
+    }
     a.sourceEditExecution = {
       taskId: a.taskId,
       attemptId: a.id,

@@ -17,6 +17,7 @@ import {
   sourceIntegrationFailure,
   sourceIntegrationRequested,
   editSourceStory,
+  mergeSourceStory,
 } from './connectors/source-changes.mjs';
 import { stopIntegrationProcess } from './connectors/source-integration.mjs';
 import { addProjectLine, retireProjectLine } from './connectors/source-lines.mjs';
@@ -1446,6 +1447,24 @@ export function createStudio({
               start = { ok: false, reason: error.message };
             }
             return json(res, { ...sent, start }, 202);
+          }
+          // Merge onto the current source (1.1 step 3): a story whose integration stopped on a conflict goes back to its
+          // editor with its change applied to the line's tip by git, then queued like Start.
+          if (action === 'merge-source') {
+            if (Object.keys(data).some(key => key !== 'projectId')) fail('Unsupported merge fields.');
+            let merged;
+            try {
+              merged = mergeSourceStory(store, registries, t);
+            } catch (error) {
+              fail(error.message);
+            }
+            let start;
+            try {
+              start = runner.queueStart(t.id);
+            } catch (error) {
+              start = { ok: false, reason: error.message };
+            }
+            return json(res, { ...merged, start }, 202);
           }
           // The director approves commands Claude Code refused to the employee, which then apply to every
           // Claude employee's future attempts, and starts the work again from what it left (v1.0 item 22).

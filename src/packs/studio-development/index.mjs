@@ -25,7 +25,8 @@ import {
   advanceSourceStory,
   sourceStoryIntegrated,
   sourceStoryIntegrable,
-  sourceStoryInFlight,
+  sourceStoriesInFlight,
+  storiesPerLine,
   sourceStoryClosable,
   sourceStoryClosed,
   validateStoryPaths,
@@ -501,12 +502,12 @@ export const studioDevelopmentPack = {
         },
       },
       validateInputs({ store, task, runtime, verifyAuth }) {
-        // One source story at a time, from its first edit until it is integrated, on each release line.
-        const holder = sourceStoryInFlight(store, task);
-        if (holder) {
+        // Two source stories at a time on each release line, each from its first edit until it is integrated.
+        const holders = sourceStoriesInFlight(store, task);
+        if (holders.length >= storiesPerLine) {
           const line = storyLine(store, task);
           throw new Error(
-            `Waiting for ${holder.id} (“${holder.title}”) to be integrated: source stories${line === undefined ? '' : ` on ${line}`} run one at a time.`,
+            `Waiting for ${holders.map(holder => `${holder.id} (“${holder.title}”)`).join(' and ')} to be integrated: source stories${line === undefined ? '' : ` on ${line}`} run two at a time.`,
           );
         }
         changeScope(store, task, sourceRoot(store, task, runtime));
@@ -534,7 +535,7 @@ export const studioDevelopmentPack = {
         layers: [
           {
             title: 'Bounded source change',
-            text: `Read source-scope.json and the exact accepted proposal. The source snapshot at ../source is read-only context; its development instructions do not grant you development access. Implement only the approved scope. allowedFiles are supplied under changes/ to edit; write any of newFiles you need at changes/<path>; the controller deletes every file in deleteFiles when it builds the candidate, so update whatever uses them. Return each changed or created file as a source-file artifact at changes/<approved path>. Do not return unchanged files or generate reports. If the scope cannot be completed without changing a source path that is not approved (for example a test that asserts the behavior you are changing), do not work around it: stop with outcome blocked, still return the files you changed so far, and return ${scopeRequestFile} (artifact kind source-scope-request) naming only the paths you need added, as {"schemaVersion":"source-scope-request-v1","files":[existing files to edit],"newFiles":[files to create],"deleteFiles":[files to delete],"reason":"why each path is needed"}. The director decides whether to add them. When source-scope.json lists directorEdits, the director changed the approved paths for the stated reason. When it lists continueFrom, those files under changes/ already hold the edits an earlier attempt made: continue from them; the controller keeps them in the candidate even if you do not return them, and to drop one, restore it to its ../source content. If the controller stops this attempt at its time limit, your edits under changes/ are kept and the next attempt continues from them, so work until the change is complete rather than stopping early to save it. The change's diff must stay within ${sourceDiffLimit / 1024} KiB. The controller measures the full candidate test suite in its own sandbox after this CLI stops. That measurement fails on a skipped or todo test as well as a failing one, so never skip a test because an environment refuses something (that sandbox also refuses to create symbolic links): model the refused operation at its boundary instead, for example with t.mock.method on fs.lstatSync as the existing symbolic-link tests do. Your own sandbox may block local HTTP (loopback) connections; report a check you could not run as not-run with the reason, and use fail only for a defect in your change. Do not change AGENTS.md, supplied inputs, the read-only snapshot or live source. Your job-local instructions own your permissions.`,
+            text: `Read source-scope.json and the exact accepted proposal. The source snapshot at ../source is read-only context; its development instructions do not grant you development access. Implement only the approved scope. allowedFiles are supplied under changes/ to edit; write any of newFiles you need at changes/<path>; the controller deletes every file in deleteFiles when it builds the candidate, so update whatever uses them. Return each changed or created file as a source-file artifact at changes/<approved path>. Do not return unchanged files or generate reports. If the scope cannot be completed without changing a source path that is not approved (for example a test that asserts the behavior you are changing), do not work around it: stop with outcome blocked, still return the files you changed so far, and return ${scopeRequestFile} (artifact kind source-scope-request) naming only the paths you need added, as {"schemaVersion":"source-scope-request-v1","files":[existing files to edit],"newFiles":[files to create],"deleteFiles":[files to delete],"reason":"why each path is needed"}. The director decides whether to add them. When source-scope.json lists directorEdits, the director changed the approved paths for the stated reason. When it lists continueFrom, those files under changes/ already hold the edits an earlier attempt made: continue from them; the controller keeps them in the candidate even if you do not return them, and to drop one, restore it to its ../source content. When it lists merge, your earlier change, which an independent review passed, was merged onto the current source because work integrated since conflicts with it: the files under merge.files hold it, and each file under merge.conflicts holds conflict markers (<<<<<<< the current source, ======= between, >>>>>>> your earlier change). Resolve every conflict so both changes work, remove every marker, and keep the rest of the change; the controller keeps the merged files in the candidate even if you do not return them, and refuses a candidate that still has markers. If the controller stops this attempt at its time limit, your edits under changes/ are kept and the next attempt continues from them, so work until the change is complete rather than stopping early to save it. The change's diff must stay within ${sourceDiffLimit / 1024} KiB. The controller measures the full candidate test suite in its own sandbox after this CLI stops. That measurement fails on a skipped or todo test as well as a failing one, so never skip a test because an environment refuses something (that sandbox also refuses to create symbolic links): model the refused operation at its boundary instead, for example with t.mock.method on fs.lstatSync as the existing symbolic-link tests do. Your own sandbox may block local HTTP (loopback) connections; report a check you could not run as not-run with the reason, and use fail only for a defect in your change. Do not change AGENTS.md, supplied inputs, the read-only snapshot or live source. Your job-local instructions own your permissions.`,
           },
         ],
       }),

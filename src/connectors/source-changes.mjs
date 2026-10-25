@@ -470,13 +470,75 @@ export const freshStartText = carried =>
   carried?.fresh
     ? `This attempt starts from the current source instead of the work of ${carried.attemptId}: ${carried.fresh.reason}${carried.fresh.paths ? ` (${carried.fresh.paths.join(', ')})` : ''}. Its history still shows that work.`
     : '';
-// What every scope carries besides its paths: the director's edits and the work it continues from.
+// What every scope carries besides its paths: the director's edits and the work it continues from, or the earlier
+// change to merge onto the current source (1.1 step 3).
 function storyScopeExtras(store, task, paths, current) {
-  const continueFrom = continuedWork(store, task, paths, current);
+  const merge = pendingMerge(store, task, paths),
+    continueFrom = merge ? null : continuedWork(store, task, paths, current);
   return {
     ...(task.scopeEdits?.length ? { scopeEdits: structuredClone(task.scopeEdits) } : {}),
     ...(continueFrom ? { continueFrom } : {}),
+    ...(merge ? { merge } : {}),
   };
+}
+// A story sent back to merge its change onto the current source, until its next implementation attempt starts: the
+// candidate commit git applies to the new base, the files it changed that the story may still write, and the files
+// that conflicted when it was integrated.
+function pendingMerge(store, task, paths) {
+  const merge = task.sourceStage?.merge;
+  if (!merge || implementationAttempts(store, task).some(attempt => attempt.startedAt >= merge.at)) return null;
+  const writable = [...paths.allowedFiles, ...paths.newFiles];
+  return {
+    from: merge.candidateAttemptId,
+    candidateCommit: merge.candidateCommit,
+    files: merge.files.filter(file => writable.includes(file)),
+    conflicts: [...merge.conflicts],
+  };
+}
+// Sends a story whose integration stopped on a conflict back to its editor with its change merged onto the current
+// source (1.1 step 3, the director, October 25: "keep the code that was already built and just have the agent merge it
+// together"). Git applies the reviewed candidate to the line's tip, as integration does; the editor resolves the
+// parts git could not combine. Its tests and a fresh independent review follow. `by` is the director or the policy.
+export function mergeSourceStory(store, registries, task, by = { type: 'director' }) {
+  return store.tx(() => {
+    const story = store.task(task.id),
+      stage = story.sourceStage,
+      review = stage?.review && store.attempt(stage.review.attemptId),
+      journal = review?.sourceIntegration;
+    if (
+      story.kind !== 'studio-development:change' ||
+      story.status !== 'done' ||
+      stage.current !== 'failed' ||
+      stage.phase !== 'integration' ||
+      journal?.state !== 'rejected' ||
+      !journal.verification?.conflicts?.length
+    )
+      throw new Error('Only a story whose integration stopped on a conflict can be merged onto the current source.');
+    const conflicts = journal.verification.conflicts,
+      named = conflicts.join(', ');
+    registries.workflows.stagesOf(story).retry(story);
+    stage.merge = {
+      candidateAttemptId: journal.candidateAttemptId,
+      candidateCommit: journal.candidateCommit,
+      files: journal.changes.filter(item => item.afterHash !== null).map(item => item.path),
+      conflicts: [...conflicts],
+      at: new Date().toISOString(),
+      by,
+    };
+    stage.merges = (stage.merges || 0) + 1;
+    story.direction = `Independent review ${review.id} passed your change, but work integrated since it started conflicts with it in ${named}. The controller merged your change onto the current source: the files under changes/ hold it, and ${named} hold conflict markers between the current source (<<<<<<<) and your change (>>>>>>>). Resolve each conflict so that both changes work, remove every marker, and keep the rest of your change. Its tests and an independent review follow.`;
+    delete story.autonomyNote;
+    Object.assign(story, { status: 'ready', queued: false, reason: '', controllerWait: false });
+    registries.workflows.stageProgress(store, story);
+    store.putTask(story);
+    store.event(
+      'source_merged',
+      story.id,
+      review.id,
+      `${by.type === 'policy' ? `Autonomy policy revision ${by.revision}` : 'The director'} sent this story back to merge its change onto the current source and resolve the conflicts in ${named}.`,
+    );
+    return { ok: true, direction: story.direction };
+  });
 }
 function breakdownChangeScope(store, task, root, dryRun) {
   const reference = task.proposalReference,
@@ -598,10 +660,14 @@ function integratedChanges(store, storyIds, seen = new Set(), files = new Map())
 // candidate stays buildable on the source it will be integrated into (MP-014 slice 4). It
 // lets go when it is denied, cancelled, failed, or its review sent it back without a retry.
 // A project with release lines (1.1 step 1) holds each line separately, so a fix on an older
-// release does not wait for a feature story on the newest line.
-export function sourceStoryInFlight(store, task) {
+// release does not wait for a feature story on the newest line. Up to two stories hold a line at
+// once (1.1 step 3, MP-016 step (d)): the second edits while the first waits for review or
+// integration, and a conflict between them is merged onto the current source (mergeSourceStory).
+export const storiesPerLine = 2;
+// The other stories holding this story's line.
+export function sourceStoriesInFlight(store, task) {
   const line = storyLine(store, task);
-  return store.tasks().find(other => {
+  return store.tasks().filter(other => {
     if (
       other.id === task.id ||
       other.kind !== 'studio-development:change' ||
@@ -615,6 +681,11 @@ export function sourceStoryInFlight(store, task) {
     if (['running', 'stopping', 'review'].includes(other.status)) return true;
     return !!other.sourceStage?.candidate && other.sourceStage.current !== 'failed';
   });
+}
+// The first story this one waits for when its line is full, or undefined when it may start.
+export function sourceStoryInFlight(store, task) {
+  const holders = sourceStoriesInFlight(store, task);
+  return holders.length >= storiesPerLine ? holders[0] : undefined;
 }
 // An accepted story that is not integrated may be closed without integrating it, which lets
 // go of the source for the next story; its candidate and review stay recorded. A recorded
@@ -920,6 +991,10 @@ export const scopeDocument = scope => ({
       }
     : {}),
   ...(scope.continueFrom ? { continueFrom: scope.continueFrom } : {}),
+  // A change merged onto the current source (1.1 step 3): the files it holds and those with conflict markers.
+  ...(scope.merge
+    ? { merge: { from: scope.merge.from, files: scope.merge.files, conflicts: scope.merge.conflicts } }
+    : {}),
 });
 // An editor that needs paths outside the approved ones stops as blocked and names them in
 // scope-request.json (MP-021). The controller records the request on the attempt when it names

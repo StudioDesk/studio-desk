@@ -13,7 +13,7 @@ import { autonomyPolicy, kindMode, evaluateAttempt, cycleRunsToday, recordCycleR
 import { sendWaitingIdea } from './idea-intake.mjs';
 import { compareVersions, parseVersion, projectMilestones } from '../connectors/source-milestones.mjs';
 import { projectLine } from '../connectors/source-lines.mjs';
-import { sourceStoryIntegrated } from '../connectors/source-changes.mjs';
+import { mergeSourceStory, sourceStoryIntegrated } from '../connectors/source-changes.mjs';
 
 const INTEGRATION = 'autonomy-integration';
 const RESTART = 'planned-restart';
@@ -381,7 +381,10 @@ export class Autonomy {
   integrationSettled(task, pending, result) {
     if (this.runner.closing) return;
     if (result?.state !== 'integrated') {
-      this.attention(task, `Integration did not complete${stays(pending)}. ${result?.error || result?.state}`);
+      // A conflict with work integrated meanwhile is merged onto the current source once, by the policy (1.1 step 3);
+      // a second conflict, or anything else, waits for the director.
+      if (!this.mergeConflict(task, pending, result))
+        this.attention(task, `Integration did not complete${stays(pending)}. ${result?.error || result?.state}`);
       this.tryIntegration();
       return;
     }
@@ -413,6 +416,27 @@ export class Autonomy {
     this.resumePlan(plan, `Integrated from ${task.id}; the pipeline continues without a restart.`);
     this.tryIntegration();
     this.sendWaiting(pending.projectId);
+  }
+
+  // A story whose integration stopped on a conflict goes back to its editor with its change merged onto the current
+  // source, once per story (the director, October 25), when the project's policy is on. Returns whether it did.
+  mergeConflict(task, pending, result) {
+    const story = this.store.task(task.id),
+      policy = this.policy(story);
+    if (!policy.enabled || !result?.verification?.conflicts?.length || (story.sourceStage?.merges || 0) >= 1)
+      return false;
+    try {
+      mergeSourceStory(this.store, this.runner.registries, story, { type: 'policy', revision: policy.revision });
+    } catch (error) {
+      this.attention(
+        story,
+        `Integration stopped on a conflict, and the change could not be merged onto the current source: ${error.message}`,
+      );
+      return true;
+    }
+    // A pause the integration took stays, as it does when an integration stops; the merge then waits for the resume.
+    this.queue([this.store.task(story.id)]);
+    return true;
   }
 
   requestRestart(marker) {

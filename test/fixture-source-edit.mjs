@@ -76,6 +76,21 @@ if (mode === 'hang') {
       fs.writeFileSync('outside.mjs', 'export const escaped = true;');
       artifacts = [{ path: 'outside.mjs', kind: 'source-file' }];
     } else {
+      // A change merged onto the current source (1.1 step 3): keep both sides of every marked part, unless the
+      // direction asks to leave the markers.
+      if (scope.merge && !mode.includes('keep-markers'))
+        for (const target of scope.merge.conflicts) {
+          const file = 'changes/' + target;
+          if (fs.existsSync(file))
+            fs.writeFileSync(
+              file,
+              fs
+                .readFileSync(file, 'utf8')
+                .split('\n')
+                .filter(text => !/^(<{7}|={7}|>{7})( |$)/.test(text))
+                .join('\n'),
+            );
+        }
       // A scope that only deletes files has nothing to edit; the controller deletes them.
       // 'next' edits the first approved file its carried work (continueFrom) did not change.
       const carried = new Set((scope.continueFrom?.files || []).map(item => item.path)),

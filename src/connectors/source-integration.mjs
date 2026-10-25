@@ -348,10 +348,14 @@ export async function verifyIntegration(runtime, journal, directory, configurati
         try {
           conflicts = git(worktree, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
         } catch {}
-        throw new Error(
-          conflicts.length
-            ? `The candidate conflicts with changes integrated since its base, in ${conflicts.join(', ')}. Request a fresh candidate on the current source.`
-            : `The candidate could not be merged onto the current source. ${error.message}`,
+        // A conflict keeps its files, so the story can be merged onto the current source (1.1 step 3).
+        throw Object.assign(
+          new Error(
+            conflicts.length
+              ? `The candidate conflicts with changes integrated since its base, in ${conflicts.join(', ')}. Use Merge onto the current source: its editor resolves the conflicts in the change it already made.`
+              : `The candidate could not be merged onto the current source. ${error.message}`,
+          ),
+          conflicts.length ? { conflicts } : {},
         );
       }
     });
@@ -495,6 +499,11 @@ export async function verifyIntegration(runtime, journal, directory, configurati
       };
     });
   } catch (error) {
-    return { passed: false, error: error.message, ...error.verification };
+    return {
+      passed: false,
+      error: error.message,
+      ...error.verification,
+      ...(error.conflicts ? { conflicts: error.conflicts } : {}),
+    };
   }
 }
