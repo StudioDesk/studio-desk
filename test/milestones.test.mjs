@@ -117,6 +117,15 @@ test('an idea lands on the release the director picks, one its words name, or th
     assert.deepEqual(run.release, { milestoneId: next.id, version: '1.2.0', by: { type: 'default' } }, idea);
     assert.equal(run.line, undefined, 'Nothing has added a second line yet.');
   }
+  // Words without a version need nothing from the repository, so an idea is taken even where git cannot read its tags,
+  // as in the test sandbox, where a worktree's git folder is out of reach.
+  fs.renameSync(path.join(c.root, '.git'), path.join(c.root, '.git-away'));
+  try {
+    const run = runOf(await send({ idea: 'Make the board faster, again.' }));
+    assert.equal(run.release.version, '1.2.0');
+  } finally {
+    fs.renameSync(path.join(c.root, '.git-away'), path.join(c.root, '.git'));
+  }
   // The New idea box hears the release an idea's words name as the director writes, and nothing is made by asking.
   const preview = async idea =>
     (await (await fetch(`${c.origin}/api/projects/${project}/releases/named?idea=${encodeURIComponent(idea)}`)).json())

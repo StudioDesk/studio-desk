@@ -192,7 +192,7 @@ export function namedRelease(milestones, tags, text, lines = []) {
   const known = [...tags.map(tag => tag.version), ...milestones.map(item => parseVersion(item.version))],
     newestMajor = Math.max(...known.map(version => version[0])),
     newest = tags.at(-1)?.version;
-  for (const match of String(text).matchAll(/(?<![\w.])v?(\d{1,6})\.(\d{1,6})(?:\.(\d{1,6}))?(?!\.?\d)(?!\w)/g)) {
+  for (const match of String(text).matchAll(versionWords)) {
     const version = match.slice(1, match[3] === undefined ? 3 : 4).map(Number),
       [x, y] = version,
       named = match[0];
@@ -220,12 +220,19 @@ export function namedRelease(milestones, tags, text, lines = []) {
   return null;
 }
 
+// A version as an idea may write it (1.1, v1.1 or 1.1.3), apart from a longer number or word. Words without one need
+// nothing from the repository, so an idea is taken even where git cannot read its tags (as in a test sandbox, where a
+// worktree's git folder is out of reach).
+const versionWords = /(?<![\w.])v?(\d{1,6})\.(\d{1,6})(?:\.(\d{1,6}))?(?!\.?\d)(?!\w)/g;
+const namesAVersion = text => new RegExp(versionWords.source).test(String(text));
+
 // The release an idea's words would name if it were sent now, for the New idea box (1.1 step 6): the version, the words
 // that named it, its line (null for the newest) and its milestone when one exists, or why that version cannot be made.
 // Nothing is made. Null when the words name no release.
 export function namedReleasePreview(store, projectId, runtime, idea) {
-  const root = sourceRoot(store, projectId, runtime),
-    milestones = projectMilestones(store, projectId),
+  const root = sourceRoot(store, projectId, runtime);
+  if (!namesAVersion(idea)) return null;
+  const milestones = projectMilestones(store, projectId),
     lines = projectLines(store.project(projectId)),
     tags = releaseTags(root),
     named = namedRelease(milestones, tags, idea, lines);
@@ -275,9 +282,10 @@ export function ideaRelease(store, projectId, runtime, { milestone, line, idea, 
       release: picked ? { milestoneId: picked.id, version: picked.version, by: { type: 'director' } } : undefined,
     };
   }
-  // Only a project with source stories reads releases in an idea's words.
+  // Only a project with source stories reads releases in an idea's words, and only words with a version need its tags.
   const lines = projectLines(store.project(projectId)),
     named =
+      namesAVersion(idea) &&
       projectCatalog(store, runtime.registries, projectId).some(item => item.kind === 'studio-development:change') &&
       namedRelease(milestones, releaseTags(sourceRoot(store, projectId, runtime)), idea, lines);
   if (named) {
