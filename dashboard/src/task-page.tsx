@@ -195,8 +195,9 @@ function Story({
         ? 'Reviewing'
         : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^A/, 'a')}` : ''}`
       : null;
-  // The Attempts tab counts a story's build attempts, as its limit does; its reviews are a step of their own.
-  const tries = source ? attempts.filter(item => !isReview(item)).length : attempts.length;
+  // The Attempts tab counts the work's own attempts, a story's builds, as its limit does; its reviews are a step of
+  // their own.
+  const tries = attempts.filter(item => !isReview(item)).length;
   const tabs: Tab[] = narrow
     ? [
         { id: 'activity', label: 'Activity' },

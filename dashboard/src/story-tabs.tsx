@@ -35,7 +35,7 @@ import {
 } from './files';
 import { workerName } from './names';
 import { FileChanges, filesEditable, readArtifact, StoryEdit } from './source-story';
-import { cliName, countsTowardLimit, isSourceStory, kindLabel, storyPeople } from './story';
+import { attemptsUsed, cliName, countsTowardLimit, isSourceStory, kindLabel, storyPeople } from './story';
 import { liveSummary, type StudioState } from './studio-runs';
 import { IntegrationJournal, type Journal } from './task-decisions';
 import { TaskRow } from './task-row';
@@ -43,7 +43,9 @@ import { useNarrow } from './use-narrow';
 import { when } from './today';
 
 const kindOf = (attempt?: AttemptSummary) => (attempt?.assignment as { kind?: string } | undefined)?.kind;
-export const isReview = (attempt?: AttemptSummary) => kindOf(attempt) === 'studio-development:change-review';
+// A review of the work, a code story's or other work's independent review, as on the Agents page.
+export const isReview = (attempt?: AttemptSummary) =>
+  ['studio-development:change-review', 'general:review'].includes(kindOf(attempt) ?? '');
 const modelOf = (attempt: AttemptSummary) => (attempt.reportedModel ?? attempt.requestedModel) as string | undefined;
 
 // A check as the agents and the controller record it: its name, pass, fail or not run, and its evidence.
@@ -561,16 +563,16 @@ export function ReviewPanel({
   );
 }
 
-// Who worked on an attempt and on which step: "Build, attempt 1 of 2", "Review". A story's build attempts count
-// against its limit; a review is a step of its own, not another attempt at the build. An attempt that uses up
-// none of them (a usage limit stopped it, or the controller's stop interrupted it and it was reconciled) is named
-// for what stopped it, so the next one never reads "attempt 3 of 2" (the recovery drill, October 24). `short`
-// leaves out "Build, ", as under the Attempts tab's Build heading and on Today's floor.
+// Who worked on an attempt and on which step: "Build, attempt 1 of 2", "Review". A story's build attempts, and
+// other work's own attempts, count against its limit; a review is a step of its own, not another attempt at the
+// work. An attempt that uses up none of them (a usage limit stopped it, or the controller's stop interrupted it and
+// it was reconciled) is named for what stopped it, so the next one never reads "attempt 3 of 2" (the recovery
+// drill, October 24). `short` leaves out "Build, ", as under the Attempts tab's Build heading and on Today's floor.
 export function attemptName(task: Task, attempts: AttemptSummary[], attempt: AttemptSummary, short = false) {
   const same = attempts.filter(item => isReview(item) === isReview(attempt)),
     counted = same.filter(countsTowardLimit),
     source = isSourceStory(task);
-  if (source && isReview(attempt)) return `Review${same.length > 1 ? ` ${same.indexOf(attempt) + 1}` : ''}`;
+  if (isReview(attempt)) return `Review${same.length > 1 ? ` ${same.indexOf(attempt) + 1}` : ''}`;
   const name = countsTowardLimit(attempt)
     ? `attempt ${counted.indexOf(attempt) + 1} of ${task.maxAttempts ?? counted.length}`
     : `${attempt.subscriptionHold ? 'stopped by a usage limit' : 'interrupted'}, not counted`;
@@ -620,7 +622,8 @@ export function attemptChip(attempt: AttemptSummary) {
 
 // Each attempt: who ran it on what, when and for how long, and how it ended. A story's are grouped by step, its
 // build attempts and then its reviews, so a review never reads as another try at the build (the director, October
-// 24). Choosing one shows its own changes, checks and record.
+// 24); other work with reviews is grouped the same way, its own attempts counted as the side panel counts them.
+// Choosing one shows its own changes, checks and record.
 export function AttemptsPanel({
   task,
   studio,
@@ -645,14 +648,16 @@ export function AttemptsPanel({
   const builds = attempts.filter(attempt => !isReview(attempt)),
     reviews = attempts.filter(isReview),
     source = isSourceStory(task),
-    used = builds.filter(countsTowardLimit).length,
+    used = source ? builds.filter(countsTowardLimit).length : attemptsUsed(task, attempts).used,
     left = Math.max(0, (task.maxAttempts ?? 0) - used);
-  const groups = source
-    ? [
-        { title: `Build · ${used} of ${task.maxAttempts ?? used} attempts used`, items: builds },
-        { title: 'Review', items: reviews },
-      ].filter(group => group.items.length)
-    : [{ title: '', items: attempts }];
+  const step = source ? 'Build' : 'Work',
+    groups =
+      source || reviews.length
+        ? [
+            { title: `${step} · ${used} of ${task.maxAttempts ?? used} attempts used`, items: builds },
+            { title: 'Review', items: reviews },
+          ].filter(group => group.items.length)
+        : [{ title: '', items: attempts }];
   return (
     <div className="sd-tabpanel" style={{ padding: '12px 22px 22px', gap: 0 }}>
       {groups.map(group => [
@@ -678,7 +683,7 @@ export function AttemptsPanel({
               {look && <AgentAvatar look={look} size={34} state={attemptState(attempt)} ring={false} />}
               <span className="sd-row__text">
                 <b>
-                  {/* Under the Build heading a build attempt is just its number. */}
+                  {/* Under the Build or Work heading an attempt is just its number. */}
                   {attemptName(task, attempts, attempt, true)}
                 </b>
                 <span className="sd-meta">

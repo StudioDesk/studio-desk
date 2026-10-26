@@ -57,6 +57,34 @@ test('an attempt that used up none is named for what stopped it, so the next nev
   expect(attemptName(work, attempts.slice(0, 3), attempts[2]!)).toBe('Attempt 1 of 3');
 });
 
+test('other work’s independent reviews are named as reviews, so its own attempts never read past its limit', () => {
+  const work = {
+      id: 'T-2',
+      title: 'Guide',
+      kind: 'general:work',
+      status: 'review',
+      maxAttempts: 2,
+      stageState: { version: 'stage-state-v1', current: 'review' },
+    } as Task,
+    attempts = [
+      attempt('w1', { status: 'accepted', assignment: { kind: 'general:work' } }),
+      attempt('r1', { status: 'accepted', assignment: { kind: 'general:review' }, workReviewVerdict: 'needs-work' }),
+      attempt('w2', { status: 'accepted', assignment: { kind: 'general:work' } }),
+      attempt('r2', { status: 'running', assignment: { kind: 'general:review' } }),
+    ];
+  expect(attempts.map(item => attemptName(work, attempts, item))).toEqual([
+    'Attempt 1 of 2',
+    'Review 1',
+    'Attempt 2 of 2',
+    'Review 2',
+  ]);
+  // The work's attempts are the ones the side panel counts.
+  expect(attemptsUsed(work, attempts)).toEqual({ used: 2, allowed: 2, left: 0 });
+  // A first review is just the review, as on Today's floor while it runs.
+  expect(attemptName(work, attempts.slice(0, 2), attempts[1]!, true)).toBe('Review');
+  expect(attemptName(work, attempts.slice(0, 3), attempts[2]!, true)).toBe('Attempt 2 of 2');
+});
+
 test('only integrating the controller’s own source pauses and restarts it, never a repository project’s', () => {
   const own = { autonomy: { selfHosted: true }, project: { id: 'project-studio-desk', name: 'Studio desk' } },
     repository = {

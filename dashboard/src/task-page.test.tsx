@@ -544,3 +544,62 @@ test("a reviewed step's Result shows its work first, then the review, unless ano
   expect(await within(chosen).findByText('Wrote the welcome guide.')).toBeTruthy();
   expect(within(chosen).queryByText('The guide covers every station.')).toBeNull();
 });
+
+test("a reviewed step's Attempts lists its work and its reviews apart, and counts only the work against its limit", async () => {
+  const user = userEvent.setup(),
+    step = (id: string, kind: string, startedAt: string, extra: object = {}) => ({
+      id,
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: kind === 'general:review' ? 'W-2' : 'W-1',
+      startedAt,
+      assignment: { kind },
+      result: { summary: `${id} handed back.` },
+      ...extra,
+    });
+  controller.shell.workers = [
+    { id: 'W-1', displayName: 'Eli', team: 'Engineering' },
+    { id: 'W-2', displayName: 'Morgan', team: 'Review' },
+  ];
+  controller.shell.taskKinds = {
+    ...controller.shell.taskKinds,
+    'general:work': { label: 'Do the work', cardLabel: 'Work' },
+    'general:review': { label: 'Independent work review', cardLabel: 'Review' },
+  };
+  edit({
+    kind: 'general:work',
+    status: 'review',
+    maxAttempts: 2,
+    lastAttemptId: 'attempt-r2',
+    acceptedAttemptId: 'attempt-w2',
+    stageState: { version: 'stage-state-v1', current: 'review' },
+  });
+  // The first review sent the work back; the second is waiting for the director.
+  controller.attempts = [
+    step('attempt-w1', 'general:work', '2026-10-24T10:00:00Z'),
+    step('attempt-r1', 'general:review', '2026-10-24T10:20:00Z', { workReviewVerdict: 'needs-work' }),
+    step('attempt-w2', 'general:work', '2026-10-24T10:40:00Z'),
+    step('attempt-r2', 'general:review', '2026-10-24T11:00:00Z', { status: 'review' }),
+  ];
+  open();
+  await screen.findByRole('heading', { name: 'Show finished results' });
+  const tab = screen.getByRole('tab', { name: /^Attempts/ });
+  // The tab counts the work's own attempts, as the side panel does; the reviews are a step of their own.
+  expect(tab.querySelector('.sd-tabs__count')?.textContent).toBe('2');
+  expect(within(screen.getByRole('region', { name: 'Details' })).getByText('2 of 2 used')).toBeTruthy();
+  await user.click(tab);
+  const panel = await screen.findByRole('tabpanel'),
+    rows = [...panel.querySelectorAll('.sd-eyebrow, button')].map(item =>
+      item.tagName === 'BUTTON' ? item.querySelector('b')?.textContent : item.textContent,
+    );
+  expect(rows).toEqual([
+    'Work · 2 of 2 attempts used',
+    'Attempt 1 of 2',
+    'Attempt 2 of 2',
+    'Review',
+    'Review 1',
+    'Review 2',
+  ]);
+  // A review reads as its verdict, as a code story's does.
+  expect(within(panel).getAllByRole('button')[2]!.textContent).toContain('Asked for changes');
+});
