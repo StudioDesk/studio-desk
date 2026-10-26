@@ -345,6 +345,8 @@ test("a repository's settings are checked again and edited, and saving runs its 
   await user.type(dialog.getByLabelText('File types'), '.css,');
   await user.click(dialog.getByRole('button', { name: 'Remove .svg' }));
   await user.click(dialog.getByRole('switch', { name: 'Install packages with npm ci before tests' }));
+  // The build command (1.1) is a program and its arguments, split on spaces.
+  await user.type(dialog.getByLabelText('Build'), 'npx tsc --noEmit');
   await user.click(dialog.getByRole('button', { name: 'Run the tests and save' }));
   // A refusal stays in the dialog, so the edits are not lost.
   expect((await dialog.findByRole('alert')).textContent).toMatch(/tests must pass before these settings are saved/);
@@ -359,6 +361,7 @@ test("a repository's settings are checked again and edited, and saving runs its 
         contextFiles: ['README.md', 'docs/notes.md'],
         extensions: ['mjs', 'css'],
         install: 'npm-ci',
+        build: ['npx', 'tsc', '--noEmit'],
       },
     },
   });

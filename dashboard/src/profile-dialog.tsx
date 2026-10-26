@@ -144,7 +144,9 @@ function ProfileForm({
   onClose: () => void;
 }) {
   const field = useId(),
-    [draft, setDraft] = useState(recorded);
+    [draft, setDraft] = useState(recorded),
+    // The build command as typed: a program and its arguments, split on spaces when saved, run without a shell (1.1).
+    [build, setBuild] = useState(recorded.build?.join(' ') ?? '');
   const set =
       <Key extends keyof SourceProfile>(key: Key) =>
       (value: SourceProfile[Key]) =>
@@ -241,6 +243,29 @@ function ProfileForm({
           />
           <span>
             Install packages with <span className="sd-file">npm ci</span>
+          </span>
+        </dd>
+        <dt>
+          <label htmlFor={`${field}-build`}>Build</label>
+        </dt>
+        <dd>
+          <input
+            id={`${field}-build`}
+            className="sd-input sd-mono"
+            style={{ width: '240px', fontSize: '13px' }}
+            placeholder="No build command"
+            value={build}
+            disabled={busy}
+            onChange={event => {
+              setBuild(event.target.value);
+              const parts = event.target.value.trim().split(/\s+/).filter(Boolean);
+              set('build')(parts.length ? parts : null);
+            }}
+          />
+          <span className="sd-meta">
+            Runs before the tests on every candidate, integration, carry and release, such as{' '}
+            <span className="sd-file">npm run build</span> or <span className="sd-file">npx tsc --noEmit</span>. No
+            shell: a program and its arguments.
           </span>
         </dd>
         <dt>

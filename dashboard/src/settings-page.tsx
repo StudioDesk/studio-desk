@@ -365,6 +365,17 @@ function Repository({ projectId, state }: { projectId: string; state: StudioStat
               <span>Nothing to install</span>
             )}
           </dd>
+          <dt>Build</dt>
+          <dd>
+            {profile.build?.length ? (
+              <>
+                <span>Before the tests, on every candidate, integration and release:</span>
+                {chips([profile.build.join(' ')])}
+              </>
+            ) : (
+              <span>No build command</span>
+            )}
+          </dd>
           <dt>On integration</dt>
           <dd>
             {profile.formatter ? (
