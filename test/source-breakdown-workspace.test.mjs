@@ -71,6 +71,9 @@ async function setup(t, { provider = 'codex', mode = '', execution, registries =
     { store, runner } = c.app,
     org = store.organization();
   for (const worker of org.workers) if (worker.provider === 'mock') worker.provider = 'codex';
+  // A measured suite runs without a sandbox, as an idea's checks did before 1.0.1: the suite never runs the real
+  // built-in sandbox, which the test studios only report as set up.
+  org.testSandbox = 'none';
   const planner = org.workers.find(worker => worker.id === 'W-01');
   Object.assign(planner, { provider, mode, model: '', effort: '' });
   org.workers.find(worker => worker.id === 'W-02').roles = ['engineer'];

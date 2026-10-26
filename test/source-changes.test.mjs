@@ -947,6 +947,11 @@ test('one idea retains original uploads through measured checks, breakdown, link
   // Measure the fixed Node suite on this tiny disposable repository. No model
   // call, and no rewriting of the measured report/context to invent uploads.
   runner.sourceCheckCommand = undefined;
+  // A measured suite runs without a sandbox, as an idea's checks did before 1.0.1: the suite never runs the real
+  // built-in sandbox, which the test studios only report as set up.
+  const unsandboxed = store.organization();
+  unsandboxed.testSandbox = 'none';
+  store.setOrganization(unsandboxed);
   const previousContext = process.env.NODE_TEST_CONTEXT;
   delete process.env.NODE_TEST_CONTEXT;
   t.after(() => {

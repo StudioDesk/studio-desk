@@ -1683,6 +1683,11 @@ function measuredIntakeSource(c, t) {
   git(root, ['commit', '--quiet', '-m', 'Fixture source']);
   c.app.runner.sourceChangeRoot = fs.realpathSync(root);
   c.app.runner.sourceCheckCommand = undefined;
+  // A measured suite runs without a sandbox, as an idea's checks did before 1.0.1: the suite never runs the real
+  // built-in sandbox, which the test studios only report as set up.
+  const org = c.app.store.organization();
+  org.testSandbox = 'none';
+  c.app.store.setOrganization(org);
   // The nested fixed Node suite is a separate measured process. Do not let the
   // outer test runner mark it as another child of its own reporter protocol.
   const testContext = process.env.NODE_TEST_CONTEXT;
