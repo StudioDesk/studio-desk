@@ -145,13 +145,19 @@ function workSteps(task: Task, studio: StudioState): Step[] {
   const attempt = studio.attempts.find(item => item.id === (task.acceptedAttemptId ?? task.lastAttemptId)),
     minutes = took(attempt),
     by = (attempt?.acceptedBy as { type?: string } | undefined)?.type,
-    history = (task.stageState as { history?: { outcome?: string }[] } | undefined)?.history ?? [];
+    history = (task.stageState as { history?: { outcome?: string }[] } | undefined)?.history ?? [],
+    sentBack = task.status === 'blocked' && history[history.length - 1]?.outcome === 'sent-back',
+    // Work sent back waits for the director's Start, unless the house rules already queued its rework and the
+    // controller holds it (its agent busy, say): decided as the source story's build step decides.
+    yours = sentBack && (!task.controllerWait || decisionState(task, studio).explanation.requiresDirector);
   const worked: Step = active(task)
     ? { label: 'Working', state: 'live' }
     : ['review', 'done'].includes(task.status)
       ? { label: minutes ? `Done · ${minutes} min` : 'Done', state: 'done' }
-      : task.status === 'blocked' && history[history.length - 1]?.outcome === 'sent-back'
-        ? { label: 'Sent back', state: 'you' }
+      : sentBack
+        ? yours
+          ? { label: 'Sent back', state: 'you' }
+          : { label: 'Rework queued', state: 'todo' }
         : ['failed', 'cancelled'].includes(task.status) ||
             (task.status === 'blocked' && task.lastAttemptId && !task.controllerWait)
           ? { label: 'Stopped', state: 'bad' }

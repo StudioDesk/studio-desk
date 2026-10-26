@@ -217,7 +217,7 @@ test('a story the controller holds until the story before it integrates is waiti
 
 // Graph test 0a (October 25): other work its review sent back read "Stopped", and its review's attempt counted as
 // one of the work's, so the panel said "2 of 2 used" while the controller allowed another.
-test('other work its review sent back is the director’s call, and only its own work counts toward its attempts', () => {
+test('other work its review sent back is the director’s call until its rework is queued, and only its own work counts toward its attempts', () => {
   const sent: Task = {
       id: 'T-3',
       title: 'Write the guide',
@@ -249,6 +249,16 @@ test('other work its review sent back is the director’s call, and only its own
     ];
   expect(storySteps(sent, studio([sent], attempts))[0]).toEqual({ label: 'Sent back', state: 'you' });
   expect(attemptsUsed(sent, attempts)).toEqual({ used: 1, allowed: 2, left: 1 });
+  // The house rules queued the rework, and the controller holds it while its agent works on something else: the
+  // step waits with the explanation, not in the director's colour.
+  const queued: Task = {
+    ...sent,
+    queued: true,
+    controllerWait: true,
+    reason: "Waiting for Eli's work on T-4 (Draw the map) to finish.",
+  };
+  expect(storySteps(queued, studio([queued], attempts))[0]).toEqual({ label: 'Rework queued', state: 'todo' });
+  expect(standing(queued, studio([queued], attempts)).tone).toBe('wait');
   // A code story's own candidate reviews never counted, and still don't.
   expect(
     attemptsUsed(story({}), [build(), build({ id: 'r', assignment: { kind: 'studio-development:change-review' } })]),
