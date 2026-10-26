@@ -269,3 +269,93 @@ test('a story whose review asked for changes is sent back, or integrated over th
     }),
   );
 });
+
+// 1.1 step 3: a story whose integration stopped on a conflict goes back to its editor merged onto the current source.
+test('a story stopped by a conflict offers to merge its change onto the current source', async () => {
+  const user = userEvent.setup();
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change-review' },
+      candidateReviewVerdict: 'pass',
+      sourceIntegration: { state: 'rejected', verification: { conflicts: ['src/core/store.mjs'] } },
+    },
+  ];
+  open(
+    taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'integration',
+        current: 'failed',
+        review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+      },
+    }),
+  );
+  const region = await decisions();
+  await user.click(region.getByRole('button', { name: 'Merge onto the current source' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/merge-source',
+      method: 'POST',
+      body: { projectId: 'project-x' },
+    }),
+  );
+});
+
+// 1.1 step 4: a fix integrated on an older line is carried to the next newer one, or marked not needed there.
+test('a fix waiting to be carried forward offers Carry to its line and Not needed with a reason', async () => {
+  const user = userEvent.setup();
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change-review' },
+      candidateReviewVerdict: 'pass',
+      sourceIntegration: { state: 'integrated' },
+      sourceCarries: [{ line: 'main', state: 'waiting' }],
+    },
+  ];
+  open(
+    taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'integration',
+        current: 'done',
+        review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+      },
+    }),
+  );
+  const region = await decisions();
+  await user.click(region.getByRole('button', { name: 'Carry to main' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/carry',
+      method: 'POST',
+      body: { projectId: 'project-x', line: 'main' },
+    }),
+  );
+  await user.click(region.getByRole('button', { name: 'Not needed on main…' }));
+  const skip = within(await screen.findByRole('dialog', { name: 'Not needed on main?' }));
+  await user.type(skip.getByLabelText('Why'), 'main replaced this code.');
+  await user.click(skip.getByRole('button', { name: 'Skip it' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/carry-skip',
+      method: 'POST',
+      body: { projectId: 'project-x', line: 'main', reason: 'main replaced this code.' },
+    }),
+  );
+});

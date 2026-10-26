@@ -17,7 +17,17 @@ export interface AttemptSummary {
   executionTiming?: { durationMs: number | null; activeStart: string | null };
   candidateReviewVerdict?: string;
   workReviewVerdict?: string;
-  sourceIntegration?: { state?: string; error?: string } | null;
+  sourceIntegration?: { state?: string; error?: string; verification?: { conflicts?: string[] } } | null;
+  // A fix integrated on an older line, carried to each newer one (1.1 step 4).
+  sourceCarries?: {
+    line: string;
+    state: string;
+    approved?: boolean;
+    storyId?: string;
+    commit?: string;
+    reason?: string;
+    error?: string;
+  }[];
   artifacts?: { path: string; hash: string; kind?: string }[];
   [field: string]: unknown;
 }

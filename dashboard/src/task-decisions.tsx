@@ -244,6 +244,47 @@ export function TaskDecisions({
                 : 'Reviewed source integrated.',
         ),
     });
+  // A story whose integration stopped on a conflict goes back to its editor with its change merged onto the current
+  // source (1.1 step 3); a fix integrated on an older line is carried to the next newer one, or marked not needed
+  // there (step 4), each through the controller.
+  if (journal?.state === 'rejected' && journal.verification?.conflicts?.length && stage?.current === 'failed')
+    actions.push({
+      key: 'merge',
+      label: 'Merge onto the current source',
+      emphasis: 'primary',
+      onClick: () =>
+        act(
+          'merge-source',
+          {},
+          () => `${editor} merges the change onto the current source; then it is tested and reviewed again.`,
+        ),
+    });
+  const carry = review?.sourceCarries?.find(item => !['carried', 'skipped'].includes(item.state));
+  if (
+    carry &&
+    (['rejected', 'needs-reconciliation'].includes(carry.state) || (carry.state === 'waiting' && !carry.approved))
+  )
+    actions.push({
+      key: 'carry',
+      label: carry.state === 'waiting' ? `Carry to ${carry.line}` : `Carry to ${carry.line} again`,
+      emphasis: 'primary',
+      onClick: () => act('carry', { line: carry.line }, () => `Carrying the fix to ${carry.line}.`),
+    });
+  if (carry && ['waiting', 'rejected'].includes(carry.state))
+    actions.push({
+      key: 'carry-skip',
+      label: `Not needed on ${carry.line}…`,
+      emphasis: 'default',
+      onClick: () =>
+        setAsking({
+          title: `Not needed on ${carry.line}?`,
+          text: `${carry.line} won't get this fix. Your reason is kept with the story, and any newer line is still offered it.`,
+          label: 'Why',
+          submit: 'Skip it',
+          required: true,
+          send: note => act('carry-skip', { line: carry.line, reason: note }, () => `Not needed on ${carry.line}.`),
+        }),
+    });
   // The director may overrule a review that passed (the canvas's Story board, the director's yes on October 23).
   // A pass has no blocking findings by definition, but its summary and notes go back with the story, and the next
   // attempt reads the whole history; the director's note is needed only when the review noted nothing.

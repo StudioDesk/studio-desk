@@ -180,9 +180,21 @@ export function dashboardAttempt(data, timing, openPhase = null) {
               })),
             }
           : {}),
+        // The files that conflicted, so the story offers Merge onto the current source (1.1 step 3).
+        ...(verification.conflicts
+          ? { conflicts: verification.conflicts.slice(0, 20).map(file => shortText(file)) }
+          : {}),
       };
     }
   }
+  // A fix integrated on an older line, carried to each newer one (1.1 step 4): where each carry stands.
+  if (data.sourceCarries)
+    summary.sourceCarries = data.sourceCarries.slice(0, 20).map(carry => ({
+      ...fields(carry, ['line', 'state', 'storyId', 'commit', 'finishedAt']),
+      ...(carry.approvedBy ? { approved: true } : {}),
+      ...(carry.reason ? { reason: shortText(carry.reason, 500) } : {}),
+      ...(carry.error ? { error: shortText(carry.error, 1000) } : {}),
+    }));
   summary.executionTiming = executionTiming(data, timing || []);
   // While the attempt works, Today shows its latest message and what it is doing (v1.0 items 21 and 23); a
   // finished attempt carries neither, so the state does not grow with history.

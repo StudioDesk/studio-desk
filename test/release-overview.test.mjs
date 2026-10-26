@@ -74,6 +74,11 @@ test('the Releases page reads each line, what landed on it since its last releas
     'A story moved into a milestone is listed there.',
   );
   assert.deepEqual(patch.movedIn[0].carries, [{ line: 'main', state: 'waiting' }]);
+  // The story's page reads the same carry, so it can offer Carry to main and Not needed on main.
+  const page = await (await fetch(`${c.origin}/api/tasks/${c.taskId}?projectId=${project}`)).json();
+  assert.deepEqual(page.attempts.find(attempt => attempt.id === review.id).sourceCarries, [
+    { line: 'main', state: 'waiting' },
+  ]);
   assert.deepEqual(patch.counts, { ideas: 0, waiting: 0, stories: 1, integrated: 1, started: 0 });
   assert.equal(view.milestones[1].id, next.id);
   assert.deepEqual(view.tags, ['v1.0.0']);
