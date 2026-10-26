@@ -5,7 +5,7 @@ import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { Milestone, ReleaseOverview } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
@@ -98,7 +98,10 @@ beforeEach(() => {
   controller = fakeController();
   controller.releases = overview();
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const open = (path: string) => {
   const router = createAppRouter(createMemoryHistory({ initialEntries: [path] }));
@@ -216,6 +219,43 @@ test('the map shows how the lines fit together: each in time order, made from a 
       .map(region => region.getAttribute('aria-label'))
       .filter(name => /^(main|release)/.test(name ?? '')),
   ).toEqual(['main', 'release/1.0']);
+});
+
+// The window's width as useNarrow reads it: a phone matches the design's break. afterEach puts the window's own back.
+const width = (phone: boolean) =>
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: phone && query === '(max-width: 860px)',
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+// jsdom lays nothing out, so this reads the minimum width the map's rows are given, not what a screen shows.
+const mapRows = async () =>
+  (await screen.findByRole('region', { name: 'How your lines fit together' })).querySelector<HTMLElement>(
+    '.sd-linemap__rows',
+  )!;
+
+test('on a phone the map is only as wide as its columns at their narrowest, 84px more for each release', async () => {
+  width(true);
+  open('/p/project-x/releases');
+  // The line's name 150px, a slot each for 1.0.0, 1.0.1 and 1.1.0 at 84px, and where its fixes go 120px.
+  expect((await mapRows()).style.minWidth).toBe('522px');
+  cleanup();
+  controller.releases!.milestones!.push(milestone('1.2.0', 'main'));
+  open('/p/project-x/releases');
+  expect((await mapRows()).style.minWidth).toBe('606px');
+});
+
+test('above the phone break the map keeps its 760px minimum, set on its rows, however many releases it holds', async () => {
+  // Where matchMedia is absent, as in the other tests.
+  open('/p/project-x/releases');
+  expect((await mapRows()).style.minWidth).toBe('760px');
+  cleanup();
+  // And where the window is wider than the break.
+  width(false);
+  controller.releases!.milestones!.push(milestone('1.2.0', 'main'));
+  open('/p/project-x/releases');
+  expect((await mapRows()).style.minWidth).toBe('760px');
 });
 
 test('a line is retired after asking, and a retired line is maintained again from the bottom of the page', async () => {

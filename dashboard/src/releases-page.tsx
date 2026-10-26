@@ -25,6 +25,7 @@ import { useStudio } from './records';
 import { byVersion, runOfTask, StoryReleaseChip } from './release-chip';
 import type { StudioState } from './studio-runs';
 import { useToast } from './toast';
+import { useNarrow } from './use-narrow';
 
 export function ReleasesPage({ projectId, milestone }: { projectId: string; milestone?: string }) {
   const { data, error } = useQuery({
@@ -266,6 +267,14 @@ function mapRows(lines: ReleaseLine[], maintained: ReleaseLine[], milestones: Mi
   return { rows, slots };
 }
 
+// The map's columns at their narrowest, in pixels: the line's name, each release slot and where its fixes go. On a
+// phone the rows are as wide as these add up to, so the map scrolls sideways only when they do not fit; above the
+// break they are at least 760px wide.
+const nameMin = 150,
+  slotMin = 84,
+  carryMin = 120,
+  wideMin = 760;
+
 // How the lines fit together: time runs left to right, each line a track in its own color, made from a release on the
 // newest line, with its releases filled, its open milestone ringed and later ones dashed; a fix is carried up to the
 // next newer line. A retired line is gray and stops.
@@ -278,8 +287,11 @@ function LineMap({
   maintained: ReleaseLine[];
   milestones: Milestone[];
 }) {
-  const { rows, slots } = mapRows(lines, maintained, milestones),
-    columns = `minmax(150px, 200px) repeat(${Math.max(1, slots.length)}, minmax(84px, 1fr)) minmax(120px, 150px)`,
+  const narrow = useNarrow(),
+    { rows, slots } = mapRows(lines, maintained, milestones),
+    count = Math.max(1, slots.length),
+    columns = `minmax(${nameMin}px, 200px) repeat(${count}, minmax(${slotMin}px, 1fr)) minmax(${carryMin}px, 150px)`,
+    minWidth = narrow ? nameMin + slotMin * count + carryMin : wideMin,
     column = (version: string) => slots.indexOf(version) + 2;
   return (
     <section className="sd-card sd-linemap" aria-label="How your lines fit together">
@@ -292,7 +304,7 @@ function LineMap({
         </p>
       </div>
       <div className="sd-linemap__scroll">
-        <div className="sd-linemap__rows">
+        <div className="sd-linemap__rows" style={{ minWidth }}>
           {rows.map(row => {
             const start = row.fork ? column(row.fork.version) : row.stations[0] ? column(row.stations[0].version) : 2,
               retiredLine = row.line.state === 'retired',
