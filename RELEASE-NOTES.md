@@ -1,10 +1,11 @@
 # Release notes
 
-## 1.0.1 (not released yet)
+## 1.0.1
 
 - **Make agents for a project.** Add a new agent to any of a project's teams, with its own name, AI tool, model and instructions. It works only in that project, so tailoring it never changes the agents your other projects use.
 - **Rename any agent, and delete the ones you made** once their work is done. What an agent did stays on the record under its name.
-- **Tests run in a sandbox, whichever AI tool you use.** A change's tests, and an idea's first checks, run in a built-in sandbox: a separate Windows account that can change only the copy being tested and can't reach past your computer. Set it up once from Settings. It takes over from Codex CLI's sandbox for tests, so code projects no longer need Codex CLI to keep their tests apart. Codex agents still work in their own sandbox.
+- **Tests run in a sandbox, whichever AI tool you use.** A change's tests, and an idea's first checks, run in a built-in sandbox: a separate Windows account that can change only the copy being tested and can't reach past your computer. It takes over from Codex CLI's sandbox for tests, so code projects no longer need Codex CLI to keep their tests apart. Codex agents still work in their own sandbox.
+- **After updating, run `npm ci` once more, then set up the sandbox from Settings**, where Windows asks for an administrator. Until you do, a code project's tests wait for it, or you can choose to run them without a sandbox.
 
 ## 1.0.0
 

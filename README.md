@@ -29,7 +29,7 @@ You'll need:
 
 Then:
 
-1. Download the release and extract it somewhere you'll keep it (or clone the repository and check out `v1.0.0`).
+1. Download the release and extract it somewhere you'll keep it (or clone the repository and check out `v1.0.1`).
 2. Run `npm ci` in that folder, once.
 3. Double-click `start-studio.cmd`, or run `npm start`.
 4. Open **http://127.0.0.1:4317** in Chrome or Edge.
