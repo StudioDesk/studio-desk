@@ -214,4 +214,6 @@ test('the Board shows each story’s release, filters by it and lanes by it', as
     '1.0.1release/1.0',
     '1.1.0',
   ]);
+  // Each lane is named by its release, as an idea lane is by its words.
+  expect(within(lanes).getByRole('region', { name: 'Release 1.0.1' })).toBeTruthy();
 });

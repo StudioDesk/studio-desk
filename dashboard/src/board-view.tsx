@@ -294,6 +294,7 @@ export function Board({
           ? [
               ...versions.map(item => ({
                 key: item.version,
+                label: `Release ${item.version}`,
                 head: (
                   <>
                     <span className="sd-rel">
@@ -307,7 +308,8 @@ export function Board({
               })),
               {
                 key: 'none',
-                head: <span>In no release</span>,
+                label: 'In no release',
+                head: <span className="sd-lanehead__name">In no release</span>,
                 cards: shown.filter(card => !releaseOf.get(card.task.id)),
               },
             ].filter(group => group.cards.length)
