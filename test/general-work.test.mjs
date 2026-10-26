@@ -15,7 +15,7 @@ import { artifactPath } from '../src/core/artifacts.mjs';
 import { hash } from '../src/core/contracts.mjs';
 import { buildAttemptHistory } from '../src/core/attempt-history.mjs';
 import { expandRun } from '../src/core/graph.mjs';
-import { validateWorkReview } from '../src/packs/general-work/index.mjs';
+import { generalWorkPack, validateWorkReview } from '../src/packs/general-work/index.mjs';
 
 const kinds = ['general:plan', 'general:work', 'general:review'];
 const shapes = {
@@ -102,6 +102,60 @@ test('a work review is graded: findings ask for changes and notes do not', () =>
   assert.throws(
     () => validateWorkReview({ ...review, extra: true, schemaVersion: 'v0' }),
     /remove extra; schemaVersion/,
+  );
+});
+
+test("an independent review is judged by its verdict; only the controller's checks of it retry it", () => {
+  const definition = generalWorkPack.tasks.find(task => task.kind === 'general:review'),
+    reported = { name: 'Every species is listed', status: 'fail', evidence: 'The heron is missing.' },
+    recorded = { name: 'Independent review recorded', status: 'pass', evidence: 'Verdict needs-work.' },
+    needsWork = {
+      schemaVersion: 'work-review-v1',
+      verdict: 'needs-work',
+      summary: 'The species list is incomplete.',
+      findings: ['Add the heron.'],
+      notes: [],
+    },
+    pass = { ...needsWork, verdict: 'pass', summary: 'The list is complete.', findings: [] },
+    // The arguments evaluateAttempt passes: `failed` holds the reviewer's checks and the controller's.
+    judge = (review, checks, controllerChecks) =>
+      definition.autonomy.evaluate({
+        task: { id: 'T-work' },
+        attempt: { result: { checks }, controllerChecks },
+        readArtifact: () => JSON.stringify(review),
+        failed: [...checks, ...controllerChecks].filter(check => check.status === 'fail'),
+      });
+  // A reviewer that also recorded the problem it found as a failed check still sends the work back
+  // with its summary and findings, and the review is not retried.
+  assert.deepEqual(judge(needsWork, [reported], [recorded]), {
+    ok: false,
+    reason: 'Independent review asked for changes. The species list is incomplete.\n- Add the heron.',
+    retryUpstream: { taskId: 'T-work', reason: 'The species list is incomplete.\n- Add the heron.' },
+  });
+  // A failed check of the controller's retries the review itself.
+  assert.deepEqual(judge(needsWork, [reported], [{ ...recorded, status: 'fail' }]), {
+    ok: false,
+    retry: true,
+    reason: 'Failed checks: Independent review recorded',
+  });
+  // A pass is accepted, even with a failed check of the reviewer's own (the brief's reading).
+  for (const checks of [[], [reported]])
+    assert.deepEqual(judge(pass, checks, [recorded]), { ok: true, reason: 'Independent review passed.' });
+  // Such a review can be accepted, but a failed check of the controller's still fails the attempt.
+  assert.equal(definition.acceptFailedChecks, true);
+  assert.throws(
+    () =>
+      definition.validateOutput({
+        attempt: { artifacts: [{ path: 'review.json', kind: 'work-review' }] },
+        readArtifact: () => JSON.stringify(pass),
+        checks: [{ name: 'Produced data format work-review-v1', status: 'fail', evidence: 'Refused.' }],
+      }),
+    /The controller's checks of the review failed: Produced data format work-review-v1\./,
+  );
+  // The contract says what checks and findings are for.
+  assert.match(
+    definition.instructions().layers[0].text,
+    /checks record what you verified; put a problem you found in the work in findings, which set the verdict, not in a failed check\./,
   );
 });
 
@@ -361,4 +415,97 @@ test("with autonomy on, only approving the plan's work is the director's; a revi
       assert.match(step.reason, /Independent review sent this back: .* Start it to run Work again\./);
     }
   }
+});
+
+// The Simulator review of a step titled REWORK ... FAILED CHECK asks for changes and also reports a
+// failed check of its own, as a reviewer may when it records the problem it found both ways.
+const checkedIdea = 'Write a guide.\n- REWORK the guide draft with a FAILED CHECK';
+
+test('with house rules, a review that asks for changes and fails a check of its own sends the work back once and is not retried', async t => {
+  const c = await setup(t),
+    projectId = await c.project('Checked guide', shapes.bench),
+    policy = await c.request(`/api/projects/${projectId}/autonomy`, {
+      projectId,
+      expectedRevision: 0,
+      enabled: true,
+      retries: 1,
+      kinds: {
+        'general:plan': { approve: 'director', accept: 'auto' },
+        'general:work': { approve: 'director', accept: 'auto' },
+        'general:review': { approve: 'auto', accept: 'auto' },
+      },
+      cycle: { enabled: false, workflowId: null, maxPerDay: 3 },
+    });
+  assert.equal(policy.status, 200, JSON.stringify(policy.data));
+  const intake = await c.request('/api/intake', { projectId, idea: checkedIdea }),
+    [stepId] = await c.until(() => c.store.task(intake.data.taskIds[0]).proposedTaskIds, 'the plan to propose work');
+  assert.equal((await c.request(`/api/tasks/${stepId}/approve-work`, { projectId })).status, 200);
+  const step = await c.until(
+    () => c.store.task(stepId).status === 'done' && c.store.task(stepId),
+    'the step to finish',
+  );
+  assert.deepEqual(
+    step.stageState.history.map(entry => [entry.key, entry.outcome]),
+    [
+      ['work', 'accepted'],
+      ['review', 'sent-back'],
+      ['work', 'accepted'],
+      ['review', 'accepted'],
+    ],
+  );
+  const attempts = c.store.attempts(stepId),
+    works = attempts.filter(attempt => attempt.assignment.kind === 'general:work'),
+    reviews = attempts.filter(attempt => attempt.assignment.kind === 'general:review'),
+    rejected = reviews[0];
+  // The policy recorded the review that asked for changes, its own failed check included, as evidence.
+  assert.equal(rejected.workReviewVerdict, 'needs-work');
+  assert.deepEqual(
+    rejected.result.checks.map(check => [check.name, check.status]),
+    [['Simulated reviewer check', 'fail']],
+  );
+  assert.equal(rejected.status, 'accepted');
+  assert.equal(rejected.acceptedBy.type, 'policy');
+  // One review of each revision of the work: the unchanged first revision was not reviewed again.
+  assert.deepEqual(
+    reviews.map(review => review.inputReferences[0].attemptId),
+    works.map(work => work.id),
+  );
+  // The work ran again with the review's summary and findings; no retry named the failed check.
+  assert.equal(step.autoRetries, 1);
+  assert.equal(step.stageRetries, undefined);
+  assert.match(
+    step.direction,
+    /Automatic retry 1: the previous attempt did not pass\. Independent review requested changes\. Simulated review: the first revision needs another pass\.\n- Simulated finding: revise once\./,
+  );
+  for (const direction of [step.direction, step.stageState.direction, ...attempts.map(a => a.assignment.direction)])
+    assert.doesNotMatch(direction || '', /Failed checks/);
+});
+
+test("the director's accept of a review that asks for changes and fails a check of its own sends the work back", async t => {
+  const c = await setup(t),
+    projectId = await c.project('Directed guide', shapes.bench),
+    intake = await c.request('/api/intake', { projectId, idea: checkedIdea }),
+    planId = intake.data.taskIds[0];
+  await c.accept(projectId, planId);
+  const [stepId] = c.store.task(planId).proposedTaskIds;
+  assert.equal((await c.request(`/api/tasks/${stepId}/approve-work`, { projectId })).status, 200);
+  assert.equal((await c.request(`/api/tasks/${stepId}/start`, { projectId })).status, 202);
+  await c.accept(projectId, stepId);
+  // c.accept requires the accept to succeed, where it used to refuse: 'The worker reported a failed check'.
+  const rejected = await c.accept(projectId, stepId);
+  assert.equal(rejected.assignment.kind, 'general:review');
+  assert.equal(rejected.workReviewVerdict, 'needs-work');
+  assert.ok(rejected.result.checks.some(check => check.status === 'fail'));
+  assert.equal(rejected.contracts.task.acceptFailedChecks, true);
+  assert.deepEqual([rejected.status, rejected.acceptedBy.type], ['accepted', 'director']);
+  const step = c.store.task(stepId);
+  assert.equal(step.status, 'blocked');
+  assert.match(step.reason, /Independent review sent this back: .* Start it to run Work again\./);
+  assert.deepEqual(
+    step.stageState.history.map(entry => [entry.key, entry.outcome]),
+    [
+      ['work', 'accepted'],
+      ['review', 'sent-back'],
+    ],
+  );
 });
