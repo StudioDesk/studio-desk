@@ -4,8 +4,8 @@
 // project, archiving a finished idea and closing what is left of one.
 import { useMutation, useQueries } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { getJSON, send, taskUrl, type TaskPage } from './api';
+import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { getJSON, send, taskUrl, type RunRecord, type Task, type TaskPage } from './api';
 import { AgentAvatar } from './design/avatar';
 import { agentState } from './faces';
 import { Icon, type IconName } from './design/icons';
@@ -27,6 +27,15 @@ import {
 import { plural } from './evidence';
 import { produced } from './produced';
 import { integratesController } from './story';
+import {
+  newestBranch,
+  ReleaseChip,
+  releaseReason,
+  StoryReleaseChip,
+  useReleases,
+  type ReleaseOf,
+} from './release-chip';
+import { workerName } from './names';
 import type { RunStory, StudioState } from './studio-runs';
 import { agentLooks, counted } from './today';
 import { useToast } from './toast';
@@ -87,6 +96,8 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
         : state,
     ),
     finished = finishedLabels.includes(run.outcome.label),
+    // The idea's own record, which carries its release and line (1.1).
+    record = state.runs.find(item => item.id === run.id),
     sent = `You sent this at ${clockOf(run.startedAt)}`,
     attached = inputs.length ? `${inputs.length} ${plural(inputs.length, 'file')} attached` : 'no files attached';
   const cards = (inside = false) =>
@@ -97,7 +108,21 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
             <Icon name="arrow" size={22} weight={2.6} />
           </span>
         )}
-        <StoryCard projectId={projectId} story={story} />
+        <StoryCard
+          projectId={projectId}
+          story={story}
+          release={
+            <StoryReleaseChip
+              projectId={projectId}
+              task={story.task}
+              run={record}
+              tasks={state.tasks}
+              attempts={state.attempts}
+              nameOf={id => workerName(state, id)}
+              compact
+            />
+          }
+        />
       </Fragment>
     ));
   return (
@@ -129,6 +154,12 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
               <span className="sd-chip__dot"></span>
               {chip.label}
             </span>
+            <IdeaRelease
+              projectId={projectId}
+              record={record}
+              tasks={state.tasks}
+              nameOf={id => workerName(state, id)}
+            />
             <span className="sd-meta sd-wide-only">
               {sent} · {attached}
             </span>
@@ -274,7 +305,41 @@ const stationIcon = (stage: JourneyStage): IconName =>
             ? 'ideas'
             : 'arrow';
 
-function StoryCard({ projectId, story }: { projectId: string; story: JourneyStory }) {
+// The release an idea was sent for, and why. Each of its stories carries its own release, which moves from the story's
+// chip until it starts, so this chip only shows where the idea began.
+function IdeaRelease({
+  projectId,
+  record,
+  tasks,
+  nameOf,
+}: {
+  projectId: string;
+  record?: RunRecord;
+  tasks: Task[];
+  nameOf: (id?: string) => string;
+}) {
+  const release = record?.release as ReleaseOf | undefined,
+    releases = useReleases(projectId, !!release);
+  if (!release) return null;
+  const newest = newestBranch(releases.data),
+    line = (record?.line as string | undefined) ?? null,
+    by = release.by;
+  return (
+    <ReleaseChip
+      projectId={projectId}
+      label="Release for this idea"
+      version={release.version}
+      line={line && line !== newest ? line : null}
+      reason={releaseReason(
+        by,
+        by?.type === 'planner' ? nameOf(tasks.find(item => item.id === by.taskId)?.workerId) : undefined,
+      )}
+    />
+  );
+}
+
+// A story's card opens its page; its release chip sits above the link, so it can move the story without opening it.
+function StoryCard({ projectId, story, release }: { projectId: string; story: JourneyStory; release?: ReactNode }) {
   const started = story.segments.slice(1).some(segment => segment !== 'todo'),
     variant =
       story.chip.tone === 'live'
@@ -285,19 +350,22 @@ function StoryCard({ projectId, story }: { projectId: string; story: JourneyStor
             ? ' sd-storycard--todo'
             : '';
   return (
-    <Link
-      className={`sd-storycard${variant}`}
-      to="/p/$projectId/tasks/$taskId"
-      params={{ projectId, taskId: story.task.id }}
-    >
-      <span className="sd-storycard__head">
-        <span className="sd-eyebrow">Story {story.number}</span>
-        <span className={`sd-chip${story.chip.tone === 'wait' ? '' : ` sd-chip--${story.chip.tone}`}`}>
-          <span className="sd-chip__dot"></span>
-          {story.chip.label}
+    <div className={`sd-storycard${variant}`}>
+      <Link
+        className="sd-storycard__link"
+        to="/p/$projectId/tasks/$taskId"
+        params={{ projectId, taskId: story.task.id }}
+      >
+        <span className="sd-storycard__head">
+          <span className="sd-eyebrow">Story {story.number}</span>
+          <span className={`sd-chip${story.chip.tone === 'wait' ? '' : ` sd-chip--${story.chip.tone}`}`}>
+            <span className="sd-chip__dot"></span>
+            {story.chip.label}
+          </span>
         </span>
-      </span>
-      <span className="sd-storycard__title">{story.task.title}</span>
+        <span className="sd-storycard__title">{story.task.title}</span>
+      </Link>
+      {release}
       <span className="sd-segments" aria-hidden="true">
         {story.segments.map((segment, index) => (
           <i key={index} className={segment === 'todo' ? undefined : `sd-segments__${segment}`}></i>
@@ -307,7 +375,7 @@ function StoryCard({ projectId, story }: { projectId: string; story: JourneyStor
         {story.commit && <span className="sd-file">{story.commit}</span>}
         <span className="sd-meta">{story.foot}</span>
       </span>
-    </Link>
+    </div>
   );
 }
 

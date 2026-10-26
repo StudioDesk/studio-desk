@@ -31,6 +31,7 @@ import { cleanExecution, ExecutionFields } from './execution-fields';
 import { workerName } from './names';
 import { CommandRequest, TaskAutoMode } from './permissions';
 import { queryKeys, useStudio } from './records';
+import { StoryReleaseChip } from './release-chip';
 import { SourceDiff } from './source-story';
 import {
   attemptsUsed,
@@ -188,6 +189,17 @@ function Story({
     place = placeIn(liveSummary(liveState).stories, task),
     idea = place ? { runId: place.run.id, brief: place.run.brief } : null,
     here = place && place.index > 0 ? `Story ${place.index} of ${place.total}` : task.id,
+    // A source story's release (1.1): it moves from its chip until it starts.
+    release = (
+      <StoryReleaseChip
+        projectId={projectId}
+        task={task}
+        run={studio.runs.find(run => run.id === idea?.runId)}
+        tasks={studio.tasks}
+        attempts={attempts}
+        nameOf={id => workerName(studio, id)}
+      />
+    ),
     stat = diffStatOf(built),
     // On a phone the chip says what the running attempt is doing: "Testing · attempt 4".
     liveLabel = active(task)
@@ -420,12 +432,16 @@ function Story({
       <header className="sd-storyhead">
         <div className="sd-storyhead__kind sd-wide-only">
           <span className="sd-chip sd-chip--brand">{kindLabel(task, studio)}</span>
+          {release}
           <span className="sd-mono sd-meta">{task.id}</span>
         </div>
-        <span className={`sd-chip sd-chip--${stand.tone} sd-narrow-only`} style={{ alignSelf: 'flex-start' }}>
-          <span className="sd-chip__dot"></span>
-          {liveLabel ?? stand.chip ?? status.label}
-        </span>
+        <div className="sd-storyhead__kind sd-narrow-only">
+          <span className={`sd-chip sd-chip--${stand.tone}`}>
+            <span className="sd-chip__dot"></span>
+            {liveLabel ?? stand.chip ?? status.label}
+          </span>
+          {release}
+        </div>
         <h1 className="sd-storyhead__title">{task.title}</h1>
         <Steps steps={storySteps(task, studio, phase)} />
       </header>

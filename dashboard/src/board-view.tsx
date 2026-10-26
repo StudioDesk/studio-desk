@@ -15,6 +15,7 @@ import type { AgentLook } from './design/agent-kit.js';
 import { plural } from './evidence';
 import { requestNewIdea } from './new-idea';
 import { useSettled, useSettledCounts } from './records';
+import { byVersion, newestBranch, ReleaseChip, storyRelease, useReleases, type ReleaseOf } from './release-chip';
 import { active, liveSummary, settled, type StudioState } from './studio-runs';
 import { agentLooks } from './today';
 import { useToast } from './toast';
@@ -51,7 +52,9 @@ export function Board({
     [search, setSearch] = useState(''),
     [filter, setFilter] = useState<Filter>('open'),
     [people, setPeople] = useState<string[]>([]),
-    [lanes, setLanes] = useState<'none' | 'idea' | 'person'>('none'),
+    [lanes, setLanes] = useState<'none' | 'idea' | 'person' | 'release'>('none'),
+    // A release to show the work of, "none" for work in no release, or every release.
+    [release, setRelease] = useState(''),
     [view, setView] = useState<'board' | 'list'>('board'),
     [dropping, setDropping] = useState(false),
     // In-progress cards' minutes follow the shared clock, which sets no timer while nothing runs.
@@ -79,12 +82,41 @@ export function Board({
       state.tasks.filter(task => task.status === 'done' && !task.closed && !liveSettled.has(task.id)).length,
     cancelled = state.tasks.filter(task => task.status === 'cancelled' && !task.closed),
     closedCount = (counts.data?.closed ?? 0) + cancelled.length;
+  // Each source story's release (1.1): its own once moved, otherwise its idea's. Only a project with releases has them.
+  const releases = useReleases(
+      projectId,
+      board.tasks.some(task => task.kind === 'studio-development:change'),
+    ),
+    hasReleases = !!releases.data?.available,
+    newestLine = newestBranch(releases.data),
+    releaseOf = new Map(
+      hasReleases
+        ? cards
+            .filter(card => card.task.kind === 'studio-development:change')
+            .map(card => [
+              card.task.id,
+              storyRelease(
+                card.task,
+                board.runs.find(run => run.id === card.idea?.runId),
+              ),
+            ])
+        : [],
+    ),
+    versions = [
+      ...new Map(
+        [...releaseOf.values()].filter((item): item is ReleaseOf => !!item).map(item => [item.version, item] as const),
+      ).values(),
+    ].sort(byVersion),
+    inRelease = (card: Card) =>
+      !release ||
+      (release === 'none' ? !releaseOf.get(card.task.id) : releaseOf.get(card.task.id)?.version === release);
   const count = (which: Filter) => cards.filter(card => matches(card, which)).length,
     shown = cards.filter(
       card =>
         (card.column === 'done' ? filter === 'open' || !!card.task.closed : matches(card, filter)) &&
         found(card, search) &&
-        (!people.length || people.includes(card.workerId ?? '')),
+        (!people.length || people.includes(card.workerId ?? '')) &&
+        inRelease(card),
     ),
     workers = state.workers.filter(worker => worker.enabled !== false);
   const setAddress = (next: { accepted?: true; closed?: true }) =>
@@ -149,6 +181,8 @@ export function Board({
             card={card}
             looks={looks}
             stories={stories.map(s => s.id)}
+            release={releaseOf.get(card.task.id) ?? null}
+            newestLine={newestLine}
           />
         ))}
         {!own.length && id === 'planned' && !lane && (
@@ -256,7 +290,28 @@ export function Board({
               cards: shown.filter(card => card.workerId === worker.id),
             }))
             .filter(group => group.cards.length)
-        : [];
+        : lanes === 'release'
+          ? [
+              ...versions.map(item => ({
+                key: item.version,
+                head: (
+                  <>
+                    <span className="sd-rel">
+                      <Icon name="tag" size={13} weight={2.2} />
+                      {item.version}
+                    </span>
+                    {item.line && item.line !== newestLine && <span className="sd-meta">{item.line}</span>}
+                  </>
+                ),
+                cards: shown.filter(card => releaseOf.get(card.task.id)?.version === item.version),
+              })),
+              {
+                key: 'none',
+                head: <span>In no release</span>,
+                cards: shown.filter(card => !releaseOf.get(card.task.id)),
+              },
+            ].filter(group => group.cards.length)
+          : [];
   const filters: [Filter, string, string | null][] = [
     ['open', 'Open work', null],
     ['calls', 'Your calls', 'var(--you-dot)'],
@@ -277,12 +332,15 @@ export function Board({
                 ['none', 'No lanes'],
                 ['idea', 'Lanes by idea'],
                 ['person', 'Lanes by person'],
+                ['release', 'Lanes by release'],
               ] as const
-            ).map(([id, label]) => (
-              <button key={id} type="button" aria-pressed={lanes === id} onClick={() => setLanes(id)}>
-                {label}
-              </button>
-            ))}
+            )
+              .filter(([id]) => id !== 'release' || hasReleases)
+              .map(([id, label]) => (
+                <button key={id} type="button" aria-pressed={lanes === id} onClick={() => setLanes(id)}>
+                  {label}
+                </button>
+              ))}
           </div>
           <div className="sd-segmented" role="group" aria-label="View">
             {(
@@ -319,6 +377,21 @@ export function Board({
             {label} <b>{count(id)}</b>
           </button>
         ))}
+        {hasReleases && (
+          <label className="sd-filter sd-relfilter">
+            <Icon name="tag" size={14} weight={2.2} />
+            <span>Release</span>
+            <select value={release} onChange={event => setRelease(event.target.value)}>
+              <option value="">Every release</option>
+              {versions.map(item => (
+                <option key={item.version} value={item.version}>
+                  {item.version}
+                </option>
+              ))}
+              <option value="none">In no release</option>
+            </select>
+          </label>
+        )}
         <span className="sd-toolbar__rule sd-wide-only" aria-hidden="true"></span>
         <span style={{ display: 'inline-flex', gap: '2px' }} role="group" aria-label="Filter by person">
           {workers.map(worker => {
@@ -379,11 +452,15 @@ function BoardCard({
   card,
   looks,
   stories,
+  release,
+  newestLine,
 }: {
   projectId: string;
   card: Card;
   looks: Map<string, AgentLook>;
   stories: string[];
+  release: ReleaseOf | null;
+  newestLine: string | null;
 }) {
   const look = looks.get(card.workerId ?? ''),
     tone = card.chip?.tone,
@@ -417,6 +494,15 @@ function BoardCard({
         )}
       </span>
       <span className="sd-kcard__title">{card.task.title}</span>
+      {release && (
+        <ReleaseChip
+          projectId={projectId}
+          label="Release for this story"
+          version={release.version}
+          line={release.line && release.line !== newestLine ? release.line : null}
+          compact
+        />
+      )}
       {card.waits && (
         <span className="sd-chip sd-chip--wrap" style={{ alignSelf: 'flex-start' }}>
           <span className="sd-chip__dot"></span>

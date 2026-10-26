@@ -32,6 +32,8 @@
   --wait: #bebad4;
   --wait-soft: #26253a;
   --wait-dot: #77738f;
+  /* A release line's own color after the newest (brand) and the next (live), on the Releases map (1.1) */
+  --line-amber: #f0a030;
   --bad: #ffa1c3;
   --bad-soft: #3a1727;
   --bad-dot: #f0679a;
@@ -119,6 +121,7 @@
     --wait: #585472;
     --wait-soft: #edecf3;
     --wait-dot: #a19db8;
+    --line-amber: #b86e00;
     --bad: #b4235a;
     --bad-soft: #fde6ee;
     --bad-dot: #e2457f;
@@ -179,6 +182,7 @@
   --wait: #585472;
   --wait-soft: #edecf3;
   --wait-dot: #a19db8;
+  --line-amber: #b86e00;
   --bad: #b4235a;
   --bad-soft: #fde6ee;
   --bad-dot: #e2457f;

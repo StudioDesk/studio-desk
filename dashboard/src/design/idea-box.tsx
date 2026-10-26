@@ -37,6 +37,7 @@ export function IdeaBox({
   suggestions = [],
   suggestionsLabel,
   settings = [],
+  release,
   sendLabel,
   secondaryLabel,
   onSecondary,
@@ -63,6 +64,8 @@ export function IdeaBox({
   suggestions?: string[];
   suggestionsLabel?: string;
   settings?: IdeaBoxSetting[];
+  // The release the idea lands in, a chip the page supplies (1.1).
+  release?: ReactNode;
   sendLabel: string;
   secondaryLabel?: string;
   onSecondary?: () => void;
@@ -249,6 +252,12 @@ export function IdeaBox({
               </select>
             </label>
           ),
+        )}
+        {release && (
+          <span className="sd-ideabox__release">
+            <span className="sd-meta">Lands in</span>
+            {release}
+          </span>
         )}
         <div className="sd-ideabox__send">
           {!empty && <span className="sd-meta">Ctrl + Enter</span>}

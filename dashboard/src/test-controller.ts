@@ -9,6 +9,7 @@ import type {
   FirstRunTemplates,
   InstructionsPage,
   LogEvent,
+  NamedRelease,
   PeopleSummary,
   ReleaseOverview,
   RunRecord,
@@ -115,6 +116,8 @@ export interface Controller {
   templates?: FirstRunTemplates;
   // The Releases page's records (1.1 step 6); none answers as a project without the source workflow.
   releases?: ReleaseOverview;
+  // The release an idea's words name, by the words; words not listed name none.
+  named: Record<string, NamedRelease>;
   requests: { url: string; method: string; body?: unknown }[];
   // Answers a command; the default accepts it, and one that throws refuses it with the error's message. A
   // promise holds the answer until the test resolves it, or refuses the command when the test rejects it.
@@ -157,6 +160,7 @@ export function fakeController(projectId = 'project-x'): Controller {
     activity: [{ events: [], next: null }],
     stories: {},
     shells: {},
+    named: {},
     requests: [],
     command: () => ({}),
     reads: () => controller.requests.filter(request => request.method === 'GET').map(request => request.url),
@@ -237,6 +241,8 @@ export function fakeController(projectId = 'project-x'): Controller {
         return respond(
           controller.releases ?? { available: false, reason: 'Only a project on the source workflow has releases.' },
         );
+      if (path === `/api/projects/${projectId}/releases/named`)
+        return respond({ named: controller.named[new URLSearchParams(url.split('?')[1]).get('idea') ?? ''] ?? null });
       if (path === `/api/projects/${projectId}/activity`) {
         const before = new URLSearchParams(url.split('?')[1] ?? '').get('before'),
           index = before ? controller.activity.findIndex(page => String(page.events.at(-1)?.seq) === before) + 1 : 0;

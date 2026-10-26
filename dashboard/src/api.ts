@@ -55,6 +55,8 @@ export interface Task {
   maxAttempts?: number;
   complexity?: number | null;
   sourceStage?: { version?: string; current?: string; phase?: string; [field: string]: unknown } | null;
+  // The release a source story is for, once the director moved it (1.1); otherwise its idea's.
+  release?: { milestoneId?: string; version: string; line?: string; by?: { type?: string } };
   [field: string]: unknown;
 }
 
@@ -573,3 +575,15 @@ export interface ReleaseOverview {
 }
 export const releasesUrl = (projectId: string) => projectPath(projectId, 'releases');
 export const milestonesUrl = (projectId: string) => projectPath(projectId, 'milestones');
+export const linesUrl = (projectId: string) => projectPath(projectId, 'lines');
+// The release an idea's words name if it were sent now, for the New idea box: its version, the words, its line (null
+// for the newest) and its milestone when one exists, or why that version cannot be made. Nothing is made by asking.
+export interface NamedRelease {
+  version: string;
+  named: string;
+  line?: string | null;
+  milestoneId?: string;
+  error?: string;
+}
+export const namedReleaseUrl = (projectId: string, idea: string) =>
+  `${projectPath(projectId, 'releases')}/named?idea=${encodeURIComponent(idea)}`;

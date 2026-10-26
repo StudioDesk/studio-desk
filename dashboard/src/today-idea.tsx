@@ -3,16 +3,82 @@
 // only when the director changed it from the Settings. On a phone the box rises as a sheet from New idea. The
 // draft stays in memory for its project, so leaving Today and coming back keeps it; nothing is stored in the
 // browser.
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
-import { send, type Shell } from './api';
+import { getJSON, namedReleaseUrl, send, type NamedRelease, type Shell } from './api';
 import { IdeaBox, type IdeaBoxFile } from './design/idea-box';
 import { added, drafts, encoded, fileSize, wording, type Draft, type IdeaIntake } from './idea-composer';
 import { newIdeaHandled, onNewIdea } from './new-idea';
+import { nextRelease, ReleaseChip, releaseChoices, useReleases, type ReleaseChoice } from './release-chip';
 import { useToast } from './toast';
 
 const narrow = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 860px)').matches;
+
+// Where a new idea lands (1.1 step 6): the director's pick, then a version the words name, which the controller reads
+// a moment after the typing stops, then the next release. Only the pick is sent; the controller decides the rest again
+// when the idea arrives, so the chip says what it will do.
+function useLandsIn(projectId: string, source: boolean, text: string, planner?: string) {
+  const releases = useReleases(projectId, source),
+    available = !!releases.data?.available,
+    [picked, setPicked] = useState<ReleaseChoice | null>(null),
+    [words, setWords] = useState('');
+  useEffect(() => {
+    const wait = setTimeout(() => setWords(/\d\.\d/.test(text) ? text.trim() : ''), 400);
+    return () => clearTimeout(wait);
+  }, [text]);
+  const named = useQuery({
+      queryKey: ['releases', projectId, 'named', words],
+      queryFn: ({ signal }) => getJSON<{ named: NamedRelease | null }>(namedReleaseUrl(projectId, words), signal),
+      enabled: available && !!words,
+      staleTime: 30_000,
+    }),
+    heard = words && !named.data?.named?.error ? (named.data?.named ?? null) : null,
+    next = nextRelease(releases.data?.milestones ?? []),
+    who = planner ?? 'The planner',
+    // A version the words name that has no milestone yet is made when the idea is sent.
+    made: ReleaseChoice[] =
+      heard && !heard.milestoneId
+        ? [{ id: heard.version, version: heard.version, line: heard.line ?? null, note: 'Made when you send it' }]
+        : [],
+    auto: ReleaseChoice = {
+      id: 'auto',
+      version: `Let ${planner ?? 'the planner'} decide`,
+      line: null,
+      note: heard
+        ? `${heard.version}, as your words say`
+        : next
+          ? `The next release, ${next.version}, unless ${who} moves it`
+          : 'The next release',
+    },
+    choices = [...made, ...releaseChoices(releases.data), auto],
+    shown = picked
+      ? { version: picked.version, line: picked.line, reason: 'your pick' }
+      : heard
+        ? { version: heard.version, line: heard.line ?? null, reason: 'from your words' }
+        : next
+          ? { version: next.version, line: null, reason: 'next release' }
+          : null;
+  return {
+    picked,
+    reset: () => setPicked(null),
+    chip: (busy: boolean) =>
+      available && shown ? (
+        <ReleaseChip
+          projectId={projectId}
+          label="Release for this idea"
+          version={shown.version}
+          line={shown.line}
+          reason={shown.reason}
+          choices={choices}
+          current={picked?.id ?? 'auto'}
+          onPick={choice => setPicked(choice.id === 'auto' ? null : choice)}
+          busy={busy}
+          footer={`Your pick comes first. Without one, a version your idea names wins; ${who} can move it only when you have not picked.`}
+        />
+      ) : null,
+  };
+}
 
 // The agent who plans an idea and the one who checks the work, by role, for the box's hint.
 function crew(shell: Shell) {
@@ -77,6 +143,7 @@ export function TodayIdea({
       else element.removeAttribute('open');
     }
   }, [sheet]);
+  const lands = useLandsIn(projectId, intake === 'source', draft.idea, planner);
   const submit = useMutation({
     mutationFn: async () => {
       const idea = draft.idea.trim();
@@ -88,6 +155,8 @@ export function TodayIdea({
         ...(files.length ? { files } : {}),
         // Only a changed setting is sent; otherwise the idea's work follows the Settings.
         ...(auto !== undefined && auto !== autoDefault ? { autoMode: auto } : {}),
+        // Only the director's pick is sent; otherwise the controller reads the words or takes the next release.
+        ...(lands.picked ? { milestone: lands.picked.id } : {}),
       });
       if (!result.runId) throw new Error('Intake did not confirm a run. Your draft and files are retained.');
       return result.runId;
@@ -98,6 +167,7 @@ export function TodayIdea({
       drafts.set(projectId, empty);
       setDraft(empty);
       setAuto(undefined);
+      lands.reset();
       setSheet(false);
       toast(wording[intake].queued);
       void navigate({ to: '/p/$projectId/runs/$runId', params: { projectId, runId } });
@@ -150,6 +220,7 @@ export function TodayIdea({
           onChange: setAuto,
         },
       ]}
+      release={lands.chip(busy)}
       sendLabel={`Send to ${name}`}
       busy={busy}
       onSend={() => submit.mutate()}

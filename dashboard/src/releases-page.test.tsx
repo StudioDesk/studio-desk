@@ -118,7 +118,11 @@ test('each line shows its last release, what landed since and its milestones, wh
   const patchLine = await screen.findByRole('region', { name: 'release/1.0' });
   expect(within(patchLine).getByText('v1.0.0')).toBeTruthy();
   expect(within(patchLine).getByText('1 through the studio · 0 by hand')).toBeTruthy();
-  expect(within(patchLine).getByText('Fixes here carry forward to main.')).toBeTruthy();
+  expect(within(patchLine).getByText('Each fix here is carried up to main.')).toBeTruthy();
+  // Each line says what it is for, in words.
+  expect(
+    within(patchLine).getByText('Fixes only, for anyone still on 1.0. Each ships as a patch: 1.0.1 next.'),
+  ).toBeTruthy();
   expect(within(patchLine).getByText('Add, edit and delete an agent')).toBeTruthy();
   expect(within(patchLine).getByText('carried to main')).toBeTruthy();
   expect(within(patchLine).getByRole('link', { name: 'Choose the sandbox in Settings' }).getAttribute('href')).toBe(
@@ -130,6 +134,9 @@ test('each line shows its last release, what landed since and its milestones, wh
   const mainLine = screen.getByRole('region', { name: 'main' });
   expect(within(mainLine).getByText('1.1.0')).toBeTruthy();
   expect(within(mainLine).getByText('Newest line')).toBeTruthy();
+  expect(
+    within(mainLine).getByText('New features. Each minor or major release is made here: 1.1.0 next.'),
+  ).toBeTruthy();
   expect(screen.getByRole('link', { name: 'Releases', current: 'page' })).toBeTruthy();
 });
 
@@ -189,6 +196,62 @@ test('Release offers to move the open work on, and Push asks before it sends any
       url: '/api/projects/project-x/milestones/milestone-1.1.0/push',
       method: 'POST',
       body: { projectId: 'project-x', confirm: true },
+    },
+  ]);
+});
+
+test('the map shows how the lines fit together: each in time order, made from a release, its fixes carried up', async () => {
+  controller.releases!.lines![0]!.from = 'v1.0.0';
+  controller.releases!.milestones!.push(milestone('1.2.0', 'main'));
+  open('/p/project-x/releases');
+  const map = within(await screen.findByRole('region', { name: 'How your lines fit together' }));
+  // Newest first, as the rows below it are.
+  expect(map.getAllByRole('group').map(row => row.getAttribute('aria-label'))).toEqual([
+    'main, New features: v1.0.0 released, 1.1.0 open, 1.2.0 planned',
+    'release/1.0, Fixes for 1.0: 1.0.1 open; made from v1.0.0; fixes are carried up to main',
+  ]);
+  expect(
+    screen
+      .getAllByRole('region')
+      .map(region => region.getAttribute('aria-label'))
+      .filter(name => /^(main|release)/.test(name ?? '')),
+  ).toEqual(['main', 'release/1.0']);
+});
+
+test('a line is retired after asking, and a retired line is maintained again from the bottom of the page', async () => {
+  const user = userEvent.setup();
+  open('/p/project-x/releases');
+  const patchLine = await screen.findByRole('region', { name: 'release/1.0' });
+  expect(
+    within(screen.getByRole('region', { name: 'main' })).queryByRole('button', { name: 'Retire this line…' }),
+  ).toBeNull();
+  await user.click(within(patchLine).getByRole('button', { name: 'Retire this line…' }));
+  expect(commands()).toEqual([]);
+  await user.click(screen.getByRole('button', { name: 'Retire it' }));
+  expect(commands()).toEqual([
+    {
+      url: '/api/projects/project-x/lines',
+      method: 'PATCH',
+      body: { projectId: 'project-x', branch: 'release/1.0', retired: true },
+    },
+  ]);
+  cleanup();
+  controller.requests = [];
+  controller.releases!.lines![0]!.state = 'retired';
+  open('/p/project-x/releases');
+  const retired = within(await screen.findByRole('region', { name: 'Retired lines' }));
+  expect(screen.queryByRole('region', { name: 'release/1.0' })).toBeNull();
+  expect(
+    retired.getByText(
+      'Its last release, v1.0.0, and its tags stay. No new ideas land here, and fixes skip it; work already on it finishes.',
+    ),
+  ).toBeTruthy();
+  await user.click(retired.getByRole('button', { name: 'Maintain it again' }));
+  expect(commands()).toEqual([
+    {
+      url: '/api/projects/project-x/lines',
+      method: 'PATCH',
+      body: { projectId: 'project-x', branch: 'release/1.0', retired: false },
     },
   ]);
 });

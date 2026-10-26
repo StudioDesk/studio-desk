@@ -141,6 +141,14 @@ const paths = {
       <path d="M6 7.2v9.6M18 9.2c0 4.5-5 4.5-11 7.6" />
     </>
   ),
+  // A release chip that has stopped moving, and one that opens its picker.
+  lock: (
+    <>
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+    </>
+  ),
+  down: <path d="M6 9l6 6 6-6" />,
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof paths;
