@@ -96,6 +96,8 @@ test('Release moves open work on when asked, the planner drafts the notes, and a
   );
   assert.match(notes.brief, new RegExp(`- ${c.taskId}: Improve fix`));
   await c.wait(notes.id);
+  // With no place chosen for the tests, the release's run where a story's would: here, a computer without Codex CLI.
+  c.app.runner.codexBinary = undefined;
   await c.accept(notes.id);
   await waitFor(
     () =>
@@ -108,6 +110,7 @@ test('Release moves open work on when asked, the planner drafts the notes, and a
   assert.equal(done.release.state, 'released', JSON.stringify(done.release));
   assert.equal(done.state, 'released');
   assert.equal(done.release.tag, 'v1.0.1');
+  assert.deepEqual(done.release.configuration, { testSandbox: 'none' });
   const tip = git(c.root, ['rev-parse', 'refs/heads/release/1.0']);
   assert.equal(tip, done.release.commit);
   assert.equal(git(c.root, ['rev-parse', `${tip}~1`]), integration.commit);

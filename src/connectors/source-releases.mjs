@@ -16,7 +16,7 @@ import { createSourceWorktree, removeSourceWorktree, sourceWorktreeRoot } from '
 import { lineReached, lineRepository, moveLine, projectLine } from './source-lines.mjs';
 import { compareVersions, makeMilestone, parseVersion, projectMilestones, releaseTags } from './source-milestones.mjs';
 import { projectSource, sourceResources } from './source-projects.mjs';
-import { testSandboxOf } from '../adapters/source-test-sandbox.mjs';
+import { chosenTestSandbox } from '../adapters/source-test-sandbox.mjs';
 import { projectOrganization } from '../core/project-organization.mjs';
 import { recordProject } from '../core/projects.mjs';
 import { runIdOf } from '../core/graph.mjs';
@@ -279,8 +279,9 @@ export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}
   if (runtime.selfHosted && root === runtime.sourceChangeRoot && repository.live !== false)
     throw new Error(`${repository.branch} is the branch this controller runs from; release it by hand.`);
   if (tagExists(root, release.tag)) throw new Error(`The repository already has a tag named ${release.tag}.`);
+  // The release's tests run where the next story's candidate tests would.
   const id = `source-release:${projectId}:${milestone.id}`,
-    org = store.organization();
+    testSandbox = chosenTestSandbox(store.organization(), runtime.codexBinary);
   Object.assign(release, {
     id,
     state: 'verifying',
@@ -292,8 +293,8 @@ export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}
     repository,
     worktree: path.join(sourceWorktreeRoot(runtime), `r-${milestone.id.slice(-8)}`),
     configuration: {
-      testSandbox: testSandboxOf(org),
-      ...(process.platform === 'win32' && testSandboxOf(org) === 'codex'
+      testSandbox,
+      ...(process.platform === 'win32' && testSandbox === 'codex'
         ? { windowsSandbox: runtime.codexWindowsSandbox }
         : {}),
     },
