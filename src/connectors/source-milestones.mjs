@@ -338,21 +338,58 @@ export function addWaitingIdea(store, projectId, { milestoneId, idea, autoMode }
   store.event('idea_waiting', null, null, `An idea waits in milestone ${milestone.version}.`, projectId);
   return waiting;
 }
-// Takes a waiting idea out of its milestone, returning it with the milestone.
+// Takes a waiting idea out of its milestone, returning it with the milestone and the place it held.
 export function takeWaitingIdea(store, projectId, milestoneId, waitingId) {
   const milestones = projectMilestones(store, projectId),
     milestone = milestones.find(item => item.id === milestoneId),
-    waiting = milestone?.waiting.find(item => item.id === waitingId);
-  if (!waiting) throw new Error('Waiting idea not found.');
-  milestone.waiting = milestone.waiting.filter(item => item !== waiting);
+    index = milestone ? milestone.waiting.findIndex(item => item.id === waitingId) : -1;
+  if (index < 0) throw new Error('Waiting idea not found.');
+  const [waiting] = milestone.waiting.splice(index, 1);
   save(store, projectId, milestones);
-  return { milestone, waiting };
+  return { milestone, waiting, index };
 }
-// Puts a waiting idea back where it was, when sending it failed.
-export function restoreWaitingIdea(store, projectId, milestoneId, waiting) {
+// Puts a waiting idea back in the place it held, when sending it failed.
+export function restoreWaitingIdea(store, projectId, milestoneId, waiting, index = 0) {
   const milestones = projectMilestones(store, projectId),
     milestone = milestones.find(item => item.id === milestoneId);
   if (!milestone) return;
-  milestone.waiting = [waiting, ...milestone.waiting].sort((a, b) => (a.at < b.at ? -1 : 1));
+  milestone.waiting.splice(Math.min(index, milestone.waiting.length), 0, waiting);
   save(store, projectId, milestones);
+}
+// Ideas wait in the order they are sent (1.1 step 6): the director moves one to another place in its milestone.
+export function orderWaitingIdea(store, projectId, milestoneId, waitingId, index) {
+  const milestones = projectMilestones(store, projectId),
+    milestone = milestones.find(item => item.id === milestoneId),
+    from = milestone ? milestone.waiting.findIndex(item => item.id === waitingId) : -1;
+  if (from < 0) throw new Error('Waiting idea not found.');
+  if (!Number.isSafeInteger(index) || index < 0 || index >= milestone.waiting.length)
+    throw new Error(`A waiting idea's place is a whole number from 0 to ${milestone.waiting.length - 1}.`);
+  const [waiting] = milestone.waiting.splice(from, 1);
+  milestone.waiting.splice(index, 0, waiting);
+  save(store, projectId, milestones);
+  return milestone;
+}
+// Moves a waiting idea to the end of another open milestone's ideas (1.1 step 6). Its line follows its milestone when
+// it is sent, so moving it is only a record.
+export function moveWaitingIdea(store, projectId, milestoneId, waitingId, toMilestone) {
+  const milestones = projectMilestones(store, projectId),
+    milestone = milestones.find(item => item.id === milestoneId),
+    target = milestones.find(item => item.id === toMilestone || item.version === toMilestone),
+    index = milestone ? milestone.waiting.findIndex(item => item.id === waitingId) : -1;
+  if (index < 0) throw new Error('Waiting idea not found.');
+  if (!target) throw new Error(`${toMilestone} is not a milestone of this project.`);
+  if (target === milestone) return target;
+  if (!open(target)) throw new Error(`Milestone ${target.version} is released, so no idea waits in it.`);
+  if (target.waiting.length >= 100) throw new Error('A milestone holds at most 100 waiting ideas.');
+  const [waiting] = milestone.waiting.splice(index, 1);
+  target.waiting.push(waiting);
+  save(store, projectId, milestones);
+  store.event(
+    'idea_moved',
+    null,
+    null,
+    `A waiting idea moved from milestone ${milestone.version} to ${target.version}.`,
+    projectId,
+  );
+  return target;
 }

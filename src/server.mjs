@@ -28,9 +28,12 @@ import {
   editMilestone,
   makeMilestone,
   moveStory,
+  moveWaitingIdea,
+  orderWaitingIdea,
   projectMilestones,
   takeWaitingIdea,
 } from './connectors/source-milestones.mjs';
+import { releaseOverview } from './connectors/release-overview.mjs';
 import { listFolders } from './connectors/folders.mjs';
 import { packageBoundary } from './connectors/package-installs.mjs';
 import {
@@ -452,6 +455,13 @@ export function createStudio({
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });
         if (parts[3] === 'live') return json(res, liveRecords(store, projectId));
+        // A project's releases (1.1 step 6): its lines, milestones and their work, read from records and git alone.
+        if (parts[3] === 'releases')
+          try {
+            return json(res, releaseOverview(store, projectId, runner));
+          } catch (error) {
+            fail(error.message);
+          }
         if (parts[3] === 'runs') {
           const limit = url.searchParams.get('limit') ?? '10';
           if (!/^[1-9][0-9]?$/.test(limit) || Number(limit) > 50) fail('limit must be a whole number from 1 to 50.');
@@ -1086,6 +1096,26 @@ export function createStudio({
             );
             runner.autonomy.sendWaiting(projectId);
             return json(res, waiting, 201);
+          }
+          // A waiting idea's place in its milestone, or a move to another milestone (1.1 step 6).
+          if (
+            parts[4] &&
+            parts[5] === 'ideas' &&
+            parts[6] &&
+            ['order', 'move'].includes(parts[7]) &&
+            !parts[8] &&
+            req.method === 'POST'
+          ) {
+            const field = parts[7] === 'order' ? 'index' : 'milestone';
+            if (Object.keys(data).some(key => !['projectId', field].includes(key)))
+              fail(parts[7] === 'order' ? 'Ordering takes the idea’s new place.' : 'Moving takes the milestone.');
+            settle(() =>
+              parts[7] === 'order'
+                ? orderWaitingIdea(store, projectId, parts[4], parts[6], data.index)
+                : moveWaitingIdea(store, projectId, parts[4], parts[6], data.milestone),
+            );
+            if (parts[7] === 'move') runner.autonomy.sendWaiting(projectId);
+            return json(res, { milestones: projectMilestones(store, projectId) });
           }
           if (
             parts[4] &&

@@ -119,7 +119,7 @@ export function startIdeaIntake(
 // next one (`by`). The director chose its milestone when writing it there, so the planner does not move it. An idea that
 // cannot be sent goes back where it waited.
 export function sendWaitingIdea(store, registries, runner, projectId, milestoneId, waitingId, by) {
-  const { milestone, waiting } = takeWaitingIdea(store, projectId, milestoneId, waitingId);
+  const { milestone, waiting, index } = takeWaitingIdea(store, projectId, milestoneId, waitingId);
   try {
     return startIdeaIntake(store, registries, runner, {
       projectId,
@@ -129,7 +129,7 @@ export function sendWaitingIdea(store, registries, runner, projectId, milestoneI
       waiting: { id: waiting.id, by },
     });
   } catch (error) {
-    restoreWaitingIdea(store, projectId, milestoneId, waiting);
+    restoreWaitingIdea(store, projectId, milestoneId, waiting, index);
     throw error;
   }
 }
