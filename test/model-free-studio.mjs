@@ -32,24 +32,31 @@ export const fixtureNpm = {
   executable: process.execPath,
   args: [fileURLToPath(new URL('./fixture-npm.mjs', import.meta.url))],
 };
-// The built-in sandbox as set up on this computer, so candidate tests and an idea's checks are recorded as running
-// in it (1.0.1). The suite never runs it: the protocol fixtures run the tests, and a test that measures a real
-// suite chooses No sandbox. A test of the sandbox's own states passes its own.
+// The built-in sandbox as the suite's studios see it (1.0.1), never this computer's own setup: set up while a
+// protocol fixture stands in for the tests, so candidate tests and an idea's checks are recorded as running in it
+// without the suite ever running it, and otherwise not available, so a test that measures a real suite stops
+// unless it chooses No sandbox. A test of the sandbox's own states passes its own.
 export const readyBuiltInSandbox = { status: () => ({ state: 'ready' }), setup: () => false };
+const fixtureBuiltInSandbox = runner => ({
+  status: () => ({ state: runner()?.sourceCheckCommand ? 'ready' : 'unsupported' }),
+  setup: () => false,
+});
 export function createStudio(options = {}) {
   const fixtureOptions =
     process.env.STUDIO_MODEL_FREE_LEAF_FIXTURES === '1'
       ? { fixtureProcessTermination: (entry, force) => entry.child.kill(force ? 'SIGKILL' : 'SIGTERM') }
       : {};
-  return createController({
+  let app = null;
+  app = createController({
     // The suite's studios start from the game organization and its starter tasks unless a test chooses.
     bootstrap: { organizationPreset: 'game-studio', workflowPresets: ['game-production'] },
     ...options,
     runnerOptions: {
       packageInstallCommand: fixtureNpm,
-      builtInSandbox: readyBuiltInSandbox,
+      builtInSandbox: fixtureBuiltInSandbox(() => app?.runner),
       ...fixtureOptions,
       ...options.runnerOptions,
     },
   });
+  return app;
 }
