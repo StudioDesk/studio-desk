@@ -220,6 +220,26 @@ export function namedRelease(milestones, tags, text, lines = []) {
   return null;
 }
 
+// The release an idea's words would name if it were sent now, for the New idea box (1.1 step 6): the version, the words
+// that named it, its line (null for the newest) and its milestone when one exists, or why that version cannot be made.
+// Nothing is made. Null when the words name no release.
+export function namedReleasePreview(store, projectId, runtime, idea) {
+  const root = sourceRoot(store, projectId, runtime),
+    milestones = projectMilestones(store, projectId),
+    lines = projectLines(store.project(projectId)),
+    tags = releaseTags(root),
+    named = namedRelease(milestones, tags, idea, lines);
+  if (!named) return null;
+  const version = versionText(named.version),
+    existing = milestones.find(item => item.version === version);
+  if (existing) return { version, named: named.named, line: existing.line, milestoneId: existing.id };
+  try {
+    return { version, named: named.named, line: milestoneTarget(root, lines, named.version, tags, milestones).line };
+  } catch (error) {
+    return { version, named: named.named, error: error.message };
+  }
+}
+
 // The release and line a new idea takes (intake): the milestone or line the director picked, a version the idea
 // names, or the next release on the newest line. `release.by` records which, so the planner (step 2b) never moves a
 // release the director picked; `by` names the chooser of `milestone` when the controller sends an idea for the planner.

@@ -269,6 +269,9 @@ function runView(run, tasks) {
     projectId: run.projectId,
     workflow: run.workflow,
     ...(run.brief ? { brief: run.brief } : {}),
+    // A source idea's release and line (1.1), for its chip on the idea page.
+    ...(run.release ? { release: run.release } : {}),
+    ...(run.line !== undefined ? { line: run.line } : {}),
     envelope: run.envelope,
     createdAt: run.createdAt,
     revisions: run.revisions.map(({ revision, at, reason, source }) => ({

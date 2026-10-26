@@ -29,6 +29,7 @@ import {
   makeMilestone,
   moveStory,
   moveWaitingIdea,
+  namedReleasePreview,
   orderWaitingIdea,
   projectMilestones,
   takeWaitingIdea,
@@ -451,6 +452,23 @@ export function createStudio({
         req.method === 'GET'
       )
         return json(res, oneRun(store, parts[2], parts[4]));
+      // The release an idea's words name, for the New idea box as the director writes (1.1 step 6); nothing is made.
+      if (
+        parts[0] === 'api' &&
+        parts[1] === 'projects' &&
+        parts[3] === 'releases' &&
+        parts[4] === 'named' &&
+        parts.length === 5 &&
+        req.method === 'GET'
+      ) {
+        const idea = url.searchParams.get('idea') ?? '';
+        if (idea.length > 4000) fail('An idea is at most 4000 characters.');
+        try {
+          return json(res, { named: namedReleasePreview(store, parts[2], runner, idea) });
+        } catch (error) {
+          fail(error.message);
+        }
+      }
       if (parts[0] === 'api' && parts[1] === 'projects' && parts.length === 4 && req.method === 'GET') {
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });

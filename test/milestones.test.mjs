@@ -117,10 +117,34 @@ test('an idea lands on the release the director picks, one its words name, or th
     assert.deepEqual(run.release, { milestoneId: next.id, version: '1.2.0', by: { type: 'default' } }, idea);
     assert.equal(run.line, undefined, 'Nothing has added a second line yet.');
   }
+  // The New idea box hears the release an idea's words name as the director writes, and nothing is made by asking.
+  const preview = async idea =>
+    (await (await fetch(`${c.origin}/api/projects/${project}/releases/named?idea=${encodeURIComponent(idea)}`)).json())
+      .named;
+  const linesBefore = structuredClone(store.project(project).lines);
+  assert.equal(await preview('Make the board faster.'), null);
+  assert.deepEqual(await preview('Security fix for 1.1.3: tokens never expire.'), {
+    version: '1.1.3',
+    named: '1.1.3',
+    line: 'release/1.1',
+  });
+  assert.deepEqual(await preview('A fix for 1.1.0.'), { version: '1.1.1', named: '1.1.0', line: 'release/1.1' });
+  assert.equal(projectMilestones(store, project).length, 1, 'Asking makes no milestone.');
+  assert.deepEqual(store.project(project).lines, linesBefore, 'Asking makes no line.');
   // A full version the idea names is made, with its release line from the newest tag of its series.
   let sent = await send({ idea: 'Security fix for 1.1.3: tokens never expire.' }),
     run = runOf(sent);
   const named = projectMilestones(store, project).find(item => item.version === '1.1.3');
+  assert.deepEqual(await preview('Security fix for 1.1.3.'), {
+    version: '1.1.3',
+    named: '1.1.3',
+    line: 'release/1.1',
+    milestoneId: named.id,
+  });
+  // The idea's own view carries its release and line, for its chip on the idea page.
+  const live = await (await fetch(`${c.origin}/api/projects/${project}/live`)).json(),
+    view = live.runs.find(item => item.id === sent.data.runId);
+  assert.deepEqual([view.release, view.line], [run.release, 'release/1.1']);
   assert.deepEqual(run.release, { milestoneId: named.id, version: '1.1.3', by: { type: 'idea', named: '1.1.3' } });
   assert.equal(run.line, 'release/1.1');
   assert.deepEqual(sent.data.release, run.release);
