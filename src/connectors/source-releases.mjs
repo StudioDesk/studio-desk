@@ -281,7 +281,7 @@ export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}
   if (tagExists(root, release.tag)) throw new Error(`The repository already has a tag named ${release.tag}.`);
   // The release's tests run where the next story's candidate tests would.
   const id = `source-release:${projectId}:${milestone.id}`,
-    testSandbox = chosenTestSandbox(store.organization(), runtime.codexBinary);
+    testSandbox = chosenTestSandbox(store.organization());
   Object.assign(release, {
     id,
     state: 'verifying',
@@ -292,12 +292,7 @@ export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}
     root,
     repository,
     worktree: path.join(sourceWorktreeRoot(runtime), `r-${milestone.id.slice(-8)}`),
-    configuration: {
-      testSandbox,
-      ...(process.platform === 'win32' && testSandbox === 'codex'
-        ? { windowsSandbox: runtime.codexWindowsSandbox }
-        : {}),
-    },
+    configuration: { testSandbox },
     startedAt: new Date().toISOString(),
   });
   store.tx(() => {

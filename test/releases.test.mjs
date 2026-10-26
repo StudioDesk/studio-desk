@@ -96,8 +96,10 @@ test('Release moves open work on when asked, the planner drafts the notes, and a
   );
   assert.match(notes.brief, new RegExp(`- ${c.taskId}: Improve fix`));
   await c.wait(notes.id);
-  // With no place chosen for the tests, the release's run where a story's would: here, a computer without Codex CLI.
-  c.app.runner.codexBinary = undefined;
+  // The release's tests run where the director chose for candidate tests, as a story's do: here, without a sandbox.
+  const chosen = store.organization();
+  chosen.testSandbox = 'none';
+  store.setOrganization(chosen);
   await c.accept(notes.id);
   await waitFor(
     () =>
