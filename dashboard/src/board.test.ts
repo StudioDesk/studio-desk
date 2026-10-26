@@ -2,8 +2,8 @@
 // build is in review until it is integrated, and closed work shows only when asked for.
 import { expect, test } from 'vitest';
 import type { AttemptSummary, Task } from './api';
-import { cardOf, columnOf, matches } from './board';
-import type { StudioState } from './studio-runs';
+import { cardOf, columnOf, laneDetails, matches } from './board';
+import type { RunStory, StudioState } from './studio-runs';
 
 const stage = (fields: object) => ({ version: 'source-story-stages-v1', history: [], ...fields });
 const story = (fields: Partial<Task>): Task => ({
@@ -28,6 +28,26 @@ const state = (tasks: Task[], attempts: AttemptSummary[] = []) =>
     attempts,
     runs: [],
   }) as unknown as StudioState;
+// An idea as the live set tells it: its tasks in its graph, one after another.
+const idea = (tasks: Task[]) =>
+  ({
+    id: 'run-1',
+    name: 'Idea',
+    title: 'An idea',
+    brief: 'An idea.',
+    directorInputs: [],
+    graph: {
+      revisions: 1,
+      envelope: null,
+      legacy: false,
+      stages: tasks.map(task => [{ taskId: task.id, title: task.title, kind: task.kind, status: task.status }]),
+    },
+    startedAt: '2026-10-22T19:00:00Z',
+    taskIds: tasks.map(task => task.id),
+    steps: [],
+    needsYou: [],
+    outcome: { tone: 'busy', label: 'In progress', text: '' },
+  }) as unknown as RunStory;
 
 test('each task stands in one of five columns, and stopped work where it stopped', () => {
   expect(columnOf(story({ status: 'backlog', approval: { status: 'pending' } }))).toBe('planned');
@@ -87,4 +107,25 @@ test('work the controller holds after an attempt waits in grey; a stop is red', 
   });
   const stopped = { ...held, controllerWait: false };
   expect(cardOf(stopped, state([stopped]), [])).toMatchObject({ chip: { tone: 'bad' } });
+});
+
+test("an idea lane's details count its stories done, running and waiting for the director", () => {
+  const work = (fields: Partial<Task>) => story({ kind: 'general:work', ...fields }),
+    accepted = work({ id: 'T-1', status: 'done', acceptedAttemptId: 'a-1', lastAttemptId: 'a-1' }),
+    running = work({ id: 'T-2', status: 'running', lastAttemptId: 'a-2' }),
+    ready = work({ id: 'T-3', status: 'ready', queued: true }),
+    attempts: AttemptSummary[] = [
+      { id: 'a-1', taskId: 'T-1', status: 'accepted', workerId: 'W-1', startedAt: '2026-10-22T19:01:00Z' },
+      { id: 'a-2', taskId: 'T-2', status: 'running', workerId: 'W-1', startedAt: '2026-10-22T19:05:00Z' },
+    ];
+  const three = [accepted, running, ready];
+  expect(laneDetails(idea(three), state(three, attempts))).toBe('1 of 3 done · 1 running');
+  // A story that waits for the director's approval.
+  const proposed = work({ id: 'T-4', status: 'backlog', approval: { status: 'pending' } }),
+    two = [proposed, ready];
+  expect(laneDetails(idea(two), state(two))).toBe('0 of 2 done · waits for you');
+  // An idea whose checks run before any story is planned has no stories to count.
+  const checks = story({ id: 'T-c', kind: 'studio-development:checks', status: 'running', lastAttemptId: 'a-c' }),
+    checking: AttemptSummary = { ...attempts[1]!, id: 'a-c', taskId: 'T-c' };
+  expect(laneDetails(idea([checks]), state([checks], [checking]))).toBe('');
 });

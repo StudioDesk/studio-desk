@@ -2176,6 +2176,33 @@ button.sd-row[aria-pressed='true'] {
   padding: var(--space-14) var(--space-4) var(--space-8);
   font-weight: 700;
 }
+/* An idea lane's head opens the idea: the agent row's hover, the global focus outline, its dot where it stood */
+.sd-lanehead__open {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  min-width: 0;
+  max-width: 100%;
+  padding: var(--space-4) var(--space-8);
+  margin-left: calc(-1 * var(--space-8));
+  border-radius: 14px;
+  color: var(--ink);
+  text-decoration: none;
+}
+.sd-lanehead__open:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.sd-lanehead__open > .sd-meta {
+  flex: none;
+}
+/* Only the name gives way, ending in an ellipsis */
+.sd-lanehead__name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .sd-kanban--lane .sd-col {
   min-height: 0;
 }

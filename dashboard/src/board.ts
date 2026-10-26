@@ -6,6 +6,7 @@ import { decisionState, fileRequest, askedPaths } from './decisions';
 import type { AgentState } from './design/agent-kit.js';
 import { diffStatOf, openPhaseOf, testingPhases, took, totalsOf } from './evidence';
 import { agentState } from './faces';
+import { journeyStories } from './journey';
 import { workerName } from './names';
 import { isSourceStory, kindLabel, standing, storyPeople } from './story';
 import { active, type RunStory, type StudioState } from './studio-runs';
@@ -243,6 +244,20 @@ export function found(card: Card, search: string) {
   const text = search.trim().toLowerCase();
   if (!text) return true;
   return [card.task.title, card.task.id, card.task.brief ?? ''].some(value => value.toLowerCase().includes(text));
+}
+
+// An idea lane's quiet details, its stories counted as the Ideas list counts them: "1 of 3 done · 1 running · waits
+// for you". An idea with no stories yet says nothing of them.
+export function laneDetails(run: RunStory, state: StudioState) {
+  const stories = journeyStories(run, state),
+    count = (tone: Tone) => stories.filter(story => story.chip.tone === tone).length;
+  return [
+    stories.length ? `${count('ok')} of ${stories.length} done` : '',
+    count('live') ? `${count('live')} running` : '',
+    count('you') ? 'waits for you' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 // The newest work first: what finished last, else what was made last.

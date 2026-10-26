@@ -5,6 +5,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { Task } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
@@ -122,6 +123,80 @@ test('closed and cancelled work joins what is done when shown, from its address'
   const done = await column('Done');
   await waitFor(() => expect(titles(done)).toEqual(expect.arrayContaining(['Cancelled work', 'Denied work'])));
   expect(screen.getByRole('button', { name: 'Hide 2 closed or cancelled' })).toBeTruthy();
+});
+
+test("lanes by idea head each idea's lane with its dot, its words and its details, the whole head opening it", async () => {
+  const user = userEvent.setup(),
+    words =
+      'Make the board read the same way in both of its lane views, so an idea is headed as plainly as a person is',
+    member = (id: string, extra: Partial<Task>) =>
+      taskFixture(id, {
+        title: `Story ${id}`,
+        workflowReference: { runId: 'run-1', key: id, id: 'workflow-1', name: 'Fixture flow' },
+        ...extra,
+      }),
+    done = member('T-done', { status: 'done', acceptedAttemptId: 'attempt-done', lastAttemptId: 'attempt-done' }),
+    running = member('T-going', { status: 'running', lastAttemptId: 'attempt-going' });
+  expect(words.length).toBeGreaterThan(90);
+  controller.shell.workers = [{ id: 'W-1', displayName: 'Eli', team: 'Engineering', jobTitle: 'Software engineer' }];
+  controller.tasks = [
+    done,
+    running,
+    taskFixture('T-alone', { title: 'Work in no idea', status: 'ready', queued: true }),
+  ];
+  controller.attempts = [
+    { id: 'attempt-done', taskId: 'T-done', status: 'accepted', workerId: 'W-1', startedAt: '2026-10-21T12:01:00Z' },
+    { id: 'attempt-going', taskId: 'T-going', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+  ];
+  // A run as the controller's run view sends it (src/core/graph.mjs runView), with one node per task.
+  controller.runs = [
+    {
+      id: 'run-1',
+      createdAt: '2026-10-21T12:00:00Z',
+      brief: `${words}\nThe whole head opens the idea.`,
+      workflow: { id: 'workflow-1', name: 'Fixture flow', version: 3 },
+      revisions: [{ revision: 1, at: '2026-10-21T12:00:00Z', reason: 'created' }],
+      nodes: [done, running].map(task => ({
+        taskId: task.id,
+        key: task.id,
+        kind: task.kind,
+        title: task.title,
+        workerId: 'W-1',
+        dependencies: [],
+        revision: 1,
+      })),
+      archive: { archived: false },
+    },
+  ];
+  controller.settled = { accepted: [], closed: [] };
+  open();
+  await user.click(await screen.findByRole('button', { name: 'Lanes by idea' }));
+  // The idea's lane is named by its words; its head is one link to the idea, holding its dot, words and details.
+  const lane = await screen.findByRole('region', { name: words }),
+    toIdea = within(lane)
+      .getAllByRole('link')
+      .filter(link => link.getAttribute('href') === '/p/project-x/runs/run-1');
+  expect(toIdea).toHaveLength(1);
+  const head = toIdea[0]!;
+  expect(head.classList.contains('sd-lanehead__open')).toBe(true);
+  expect(head.querySelector('.sd-ideadot')).toBeTruthy();
+  expect(head.querySelector('.sd-lanehead__name')?.textContent).toBe(words);
+  expect(head.querySelector('.sd-meta')?.textContent).toBe('1 of 2 done · 1 running');
+  expect(head.textContent).not.toMatch(/[“”"]|The whole head/);
+  // Work in no idea is headed in the same words' place, with no dot and no link.
+  const none = (await screen.findByRole('region', { name: 'Not part of an idea' })).querySelector('.sd-lanehead')!;
+  expect(none.querySelector('.sd-lanehead__name')?.textContent).toBe('Not part of an idea');
+  expect(none.querySelector('.sd-ideadot')).toBeNull();
+  expect(none.querySelector('a')).toBeNull();
+  // Person lanes keep their heads: the agent's name and job title.
+  await user.click(screen.getByRole('button', { name: 'Lanes by person' }));
+  const person = await waitFor(() => {
+    const found = document.querySelector<HTMLElement>('.sd-lanehead')!;
+    within(found).getByText('Eli');
+    return found;
+  });
+  expect(within(person).getByText('Software engineer').className).toBe('sd-meta');
+  expect(person.querySelector('.sd-lanehead__open')).toBeNull();
 });
 
 test('a paused project says so above the board, and resumes from there', async () => {

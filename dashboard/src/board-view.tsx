@@ -6,7 +6,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Link, useNavigate, useRouter } from '@tanstack/react-router';
 import { useMemo, useState, type DragEvent, type ReactNode } from 'react';
 import { send } from './api';
-import { columns, cardOf, found, matches, newest, type Card, type ColumnId, type Filter } from './board';
+import { columns, cardOf, found, laneDetails, matches, newest, type Card, type ColumnId, type Filter } from './board';
 import { withSettled } from './board-page';
 import { AgentAvatar } from './design/avatar';
 import { Icon } from './design/icons';
@@ -197,24 +197,40 @@ export function Board({
       </section>
     );
   };
-  const laneGroups: { key: string; head: ReactNode; cards: Card[] }[] =
+  // An idea lane is headed as a person lane is: its dot, its words and its quiet details, the whole head opening the
+  // idea. Its words are the brief's first line, uncut; the head's CSS ends a long one in an ellipsis. The details
+  // count from the live set, which holds every task of an open idea.
+  const laneGroups: { key: string; label?: string; head: ReactNode; cards: Card[] }[] =
     lanes === 'idea'
       ? [
           ...stories
-            .map((story, index) => ({
-              key: story.id,
-              head: (
-                <>
-                  <span className="sd-ideadot" style={{ background: ideaHues[index % ideaHues.length] }}></span>
-                  <Link to="/p/$projectId/runs/$runId" params={{ projectId, runId: story.id }}>
-                    {story.brief ? `“${story.brief.split('\n')[0]!.slice(0, 90)}”` : story.title}
+            .map((story, index) => {
+              const words = (story.brief || story.title).trim().split('\n')[0]!,
+                details = laneDetails(story, state);
+              return {
+                key: story.id,
+                label: words,
+                head: (
+                  <Link
+                    className="sd-lanehead__open"
+                    to="/p/$projectId/runs/$runId"
+                    params={{ projectId, runId: story.id }}
+                  >
+                    <span className="sd-ideadot" style={{ background: ideaHues[index % ideaHues.length] }}></span>
+                    <span className="sd-lanehead__name">{words}</span>
+                    {details && <span className="sd-meta">{details}</span>}
                   </Link>
-                </>
-              ),
-              cards: shown.filter(card => card.idea?.runId === story.id),
-            }))
+                ),
+                cards: shown.filter(card => card.idea?.runId === story.id),
+              };
+            })
             .filter(group => group.cards.length),
-          { key: 'none', head: <span>Not part of an idea</span>, cards: shown.filter(card => !card.idea) },
+          {
+            key: 'none',
+            label: 'Not part of an idea',
+            head: <span className="sd-lanehead__name">Not part of an idea</span>,
+            cards: shown.filter(card => !card.idea),
+          },
         ].filter(group => group.cards.length)
       : lanes === 'person'
         ? workers
@@ -338,7 +354,7 @@ export function Board({
             ))}
           </div>
           {laneGroups.map(group => (
-            <section key={group.key} aria-label={typeof group.head === 'string' ? group.head : undefined}>
+            <section key={group.key} aria-label={group.label}>
               <div className="sd-lanehead">{group.head}</div>
               <div className="sd-kanban sd-kanban--lane">{columns.map(item => column(item.id, group.cards, true))}</div>
             </section>
