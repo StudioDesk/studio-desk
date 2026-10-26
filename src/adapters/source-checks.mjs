@@ -66,7 +66,7 @@ export const sourceChecksAdapter = {
       profileOf(a.sourceCheck),
     );
     runtime.store.updateAttempt(a);
-    const sandboxed = a.configuration.testSandbox === 'built-in',
+    const sandboxed = a.configuration?.testSandbox === 'built-in',
       command =
         runtime.sourceCheckCommand ||
         (sandboxed ? builtInSandboxCommand({ root: snapshot, command: a.sourceCheck.command }) : a.sourceCheck.command);

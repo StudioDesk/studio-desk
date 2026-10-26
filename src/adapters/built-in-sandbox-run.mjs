@@ -13,6 +13,7 @@ import {
   builtInSandboxCommandLine,
   builtInSandboxEnvironment,
   builtInSandboxFiles,
+  builtInSandboxGitConfiguration,
   builtInSandboxPackages,
   builtInSandboxSettings,
   openBuiltInSandboxPassThrough,
@@ -50,13 +51,18 @@ fs.writeFileSync(
     }),
   ),
 );
+// The sandbox account is an account of its own, with no git name or email, which tests that commit (or a
+// controller under test that checks for one) need. A neutral one goes where the director's own would be,
+// in git's global settings, so a repository's own settings still come first.
+const gitConfiguration = path.join(runDirectory, 'gitconfig');
+fs.writeFileSync(gitConfiguration, builtInSandboxGitConfiguration);
 fs.writeFileSync(
   instructions,
   JSON.stringify({
     cwd: process.cwd(),
     executable: executable === process.execPath ? node : executable,
     args,
-    env: builtInSandboxEnvironment(process.env),
+    env: { ...builtInSandboxEnvironment(process.env), GIT_CONFIG_GLOBAL: gitConfiguration },
   }),
 );
 const child = spawn(

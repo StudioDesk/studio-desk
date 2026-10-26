@@ -193,6 +193,9 @@ export const builtInSandboxCommandLine = (node, launcher, instructions) =>
 // them. Nothing else from the controller's environment, which may hold sign-ins, goes in.
 export const builtInSandboxEnvironment = environment =>
   Object.fromEntries(Object.entries(environment).filter(([name]) => /^STUDIO_/i.test(name)));
+// git's global settings for the sandbox account, which has none of its own: a neutral name and email.
+export const builtInSandboxGitConfiguration =
+  '[user]\n\tname = Studio desk tests\n\temail = tests@studio-desk.invalid\n';
 
 // The test command run through the built-in sandbox: the runner gets the folder the tests may write
 // (the copy they run on) and the command itself.
