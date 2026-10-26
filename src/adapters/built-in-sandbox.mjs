@@ -109,11 +109,14 @@ export function builtInSandbox(files = builtInSandboxFiles()) {
 export const noBuiltInSandbox = { status: () => ({ state: 'unsupported' }), setup: () => false };
 export const builtInSandboxReady = runtime => runtime.builtInSandbox?.status().state === 'ready';
 
-// The packages installed for a copy: any `node_modules` in a folder above it, where Node's lookup finds them.
+// The packages installed for a copy: any `node_modules` in a folder above it, where Node's lookup finds them,
+// and any `package.json` there, which Node reads to know how the files below it load (the data folder's marks
+// where the pipeline's installed packages begin).
 export function builtInSandboxPackages(root) {
   const packages = [];
   for (let folder = path.dirname(root); folder !== path.dirname(folder); folder = path.dirname(folder))
-    if (fs.existsSync(path.join(folder, 'node_modules'))) packages.push(path.join(folder, 'node_modules'));
+    for (const name of ['node_modules', 'package.json'])
+      if (fs.existsSync(path.join(folder, name))) packages.push(path.join(folder, name));
   return packages;
 }
 
