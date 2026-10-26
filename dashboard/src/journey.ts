@@ -157,8 +157,9 @@ export interface JourneyStory {
   current: boolean;
 }
 
-// The idea's stories in order: each one's chip, its steps as segments, and a line about where it is.
-export function journeyStories(run: RunStory, state: StudioState): JourneyStory[] {
+// The idea's stories in order: each one's chip, its steps as segments, and a line about where it is, its running
+// minutes read from the page's clock.
+export function journeyStories(run: RunStory, state: StudioState, now = Date.now()): JourneyStory[] {
   const { stories, attempts } = runRecords(run, state),
     current = stories.find(task => !storyDone(task) && !task.closed);
   let seenCurrent = false;
@@ -190,7 +191,7 @@ export function journeyStories(run: RunStory, state: StudioState): JourneyStory[
     const foot = storyDone(task)
       ? clockOf(lastFinish(own))
       : running
-        ? `Attempt ${builds.indexOf(running) + 1 || 1} of ${workerName(state, running.workerId)}'s · ${Math.max(1, Math.round(ms(running) / 60000))} min in`
+        ? `Attempt ${builds.indexOf(running) + 1 || 1} of ${workerName(state, running.workerId)}'s · ${Math.max(1, Math.round(ms(running, now) / 60000))} min in`
         : stand.tone === 'you'
           ? 'Waiting for you'
           : task.lastAttemptId

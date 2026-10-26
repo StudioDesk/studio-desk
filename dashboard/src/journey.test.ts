@@ -129,6 +129,13 @@ test('each story says where it is: integrated with its commit, or the attempt ru
   expect(two!.current).toBe(true);
 });
 
+test("the running story's minutes follow the page's clock, not the time of the call", () => {
+  const started = Date.parse(at(47)),
+    foot = (now: number) => journeyStories(run, state, now)[1]!.foot;
+  expect(foot(started + 60000)).toBe("Attempt 2 of Eli's · 1 min in");
+  expect(foot(started + 3 * 60000)).toBe("Attempt 2 of Eli's · 3 min in");
+});
+
 test('what happened is told in plain sentences, with its stops and decisions marked', () => {
   const groups = happened(run, state);
   expect(groups.map(group => group.title)).toEqual(['Checks and plan', 'Story 1', 'Story 2']);

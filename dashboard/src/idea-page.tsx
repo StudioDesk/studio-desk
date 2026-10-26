@@ -32,6 +32,7 @@ import { agentLooks, counted } from './today';
 import { useToast } from './toast';
 import { queryKeys } from './records';
 import { useNarrow } from './use-narrow';
+import { useNow } from './use-now';
 
 const finishedLabels = ['Integrated', 'Finished', 'Stopped', 'Cancelled', 'Closed'];
 
@@ -50,8 +51,13 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
       () => agentLooks(projectId, [...state.workers, ...(state.employeeDirectory ?? [])]),
       [projectId, state.workers, state.employeeDirectory],
     ),
+    // The story cards' running minutes follow the clock, on only while one of the idea's attempts runs.
+    running = state.attempts.some(
+      attempt => run.taskIds.includes(attempt.taskId) && ['running', 'stopping'].includes(attempt.status),
+    ),
+    now = useNow(running),
     stages = journeyStages(run, state),
-    stories = journeyStories(run, state),
+    stories = journeyStories(run, state, now),
     groups = happened(run, state),
     people = whoWorked(run, state),
     chip = journeyChip(run, state),
