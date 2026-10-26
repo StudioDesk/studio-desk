@@ -5,7 +5,9 @@
 // (a local `srt-sandbox` account and a machine-wide network filter); the director starts it from
 // Settings → Candidate tests.
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,7 +21,24 @@ export function builtInSandboxFiles(root = studioRoot) {
   return {
     cli: path.join(runtime, 'dist', 'cli.js'),
     srtWin: path.join(runtime, 'vendor', 'srt-win', process.arch === 'arm64' ? 'arm64' : 'x64', 'srt-win.exe'),
+    // The runtime starts its helper again as the sandbox account, which cannot read a copy of Studio desk under
+    // the director's profile (where none of the profile is readable to it). So the helper runs from a copy in
+    // ProgramData, which every account may read and the runtime's setup keeps the sandbox account from writing.
+    sharedSrtWin: path.join(
+      process.env.ProgramData || 'C:\\ProgramData',
+      'Studio desk',
+      'sandbox',
+      `srt-win-${builtInSandboxVersion}-${process.arch}.exe`,
+    ),
   };
+}
+
+// Puts the helper's shared copy in place when it is missing or differs from the installed one.
+export function shareBuiltInSandboxHelper(files = builtInSandboxFiles()) {
+  const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  if (fs.existsSync(files.sharedSrtWin) && digest(files.sharedSrtWin) === digest(files.srtWin)) return;
+  fs.mkdirSync(path.dirname(files.sharedSrtWin), { recursive: true });
+  fs.copyFileSync(files.srtWin, files.sharedSrtWin);
 }
 
 // Setup allows tests to connect within this computer, since test suites start local servers, and makes
@@ -90,23 +109,78 @@ export function builtInSandbox(files = builtInSandboxFiles()) {
 export const noBuiltInSandbox = { status: () => ({ state: 'unsupported' }), setup: () => false };
 export const builtInSandboxReady = runtime => runtime.builtInSandbox?.status().state === 'ready';
 
-// What one test run may touch. It writes only the copy it runs on; it reads Node, the packages installed
-// for the copy (any `node_modules` in a folder above it, where Node's lookup finds them), the launcher and
-// the run's own instructions; it reaches no network beyond this computer. Git for Windows and Windows'
-// own folders are readable to every account already.
-export function builtInSandboxSettings({ root, nodeDirectory, launcherDirectory, runDirectory }) {
+// The packages installed for a copy: any `node_modules` in a folder above it, where Node's lookup finds them.
+export function builtInSandboxPackages(root) {
   const packages = [];
   for (let folder = path.dirname(root); folder !== path.dirname(folder); folder = path.dirname(folder))
     if (fs.existsSync(path.join(folder, 'node_modules'))) packages.push(path.join(folder, 'node_modules'));
+  return packages;
+}
+
+// What one test run may touch. It writes only the copy it runs on; it reads Node, the packages installed for
+// the copy, the launcher and the run's own instructions; it reaches no network beyond this computer. Git for
+// Windows and Windows' own folders are readable to every account already.
+export function builtInSandboxSettings({ root, nodeDirectory, launcherDirectory, runDirectory, helper }) {
   return {
     network: { allowedDomains: [], deniedDomains: [], allowLocalBinding: true },
     filesystem: {
       denyRead: [],
-      allowRead: [nodeDirectory, launcherDirectory, runDirectory, ...packages],
+      allowRead: [nodeDirectory, launcherDirectory, runDirectory, ...builtInSandboxPackages(root)],
       allowWrite: [root],
       denyWrite: [],
     },
+    windows: { srtWin: { path: helper } },
   };
+}
+
+// Node looks at every folder above a file it runs, and the sandbox account may not even look at the folders in
+// the director's profile. Each folder inside the profile above what a run uses gets a see-only entry for the
+// runtime's sandbox group: "read attributes", so the folder can be found but not opened or listed (the
+// director's choice, October 25). The profile folder itself needs none, since its parent lets every account
+// look in. The folders changed are recorded beside the helper's shared copy, so each is changed once.
+export const builtInSandboxGroup = 'sandbox-runtime-users';
+export function builtInSandboxPassThrough(paths, home = os.homedir()) {
+  const folders = new Set(),
+    inside = folder => path.relative(home, folder) && !path.relative(home, folder).startsWith('..');
+  for (const target of paths)
+    for (let folder = path.dirname(path.resolve(target)); inside(folder); folder = path.dirname(folder))
+      folders.add(folder);
+  return [...folders];
+}
+// The entry is written with SetFileSecurity, which changes the one folder: the usual tools re-apply inheritance
+// to everything beneath it, which takes minutes under AppData. The folders come in on standard input.
+const passThroughScript = `
+$ErrorActionPreference = 'Stop'
+Add-Type -Namespace StudioDesk -Name Acl -MemberDefinition '[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool SetFileSecurity(string name, int information, byte[] descriptor);'
+$group = (New-Object System.Security.Principal.NTAccount('${builtInSandboxGroup}')).Translate([System.Security.Principal.SecurityIdentifier])
+foreach ($folder in @($input)) {
+  $acl = Get-Acl -LiteralPath $folder
+  $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($group, 'ReadAttributes', 'None', 'None', 'Allow')))
+  if (-not [StudioDesk.Acl]::SetFileSecurity($folder, 4, $acl.GetSecurityDescriptorBinaryForm())) {
+    throw "$($folder) error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+  }
+}`;
+export function openBuiltInSandboxPassThrough(paths, files = builtInSandboxFiles(), run = spawnSync) {
+  const record = path.join(path.dirname(files.sharedSrtWin), 'pass-through.json');
+  let opened = [];
+  try {
+    opened = JSON.parse(fs.readFileSync(record, 'utf8'));
+  } catch {
+    // None recorded yet.
+  }
+  const missing = builtInSandboxPassThrough(paths).filter(folder => !opened.includes(folder));
+  if (!missing.length) return missing;
+  const result = run(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(passThroughScript, 'utf16le').toString('base64')],
+    { input: missing.join('\n'), encoding: 'utf8', windowsHide: true, timeout: 60000 },
+  );
+  if (result.status !== 0)
+    throw new Error(
+      `The sandbox could not be let through the folders above its work: ${(result.stderr || result.error?.message || '').trim().slice(0, 500)}`,
+    );
+  fs.writeFileSync(record, JSON.stringify([...opened, ...missing], null, 2));
+  return missing;
 }
 
 // The command line the runtime runs inside the sandbox (through cmd.exe on Windows). The test command

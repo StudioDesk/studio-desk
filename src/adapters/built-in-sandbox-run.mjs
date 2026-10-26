@@ -13,7 +13,10 @@ import {
   builtInSandboxCommandLine,
   builtInSandboxEnvironment,
   builtInSandboxFiles,
+  builtInSandboxPackages,
   builtInSandboxSettings,
+  openBuiltInSandboxPassThrough,
+  shareBuiltInSandboxHelper,
 } from './built-in-sandbox.mjs';
 
 const separator = process.argv.indexOf('--');
@@ -30,6 +33,11 @@ const root = path.resolve(process.argv[3]),
   runDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-sandbox-')),
   settings = path.join(runDirectory, 'settings.json'),
   instructions = path.join(runDirectory, `run-${randomUUID()}.json`);
+shareBuiltInSandboxHelper(files);
+openBuiltInSandboxPassThrough(
+  [root, path.dirname(node), path.dirname(launcher), runDirectory, ...builtInSandboxPackages(root)],
+  files,
+);
 fs.writeFileSync(
   settings,
   JSON.stringify(
@@ -38,6 +46,7 @@ fs.writeFileSync(
       nodeDirectory: path.dirname(node),
       launcherDirectory: path.dirname(launcher),
       runDirectory,
+      helper: files.sharedSrtWin,
     }),
   ),
 );
