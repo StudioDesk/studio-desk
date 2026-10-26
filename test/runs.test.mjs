@@ -616,13 +616,14 @@ const explain = s => {
   }
   return context.StudioRuns.taskExplanation(s.tasks[0], s);
 };
-// The controller's stop reasons as recorded: the source-change adapter's two candidate test sandbox stops
-// and its Windows sandbox mode stop, and the orchestrator's check of the employee's own workspace isolation.
+// The controller's stop reasons as recorded: the built-in sandbox's stops for candidate tests and an idea's checks
+// before it is set up, and the Codex employee's Windows sandbox mode stop and the orchestrator's check of the
+// employee's own workspace isolation.
 const candidateSandboxStops = {
-  noCodex:
-    "Candidate tests run in the Codex CLI sandbox, and Codex CLI isn't installed. Install Codex CLI and restart the controller, or choose No sandbox under Settings → Candidate tests.",
-  failedCheck:
-    'The candidate test sandbox did not pass its isolation check. Check the sandbox from a normal terminal (node scripts/check-codex-sandbox.mjs), or choose No sandbox under Settings → Candidate tests.',
+  notSetUp:
+    "Candidate tests run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose No sandbox there.",
+  checksNotSetUp:
+    "An idea's checks run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose No sandbox there.",
   windowsMode: 'STUDIO_CODEX_WINDOWS_SANDBOX must be mxc or elevated. No weaker sandbox fallback is allowed.',
   workspace: 'Codex CLI workspace isolation did not pass (mxc): See sandbox diagnostics.',
 };
@@ -766,24 +767,14 @@ test('task explanations distinguish director decisions from passive stops and wa
       /settings/i,
     ],
     [
-      'candidate tests without Codex CLI',
-      { status: 'blocked', controllerWait: true, reason: candidateSandboxStops.noCodex },
+      'candidate tests before the built-in sandbox is set up',
+      { status: 'blocked', controllerWait: true, reason: candidateSandboxStops.notSetUp },
       null,
       {},
       'test-sandbox',
       'Candidate tests',
-      /^This story can’t start because its candidate tests have no sandbox to run in: Codex CLI isn’t installed\. The employee and its execution settings are fine\.$/,
-      /^Install Codex CLI and restart the controller, or choose No sandbox under Settings → Candidate tests\.$/,
-    ],
-    [
-      'candidate test sandbox failing its isolation check',
-      { status: 'blocked', controllerWait: true, reason: candidateSandboxStops.failedCheck },
-      null,
-      {},
-      'test-sandbox',
-      'Candidate tests',
-      /^This story can’t start because its candidate tests have no sandbox to run in: the sandbox failed its isolation check\. The employee and its execution settings are fine\.$/,
-      /^Check the sandbox from a normal terminal \(node scripts\/check-codex-sandbox\.mjs\), or choose No sandbox under Settings → Candidate tests\.$/,
+      /^This can’t start because its tests run in the built-in sandbox, which isn’t set up on this computer\. The employee and its execution settings are fine\.$/,
+      /^Set up the sandbox under Settings → Candidate tests, or choose No sandbox there\.$/,
     ],
     [
       'employee workspace isolation',
@@ -1036,13 +1027,13 @@ test('a story stopped because its candidate tests have no sandbox needs the dire
   const stopped = (reason, stateFields) =>
       explanationFixture({ status: 'blocked', controllerWait: true, reason }, null, stateFields),
     plain = value => JSON.parse(JSON.stringify(value));
-  for (const reason of [candidateSandboxStops.noCodex, candidateSandboxStops.failedCheck]) {
+  for (const reason of [candidateSandboxStops.notSetUp, candidateSandboxStops.checksNotSetUp]) {
     const s = stopped(reason),
       e = explain(s);
     assert.equal(e.kind, 'test-sandbox', reason);
     assert.equal(e.action, 'Candidate tests', reason);
     assert.doesNotMatch(e.reason, /configuration cannot run/, reason);
-    assert.match(e.next, /choose No sandbox under Settings → Candidate tests\.$/, reason);
+    assert.match(e.next, /^Set up the sandbox under Settings → Candidate tests, or choose No sandbox there\.$/, reason);
     assert.deepEqual(plain(e.details), [], 'The controller’s reason is not repeated under the explanation.');
     assert.deepEqual(
       plain(context.StudioRuns.needsYou(s).map(item => [item.taskId, item.kind, item.action, item.requiresDirector])),

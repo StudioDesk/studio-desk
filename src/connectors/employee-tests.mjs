@@ -144,7 +144,7 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
         };
     }
     const focused = { ...plan, command: { ...plan.command, args: sourceTestArgs(wanted.length ? wanted : suite) } },
-      command = runtime.sourceCheckCommand || candidateTestCommand(runtime.codexBinary, focused, a.configuration);
+      command = runtime.sourceCheckCommand || candidateTestCommand(focused, a.configuration);
     const started = new Date().toISOString(),
       result = await run(command.executable, command.args, {
         cwd: directory,

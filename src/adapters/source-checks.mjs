@@ -18,9 +18,8 @@ import { chosenTestSandbox } from './source-test-sandbox.mjs';
 import { builtInSandboxCommand, builtInSandboxReady } from './built-in-sandbox.mjs';
 
 // An idea's first checks run in the built-in sandbox when candidate tests do (1.0.1), so the pipeline
-// tests in one place; otherwise they run as they always have, on a copy without a sandbox.
-const checksSandbox = runtime =>
-  chosenTestSandbox(runtime.store.organization(), runtime.codexBinary, builtInSandboxReady(runtime)) === 'built-in';
+// tests in one place; without a sandbox, by the director's choice, they run on the copy as before.
+const checksSandbox = runtime => chosenTestSandbox(runtime.store.organization()) === 'built-in';
 
 export const sourceChecksAdapter = {
   id: 'source-checks',
@@ -37,7 +36,7 @@ export const sourceChecksAdapter = {
     !runtime.workflows.get(task.kind).requiredCapabilities.includes('source-checks')
       ? 'A registered source-check assignment is required.'
       : checksSandbox(runtime) && !builtInSandboxReady(runtime)
-        ? "An idea's checks run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose another place for the tests there."
+        ? "An idea's checks run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose No sandbox there."
         : '',
   configuration: (runtime, worker) => ({
     ...structuredClone(worker),

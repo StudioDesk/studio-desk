@@ -3,17 +3,15 @@
 // ignores): the commit checked out in a worktree, the packages installed from its lockfile as the pipeline
 // installs them, and the plan's fixed test command in a candidate's environment. It makes no model call.
 //   --as candidate (the default): as candidate tests and the check before merging run, in a worktree and in
-//     the test sandbox that Settings → Candidate tests names (--sandbox built-in, codex or none; without it,
-//     the built-in sandbox once it is set up on this computer, then Codex's where it is installed, then none).
-//   --as checks: as an idea's first checks run, on a copy of the commit at a job's depth: in the built-in
-//     sandbox when that is where the tests run (1.0.1), and otherwise with no sandbox.
-// Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|codex|none] [commit]
+//     the test sandbox that Settings → Candidate tests names (--sandbox built-in, the default, or none).
+//   --as checks: as an idea's first checks run, on a copy of the commit at a job's depth, in the same place.
+// Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|none] [commit]
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 // The runner first: the adapters reach each other through it.
-import { locateCodex, subscriptionEnvironment } from '../src/runner.mjs';
+import { subscriptionEnvironment } from '../src/runner.mjs';
 import { command as nativeCommand } from '../src/adapters/process.mjs';
 import { candidateTestCommand, sandboxLabel, testSandboxes } from '../src/adapters/source-test-sandbox.mjs';
 import { sourcePlan, studioSourceRoot, testPhaseEvidence, verifyCopy } from '../src/connectors/source-checks.mjs';
@@ -24,7 +22,7 @@ import { createSourceWorktree, removeSourceWorktree, worktreeName } from '../src
 import { snapshotCommit } from '../src/adapters/source-snapshot.mjs';
 import { builtInSandboxCommand, readBuiltInSandboxStatus } from '../src/adapters/built-in-sandbox.mjs';
 
-const usage = 'Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|codex|none] [commit]';
+const usage = 'Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|none] [commit]';
 const options = { as: 'candidate', sandbox: undefined, commit: 'HEAD' };
 for (let i = 2; i < process.argv.length; i++) {
   const argument = process.argv[i];
@@ -32,11 +30,12 @@ for (let i = 2; i < process.argv.length; i++) {
   else if (argument.startsWith('-')) fail(usage);
   else options.commit = argument;
 }
-const builtInReady = readBuiltInSandboxStatus().state === 'ready';
-options.sandbox ??= builtInReady ? 'built-in' : locateCodex() ? 'codex' : 'none';
+options.sandbox ??= 'built-in';
 if (!['candidate', 'checks'].includes(options.as) || !testSandboxes.includes(options.sandbox)) fail(usage);
-if (options.sandbox === 'built-in' && !builtInReady)
-  fail('The built-in sandbox is not set up on this computer. Set it up under Settings → Candidate tests.');
+if (options.sandbox === 'built-in' && readBuiltInSandboxStatus().state !== 'ready')
+  fail(
+    'The built-in sandbox is not set up on this computer. Set it up under Settings → Candidate tests, or add --sandbox none if that is No sandbox.',
+  );
 
 const root = studioSourceRoot,
   profile = studioDeskProfile,
@@ -52,18 +51,7 @@ if (git(root, ['status', '--porcelain', '--', ...snapshotPaths(profile)]))
   console.log(`Testing commit ${commit.slice(0, 8)}; uncommitted changes are not part of it.`);
 
 // Where the tests run, as the pipeline records it on an attempt.
-const configuration =
-  options.as === 'checks'
-    ? { testSandbox: options.sandbox === 'built-in' ? 'built-in' : 'none' }
-    : {
-        testSandbox: options.sandbox,
-        ...(options.sandbox === 'codex' && process.platform === 'win32'
-          ? { windowsSandbox: process.env.STUDIO_CODEX_WINDOWS_SANDBOX ?? 'mxc' }
-          : {}),
-      };
-const codex = configuration.testSandbox === 'codex' ? locateCodex() : null;
-if (configuration.testSandbox === 'codex' && !codex)
-  fail('Codex CLI was not found. Install it, or add --sandbox none if Settings → Candidate tests is No sandbox.');
+const configuration = { testSandbox: options.sandbox };
 
 fs.mkdirSync(data, { recursive: true });
 packageBoundary(data);
@@ -97,7 +85,7 @@ try {
     throw new Error('Installing the packages failed, so no tests ran.');
   const test =
       options.as !== 'checks'
-        ? candidateTestCommand(codex, plan, configuration)
+        ? candidateTestCommand(plan, configuration)
         : configuration.testSandbox === 'built-in'
           ? builtInSandboxCommand({ root: copy, command: plan.command })
           : plan.command,

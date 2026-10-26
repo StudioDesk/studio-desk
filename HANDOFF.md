@@ -6,7 +6,7 @@ This page is the current status of Studio desk and where to look in the code, ke
 
 Studio desk is a local controller that runs AI agents (Claude Code and Codex CLI through their subscription sign-ins, never paid APIs) as bounded work the director approves. The controller owns scheduling, locks, instruction snapshots, the provenance of every file and acceptance. A project is either code in a git repository or work that is not code:
 
-- **Code:** an idea becomes linked stories. Each story is edited in its own worktree, tested in its own copy (in Codex CLI's sandbox where it is installed), reviewed independently and integrated by merge.
+- **Code:** an idea becomes linked stories. Each story is edited in its own worktree, tested in its own copy (in the built-in sandbox once it is set up on the computer), reviewed independently and integrated by merge.
 - **Everything else:** a planner splits an idea into steps that hand files on, and each step is reviewed independently.
 
 The dashboard (`dashboard/`, React with a Vite build) is served by the controller at its own address.
@@ -16,6 +16,7 @@ The dashboard (`dashboard/`, React with a Vite build) is served by the controlle
 - Projects for git repositories and for general work, started from the dashboard or from the Code and Writing samples.
 - Teams, agents and instructions at three levels (everyone, a team, one agent), each with drafts and published revisions; every attempt records the instructions, configuration and inputs it ran with.
 - Since 1.0.1 (in progress), agents made for one project, which work only there, and renaming and deleting agents (`src/core/project-agents.mjs`, the Teams and Agents pages).
+- Since 1.0.1 (in progress), candidate tests, integration verification and an idea's checks run in the built-in sandbox, Anthropic's sandbox runtime pinned in the lockfile, set up once from Settings → Candidate tests (`src/adapters/built-in-sandbox*.mjs`, `src/adapters/source-test-sandbox.mjs`); No sandbox is the director's explicit choice. Codex CLI's sandbox is for Codex agents only.
 - Ready → Working → Review → Accepted for every story and step, with independent review, send-back and retries that see earlier attempts.
 - House rules for what runs on its own and what waits for the director.
 - Recovery after a restart: interrupted attempts and integrations are reconciled from the dashboard, never replayed blindly.
@@ -27,10 +28,10 @@ The dashboard (`dashboard/`, React with a Vite build) is served by the controlle
 
 ## How to work on it
 
-- Node.js 24 or later. The controller needs no install. Run `npm ci` once per copy for the dashboard's tools.
+- Node.js 24 or later. The controller needs no install. Run `npm ci` once per copy for the dashboard's tools and the built-in sandbox.
 - `npm start` runs the controller at http://127.0.0.1:4317 and builds the dashboard when its sources changed.
 - `npm test` runs the model-free suite, the dashboard's typecheck, lint, tests and build among it, with the same command the pipeline runs.
-- `npm run verify` tests a commit exactly as the pipeline will: in a worktree and the candidate test sandbox, or with `--as checks` as an idea's first checks run (no sandbox). Before merging by hand, run it once for each of those; a change to `dashboard/` alone needs only `node --test test/dashboard-tools.test.mjs test/next-dashboard.test.mjs`, and a change to documents alone needs no tests.
+- `npm run verify` tests a commit exactly as the pipeline will: in a worktree and the built-in sandbox, or with `--as checks` as an idea's first checks run (add `--sandbox none` when Settings → Candidate tests is No sandbox). Before merging by hand, run it once for each of those; a change to `dashboard/` alone needs only `node --test test/dashboard-tools.test.mjs test/next-dashboard.test.mjs`, and a change to documents alone needs no tests.
 - Run `npm run format` (Prettier 3.3.3 through npx) before committing.
 - Never commit `data/`, the controller's runtime records. Read live state through the controller's GET routes, such as `/api/state?mode=dashboard&projectId=<id>`.
 - Check the interface in a real browser: `node scripts/screenshot.mjs`, or a throwaway controller (`STUDIO_DATA_DIR` and `STUDIO_PORT`) for anything that writes. Never start a second controller on a data folder that is already in use.

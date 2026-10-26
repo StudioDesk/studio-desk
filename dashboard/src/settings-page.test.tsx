@@ -169,7 +169,7 @@ test('Settings links the records it keeps elsewhere and changes where candidate 
   ]);
 });
 
-test('with only Claude Code, Settings never mentions Codex and says the candidate tests run on this computer (v1.0 item 25)', async () => {
+test('with only Claude Code, Settings never mentions Codex and says when the candidate tests run on this computer (v1.0 item 25)', async () => {
   controller.shell = {
     ...controller.shell,
     testSandbox: 'none',
@@ -183,7 +183,8 @@ test('with only Claude Code, Settings never mentions Codex and says the candidat
   const tools = screen.getByRole('region', { name: 'Command-line tools' });
   expect(within(tools).getByText('Claude Code CLI')).toBeTruthy();
   expect(tools.textContent).not.toMatch(/codex/i);
-  expect(within(tools).queryByRole('group', { name: 'Where candidate tests run' })).toBeNull();
+  const choices = within(tools).getByRole('group', { name: 'Where candidate tests run' });
+  expect(within(choices).getByRole('button', { name: 'No sandbox' }).getAttribute('aria-pressed')).toBe('true');
   expect(
     within(tools).getByText(/^Code an agent wrote runs on this computer with your account’s full access/),
   ).toBeTruthy();

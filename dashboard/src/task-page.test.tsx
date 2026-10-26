@@ -423,13 +423,13 @@ test('a story stopped for want of a test sandbox points to Settings, not to the 
     status: 'blocked',
     lastAttemptId: undefined,
     reason:
-      "Candidate tests run in the Codex CLI sandbox, and Codex CLI isn't installed. Install Codex CLI and restart the controller, or choose No sandbox under Settings → Candidate tests.",
+      "Candidate tests run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose No sandbox there.",
   });
   controller.attempts = [];
   open();
   const link = await screen.findByRole('link', { name: 'Open Candidate tests in Settings' });
   expect(link.getAttribute('href')).toBe('/p/project-x/settings');
-  expect(screen.getByText(/its candidate tests have no sandbox to run in: Codex CLI isn’t installed/)).toBeTruthy();
+  expect(screen.getByText(/its tests run in the built-in sandbox, which isn’t set up on this computer/)).toBeTruthy();
 });
 
 test('the page sits in the frame with the way back to its ideas and where the task stands', async () => {

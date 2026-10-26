@@ -63,8 +63,8 @@ export interface DiffStat {
 export const diffStatOf = (attempt?: AttemptSummary) =>
   (attempt?.sourceCandidate as { diffStat?: DiffStat } | undefined)?.diffStat ?? null;
 
-// Whether the candidate's tests ran in the Codex sandbox, as the attempt's configuration recorded
-// (src/adapters/source-test-sandbox.mjs testSandboxOf: no setting means the sandbox).
+// Whether the candidate's tests ran in a sandbox, as the attempt's configuration recorded: the built-in one, or
+// before 1.0.1 the Codex CLI sandbox (src/adapters/source-test-sandbox.mjs testSandboxOf: no setting means it).
 export const sandboxed = (attempt?: AttemptSummary) =>
   (attempt?.configuration as { testSandbox?: string } | undefined)?.testSandbox !== 'none';
 

@@ -12,7 +12,7 @@ import { sourcePlan, testsSentence, validateCheckReport } from './source-checks.
 import { profileOf, recordedProfile, storyPathAllowed, storyPathRule, studioDeskProfile } from './source-profile.mjs';
 import { sourceResources, sourceRoot, studioDeskSourceResources } from './source-projects.mjs';
 import { sourceDiffFormat, sourceDiffLimit, verifySourceDiff } from './source-diff.mjs';
-import { sandboxRecord, testSandboxOf } from '../adapters/source-test-sandbox.mjs';
+import { codexSandboxRecord, sandboxRecord, testSandboxOf } from '../adapters/source-test-sandbox.mjs';
 import { builtInSandboxRunner } from '../adapters/built-in-sandbox.mjs';
 import {
   commitIntegration,
@@ -1022,18 +1022,18 @@ export function validateSourceChange(attempt, read, result = attempt.result) {
   const changes = stagedChanges(scope, originalResult, read);
   const expectedFiles = candidateFiles(scope.source.files, changes);
   const candidate = attempt.sourceCandidate;
-  // The tests ran where the attempt recorded: through the built-in sandbox's runner, in the Codex sandbox
-  // command, or, by the director's choice, as the plain test command.
+  // The tests ran where the attempt recorded: through the built-in sandbox's runner or, by the director's
+  // choice, as the plain test command. A candidate tested before 1.0.1 may have run in the Codex sandbox
+  // command, which its review still accepts.
   // The runner is named by its file, so a record stays valid when the controller's copy moves.
   const first = candidate.command.args[0],
-    sandbox = testSandboxOf(attempt.configuration);
+    sandbox = testSandboxOf(attempt.configuration),
+    codex = sandbox === 'codex' && equal(candidate.sandbox, codexSandboxRecord(attempt.configuration));
   if (
-    !equal(candidate.sandbox, sandboxRecord(attempt.configuration)) ||
-    (sandbox === 'none'
-      ? first !== '--test'
-      : sandbox === 'built-in'
-        ? path.basename(first) !== path.basename(builtInSandboxRunner)
-        : first !== 'sandbox')
+    codex
+      ? first !== 'sandbox'
+      : !equal(candidate.sandbox, sandboxRecord(attempt.configuration)) ||
+        (sandbox === 'none' ? first !== '--test' : path.basename(first) !== path.basename(builtInSandboxRunner))
   )
     throw new Error('Candidate tests require the recorded source sandbox.');
   if (

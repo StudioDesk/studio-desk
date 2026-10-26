@@ -66,30 +66,15 @@ export const sourceChangeAdapter = {
     } catch (error) {
       return error.message;
     }
-    const sandbox = chosenTestSandbox(runtime.store.organization(), runtime.codexBinary, builtInSandboxReady(runtime));
-    // Without a sandbox, by the director's choice or because Codex CLI isn't installed, candidate tests need no
-    // other CLI; the built-in sandbox needs only its one-time setup.
-    if (sandbox === 'none') return model.blockReason(runtime, verifyAuth, task, worker);
-    if (sandbox === 'built-in')
-      return builtInSandboxReady(runtime)
-        ? model.blockReason(runtime, verifyAuth, task, worker)
-        : "Candidate tests run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose another place for the tests there.";
-    // Only a director who chose the Codex sandbox gets here without Codex CLI.
-    if (!runtime.codexBinary)
-      return "Candidate tests run in the Codex CLI sandbox, and Codex CLI isn't installed. Install Codex CLI and restart the controller, or choose No sandbox under Settings → Candidate tests.";
-    if (process.platform === 'win32' && !['mxc', 'elevated'].includes(runtime.codexWindowsSandbox))
-      return 'STUDIO_CODEX_WINDOWS_SANDBOX must be mxc or elevated. No weaker sandbox fallback is allowed.';
-    // Candidate tests run in this sandbox whichever model edits.
-    runtime.isolation ||= {};
-    if (verifyAuth) runtime.isolation.testSandbox = runtime.sourceReviewSandbox();
-    const probe = runtime.isolation.testSandbox;
-    if (probe && !probe.passed)
-      return 'The candidate test sandbox did not pass its isolation check. Check the sandbox from a normal terminal (node scripts/check-codex-sandbox.mjs), or choose No sandbox under Settings → Candidate tests.';
+    // Candidate tests need no other CLI: the built-in sandbox needs only its one-time setup, and without a
+    // sandbox, by the director's choice, they need nothing.
+    if (chosenTestSandbox(runtime.store.organization()) === 'built-in' && !builtInSandboxReady(runtime))
+      return "Candidate tests run in the built-in sandbox, and it isn't set up on this computer. Set it up under Settings → Candidate tests, or choose No sandbox there.";
     return model.blockReason(runtime, verifyAuth, task, worker);
   },
   configuration(runtime, worker, task) {
     const model = modelAdapter(runtime.adapters, worker),
-      testSandbox = chosenTestSandbox(runtime.store.organization(), runtime.codexBinary, builtInSandboxReady(runtime)),
+      testSandbox = chosenTestSandbox(runtime.store.organization()),
       editor = model.configuration(runtime, worker, task);
     return {
       ...editor,
@@ -97,9 +82,6 @@ export const sourceChangeAdapter = {
       // edits through the controller (v1.0 item 22, connectors/employee-tests.mjs).
       ...(editor.permissions ? { permissions: { ...editor.permissions, tools: [employeeTestsCommand] } } : {}),
       testSandbox,
-      ...(process.platform === 'win32' && testSandbox === 'codex'
-        ? { windowsSandbox: runtime.codexWindowsSandbox }
-        : {}),
       executionAdapter: 'source-change',
       model: model.id,
       mode: modelMode(model, worker),
@@ -232,7 +214,7 @@ function withCarriedWork(scope, result, output, baseline) {
 }
 
 // After the editing CLI stops: apply the edits to the attempt's worktree, commit them as the
-// candidate and measure the fixed test suite there in the Codex sandbox, under the same reservations.
+// candidate and measure the fixed test suite there in its recorded test sandbox, under the same reservations.
 function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, editor) {
   const a = entry.attempt,
     scope = a.sourceChange;
@@ -299,7 +281,7 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     );
     runtime.store.finishPhase(commitPhase, 'succeeded', { commit });
     a.sourceCandidate = { ...sourcePlan(candidate, profileOf(scope.source)), commit, diffStat: sourceDiffStat(diff) };
-    a.sourceCandidate.command = candidateTestCommand(runtime.codexBinary, a.sourceCandidate, a.configuration);
+    a.sourceCandidate.command = candidateTestCommand(a.sourceCandidate, a.configuration);
     a.sourceCandidate.sandbox = sandboxRecord(a.configuration);
     runtime.store.updateAttempt(a);
     const manifest = {

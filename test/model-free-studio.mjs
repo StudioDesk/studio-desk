@@ -11,10 +11,11 @@ import v8 from 'node:v8';
 // 2026). Keep the parser on its first tier; it is set before any test's first fetch compiles it.
 v8.setFlagsFromString('--no-wasm-dynamic-tiering');
 
-// MXC redirects the OS temp folder. Put disposable fixtures inside the explicit
-// copied-source workspace so replacement permissions match the tested target.
+// In the test sandbox the copy is the only folder the tests may write, and the built-in
+// sandbox hands them no temp folder of their own (Codex's MXC, before 1.0.1, redirected it).
+// Put disposable fixtures inside the copied-source workspace so permissions match the tested target.
 // Keep the name short: fixtures nest job folders and git repositories under it, and
-// process working folders and git in MXC stop at 260-character Windows paths.
+// process working folders and git stop at 260-character Windows paths.
 if (process.env.STUDIO_MODEL_FREE_LEAF_FIXTURES === '1') {
   const fixtureTemporaryDirectory = path.resolve('.tmp');
   fs.mkdirSync(fixtureTemporaryDirectory, { recursive: true });
@@ -24,13 +25,17 @@ if (process.env.STUDIO_MODEL_FREE_LEAF_FIXTURES === '1') {
 }
 
 // Protocol fixtures are single Node processes. Terminate their known leaf
-// directly so model-free tests can run inside MXC, where taskkill is unavailable.
+// directly so model-free tests can run inside a test sandbox, which need not offer taskkill (MXC had none).
 // Real controllers/CLIs retain process-tree termination and conservative leases.
 // Installing packages for a tested copy (MP-026) uses a stand-in for npm, so no test reaches the network.
 export const fixtureNpm = {
   executable: process.execPath,
   args: [fileURLToPath(new URL('./fixture-npm.mjs', import.meta.url))],
 };
+// The built-in sandbox as set up on this computer, so candidate tests and an idea's checks are recorded as running
+// in it (1.0.1). The suite never runs it: the protocol fixtures run the tests, and a test that measures a real
+// suite chooses No sandbox. A test of the sandbox's own states passes its own.
+export const readyBuiltInSandbox = { status: () => ({ state: 'ready' }), setup: () => false };
 export function createStudio(options = {}) {
   const fixtureOptions =
     process.env.STUDIO_MODEL_FREE_LEAF_FIXTURES === '1'
@@ -40,6 +45,11 @@ export function createStudio(options = {}) {
     // The suite's studios start from the game organization and its starter tasks unless a test chooses.
     bootstrap: { organizationPreset: 'game-studio', workflowPresets: ['game-production'] },
     ...options,
-    runnerOptions: { packageInstallCommand: fixtureNpm, ...fixtureOptions, ...options.runnerOptions },
+    runnerOptions: {
+      packageInstallCommand: fixtureNpm,
+      builtInSandbox: readyBuiltInSandbox,
+      ...fixtureOptions,
+      ...options.runnerOptions,
+    },
   });
 }

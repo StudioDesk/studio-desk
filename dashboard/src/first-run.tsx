@@ -7,6 +7,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { lazy, Suspense, useState, type ReactNode } from 'react';
+import { BuiltInSandboxSetup } from './built-in-sandbox';
 import {
   getJSON,
   send,
@@ -171,14 +172,16 @@ function CliCard({
   onCli,
   checking,
   onCheck,
-  unsandboxed,
+  testSandbox,
+  builtInSandbox,
 }: {
   found: FirstRunTemplates['clis'];
   cli: string;
   onCli: (id: string) => void;
   checking: boolean;
   onCheck: () => void;
-  unsandboxed: boolean;
+  testSandbox: FirstRunTemplates['testSandbox'];
+  builtInSandbox: NonNullable<FirstRunTemplates['builtInSandbox']>;
 }) {
   return (
     <section className="sd-card sd-sidecard sd-sidecard--roomy" aria-labelledby="start-cli">
@@ -210,11 +213,28 @@ function CliCard({
               ? 'Both are signed in. Pick one for now; you can give each agent its own later.'
               : 'One signed-in CLI is enough. You can sign in to another any time.'}
           </p>
-          {unsandboxed && (
+          {/* A code project's tests run in the built-in sandbox, which needs its one-time setup first, or by the
+              director's choice without one (1.0.1). */}
+          {testSandbox === 'none' ? (
             <p className="sd-meta" style={{ margin: 0 }}>
               A code project’s tests run on this computer, without a sandbox, with your account’s access to your files.
-              Set up the built-in sandbox under Settings → Candidate tests to keep them apart.
+              Choose the built-in sandbox under Settings → Candidate tests to keep them apart.
             </p>
+          ) : builtInSandbox.state === 'unsupported' ? (
+            <p className="sd-meta" style={{ margin: 0 }}>
+              A code project’s tests run in the built-in sandbox, which works only on Windows for now. Choose No sandbox
+              under Settings → Candidate tests to run them here.
+            </p>
+          ) : (
+            builtInSandbox.state !== 'ready' && (
+              <>
+                <p className="sd-meta" style={{ margin: 0 }}>
+                  A code project’s tests run in the built-in sandbox, apart from your files. It needs a one-time setup
+                  on this computer before they can run.
+                </p>
+                <BuiltInSandboxSetup sandbox={builtInSandbox} queryKey={['templates']} />
+              </>
+            )
           )}
         </>
       ) : (
@@ -382,7 +402,8 @@ function Choose({
             onCli={onCli}
             checking={checking}
             onCheck={onCheck}
-            unsandboxed={answer.testSandbox === 'none'}
+            testSandbox={answer.testSandbox}
+            builtInSandbox={answer.builtInSandbox ?? { state: 'unsupported' }}
           />
         </aside>
       </div>

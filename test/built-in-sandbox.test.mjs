@@ -18,12 +18,6 @@ import {
   builtInSandboxVersion,
   readBuiltInSandboxStatus,
 } from '../src/adapters/built-in-sandbox.mjs';
-import {
-  candidateTestCommand,
-  chosenTestSandbox,
-  sandboxLabel,
-  sandboxRecord,
-} from '../src/adapters/source-test-sandbox.mjs';
 
 const claudeFixture = fileURLToPath(new URL('./fixture-claude.mjs', import.meta.url)),
   plan = { root: '/candidate', command: { executable: process.execPath, args: ['--test', 'test/a.test.mjs'] } };
@@ -47,29 +41,12 @@ function fakeSandbox(state) {
   return sandbox;
 }
 
-test('the built-in sandbox comes first once it is set up, and its tests run through its runner', () => {
-  // Once set up, it is where the next tests run unless the director chose; before that, Codex's, then none.
-  assert.equal(chosenTestSandbox({}, 'codex.exe', true), 'built-in');
-  assert.equal(chosenTestSandbox({}, undefined, true), 'built-in');
-  assert.equal(chosenTestSandbox({}, 'codex.exe', false), 'codex');
-  assert.equal(chosenTestSandbox({}, undefined, false), 'none');
-  assert.equal(chosenTestSandbox({ testSandbox: 'codex' }, 'codex.exe', true), 'codex', 'A choice stands.');
-  assert.equal(chosenTestSandbox({ testSandbox: 'built-in' }, undefined, false), 'built-in');
-  // The recorded command runs the runner, which gets the folder the tests may write and the plan's command.
-  const command = candidateTestCommand(undefined, plan, { testSandbox: 'built-in' });
-  assert.deepEqual(command, builtInSandboxCommand(plan));
-  assert.deepEqual(command, {
+test('its tests run through its runner, which gets the folder they may write and the plan’s command', () => {
+  // test-sandbox.test.mjs covers which attempts run here and what they record.
+  assert.deepEqual(builtInSandboxCommand(plan), {
     executable: process.execPath,
     args: [builtInSandboxRunner, '--root', '/candidate', '--', process.execPath, '--test', 'test/a.test.mjs'],
   });
-  assert.deepEqual(sandboxRecord({ testSandbox: 'built-in' }), {
-    provider: 'sandbox-runtime',
-    version: builtInSandboxVersion,
-    network: 'loopback-tests',
-  });
-  assert.equal(sandboxLabel({ testSandbox: 'built-in' }), 'in the built-in sandbox');
-  assert.equal(sandboxLabel({ testSandbox: 'none' }), 'without a sandbox');
-  assert.equal(sandboxLabel({}), 'in the Codex sandbox');
 });
 
 test("the runtime's status reads as not set up, out of date or ready", () => {
@@ -179,31 +156,4 @@ test('the director sets up the built-in sandbox from Settings, one setup at a ti
       .at(-1).message,
     /built-in sandbox/,
   );
-});
-
-test('a story waits for the built-in sandbox the director chose, and records it once it is set up', async t => {
-  const sandbox = fakeSandbox('not-set-up'),
-    c = await setup(t, 'pass', undefined, { claudeBinary: claudeFixture, builtInSandbox: sandbox }, true),
-    { store, runner } = c.app;
-  runner.codexBinary = undefined;
-  const task = store.task(c.taskId);
-  task.execution = { provider: 'claude', mode: 'text' };
-  store.putTask(task);
-  const org = store.organization();
-  org.testSandbox = 'built-in';
-  store.setOrganization(org);
-  assert.throws(() => runner.start(task.id), {
-    message:
-      /^Candidate tests run in the built-in sandbox, and it isn't set up on this computer\. Set it up under Settings → Candidate tests, or choose another place for the tests there\.$/,
-  });
-  sandbox.state = 'ready';
-  runner.refreshReadiness();
-  runner.start(task.id);
-  // The protocol fixture stands in for the tests here; the recorded command is what the sandbox would run.
-  const attempt = await c.wait(task.id);
-  assert.equal(attempt.status, 'review', attempt.error);
-  assert.equal(attempt.configuration.testSandbox, 'built-in');
-  assert.deepEqual(attempt.sourceCandidate.sandbox, sandboxRecord({ testSandbox: 'built-in' }));
-  assert.equal(attempt.sourceCandidate.command.args[0], builtInSandboxRunner);
-  assert.equal(attempt.sourceCandidate.command.args[2], attempt.sourceCandidate.root);
 });

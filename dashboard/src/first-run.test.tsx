@@ -135,17 +135,34 @@ test('with no project, the home page offers the templates on the signed-in CLI a
   expect(screen.getByRole('navigation', { name: 'Main' }).textContent).toBe('Start a project');
 });
 
-test('the CLI card says when a code project’s tests will run without a sandbox, and only then (v1.0 item 25)', async () => {
-  const notice = /A code project’s tests run on this computer, without a sandbox/;
-  controller.templates = templates({ testSandbox: 'none' });
-  open('/');
-  await screen.findByRole('heading', { level: 1, name: 'Let’s start your first project.' });
-  expect(screen.getByText(notice)).toBeTruthy();
-  cleanup();
-  controller.templates = templates({ testSandbox: 'codex' });
-  open('/');
-  await screen.findByRole('heading', { level: 1, name: 'Let’s start your first project.' });
-  expect(screen.queryByText(notice)).toBeNull();
+test('the CLI card says when a code project’s tests will run without a sandbox, or wait for its setup, and offers it (1.0.1)', async () => {
+  const user = userEvent.setup(),
+    unsandboxed = /A code project’s tests run on this computer, without a sandbox/,
+    waiting = /It needs a one-time setup on this computer before they can run\.$/,
+    start = async (extra: Partial<FirstRunTemplates>) => {
+      cleanup();
+      controller.templates = templates(extra);
+      open('/');
+      await screen.findByRole('heading', { level: 1, name: 'Let’s start your first project.' });
+    };
+  await start({ testSandbox: 'none', builtInSandbox: { state: 'ready' } });
+  expect(screen.getByText(unsandboxed)).toBeTruthy();
+  expect(screen.queryByText(waiting)).toBeNull();
+  // Set up, nothing needs saying.
+  await start({ testSandbox: 'built-in', builtInSandbox: { state: 'ready' } });
+  expect(screen.queryByText(unsandboxed)).toBeNull();
+  expect(screen.queryByText(waiting)).toBeNull();
+  // Not set up yet, the card offers the setup, which the controller starts without a project.
+  await start({ testSandbox: 'built-in', builtInSandbox: { state: 'not-set-up' } });
+  expect(screen.getByText(waiting)).toBeTruthy();
+  await user.click(screen.getByRole('button', { name: 'Set up the sandbox' }));
+  await waitFor(() =>
+    expect(commands().filter(command => command.url === '/api/built-in-sandbox')).toEqual([
+      { url: '/api/built-in-sandbox', method: 'POST', body: {} },
+    ]),
+  );
+  // Someone signed in to one CLI still never reads about the other.
+  expect(screen.queryByText(/codex/i)).toBeNull();
 });
 
 test('with no CLI signed in, the examples wait for one, and Check again asks the controller again', async () => {

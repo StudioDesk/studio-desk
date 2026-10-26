@@ -2,18 +2,11 @@
 // and direction, its repository, its house rules, its workflows and its records. Every project: running work, the
 // command-line tools, the projects on this computer and the appearance, which belong to this computer, so a change
 // there reaches every project. Every change applies to work that starts after it.
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useState, type ReactNode } from 'react';
-import {
-  send,
-  type BuiltInSandbox,
-  type KindModes,
-  type Mode,
-  type Project,
-  type RepositoryInspection,
-  type TestSandbox,
-} from './api';
+import { send, type KindModes, type Mode, type Project, type RepositoryInspection, type TestSandbox } from './api';
+import { BuiltInSandboxSetup } from './built-in-sandbox';
 import { AgentAvatar } from './design/avatar';
 import { Clapper, Icon, StudioMark } from './design/icons';
 import { agentLooks } from './today';
@@ -358,11 +351,7 @@ function Repository({ projectId, state }: { projectId: string; state: StudioStat
           <dd>
             {chips([`${profile.tests.directory}/*${profile.tests.suffix}`])}
             <span className="sd-meta">
-              {state.testSandbox === 'none'
-                ? 'without a sandbox'
-                : state.testSandbox === 'built-in'
-                  ? 'in the built-in sandbox'
-                  : 'in the Codex sandbox'}
+              {state.testSandbox === 'none' ? 'without a sandbox' : 'in the built-in sandbox'}
             </span>
           </dd>
           <dt>Before tests</dt>
@@ -859,9 +848,7 @@ function Tools({ projectId, state }: { projectId: string; state: StudioState }) 
     subscriptions = Object.values(state.adapters ?? {}).filter(adapter => adapter.subscription),
     adapters = subscriptions.some(adapter => adapter.available)
       ? subscriptions.filter(adapter => adapter.available)
-      : subscriptions,
-    // Codex CLI runs a test sandbox too; the controller picks it where it is installed and the built-in one isn't set up.
-    codexFound = !!state.adapters?.codex?.available;
+      : subscriptions;
   const control = useMutation({
     mutationFn: (body: Record<string, unknown>) => send('/api/control', { projectId, ...body }),
     onError: error => toast(error.message),
@@ -870,7 +857,7 @@ function Tools({ projectId, state }: { projectId: string; state: StudioState }) 
     state.workers
       .filter(worker => worker.enabled !== false && worker.provider === id)
       .map(worker => worker.displayName);
-  const sandbox = state.testSandbox ?? (codexFound ? 'codex' : 'none');
+  const sandbox = state.testSandbox ?? 'built-in';
   const chooseSandbox = (value: TestSandbox) => {
     if (
       value === 'none' &&
@@ -882,15 +869,10 @@ function Tools({ projectId, state }: { projectId: string; state: StudioState }) 
     control.mutate({ testSandbox: value });
   };
   const builtIn = state.builtInSandbox ?? { state: 'unsupported' },
-    choices = (
-      [
-        ['built-in', 'Built-in sandbox', !['unsupported', 'missing'].includes(builtIn.state) || sandbox === 'built-in'],
-        ['codex', 'Codex sandbox', codexFound || sandbox === 'codex'],
-        ['none', 'No sandbox', true],
-      ] as const
-    )
-      .filter(([, , offered]) => offered)
-      .map(([value, label]) => [value, label] as const);
+    choices = [
+      ['built-in', 'Built-in sandbox'],
+      ['none', 'No sandbox'],
+    ] as const;
   return (
     <Section id="tools" title="Command-line tools" shared>
       <p>
@@ -906,11 +888,9 @@ function Tools({ projectId, state }: { projectId: string; state: StudioState }) 
             <Row
               title={adapter.name}
               note={
-                adapter.id === 'codex' && sandbox === 'codex'
-                  ? 'Also runs the candidate test sandbox, so keep it installed.'
-                  : names.length
-                    ? `${names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0]} use${names.length > 1 ? '' : 's'} it here.`
-                    : 'No agent in this project uses it.'
+                names.length
+                  ? `${names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0]} use${names.length > 1 ? '' : 's'} it here.`
+                  : 'No agent in this project uses it.'
               }
             >
               <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-6)', alignItems: 'center' }}>
@@ -939,97 +919,37 @@ function Tools({ projectId, state }: { projectId: string; state: StudioState }) 
       })}
       <div className="sd-field" id="candidate-tests">
         <span className="sd-field__label">Where candidate tests run</span>
-        {/* A choice once there is more than one place: the built-in sandbox where this computer can have it, Codex's
-            where Codex CLI is installed (or a director who chose it and has since lost it), and none. */}
-        {choices.length > 1 && (
-          <span
-            className="sd-segmented"
-            role="group"
-            aria-label="Where candidate tests run"
-            style={{ alignSelf: 'flex-start' }}
-          >
-            {choices.map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={sandbox === value}
-                disabled={control.isPending}
-                onClick={() => sandbox !== value && chooseSandbox(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </span>
-        )}
+        {/* The built-in sandbox, or none by the director's choice, which asks first (1.0.1). */}
+        <span
+          className="sd-segmented"
+          role="group"
+          aria-label="Where candidate tests run"
+          style={{ alignSelf: 'flex-start' }}
+        >
+          {choices.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={sandbox === value}
+              disabled={control.isPending}
+              onClick={() => sandbox !== value && chooseSandbox(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </span>
         <span className="sd-meta" style={sandbox === 'none' ? { color: 'var(--you)' } : undefined}>
           {sandbox === 'none'
             ? 'Code an agent wrote runs on this computer with your account’s full access to your files and the network.'
-            : sandbox === 'built-in'
-              ? builtIn.state === 'ready'
-                ? 'The built-in sandbox runs tests as a separate Windows account that can change only the copy it tests and reach nothing beyond this computer.'
-                : 'Code changes wait to run their tests until the built-in sandbox is set up.'
-              : !codexFound
-                ? 'Codex CLI isn’t installed, so code changes can’t run their tests. Install it and restart the controller, or choose another place.'
-                : 'The Codex CLI sandbox lets code an agent wrote change only its own copy, with local network access only.'}
+            : builtIn.state === 'ready'
+              ? 'The built-in sandbox runs tests as a separate Windows account that can change only the copy it tests and reach nothing beyond this computer.'
+              : builtIn.state === 'unsupported'
+                ? 'The built-in sandbox works only on Windows for now, so code changes can’t run their tests here unless you choose No sandbox.'
+                : 'Code changes wait to run their tests until the built-in sandbox is set up.'}
         </span>
-        <BuiltInSandboxSetup projectId={projectId} sandbox={builtIn} />
+        <BuiltInSandboxSetup projectId={projectId} sandbox={builtIn} queryKey={queryKeys.shell(projectId)} />
       </div>
     </Section>
-  );
-}
-
-// The built-in sandbox's one-time setup on this computer (1.0.1). The setup asks Windows for an administrator, so
-// the director answers Windows' own prompt; the card refreshes until the setup has finished.
-function BuiltInSandboxSetup({ projectId, sandbox }: { projectId: string; sandbox: BuiltInSandbox }) {
-  const toast = useToast(),
-    client = useQueryClient(),
-    running = sandbox.setup?.state === 'running',
-    failed = sandbox.setup?.state === 'failed';
-  const setup = useMutation({
-    mutationFn: () => send('/api/built-in-sandbox', { projectId }),
-    onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.shell(projectId) }),
-    onError: error => toast(error.message),
-  });
-  useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(() => client.invalidateQueries({ queryKey: queryKeys.shell(projectId) }), 2000);
-    return () => clearInterval(timer);
-  }, [client, projectId, running]);
-  if (sandbox.state === 'unsupported') return null;
-  if (sandbox.state === 'missing')
-    return (
-      <span className="sd-meta">
-        The built-in sandbox isn’t installed with this copy of Studio desk. Run <span className="sd-mono">npm ci</span>{' '}
-        in its folder, then restart the controller.
-      </span>
-    );
-  if (sandbox.state === 'ready')
-    return (
-      <span className="sd-chip sd-chip--ok" style={{ alignSelf: 'flex-start' }}>
-        <span className="sd-chip__dot"></span>Built-in sandbox set up on this computer
-      </span>
-    );
-  const update = sandbox.state === 'outdated';
-  return (
-    <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-10)', alignItems: 'center' }}>
-      <button
-        type="button"
-        className="sd-btn sd-btn--sm"
-        disabled={running || setup.isPending}
-        onClick={() => setup.mutate()}
-      >
-        {running ? 'Setting up…' : failed ? 'Try again' : update ? 'Update the sandbox' : 'Set up the sandbox'}
-      </button>
-      <span className="sd-meta" style={{ flex: '1 1 260px' }}>
-        {running
-          ? 'Windows is asking for an administrator. Answer its prompt to finish.'
-          : failed
-            ? `The setup didn’t finish${sandbox.setup?.output ? `: ${sandbox.setup.output.split(/\r?\n/).filter(Boolean).at(-1)}` : '.'}`
-            : update
-              ? 'This version of Studio desk needs the sandbox set up again. Windows asks for an administrator once.'
-              : 'One-time setup on this computer. Windows asks for an administrator, then adds a local account for tests and a network filter for it.'}
-      </span>
-    </span>
   );
 }
 

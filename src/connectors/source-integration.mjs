@@ -426,7 +426,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
             },
           );
       }
-      const test = runtime.sourceCheckCommand || candidateTestCommand(runtime.codexBinary, plan, configuration);
+      const test = runtime.sourceCheckCommand || candidateTestCommand(plan, configuration);
       // Same command-local test profile and copied-harness marker as candidate tests.
       environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
       const tested = await run(runtime, test.executable, test.args, {

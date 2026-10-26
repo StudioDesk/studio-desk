@@ -1085,16 +1085,13 @@
         'Open the employee execution settings and clear Pause new assignments for this employee.',
         'Save future-run settings',
       );
-    // The controller's two stops for candidate tests with no sandbox are fixed in Settings → Candidate tests,
-    // not in the employee's settings. Every other sandbox or isolation stop is the employee's configuration.
-    const noCodex = /Candidate tests run in the Codex CLI sandbox/.test(blocker);
-    if (noCodex || /The candidate test sandbox did not pass its isolation check/.test(blocker))
+    // The controller's stop for tests whose sandbox isn't set up is fixed in Settings → Candidate tests, not in
+    // the employee's settings. Every other sandbox or isolation stop is the employee's configuration.
+    if (/run in the built-in sandbox, and it isn't set up/.test(blocker))
       return result(
         'test-sandbox',
-        `This story can’t start because its candidate tests have no sandbox to run in: ${noCodex ? 'Codex CLI isn’t installed' : 'the sandbox failed its isolation check'}. The employee and its execution settings are fine.`,
-        noCodex
-          ? 'Install Codex CLI and restart the controller, or choose No sandbox under Settings → Candidate tests.'
-          : 'Check the sandbox from a normal terminal (node scripts/check-codex-sandbox.mjs), or choose No sandbox under Settings → Candidate tests.',
+        'This can’t start because its tests run in the built-in sandbox, which isn’t set up on this computer. The employee and its execution settings are fine.',
+        'Set up the sandbox under Settings → Candidate tests, or choose No sandbox there.',
         'Candidate tests',
       );
     if (

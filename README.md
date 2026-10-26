@@ -74,7 +74,7 @@ Agents run commands on your computer through your CLI:
 - **Codex CLI** runs in its own sandbox.
 - **Claude Code** has no sandbox on Windows. It runs only the commands you approve in Settings, unless you turn on auto mode, which lets Claude Code decide.
 
-Anything an agent runs has your account's access to your files and network, so **approve narrowly**. A change's tests run in a disposable copy: in Codex CLI's sandbox when Codex CLI is installed, otherwise on your computer with your account's access. A built-in sandbox is coming in an update.
+Anything an agent runs has your account's access to your files and network, so **approve narrowly**. A change's tests are kept apart: they run in a disposable copy inside the built-in sandbox, as a separate Windows account that can change only that copy and can't reach past your computer. It needs a one-time setup from Settings, where Windows asks for an administrator. You can choose to run tests without it there, and they then have your account's access.
 
 ## Good to know
 
