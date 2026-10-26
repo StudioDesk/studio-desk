@@ -10,6 +10,7 @@ import type {
   InstructionsPage,
   LogEvent,
   PeopleSummary,
+  ReleaseOverview,
   RunRecord,
   SettledKind,
   SettledPage,
@@ -112,6 +113,8 @@ export interface Controller {
   shells: Record<string, Shell>;
   // No projects yet's templates and signed-in CLIs (v1.0 item 24); none answers as a controller without the route.
   templates?: FirstRunTemplates;
+  // The Releases page's records (1.1 step 6); none answers as a project without the source workflow.
+  releases?: ReleaseOverview;
   requests: { url: string; method: string; body?: unknown }[];
   // Answers a command; the default accepts it, and one that throws refuses it with the error's message. A
   // promise holds the answer until the test resolves it, or refuses the command when the test rejects it.
@@ -230,6 +233,10 @@ export function fakeController(projectId = 'project-x'): Controller {
       }
       if (path === `/api/projects/${projectId}/instructions`) return respond({ instructions: controller.instructions });
       if (path === `/api/projects/${projectId}/people`) return respond(controller.people);
+      if (path === `/api/projects/${projectId}/releases`)
+        return respond(
+          controller.releases ?? { available: false, reason: 'Only a project on the source workflow has releases.' },
+        );
       if (path === `/api/projects/${projectId}/activity`) {
         const before = new URLSearchParams(url.split('?')[1] ?? '').get('before'),
           index = before ? controller.activity.findIndex(page => String(page.events.at(-1)?.seq) === before) + 1 : 0;

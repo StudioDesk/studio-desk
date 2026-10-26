@@ -52,6 +52,7 @@ test("a project's pages share one frame: the project rail, its pages and the con
     ['Today', '/p/project-x'],
     ['Ideas', '/p/project-x/runs'],
     ['Board', '/p/project-x/board'],
+    ['Releases', '/p/project-x/releases'],
     ['Agents', '/p/project-x/agents'],
     ['Project settings', '/p/project-x/settings'],
   ]);

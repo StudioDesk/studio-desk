@@ -127,6 +127,20 @@ const paths = {
     </>
   ),
   trash: <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />,
+  tag: (
+    <>
+      <path d="M3 12.5V4h8.5l9.5 9.5-8.5 8.5z" />
+      <circle cx="7.8" cy="8.3" r="1.6" />
+    </>
+  ),
+  branch: (
+    <>
+      <circle cx="6" cy="5" r="2.2" />
+      <circle cx="6" cy="19" r="2.2" />
+      <circle cx="18" cy="7" r="2.2" />
+      <path d="M6 7.2v9.6M18 9.2c0 4.5-5 4.5-11 7.6" />
+    </>
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof paths;

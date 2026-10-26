@@ -492,3 +492,74 @@ export async function send<T>(
   if (!response.ok) throw new Error(result?.error || `The controller refused the request (${response.status}).`);
   return result as T;
 }
+
+// What a project's Releases page reads (1.1 step 6): its lines, each with its last release and what landed since, and
+// its milestones with their ideas, stories and waiting ideas (GET /api/projects/:id/releases).
+export interface ReleaseStory {
+  id: string;
+  title: string;
+  status: string;
+  started: boolean;
+  integration: string | null;
+  carries: { line: string; state: string }[];
+}
+export interface ReleaseIdea {
+  runId: string;
+  idea: string;
+  at: string | null;
+  by: string | null;
+  stories: ReleaseStory[];
+  movedOut: { id: string; title: string; version: string | null }[];
+}
+export interface WaitingIdea {
+  id: string;
+  idea: string;
+  at: string;
+  autoMode?: boolean;
+}
+export interface MilestoneRelease {
+  state: string;
+  notesTaskId?: string;
+  tag?: string;
+  error?: string;
+  interrupted?: string;
+  pushed?: { remote: string; at: string };
+}
+export interface Milestone {
+  id: string;
+  version: string;
+  line: string | null;
+  goal: string;
+  state: 'open' | 'released';
+  waiting: WaitingIdea[];
+  release?: MilestoneRelease;
+  ideas: ReleaseIdea[];
+  movedIn: ReleaseStory[];
+  counts: { ideas: number; waiting: number; stories: number; integrated: number; started: number };
+}
+export interface ReleaseLine {
+  branch: string;
+  state: string;
+  newest: boolean;
+  from?: string;
+  head: string | null;
+  lastRelease: { name: string; version: string } | null;
+  landed: {
+    studio: number;
+    hand: number;
+    more: boolean;
+    commits: { commit: string; subject: string; at: string; studio: boolean }[];
+  } | null;
+  onRemote: { known: boolean; ahead?: number; behind?: number } | null;
+}
+export interface ReleaseOverview {
+  available: boolean;
+  reason?: string;
+  copy?: { branch: string | null; clean: boolean };
+  remote?: { name: string; url: string } | null;
+  lines?: ReleaseLine[];
+  milestones?: Milestone[];
+  tags?: string[];
+}
+export const releasesUrl = (projectId: string) => projectPath(projectId, 'releases');
+export const milestonesUrl = (projectId: string) => projectPath(projectId, 'milestones');

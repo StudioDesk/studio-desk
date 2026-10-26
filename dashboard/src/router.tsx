@@ -28,6 +28,7 @@ const TaskView = lazyRouteComponent(() => import('./task-page'), 'TaskView'),
   TeamPage = lazyRouteComponent(() => import('./teams-page'), 'TeamPage'),
   AgentsPage = lazyRouteComponent(() => import('./agents-page'), 'AgentsPage'),
   InstructionsPage = lazyRouteComponent(() => import('./instructions-page'), 'InstructionsPage'),
+  ReleasesPage = lazyRouteComponent(() => import('./releases-page'), 'ReleasesPage'),
   ActivityLogPage = lazyRouteComponent(() => import('./activity-log-page'), 'ActivityLogPage'),
   PlatformPage = lazyRouteComponent(() => import('./platform-page'), 'PlatformPage');
 // No projects yet loads only when no project exists.
@@ -205,6 +206,19 @@ const setupRoute = createRoute({
   },
 });
 
+// A project's release lines and milestones (1.1 step 6); a milestone's own address opens its card.
+const releasesRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: '/releases',
+  validateSearch: (search: Record<string, unknown>): { milestone?: string } =>
+    typeof search.milestone === 'string' ? { milestone: search.milestone } : {},
+  component: function Releases() {
+    const { projectId } = projectRoute.useParams(),
+      { milestone } = releasesRoute.useSearch();
+    return <ReleasesPage projectId={projectId} milestone={milestone} />;
+  },
+});
+
 // The agents' pages sit under Agents, as the sidebar has them: the agents, one agent, the teams, one team and the
 // instructions.
 const agentsRoute = createRoute({
@@ -320,6 +334,7 @@ export const routeTree = rootRoute.addChildren([
     runsRoute,
     runRoute,
     boardRoute,
+    releasesRoute,
     settingsRoute,
     setupRoute,
     agentsRoute,
