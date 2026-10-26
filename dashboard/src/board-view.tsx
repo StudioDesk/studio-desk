@@ -18,6 +18,7 @@ import { useSettled, useSettledCounts } from './records';
 import { active, liveSummary, settled, type StudioState } from './studio-runs';
 import { agentLooks } from './today';
 import { useToast } from './toast';
+import { useNow } from './use-now';
 
 // An idea's color on its cards: the project hues, never the orange that marks the director's calls.
 const ideaHues = ['var(--live-dot)', 'var(--project-2)', 'var(--agent-morgan)', 'var(--agent-eli)', 'var(--ok-dot)'];
@@ -53,6 +54,8 @@ export function Board({
     [lanes, setLanes] = useState<'none' | 'idea' | 'person'>('none'),
     [view, setView] = useState<'board' | 'list'>('board'),
     [dropping, setDropping] = useState(false),
+    // In-progress cards' minutes follow the shared clock, which sets no timer while nothing runs.
+    now = useNow(state.attempts.some(attempt => ['running', 'stopping'].includes(attempt.status))),
     looks = useMemo(
       () => agentLooks(projectId, [...state.workers, ...(state.employeeDirectory ?? [])]),
       [projectId, state.workers, state.employeeDirectory],
@@ -61,7 +64,7 @@ export function Board({
   const board = withSettled(state, [...(done.data?.pages ?? []), ...(closedPages.data?.pages ?? [])]),
     stories = liveSummary(state).stories,
     cards = board.tasks
-      .map(task => cardOf(task, board, stories, closed))
+      .map(task => cardOf(task, board, stories, closed, now))
       .filter((card): card is Card => !!card)
       .sort(newest(board));
   const approve = useMutation({

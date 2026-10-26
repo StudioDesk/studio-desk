@@ -3,7 +3,7 @@
 // finished runs.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './app';
@@ -16,8 +16,18 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+
+// Faked time and intervals, the page's own waits still running as time passes, and a record of each interval set.
+const fakeClock = (at: number) => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'], shouldAdvanceTime: true });
+  vi.setSystemTime(at);
+  return vi.spyOn(globalThis, 'setInterval');
+};
+const minute = 60000;
 
 const open = (path = '/p/project-x') => {
   const router = createAppRouter(createMemoryHistory({ initialEntries: [path] }));
@@ -249,6 +259,43 @@ test('running work shows on the floor with who is on it and a way to watch, and 
     '/p/project-x/tasks/T-wait',
   );
   expect(screen.queryByLabelText(/calls? for you$/)).toBeNull();
+});
+
+test("a working agent's minutes on the floor move on as the minute does, with no other change", async () => {
+  const start = Date.parse('2026-10-26T12:00:00Z'),
+    interval = fakeClock(start);
+  controller.tasks = [
+    taskFixture('T-2', { title: 'Build the board', status: 'running', lastAttemptId: 'attempt-2', maxSeconds: 1200 }),
+  ];
+  controller.attempts = [
+    {
+      id: 'attempt-2',
+      taskId: 'T-2',
+      status: 'running',
+      workerId: 'W-1',
+      startedAt: new Date(start - 6 * minute).toISOString(),
+    },
+  ];
+  open();
+  const live = await screen.findByRole('region', { name: 'Eli is working' });
+  expect(within(live).getByText('6 of 20 min')).toBeTruthy();
+  await waitFor(() => expect(interval.mock.calls.map(call => call[1])).toContain(1000));
+  await act(async () => {
+    vi.advanceTimersByTime(minute);
+  });
+  expect(within(live).getByText('7 of 20 min')).toBeTruthy();
+  expect(within(live).queryByText('6 of 20 min')).toBeNull();
+});
+
+test('Today with nobody working sets no running-time clock', async () => {
+  const interval = fakeClock(Date.parse('2026-10-26T12:00:00Z'));
+  open();
+  await screen.findByRole('region', { name: 'Free agents' });
+  await act(async () => {
+    vi.advanceTimersByTime(minute);
+  });
+  expect(screen.queryByRole('region', { name: 'Eli is working' })).toBeNull();
+  expect(interval.mock.calls.map(call => call[1]).filter(period => period === 1000 || period === 30000)).toEqual([]);
 });
 
 test('a change to running work fetches that task alone and updates Today in place', async () => {

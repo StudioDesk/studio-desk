@@ -93,6 +93,23 @@ test('a running card shows its attempt and time; a waiting one what it waits for
   expect(matches(next, 'waiting')).toBe(true);
 });
 
+test("a running card's minutes follow the time it is given, with nothing else changed", () => {
+  const started = Date.parse('2026-10-22T20:04:00Z'),
+    minute = 60000,
+    running = story({ status: 'running', lastAttemptId: 'a-1', sourceStage: stage({ phase: 'implementing' }) }),
+    attempt: AttemptSummary = {
+      id: 'a-1',
+      taskId: 'T-1',
+      status: 'running',
+      workerId: 'W-1',
+      startedAt: new Date(started).toISOString(),
+      assignment: { kind: 'studio-development:change' },
+    },
+    board = state([running], [attempt]);
+  expect(cardOf(running, board, [], false, started + 6 * minute)!.running!.used).toBe('6 of 20 min');
+  expect(cardOf(running, board, [], false, started + 7 * minute)!.running!.used).toBe('7 of 20 min');
+});
+
 test('work the controller holds after an attempt waits in grey; a stop is red', () => {
   const held = story({
     status: 'blocked',

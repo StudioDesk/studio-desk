@@ -3,7 +3,7 @@
 // floor and what shipped today. Every action asks the controller for the same recorded step the task page would.
 import { useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
+import { useId, useMemo, useState, type ReactNode } from 'react';
 import { send, type AttemptSummary, type Task, type Worker } from './api';
 import { askedPaths, commandRequest, decisionState, fileRequest } from './decisions';
 import { plural, took, totalsOf, diffStatOf, sandboxed, openPhaseOf, testingPhases } from './evidence';
@@ -46,6 +46,7 @@ import {
   when,
 } from './today';
 import { useToast } from './toast';
+import { useNow } from './use-now';
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60000));
 
@@ -800,16 +801,6 @@ function Call(props: CallProps & { item: HomeItem }) {
   return <GenericCall {...props} task={task} item={item} />;
 }
 
-// The clock for elapsed minutes, a tick each half minute.
-function useNow(every = 30000) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), every);
-    return () => clearInterval(timer);
-  }, [every]);
-  return now;
-}
-
 const working: Record<string, { chip: string; line: string; strip: string }> = {
   'studio-development:checks': { chip: 'Running checks', line: 'running the source checks', strip: 'checking' },
   'studio-development:breakdown': { chip: 'Planning', line: 'planning the stories', strip: 'planning' },
@@ -857,8 +848,9 @@ function Floor({
   stories: RunStory[];
   agents: FloorAgent[];
 }) {
-  const now = useNow(),
-    busy = agents.filter(agent => agent.task && agent.attempt),
+  // The working cards' minutes follow the shared clock, which sets no timer while nobody is working.
+  const busy = agents.filter(agent => agent.task && agent.attempt),
+    now = useNow(busy.length > 0),
     free = agents.filter(agent => !agent.task),
     verifying = state.attempts.filter(attempt => attempt.sourceIntegration?.state === 'verifying');
   return (
