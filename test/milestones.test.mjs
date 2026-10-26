@@ -1,5 +1,5 @@
 // Milestones (1.1 step 2a, Decision MP-028): a milestone is a planned release, and every idea and story carries its
-// release, picked with no extra step from the director's pick, a version the idea names, or the next release. A minor
+// release, picked with no extra step: the director's pick, otherwise the current working release (MP-032). A minor
 // or major release lands on the newest line; a patch on release/x.y, made from the newest tag of its series. A story
 // moves until it starts. Ideas wait in a milestone, sent by the director or by a setting when their line is free.
 import test from 'node:test';
@@ -97,7 +97,7 @@ test('a milestone lands on the newest line, or a patch on its release line made 
   );
 });
 
-test('an idea lands on the release the director picks, one its words name, or the next; a release named before it exists is made', async t => {
+test('an idea lands on the release the director picks or the current working release; its words never pick or make one', async t => {
   const c = await setup(t),
     store = c.app.store,
     project = await development(c),
@@ -106,87 +106,83 @@ test('an idea lands on the release the director picks, one its words name, or th
       assert.equal(sent.status, 201, JSON.stringify(sent.data));
       return store.run(sent.data.runId);
     };
-  // Before the project has a release, a version in an idea is nobody's release.
+  const unmade = () => {
+    assert.equal(git(c.root, ['branch', '--list', 'release/*']), '', 'No branch is made.');
+    assert.deepEqual(store.project(project).lines ?? [], [], 'No line is added.');
+  };
+  // Before the project has a milestone, an idea is in no release, whatever its words say.
   assert.equal(runOf(await send({ idea: 'Upgrade the parser to 2.4.1.' })).release, undefined);
   release(c);
+  assert.equal(runOf(await send({ idea: 'Security fix for 1.1.3: tokens never expire.' })).release, undefined);
+  assert.deepEqual(projectMilestones(store, project), []);
+  unmade();
   const next = (await c.request(`/api/projects/${project}/milestones`, { projectId: project, version: '1.2.0' })).data
     .milestone;
-  // A short version in passing, a library's version, or none: the next release, on the newest line.
-  for (const idea of ['Since 1.0 the board is slow.', 'Upgrade lodash to 4.17.21.', 'Make the board faster.']) {
-    const run = runOf(await send({ idea }));
+  // A version in passing, a library's, a released one, a patch or a minor with no milestone, or none: the current
+  // working release, on the newest line, the folder's own branch.
+  for (const idea of [
+    'Since 1.0 the board is slow.',
+    'Upgrade lodash to 4.17.21.',
+    'The crash in 1.0.0 is back.',
+    'Security fix for 1.1.3: tokens never expire.',
+    'Plan 1.3 next.',
+    'Make the board faster.',
+  ]) {
+    const sent = await send({ idea }),
+      run = runOf(sent);
     assert.deepEqual(run.release, { milestoneId: next.id, version: '1.2.0', by: { type: 'default' } }, idea);
-    assert.equal(run.line, undefined, 'Nothing has added a second line yet.');
+    assert.equal(run.line, undefined, idea);
+    assert.equal(checksBase(c, sent.data.runId).branch, 'main', idea);
   }
-  // Words without a version need nothing from the repository, so an idea is taken even where git cannot read its tags,
-  // as in the test sandbox, where a worktree's git folder is out of reach.
-  fs.renameSync(path.join(c.root, '.git'), path.join(c.root, '.git-away'));
-  try {
-    const run = runOf(await send({ idea: 'Make the board faster, again.' }));
-    assert.equal(run.release.version, '1.2.0');
-  } finally {
-    fs.renameSync(path.join(c.root, '.git-away'), path.join(c.root, '.git'));
-  }
-  // The New idea box hears the release an idea's words name as the director writes, and nothing is made by asking.
-  const preview = async idea =>
-    (await (await fetch(`${c.origin}/api/projects/${project}/releases/named?idea=${encodeURIComponent(idea)}`)).json())
-      .named;
-  const linesBefore = structuredClone(store.project(project).lines);
-  assert.equal(await preview('Make the board faster.'), null);
-  assert.deepEqual(await preview('Security fix for 1.1.3: tokens never expire.'), {
-    version: '1.1.3',
-    named: '1.1.3',
-    line: 'release/1.1',
-  });
-  assert.deepEqual(await preview('A fix for 1.1.0.'), { version: '1.1.1', named: '1.1.0', line: 'release/1.1' });
-  assert.equal(projectMilestones(store, project).length, 1, 'Asking makes no milestone.');
-  assert.deepEqual(store.project(project).lines, linesBefore, 'Asking makes no line.');
-  // A full version the idea names is made, with its release line from the newest tag of its series.
-  let sent = await send({ idea: 'Security fix for 1.1.3: tokens never expire.' }),
-    run = runOf(sent);
-  const named = projectMilestones(store, project).find(item => item.version === '1.1.3');
-  assert.deepEqual(await preview('Security fix for 1.1.3.'), {
-    version: '1.1.3',
-    named: '1.1.3',
-    line: 'release/1.1',
-    milestoneId: named.id,
-  });
-  // The idea's own view carries its release and line, for its chip on the idea page.
+  assert.deepEqual(
+    projectMilestones(store, project).map(item => item.version),
+    ['1.2.0'],
+  );
+  unmade();
+  // The idea's own view carries its release, for its chip on the idea page.
+  let sent = await send({ idea: 'Make the board faster, again.' });
   const live = await (await fetch(`${c.origin}/api/projects/${project}/live`)).json(),
     view = live.runs.find(item => item.id === sent.data.runId);
-  assert.deepEqual([view.release, view.line], [run.release, 'release/1.1']);
-  assert.deepEqual(run.release, { milestoneId: named.id, version: '1.1.3', by: { type: 'idea', named: '1.1.3' } });
-  assert.equal(run.line, 'release/1.1');
-  assert.deepEqual(sent.data.release, run.release);
-  assert.deepEqual(checksBase(c, sent.data.runId), { commit: tagCommit(c, 'v1.1.0'), branch: 'release/1.1' });
+  assert.deepEqual(view.release, { milestoneId: next.id, version: '1.2.0', by: { type: 'default' } });
+  assert.equal(view.line, undefined);
+  assert.deepEqual(sent.data.release, view.release);
   assert.ok(
     store
       .events()
-      .some(
-        event =>
-          event.kind === 'workflow_started' &&
-          event.message.endsWith('It is for 1.1.3 on release/1.1, which the idea names ("1.1.3").'),
-      ),
+      .some(event => event.kind === 'workflow_started' && event.message.endsWith('It is for 1.2.0, the next release.')),
   );
-  // A released version means its next patch.
-  run = runOf(await send({ idea: 'The crash in 1.0.0 is back.' }));
-  assert.equal(run.release.version, '1.0.1');
+  // An idea reads nothing from the repository for its release, so it is taken even where git cannot read its tags,
+  // as in the test sandbox, where a worktree's git folder is out of reach.
+  fs.renameSync(path.join(c.root, '.git'), path.join(c.root, '.git-away'));
+  try {
+    assert.equal(runOf(await send({ idea: 'The crash in 1.0.0 is back, again.' })).release.version, '1.2.0');
+  } finally {
+    fs.renameSync(path.join(c.root, '.git-away'), path.join(c.root, '.git'));
+  }
+  // Only the director's pick makes a milestone that does not exist yet, with its line from the newest tag of its
+  // series when it needs one.
+  sent = await send({ idea: 'Another 1.0 fix.', milestone: '1.0.1' });
+  let run = runOf(sent);
+  const patch = projectMilestones(store, project).find(item => item.version === '1.0.1');
+  assert.deepEqual(run.release, { milestoneId: patch.id, version: '1.0.1', by: { type: 'director' } });
   assert.equal(run.line, 'release/1.0');
-  // Now that 1.0 has a release line, a short mention of it is its open milestone.
-  assert.equal(runOf(await send({ idea: 'Since 1.0 the board is slow.' })).release.version, '1.0.1');
-  // The director's pick wins over the words, and may name a release that does not exist yet.
-  run = runOf(await send({ idea: 'Security fix for 1.1.3, on the next release instead.', milestone: next.id }));
+  assert.deepEqual(checksBase(c, sent.data.runId), { commit: tagCommit(c, 'v1.0.0'), branch: 'release/1.0' });
+  assert.ok(store.events().some(event => event.message === 'Milestone 1.0.1 made on release/1.0.'));
+  // Once the project has that line, words naming it still pick the current working release, now named by its branch.
+  run = runOf(await send({ idea: 'The crash in 1.0.0 is back.' }));
+  assert.deepEqual(run.release, { milestoneId: next.id, version: '1.2.0', by: { type: 'default' } });
+  assert.equal(run.line, 'main');
+  // The director's pick of an open milestone or a line wins.
+  run = runOf(await send({ idea: 'Security fix for 1.0.1, on the next release instead.', milestone: next.id }));
   assert.deepEqual(run.release, { milestoneId: next.id, version: '1.2.0', by: { type: 'director' } });
   assert.equal(run.line, 'main');
-  run = runOf(await send({ idea: 'Another 1.0 fix.', milestone: '1.0.2' }));
-  assert.equal(run.release.version, '1.0.2');
+  run = runOf(await send({ idea: 'Backport the parser fix.', line: 'release/1.0' }));
+  assert.deepEqual(run.release, { milestoneId: patch.id, version: '1.0.1', by: { type: 'director' } });
   assert.equal(run.line, 'release/1.0');
-  assert.equal(run.release.by.type, 'director');
-  run = runOf(await send({ idea: 'Backport the parser fix.', line: 'release/1.1' }));
-  assert.deepEqual(run.release, { milestoneId: named.id, version: '1.1.3', by: { type: 'director' } });
   for (const [data, error] of [
     [{ milestone: '1.1.0' }, /1\.1\.0 is already released/],
     [{ milestone: 'milestone-none' }, /milestone-none is not a milestone of this project/],
-    [{ milestone: next.id, line: 'release/1.1' }, /lands on the newest line, not release\/1\.1/],
+    [{ milestone: next.id, line: 'release/1.0' }, /lands on the newest line, not release\/1\.0/],
   ]) {
     const refused = await send({ idea: 'Refused.', ...data });
     assert.equal(refused.status, 400, JSON.stringify(data));

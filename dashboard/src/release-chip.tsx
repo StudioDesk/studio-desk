@@ -23,8 +23,6 @@ const story = 'studio-development:change';
 
 export interface ReleaseBy {
   type?: string;
-  named?: string;
-  taskId?: string;
 }
 export interface ReleaseOf {
   milestoneId?: string;
@@ -89,11 +87,9 @@ export function releaseChoices(overview?: ReleaseOverview): ReleaseChoice[] {
     }));
 }
 
-// Why work is in its release, in a few words.
-export function releaseReason(by?: ReleaseBy, planner?: string) {
+// Why work is in its release, in a few words: only the director picks one (MP-032).
+export function releaseReason(by?: ReleaseBy) {
   if (by?.type === 'director') return 'your pick';
-  if (by?.type === 'idea') return 'from your words';
-  if (by?.type === 'planner') return planner ? `${planner}'s call` : "the planner's call";
   if (by?.type === 'default') return 'next release';
   return '';
 }
@@ -268,7 +264,6 @@ export function StoryReleaseChip({
   run,
   tasks,
   attempts,
-  nameOf,
   compact,
 }: {
   projectId: string;
@@ -276,13 +271,9 @@ export function StoryReleaseChip({
   run?: RunRecord | null;
   tasks: Task[];
   attempts: AttemptSummary[];
-  // An agent's name, for a release that was the planner's call.
-  nameOf?: (workerId?: string) => string;
   compact?: boolean;
 }) {
   const release = storyRelease(task, run),
-    by = release?.by,
-    planner = by?.type === 'planner' ? nameOf?.(tasks.find(item => item.id === by.taskId)?.workerId) : undefined,
     started = storyStarted(task, attempts),
     releases = useReleases(projectId, task.kind === story && !!release),
     client = useQueryClient(),
@@ -317,7 +308,7 @@ export function StoryReleaseChip({
       label="Release for this story"
       version={release.version}
       line={own && own !== newest ? own : null}
-      reason={releaseReason(release.by, planner)}
+      reason={releaseReason(release.by)}
       compact={compact}
       locked={
         started

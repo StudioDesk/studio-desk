@@ -21,7 +21,6 @@ import {
 import { Dialog } from './design/dialog';
 import { Icon } from './design/icons';
 import { Heading } from './layout';
-import { workerName } from './names';
 import { useStudio } from './records';
 import { byVersion, runOfTask, StoryReleaseChip } from './release-chip';
 import type { StudioState } from './studio-runs';
@@ -597,7 +596,6 @@ function StoryRow({
           run={runOfTask(studio.runs, task.id)}
           tasks={studio.tasks}
           attempts={studio.attempts}
-          nameOf={id => workerName(studio, id)}
           compact
         />
       )}

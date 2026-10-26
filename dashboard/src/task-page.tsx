@@ -197,7 +197,6 @@ function Story({
         run={studio.runs.find(run => run.id === idea?.runId)}
         tasks={studio.tasks}
         attempts={attempts}
-        nameOf={id => workerName(studio, id)}
       />
     ),
     stat = diffStatOf(built),

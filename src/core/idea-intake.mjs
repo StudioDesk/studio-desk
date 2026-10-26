@@ -11,14 +11,13 @@ import { ideaRelease, restoreWaitingIdea, takeWaitingIdea } from '../connectors/
 
 // `general` is true on the general intake route, which also takes a source project's ideas; the Studio desk route
 // only checks and breaks down. `sampleFiles` reads a sample's waiting files as wire files when the idea takes them. A
-// source idea lands on a milestone or line the director picked (`milestone`, `line`), or one its words name, or the
-// next release (1.1 steps 1 and 2a); `waiting` names the waiting idea it was sent from, and `releaseBy` records who
-// chose its milestone when the controller sends it for the planner (step 2b).
+// source idea lands on a milestone or line the director picked (`milestone`, `line`), or the current working release
+// (1.1 steps 1 and 2a, MP-032); `waiting` names the waiting idea it was sent from.
 export function startIdeaIntake(
   store,
   registries,
   runner,
-  { projectId, idea, files, autoMode, general, line, milestone, waiting, releaseBy },
+  { projectId, idea, files, autoMode, general, line, milestone, waiting },
   sampleFiles,
 ) {
   store.project(projectId);
@@ -51,11 +50,10 @@ export function startIdeaIntake(
           steps,
         },
     { runId, tasks, budget, run } = materializeWorkflow(store, registries, workflow, { brief, ideaFiles });
-  // A source idea's release and line (1.1 step 2a): the director's pick, a version it names, or the next release. A
-  // milestone it names is made here, after everything else about the idea has been checked.
-  const { line: branch, release } = planned
-    ? {}
-    : ideaRelease(store, projectId, runner, { milestone, line, idea: brief, by: releaseBy });
+  // A source idea's release and line (1.1 step 2a): the director's pick, or the current working release. A milestone
+  // the director names by a version that has none yet is made here, after everything else about the idea has been
+  // checked.
+  const { line: branch, release } = planned ? {} : ideaRelease(store, projectId, runner, { milestone, line });
   if (branch !== undefined) run.line = branch;
   if (release) run.release = { ...release, ...(waiting ? { waiting } : {}) };
   if (typeof autoMode === 'boolean') {
@@ -83,15 +81,7 @@ export function startIdeaIntake(
   const by = run.release?.by,
     lands = run.release
       ? ` It is for ${run.release.version}${run.line !== undefined ? ` on ${run.line}` : ''}${
-          by.type === 'idea'
-            ? `, which the idea names ("${by.named}")`
-            : by.type === 'default'
-              ? ', the next release'
-              : by.type === 'planner'
-                ? ', where the planner moved it'
-                : run.release.waiting
-                  ? ', the milestone it waited in'
-                  : ''
+          by.type === 'default' ? ', the next release' : run.release.waiting ? ', the milestone it waited in' : ''
         }.`
       : run.line !== undefined
         ? ` It lands on ${run.line}.`

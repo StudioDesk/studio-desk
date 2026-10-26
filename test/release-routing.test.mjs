@@ -1,7 +1,6 @@
-// The planner's call on releases (1.1 step 2b, Decision MP-028): a breakdown may give each story the release it belongs
-// on. When the director did not choose the idea's release, a story moves to another milestone on its line, or leaves
-// the idea for a new intake on another line, checked and planned there. Linked stories share a release, and a release
-// the director chose is never moved.
+// The planner's suggestions on releases (1.1 step 2b, Decision MP-028, narrowed by MP-032): a breakdown may say a story
+// belongs on another release, with its reason. Only the director picks a release, so nothing moves, no milestone or
+// line is made and no intake starts; each suggestion is noted on the breakdown, once.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,7 +13,7 @@ import { projectOrganization, saveProjectOrganization } from '../src/core/projec
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
 
 const project = 'project-legacy';
-// The fixture's project takes ideas (so a moved part can start its own intake), and nothing in it dispatches.
+// The fixture's project is on the source workflow, which milestones need, and nothing in it dispatches.
 async function routed(t) {
   const c = await setup(t),
     store = c.app.store;
@@ -36,8 +35,9 @@ const notes = store =>
     .events()
     .filter(event => event.kind === 'release_planned')
     .map(event => event.message);
+const director = 'only the director moves a story to another release, from its release chip.';
 
-test("a breakdown's story moves to the release the planner names: on its line in place, on another line to a new intake there", async t => {
+test("a planner's release for a story moves nothing and makes nothing: it is noted for the director, once", async t => {
   const c = await routed(t),
     store = c.app.store;
   // Planned before the releases: the fixture's breakdown measured that source.
@@ -51,84 +51,49 @@ test("a breakdown's story moves to the release the planner names: on its line in
     { files: ['src/core/projects.mjs'], dependencies: [], release: '1.3.0' },
   ]);
   release(c);
-  const runs = () => store.runs(project).length,
-    before = runs();
+  const runs = store.runs(project).length,
+    lines = structuredClone(store.project(project).lines);
   c.app.runner.autonomy.accepted(planning.taskId);
-  // The story for 1.1.1 leaves this idea: its proposal is denied with the reason, and a new intake plans it on release/1.1.
-  const moved = store.task(ids[0]);
-  assert.equal(moved.status, 'denied');
-  assert.match(
-    moved.reason,
-    /^Moved to 1\.1\.1 by the planner: A fix for the 1\.1 release\. Idea run \S+ checks and plans it on release\/1\.1\.$/,
-  );
-  assert.deepEqual({ ...moved.movedTo, runId: undefined }, { version: '1.1.1', line: 'release/1.1', runId: undefined });
-  const run = store.run(moved.movedTo.runId),
-    milestone = projectMilestones(store, project).find(item => item.version === '1.1.1');
-  assert.deepEqual(run.release, {
-    milestoneId: milestone.id,
-    version: '1.1.1',
-    by: { type: 'planner', taskId: planning.taskId, reason: 'A fix for the 1.1 release.' },
-  });
-  assert.equal(run.line, 'release/1.1');
-  assert.match(run.brief, /Plan only this part:\n- Refine workflow fixture: Add a bounded comment\.$/);
-  assert.equal(git(c.root, ['rev-parse', 'refs/heads/release/1.1']), git(c.root, ['rev-parse', 'v1.1.0^{commit}']));
-  // The story for 1.3.0 is on the newest line, the idea's own: it stays, on that milestone.
-  const stayed = store.task(ids[1]);
-  assert.equal(stayed.status, 'backlog');
-  assert.deepEqual(
-    { ...stayed.release, at: undefined, milestoneId: undefined },
-    {
-      version: '1.3.0',
-      by: { type: 'planner', taskId: planning.taskId },
-      line: 'main',
-      at: undefined,
-      milestoneId: undefined,
-    },
-  );
+  for (const id of ids) {
+    const story = store.task(id);
+    assert.equal(story.status, 'backlog');
+    assert.equal(story.approval.status, 'pending');
+    assert.equal(story.release, undefined);
+  }
+  assert.equal(store.runs(project).length, runs, 'No new intake.');
+  assert.deepEqual(projectMilestones(store, project), [], 'No milestone.');
+  assert.deepEqual(store.project(project).lines, lines, 'No line.');
+  assert.equal(git(c.root, ['branch', '--list', 'release/*']), '', 'No branch.');
+  assert.deepEqual(notes(store), [
+    `The planner suggested 1.1.1 for “Refine workflow fixture”: A fix for the 1.1 release. It stays on this idea's line; ${director}`,
+    `The planner suggested 1.3.0 for “Refine project fixture”. It stays on this idea's line; ${director}`,
+  ]);
+  // Accepting again notes nothing twice.
+  c.app.runner.autonomy.accepted(planning.taskId);
   assert.equal(notes(store).length, 2);
-  assert.match(notes(store)[0], /^The planner moved “Refine workflow fixture” to 1\.1\.1 on release\/1\.1: A fix/);
-  assert.equal(notes(store)[1], 'The planner put “Refine project fixture” on 1.3.0.');
-  // Accepting again starts no second intake.
-  assert.equal(runs(), before + 1);
-  c.app.runner.autonomy.accepted(planning.taskId);
-  assert.equal(runs(), before + 1);
 });
 
-test('linked stories share a release, and a release the director chose is never moved', async t => {
+test("a release the director chose stays, and a suggestion of the idea's own release is not noted", async t => {
   const c = await routed(t),
     store = c.app.store;
-  const mixed = await c.breakdown([
-      { files: ['src/core/workflows.mjs'], dependencies: [], release: '1.1.1' },
-      { files: ['src/core/projects.mjs'], dependencies: ['workflow'], release: '1.0.1' },
-    ]),
-    chosen = await c.breakdown(
-      [
-        { files: ['src/core/workflows.mjs'], dependencies: [], release: '1.1.1', releaseReason: 'Belongs on 1.1.' },
-        { files: ['src/core/projects.mjs'], dependencies: [] },
-      ],
-      'chosen',
-    );
+  const { ids, planning } = await c.breakdown([
+    { files: ['src/core/workflows.mjs'], dependencies: [], release: '1.1.1', releaseReason: 'Belongs on 1.1.' },
+    { files: ['src/core/projects.mjs'], dependencies: ['workflow'], release: '1.2.0' },
+  ]);
   release(c);
-  // The second breakdown's idea is one the director sent to 1.2.0.
+  // The idea is one the director sent to 1.2.0.
   store.putRun({
     id: 'run-chosen',
     projectId: project,
     brief: 'Make the board faster.',
     release: { milestoneId: 'milestone-chosen', version: '1.2.0', by: { type: 'director' } },
   });
-  store.putTask({ ...store.task(chosen.planning.taskId), workflowReference: { runId: 'run-chosen' } });
-  const runs = store.runs(project).length;
-  c.app.runner.autonomy.accepted(mixed.planning.taskId);
-  c.app.runner.autonomy.accepted(chosen.planning.taskId);
-  assert.equal(store.runs(project).length, runs, 'No new intake.');
-  for (const id of [...mixed.ids, ...chosen.ids]) {
-    assert.equal(store.task(id).status, 'backlog');
-    assert.equal(store.task(id).release, undefined);
-  }
+  store.putTask({ ...store.task(planning.taskId), workflowReference: { runId: 'run-chosen' } });
+  c.app.runner.autonomy.accepted(planning.taskId);
+  for (const id of ids) assert.equal(store.task(id).release, undefined);
   assert.deepEqual(projectMilestones(store, project), []);
   assert.deepEqual(notes(store), [
-    "The planner put linked stories “Refine workflow fixture”, “Refine project fixture” on 1.1.1 and 1.0.1; linked stories share a release, so they stay on the idea's release.",
-    'The planner suggested 1.1.1 for “Refine workflow fixture”: Belongs on 1.1. The director chose 1.2.0 for this idea, which stays.',
+    `The planner suggested 1.1.1 for “Refine workflow fixture”: Belongs on 1.1. It stays on 1.2.0, this idea's release; ${director}`,
   ]);
 });
 
@@ -155,9 +120,10 @@ test("a breakdown is told its idea's release and the project's open milestones, 
   let text = layers().find(layer => layer.title === 'Releases').text;
   assert.match(
     text,
-    /^This idea has no release yet\. The project's open milestones: 1\.2\.0 \(the newest line: Faster boards\)\. /,
+    /^This idea has no release yet\. The project's open milestones: 1\.2\.0 \(the newest line: Faster boards\)\. Keep every story on this idea's line and leave release out: only the director picks a release\. /,
   );
-  assert.match(text, /A story may add release \(a version such as 1\.1\.3\) and releaseReason/);
+  assert.match(text, /the controller keeps the story where it is and shows your suggestion to the director\.$/);
+  assert.doesNotMatch(text, /next patch|makes a release/);
   store.putRun({
     id: 'run-chosen',
     projectId: project,
@@ -167,7 +133,7 @@ test("a breakdown is told its idea's release and the project's open milestones, 
   store.putTask({ ...store.task(planning.taskId), workflowReference: { runId: 'run-chosen' } });
   text = layers().find(layer => layer.title === 'Releases').text;
   assert.match(text, /^This idea is for release 1\.2\.0, which the director chose\. /);
-  assert.match(text, /Keep every story on it and leave release out\./);
+  assert.match(text, /Keep every story on it and leave release out: only the director picks a release\./);
 });
 
 test('a breakdown story gives a release as a version, and its reason only with one', async t => {

@@ -5,7 +5,7 @@
 import { useMutation, useQueries } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { getJSON, send, taskUrl, type RunRecord, type Task, type TaskPage } from './api';
+import { getJSON, send, taskUrl, type RunRecord, type TaskPage } from './api';
 import { AgentAvatar } from './design/avatar';
 import { agentState } from './faces';
 import { Icon, type IconName } from './design/icons';
@@ -35,7 +35,6 @@ import {
   useReleases,
   type ReleaseOf,
 } from './release-chip';
-import { workerName } from './names';
 import type { RunStory, StudioState } from './studio-runs';
 import { agentLooks, counted } from './today';
 import { useToast } from './toast';
@@ -118,7 +117,6 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
               run={record}
               tasks={state.tasks}
               attempts={state.attempts}
-              nameOf={id => workerName(state, id)}
               compact
             />
           }
@@ -154,12 +152,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
               <span className="sd-chip__dot"></span>
               {chip.label}
             </span>
-            <IdeaRelease
-              projectId={projectId}
-              record={record}
-              tasks={state.tasks}
-              nameOf={id => workerName(state, id)}
-            />
+            <IdeaRelease projectId={projectId} record={record} />
             <span className="sd-meta sd-wide-only">
               {sent} · {attached}
             </span>
@@ -307,33 +300,19 @@ const stationIcon = (stage: JourneyStage): IconName =>
 
 // The release an idea was sent for, and why. Each of its stories carries its own release, which moves from the story's
 // chip until it starts, so this chip only shows where the idea began.
-function IdeaRelease({
-  projectId,
-  record,
-  tasks,
-  nameOf,
-}: {
-  projectId: string;
-  record?: RunRecord;
-  tasks: Task[];
-  nameOf: (id?: string) => string;
-}) {
+function IdeaRelease({ projectId, record }: { projectId: string; record?: RunRecord }) {
   const release = record?.release as ReleaseOf | undefined,
     releases = useReleases(projectId, !!release);
   if (!release) return null;
   const newest = newestBranch(releases.data),
-    line = (record?.line as string | undefined) ?? null,
-    by = release.by;
+    line = (record?.line as string | undefined) ?? null;
   return (
     <ReleaseChip
       projectId={projectId}
       label="Release for this idea"
       version={release.version}
       line={line && line !== newest ? line : null}
-      reason={releaseReason(
-        by,
-        by?.type === 'planner' ? nameOf(tasks.find(item => item.id === by.taskId)?.workerId) : undefined,
-      )}
+      reason={releaseReason(release.by)}
     />
   );
 }

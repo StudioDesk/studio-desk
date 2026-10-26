@@ -165,29 +165,24 @@ test("the idea page shows the idea's release, and each story's chip moves it wit
   expect(router.state.location.pathname).toBe('/p/project-x/runs/run-1');
 });
 
-test('the New idea box follows a version the words name, and sends only the director’s pick', async () => {
+test('the New idea box keeps the next release whatever the words say, and sends only the director’s pick', async () => {
   const user = userEvent.setup();
-  controller.named['Fix the crash for 1.0.1 users'] = {
-    version: '1.0.1',
-    named: '1.0.1',
-    line: 'release/1.0',
-    milestoneId: 'milestone-1.0.1',
-  };
   controller.command = url => (url === '/api/intake' ? { runId: 'run-1' } : {});
   open('/p/project-x');
   const [box] = await screen.findAllByRole('form', { name: 'New idea for Project X' });
   const form = within(box!);
   expect(await form.findByRole('button', { name: 'Release: 1.1.0, next release. Change' })).toBeTruthy();
+  // The words name 1.0.1, an open milestone, and the chip stays: only the director picks a release (MP-032).
   await user.type(form.getByRole('textbox'), 'Fix the crash for 1.0.1 users');
-  const heard = await form.findByRole(
-    'button',
-    { name: 'Release: 1.0.1 on release/1.0, from your words. Change' },
-    { timeout: 2000 },
-  );
-  await user.click(heard);
-  await user.click(
-    within(form.getByRole('dialog', { name: 'Release for this idea' })).getByRole('button', { name: /^1\.2\.0/ }),
-  );
+  await user.click(form.getByRole('button', { name: 'Release: 1.1.0, next release. Change' }));
+  const picker = within(form.getByRole('dialog', { name: 'Release for this idea' }));
+  expect(picker.getByRole('button', { name: /^The next release/ })).toBeTruthy();
+  expect(
+    picker.getByText(
+      'Only you pick a release. Without your pick, the idea goes to the next release; the planner can only suggest another.',
+    ),
+  ).toBeTruthy();
+  await user.click(picker.getByRole('button', { name: /^1\.2\.0/ }));
   expect(form.getByRole('button', { name: 'Release: 1.2.0, your pick. Change' })).toBeTruthy();
   await user.click(form.getByRole('button', { name: /Send to Project X/ }));
   await waitFor(() =>

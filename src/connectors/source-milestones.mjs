@@ -1,12 +1,13 @@
 // Milestones (1.1 step 2a, Decision MP-028). A milestone is a planned release of a project on a repository: a version,
 // the line its work lands on, a goal, and the ideas waiting in it. Every idea, and every story planned from it, carries
-// its release, like a fix version in Jira or a milestone in GitLab. The release is picked with no extra step, from the
-// first that applies: the one the director picked, a version the idea names, the planner's call (step 2b), otherwise the
-// next release on the newest line. A release named before it exists is made, with its line.
+// its release, like a fix version in Jira or a milestone in GitLab. The release is picked with no extra step: the one the
+// director picked, otherwise the current working release, the lowest open milestone on the newest line. Only the
+// director makes a milestone, and its line when it needs one; an idea's words and the planner never pick, move or make a
+// release (MP-032, October 26).
 //
 // Where a version's work lands: a minor or major release (x.y.0) is made on the newest line; a patch (x.y.z) on
 // `release/x.y`, which is made from the newest x.y tag the first time a patch needs it. Milestones are opt-in: a project
-// with none, and no release tags, takes ideas exactly as before.
+// with none takes ideas exactly as before.
 import { randomUUID } from 'node:crypto';
 import { git } from './source-integration.mjs';
 import { addProjectLine, branchCommit, checkedOut, ideaLine, projectLine, projectLines } from './source-lines.mjs';
@@ -153,7 +154,7 @@ export function makeMilestone(store, projectId, runtime, { version, goal = '', b
     'milestone_made',
     null,
     null,
-    `Milestone ${milestone.version} made on ${milestone.line ?? 'the newest line'}${by.type === 'idea' ? `, named in an idea ("${by.named}")` : ''}.`,
+    `Milestone ${milestone.version} made on ${milestone.line ?? 'the newest line'}.`,
     projectId,
   );
   return milestone;
@@ -182,83 +183,11 @@ const nextRelease = milestones =>
     .filter(item => open(item) && item.line === null)
     .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
 
-// The release a version written in an idea means, as its version: the open milestone of that version or series, the
-// next patch of a released series, or a new minor or major release after the newest. Only a project with releases or
-// milestones reads versions in ideas, and a version far beyond its own (a library's) is not its release. A full
-// version (1.1.3) may need a new patch line; a short one (1.1), which an idea may mention in passing, is read only as an
-// open milestone, a patch on a line that exists, or a new release on the newest line.
-export function namedRelease(milestones, tags, text, lines = []) {
-  if (!tags.length && !milestones.length) return null;
-  const known = [...tags.map(tag => tag.version), ...milestones.map(item => parseVersion(item.version))],
-    newestMajor = Math.max(...known.map(version => version[0])),
-    newest = tags.at(-1)?.version;
-  for (const match of String(text).matchAll(versionWords)) {
-    const version = match.slice(1, match[3] === undefined ? 3 : 4).map(Number),
-      [x, y] = version,
-      named = match[0];
-    if (x > newestMajor + 1) continue;
-    const series = seriesTags(tags, version),
-      nextPatch = series.length ? [x, y, series.at(-1).version[2] + 1] : null,
-      openOf = milestones
-        .filter(item => open(item))
-        .map(item => parseVersion(item.version))
-        .filter(item => item[0] === x && item[1] === y && (version[2] === undefined || item[2] === version[2]))
-        .sort(compareVersions)[0];
-    if (openOf) return { version: openOf, named };
-    if (version[2] === undefined) {
-      if (nextPatch && lines.some(line => line.branch === `release/${x}.${y}`)) return { version: nextPatch, named };
-    } else if (series.some(tag => tag.version[2] === version[2])) return { version: nextPatch, named };
-    else if (nextPatch && version[2] >= nextPatch[2]) return { version, named };
-    const minor = [x, y, 0];
-    if (
-      !series.length &&
-      (version[2] === undefined || version[2] === 0) &&
-      (!newest || compareVersions(minor, newest) > 0)
-    )
-      return { version: minor, named };
-  }
-  return null;
-}
-
-// A version as an idea may write it (1.1, v1.1 or 1.1.3), apart from a longer number or word. Words without one need
-// nothing from the repository, so an idea is taken even where git cannot read its tags (as in a test sandbox, where a
-// worktree's git folder is out of reach).
-const versionWords = /(?<![\w.])v?(\d{1,6})\.(\d{1,6})(?:\.(\d{1,6}))?(?!\.?\d)(?!\w)/g;
-const namesAVersion = text => new RegExp(versionWords.source).test(String(text));
-
-// The release an idea's words would name if it were sent now, for the New idea box (1.1 step 6): the version, the words
-// that named it, its line (null for the newest) and its milestone when one exists, or why that version cannot be made.
-// Nothing is made. Null when the words name no release.
-export function namedReleasePreview(store, projectId, runtime, idea) {
-  const root = sourceRoot(store, projectId, runtime);
-  if (!namesAVersion(idea)) return null;
-  const milestones = projectMilestones(store, projectId),
-    lines = projectLines(store.project(projectId)),
-    tags = releaseTags(root),
-    named = namedRelease(milestones, tags, idea, lines);
-  if (!named) return null;
-  const version = versionText(named.version),
-    existing = milestones.find(item => item.version === version);
-  if (existing) return { version, named: named.named, line: existing.line, milestoneId: existing.id };
-  try {
-    return { version, named: named.named, line: milestoneTarget(root, lines, named.version, tags, milestones).line };
-  } catch (error) {
-    return { version, named: named.named, error: error.message };
-  }
-}
-
-// The release and line a new idea takes (intake): the milestone or line the director picked, a version the idea
-// names, or the next release on the newest line. `release.by` records which, so the planner (step 2b) never moves a
-// release the director picked; `by` names the chooser of `milestone` when the controller sends an idea for the planner.
-export function ideaRelease(store, projectId, runtime, { milestone, line, idea, by: chooser }) {
+// The release and line a new idea takes (intake): the milestone or line the director picked, otherwise the current
+// working release, the next one on the newest line. Its words are never read for a version, and the planner never moves
+// it: only the director picks a release (MP-032). `release.by` records which.
+export function ideaRelease(store, projectId, runtime, { milestone, line }) {
   const milestones = projectMilestones(store, projectId);
-  const chosen = (picked, by) => {
-    if (!open(picked)) throw new Error(`Milestone ${picked.version} is released, so no new idea lands on it.`);
-    return {
-      line: ideaLine(store, projectId, runtime, picked.line ?? undefined),
-      release: { milestoneId: picked.id, version: picked.version, by },
-    };
-  };
   if (milestone !== undefined) {
     if (typeof milestone !== 'string' || !milestone) throw new Error('Choose a milestone by its ID or version.');
     const picked =
@@ -267,7 +196,11 @@ export function ideaRelease(store, projectId, runtime, { milestone, line, idea, 
         : findMilestone(store, projectId, milestone);
     if (line !== undefined && line !== (picked.line ?? projectLine(store, projectId, undefined)))
       throw new Error(`Milestone ${picked.version} lands on ${picked.line ?? 'the newest line'}, not ${line}.`);
-    return chosen(picked, chooser ?? { type: 'director' });
+    if (!open(picked)) throw new Error(`Milestone ${picked.version} is released, so no new idea lands on it.`);
+    return {
+      line: ideaLine(store, projectId, runtime, picked.line ?? undefined),
+      release: { milestoneId: picked.id, version: picked.version, by: { type: 'director' } },
+    };
   }
   if (line !== undefined) {
     const branch = ideaLine(store, projectId, runtime, line),
@@ -281,19 +214,6 @@ export function ideaRelease(store, projectId, runtime, { milestone, line, idea, 
       line: branch,
       release: picked ? { milestoneId: picked.id, version: picked.version, by: { type: 'director' } } : undefined,
     };
-  }
-  // Only a project with source stories reads releases in an idea's words, and only words with a version need its tags.
-  const lines = projectLines(store.project(projectId)),
-    named =
-      namesAVersion(idea) &&
-      projectCatalog(store, runtime.registries, projectId).some(item => item.kind === 'studio-development:change') &&
-      namedRelease(milestones, releaseTags(sourceRoot(store, projectId, runtime)), idea, lines);
-  if (named) {
-    const picked = makeMilestone(store, projectId, runtime, {
-      version: named.version,
-      by: { type: 'idea', named: named.named },
-    });
-    return chosen(picked, { type: 'idea', named: named.named });
   }
   const next = nextRelease(milestones);
   return {

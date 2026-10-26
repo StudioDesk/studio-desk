@@ -347,7 +347,6 @@ function conflictedCarry(runtime, story, review, journal, close) {
       autonomyNote,
       release,
       closed,
-      movedTo,
       releasesRouted,
       runReference,
       workflowReference,

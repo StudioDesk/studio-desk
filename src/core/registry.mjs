@@ -95,7 +95,6 @@ export class OrganizationPresetRegistry {
   'proposedTaskIds',
   'sprintId',
   'release',
-  'movedTo',
   'releasesRouted',
   'organization',
   'organizationReference',
