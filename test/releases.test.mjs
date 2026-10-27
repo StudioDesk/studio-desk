@@ -32,10 +32,13 @@ const make = async (c, version) => {
 };
 const milestone = (c, id) => projectMilestones(c.app.store, project).find(item => item.id === id);
 // Whether git can push to a repository in a folder here. Every such push runs git's receiving side through its shell,
-// which the Codex test sandbox does not let git start, so there Push refuses with git's own reason instead.
+// which the Codex test sandbox does not let git start, so there Push refuses with git's own reason instead. The probe's
+// repository has a name as long as the test's remote.git: git's receiving side writes each object at a path that, at
+// the depth of an idea's checks, can pass Windows' 260 characters, and the probe must fail exactly when Push does
+// (October 27, when a probe name four characters longer failed while Push passed).
 function pushesToAFolder(directory) {
   const probe = path.join(directory, 'push-probe'),
-    bare = path.join(directory, 'push-probe.git');
+    bare = path.join(directory, 'probes.git');
   git(directory, ['init', '--quiet', '--bare', bare]);
   git(directory, ['-c', 'init.defaultBranch=main', 'init', '--quiet', probe]);
   git(probe, [
