@@ -497,6 +497,28 @@ function pendingMerge(store, task, paths) {
     conflicts: [...merge.conflicts],
   };
 }
+// Which of source-scope.json's situational entries a story's next attempt can have, so its instructions explain only
+// those: directorEdits and merge exactly as storyScopeExtras sets them, and continueFrom whenever an earlier attempt
+// exists, since only that attempt's recorded files decide whether its work carries on.
+export function storySituation(store, task) {
+  const merge = task.sourceStage?.merge,
+    attempts = implementationAttempts(store, task),
+    merging = !!merge && !attempts.some(attempt => attempt.startedAt >= merge.at);
+  return { directorEdits: !!task.scopeEdits?.length, continueFrom: !merging && attempts.length > 0, merge: merging };
+}
+// What a candidate's review needs explained: a candidate from before diffs or source-scope.json (legacy), and paths
+// the editor asked for that were then added (MP-021), which the review judges.
+export function candidateSituation(store, task) {
+  const ref = task.sourceStage
+      ? sourceCandidateReference(store, task)
+      : acceptedReference(store, task.dependencies[0], undefined, recordProject(task)),
+    candidate = store.attempt(ref.attemptId),
+    has = name => candidate.artifacts.some(item => item.path === name);
+  return {
+    legacy: !has('change.diff') || !has('source-scope.json'),
+    requested: !!candidate.sourceChange?.scopeEdits?.some(edit => edit.request),
+  };
+}
 // Sends a story whose integration stopped on a conflict back to its editor with its change merged onto the current
 // source (1.1 step 3, the director, October 25: "keep the code that was already built and just have the agent merge it
 // together"). Git applies the reviewed candidate to the line's tip, as integration does; the editor resolves the

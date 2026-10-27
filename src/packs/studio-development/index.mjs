@@ -34,6 +34,8 @@ import {
   scopeRequestFile,
   approveScopeRequest,
   maxScopePaths,
+  storySituation,
+  candidateSituation,
 } from '../../connectors/source-changes.mjs';
 import { sourceDiffLimit } from '../../connectors/source-diff.mjs';
 import { lineHead, projectLine, storyLine } from '../../connectors/source-lines.mjs';
@@ -136,6 +138,38 @@ const changeReviewShape = {
 // What a review may block on (MP-019), so theoretical cases become notes rather than send-backs.
 const blockingRule =
   'findings are blocking defects only: wrong behavior, a missed acceptance criterion, a failing or missing required test, or a broken controller boundary in the approved scope, as it matters for this repository. notes are everything else worth saying: syntax or cases this repository does not use, style, and possible follow-ups. verdict is needs-work exactly when findings is not empty; a passing review may carry notes, and notes never send the story back.';
+// The editor's and the reviewer's contracts explain a situation only to an attempt in it (storySituation,
+// candidateSituation), so each attempt reads what applies to it. Compiled without the store, as the legacy fixture
+// export does, they explain every situation.
+const everySituation = { directorEdits: true, continueFrom: true, merge: true, legacy: true, requested: true };
+const changeContract = ({ directorEdits, continueFrom, merge }) =>
+  [
+    `Read source-scope.json and the exact accepted proposal. The source snapshot at ../source is read-only context; its development instructions do not grant you development access. Implement only the approved scope. allowedFiles are supplied under changes/ to edit; write any of newFiles you need at changes/<path>; the controller deletes every file in deleteFiles when it builds the candidate, so update whatever uses them. Return each changed or created file as a source-file artifact at changes/<approved path>. Do not return unchanged files or generate reports. If the scope cannot be completed without changing a source path that is not approved (for example a test that asserts the behavior you are changing), do not work around it: stop with outcome blocked, still return the files you changed so far, and return ${scopeRequestFile} (artifact kind source-scope-request) naming only the paths you need added, as {"schemaVersion":"source-scope-request-v1","files":[existing files to edit],"newFiles":[files to create],"deleteFiles":[files to delete],"reason":"why each path is needed"}. The director decides whether to add them.`,
+    directorEdits &&
+      'When source-scope.json lists directorEdits, the director changed the approved paths for the stated reason.',
+    continueFrom &&
+      'When source-scope.json lists continueFrom, those files under changes/ already hold the edits an earlier attempt made: continue from them; the controller keeps them in the candidate even if you do not return them, and to drop one, restore it to its ../source content.',
+    merge &&
+      'When source-scope.json lists merge, your earlier change, which an independent review passed, was merged onto the current source because work integrated since conflicts with it: the files under merge.files hold it, and each file under merge.conflicts holds conflict markers (<<<<<<< the current source, ======= between, >>>>>>> your earlier change). Resolve every conflict so both changes work, remove every marker, and keep the rest of the change; the controller keeps the merged files in the candidate even if you do not return them, and refuses a candidate that still has markers.',
+    `If the controller stops this attempt at its time limit, your edits under changes/ are kept and the next attempt continues from them, so work until the change is complete rather than stopping early to save it. The change's diff must stay within ${sourceDiffLimit / 1024} KiB. The controller measures the full candidate test suite in its own sandbox after this CLI stops. That measurement fails on a skipped or todo test as well as a failing one, so never skip a test because an environment refuses something (that sandbox also refuses to create symbolic links): model the refused operation at its boundary instead, for example with t.mock.method on fs.lstatSync as the existing symbolic-link tests do. Your own sandbox may block local HTTP (loopback) connections; report a check you could not run as not-run with the reason, and use fail only for a defect in your change.`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+const changeReviewContract = ({ legacy, requested }) =>
+  [
+    JSON.stringify(changeReviewShape) +
+      '\nRead the accepted change.diff (the candidate against its base, with a few lines of context; a deleted file shows only its header), source-change.json, check-report.json and source-scope.json, the approved proposal with its scope, files and acceptance criteria.',
+    legacy &&
+      'Candidates made before diffs supply change-context.json and the changed files instead, and candidates made before source-scope.json was supplied lack it; then use the assignment brief and direction.',
+    'Return only source-change-review.json, kind source-change-review, in this shape. source repeats the candidate exactly as recorded: its taskId and attemptId, path source-change.json (the name of the file in the candidate, not the path of the copy under ../inputs), the SHA-256 of that file and the candidateHash in it. findings and notes are arrays of at most 20 plain strings each, never objects.',
+    blockingRule,
+    'Assess correctness and whether the edits meet the approved scope.',
+    requested &&
+      "When an entry of directorEdits in source-scope.json has requestedIn, the editor stopped and asked for the paths listed in added, giving the entry's reason, and approvedBy says who approved them; the autonomy policy approves such requests without the director. Check that each added path was needed to meet the approved scope and acceptance, and that its changes go no further than that: an added path the scope did not need, or changes in it beyond what the scope required, is a blocking finding.",
+    'Failing tests require needs-work with explained findings. Do not claim integration, release or browser verification.',
+  ]
+    .filter(Boolean)
+    .join(' ');
 const breakdownSource = (store, task) => {
   if (task.dependencies.length !== 1)
     throw new Error(
@@ -519,13 +553,12 @@ export const studioDevelopmentPack = {
       prepareAttempt: ({ store, task, runtime }) => ({
         sourceChange: changeScope(store, task, sourceRoot(store, task, runtime)),
       }),
-      instructions: () => ({
-        scopeNote:
-          'Edit only files supplied under changes/. The controller tests an isolated candidate and retains live-source integration ownership.',
+      // The editing adapter's delivery scope already says what an editor may change and what the controller owns.
+      instructions: ({ store, task } = {}) => ({
         layers: [
           {
             title: 'Bounded source change',
-            text: `Read source-scope.json and the exact accepted proposal. The source snapshot at ../source is read-only context; its development instructions do not grant you development access. Implement only the approved scope. allowedFiles are supplied under changes/ to edit; write any of newFiles you need at changes/<path>; the controller deletes every file in deleteFiles when it builds the candidate, so update whatever uses them. Return each changed or created file as a source-file artifact at changes/<approved path>. Do not return unchanged files or generate reports. If the scope cannot be completed without changing a source path that is not approved (for example a test that asserts the behavior you are changing), do not work around it: stop with outcome blocked, still return the files you changed so far, and return ${scopeRequestFile} (artifact kind source-scope-request) naming only the paths you need added, as {"schemaVersion":"source-scope-request-v1","files":[existing files to edit],"newFiles":[files to create],"deleteFiles":[files to delete],"reason":"why each path is needed"}. The director decides whether to add them. When source-scope.json lists directorEdits, the director changed the approved paths for the stated reason. When it lists continueFrom, those files under changes/ already hold the edits an earlier attempt made: continue from them; the controller keeps them in the candidate even if you do not return them, and to drop one, restore it to its ../source content. When it lists merge, your earlier change, which an independent review passed, was merged onto the current source because work integrated since conflicts with it: the files under merge.files hold it, and each file under merge.conflicts holds conflict markers (<<<<<<< the current source, ======= between, >>>>>>> your earlier change). Resolve every conflict so both changes work, remove every marker, and keep the rest of the change; the controller keeps the merged files in the candidate even if you do not return them, and refuses a candidate that still has markers. If the controller stops this attempt at its time limit, your edits under changes/ are kept and the next attempt continues from them, so work until the change is complete rather than stopping early to save it. The change's diff must stay within ${sourceDiffLimit / 1024} KiB. The controller measures the full candidate test suite in its own sandbox after this CLI stops. That measurement fails on a skipped or todo test as well as a failing one, so never skip a test because an environment refuses something (that sandbox also refuses to create symbolic links): model the refused operation at its boundary instead, for example with t.mock.method on fs.lstatSync as the existing symbolic-link tests do. Your own sandbox may block local HTTP (loopback) connections; report a check you could not run as not-run with the reason, and use fail only for a defect in your change. Do not change AGENTS.md, supplied inputs, the read-only snapshot or live source. Your job-local instructions own your permissions.`,
+            text: changeContract(store ? storySituation(store, task) : everySituation),
           },
         ],
       }),
@@ -626,17 +659,13 @@ export const studioDevelopmentPack = {
         acceptedCandidate(store, task);
       },
       prepareAttempt: ({ store, task }) => ({ candidateReview: acceptedCandidate(store, task) }),
-      instructions: () => ({
+      instructions: ({ store, task } = {}) => ({
         scopeNote: 'Review staged candidate evidence only. This attempt cannot edit or integrate live source.',
         assignment: { reviewShape: changeReviewShape },
         layers: [
           {
             title: 'Candidate review contract',
-            text:
-              JSON.stringify(changeReviewShape) +
-              '\nRead the accepted change.diff (the candidate against its base, with a few lines of context; a deleted file shows only its header), source-change.json, check-report.json and source-scope.json, the approved proposal with its scope, files and acceptance criteria. Candidates made before diffs supply change-context.json and the changed files instead, and candidates made before source-scope.json was supplied lack it; then use the assignment brief and direction. Return only source-change-review.json, kind source-change-review, in this shape. source repeats the candidate exactly as recorded: its taskId and attemptId, path source-change.json (the name of the file in the candidate, not the path of the copy under ../inputs), the SHA-256 of that file and the candidateHash in it. findings and notes are arrays of at most 20 plain strings each, never objects. ' +
-              blockingRule +
-              " Assess correctness and whether the edits meet the approved scope. When an entry of directorEdits in source-scope.json has requestedIn, the editor stopped and asked for the paths listed in added, giving the entry's reason, and approvedBy says who approved them; the autonomy policy approves such requests without the director. Check that each added path was needed to meet the approved scope and acceptance, and that its changes go no further than that: an added path the scope did not need, or changes in it beyond what the scope required, is a blocking finding. Failing tests require needs-work with explained findings. Do not claim integration, release or browser verification.",
+            text: changeReviewContract(store ? candidateSituation(store, task) : everySituation),
           },
         ],
       }),

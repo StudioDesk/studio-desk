@@ -62,6 +62,13 @@ test('a conflicting story keeps its change: merged onto the current source by th
   await c.start();
   const first = await c.wait(c.taskId),
     review = await c.review(first);
+  // Each attempt's contract explains only the situations its source-scope.json can have: the first edit none, and
+  // the review of a candidate with a diff and no file request neither older candidates nor added paths.
+  const contract = (attempt, title = 'Bounded source change') =>
+    attempt.instructions.layers.find(layer => layer.title === title).text;
+  assert.doesNotMatch(contract(first), /lists (directorEdits|continueFrom|merge)/);
+  assert.doesNotMatch(contract(review, 'Candidate review contract'), /Candidates made before diffs|has requestedIn/);
+  assert.match(contract(review, 'Candidate review contract'), /Assess correctness and whether the edits meet/);
   await c.accept(review.taskId);
   meanwhile(c, 'A different change here on main.');
   const tip = git(c.root, ['rev-parse', 'HEAD']);
@@ -87,6 +94,8 @@ test('a conflicting story keeps its change: merged onto the current source by th
   });
   assert.equal(merged.sourceChange.base.commit, tip);
   assert.equal(merged.sourceChange.continueFrom, undefined, 'The merge replaces continuing from the earlier attempt.');
+  assert.match(contract(merged), /When source-scope\.json lists merge, your earlier change/);
+  assert.doesNotMatch(contract(merged), /lists (directorEdits|continueFrom)/);
   const resolved = git(c.root, ['show', `${merged.sourceCandidate.commit}:${target}`]);
   assert.match(resolved, /A different change here on main\.\n\/\/ Bounded fixture improvement\.$/);
   assert.doesNotMatch(resolved, /^(<{7}|>{7})/m);

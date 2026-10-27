@@ -302,6 +302,9 @@ test('a blocked editor names the files it needs, and the director approves them 
   });
   // T-b18131f6's candidate skipped a test the sandbox could not run, and the measured suite failed it.
   assert.match(blocked.instructions.text, /fails on a skipped or todo test/);
+  // A first attempt's source-scope.json has none of the situational entries, so its contract explains none of them.
+  const contract = attempt => attempt.instructions.layers.find(layer => layer.title === 'Bounded source change').text;
+  assert.doesNotMatch(contract(blocked), /lists (directorEdits|continueFrom|merge)/);
   assert.ok(blocked.artifacts.some(item => item.path === 'scope-request.json' && item.kind === 'source-scope-request'));
   assert.ok(
     blocked.artifacts.some(item => item.path === 'changes/src/core/workflows.mjs'),
@@ -343,6 +346,10 @@ test('a blocked editor names the files it needs, and the director approves them 
   );
   assert.equal(next.sourceChange.continueFrom.attemptId, blocked.id);
   assert.equal(next.scopeRequest, undefined);
+  // Its contract explains the director's edit and the work it continues from, and nothing about a merge.
+  assert.match(contract(next), /When source-scope\.json lists directorEdits, the director changed the approved paths/);
+  assert.match(contract(next), /When source-scope\.json lists continueFrom, those files under changes\/ already hold/);
+  assert.doesNotMatch(contract(next), /lists merge/);
   // The editor and the independent reviewer read which paths the request added, and who approved them.
   const scope = JSON.parse(fs.readFileSync(path.join(next.outputFolder, 'source-scope.json')));
   assert.deepEqual(
@@ -359,6 +366,11 @@ test('a blocked editor names the files it needs, and the director approves them 
     () => editSourceStory(store, store.task(id), { ...approval, files: ['src/core/workflows.mjs'] }, c.root),
     /Only the file request of the story's latest attempt can be approved/,
   );
+  // Its independent review is told how to judge the requested paths, and nothing about candidates from before diffs.
+  const { review } = await c.toReview(id),
+    reviewContract = review.instructions.layers.find(layer => layer.title === 'Candidate review contract').text;
+  assert.match(reviewContract, /an added path the scope did not need, .* is a blocking finding/);
+  assert.doesNotMatch(reviewContract, /Candidates made before diffs/);
 });
 
 // The director's amendment of October 20: the policy approves the request, and the director is the
