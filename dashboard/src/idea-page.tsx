@@ -1,11 +1,13 @@
 // An idea's journey (the canvas's Idea board and its phone board, v1.0 item 23): what the idea is doing now, the
 // stages from Sent to Shipped, its stories in order, what happened in plain sentences with a view of only the stops
 // and decisions, the idea in full, who worked on it and what landed. Its actions are the run page's: pausing the
-// project, archiving a finished idea and closing what is left of one.
+// project, archiving a finished idea and closing what is left of one, and bringing an idea whose stories landed back
+// to an older line (1.1).
 import { useMutation, useQueries } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { getJSON, send, taskUrl, type RunRecord, type TaskPage } from './api';
+import { getJSON, runUrl, send, taskUrl, type RunRecord, type Task, type TaskPage } from './api';
+import { BringBack, named } from './bring-back';
 import { AgentAvatar } from './design/avatar';
 import { agentState } from './faces';
 import { Icon, type IconName } from './design/icons';
@@ -97,6 +99,12 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
     finished = finishedLabels.includes(run.outcome.label),
     // The idea's own record, which carries its release and line (1.1).
     record = state.runs.find(item => item.id === run.id),
+    // The idea may be brought back to an older line (1.1, October 27) once each of its source stories landed or was
+    // closed, and one landed; a carry story goes with the fix it carries. Until then nothing asks the controller.
+    sourceStories = storyTasks.filter(task => task.kind === 'studio-development:change' && !task.carryOf),
+    backable =
+      sourceStories.some(landed) &&
+      sourceStories.every(task => landed(task) || !!task.closed || ['cancelled', 'denied'].includes(task.status)),
     sent = `You sent this at ${clockOf(run.startedAt)}`,
     attached = inputs.length ? `${inputs.length} ${plural(inputs.length, 'file')} attached` : 'no files attached';
   const cards = (inside = false) =>
@@ -161,6 +169,21 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
           <span className="sd-meta sd-narrow-only">{sent}</span>
           {finished && run.outcome.text && (
             <span style={{ color: 'var(--ink-2)', maxWidth: '72ch' }}>{run.outcome.text}</span>
+          )}
+          {backable && (
+            <BringBack
+              projectId={projectId}
+              url={`${runUrl(projectId, run.id)}/bring-back?projectId=${encodeURIComponent(projectId)}`}
+              path={`${runUrl(projectId, run.id)}/bring-back`}
+              watch={state.attempts
+                .filter(attempt => run.taskIds.includes(attempt.taskId))
+                .flatMap(attempt => attempt.sourceCarries ?? [])}
+              label={line => `Bring the idea back to ${line}`}
+              text={({ through }) =>
+                `An older release gets this change: all of the idea's stories go back to ${through.join(', then ')}, in the order they landed, one at a time when the project's source is free. Where one conflicts on a line, it gets a story of its own.`
+              }
+              done={result => broughtBack(result, stories)}
+            />
           )}
         </div>
         {!narrow && <IdeaActions projectId={projectId} run={run} state={state} />}
@@ -267,6 +290,23 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
       )}
     </article>
   );
+}
+
+const landed = (task: Task) => task.sourceStage?.current === 'integrated';
+
+// The toast once the controller planned bringing the idea back, each story named as its card is: "Bringing stories 1
+// and 2 back to release/1.1, then release/1.0."
+function broughtBack(result: Record<string, unknown>, stories: JourneyStory[]) {
+  const planned = (result.stories as { storyId: string; lines: string[] }[] | undefined) ?? [],
+    byLines = new Map<string, string[]>();
+  for (const { storyId, lines } of planned) {
+    const number = stories.find(story => story.task.id === storyId)?.number,
+      reached = lines.join(', then ');
+    byLines.set(reached, [...(byLines.get(reached) ?? []), number ? String(number) : storyId]);
+  }
+  return `Bringing ${[...byLines]
+    .map(([reached, names]) => `${plural(names.length, 'story', 'stories')} ${named(names)} back to ${reached}`)
+    .join('; ')}.`;
 }
 
 // "3 things made, a review and 6 records".

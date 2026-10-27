@@ -18,7 +18,7 @@ export interface BringBackTargets {
   reason?: string;
 }
 
-const named = (lines: string[]) =>
+export const named = (lines: string[]) =>
   lines.length > 1 ? `${lines.slice(0, -1).join(', ')} and ${lines.at(-1)}` : (lines[0] ?? '');
 
 export function BringBack({
