@@ -1629,6 +1629,22 @@ test('integration explanations retain exact eligibility and distinguish automati
       'Approve integration again',
       /failing tests/,
     ],
+    // It passed its own tests and fails only merged onto what landed since: integrating again fails the same way.
+    [
+      s => {
+        s.attempts[1].sourceIntegration = {
+          state: 'rejected',
+          verification: {
+            passed: false,
+            phaseId: 'integration.verification',
+            landedSince: { commits: 2, stories: ['T-landed1'] },
+          },
+        };
+      },
+      'integration-landed',
+      'Merge onto the current source',
+      /Merge onto the current source/,
+    ],
     [
       s => {
         s.attempts[1].sourceIntegration = {
@@ -1679,6 +1695,10 @@ test('integration explanations retain exact eligibility and distinguish automati
     assert.match(e.next, next);
     assert.doesNotMatch(e.reason + e.next, /Approve or deny proposed work/);
     if (kind === 'integration-tests') assert.ok(e.details.includes('test/source.test.mjs: keeps local work'));
+    if (kind === 'integration-landed') {
+      assert.match(e.reason, /passed its own tests but fails together with work that landed after it was tested/);
+      assert.match(e.next, /Integrating again fails the same way/);
+    }
     assert.equal(JSON.stringify(s), before);
   }
   for (const mutate of [

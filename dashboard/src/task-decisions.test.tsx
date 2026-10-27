@@ -270,43 +270,82 @@ test('a story whose review asked for changes is sent back, or integrated over th
   );
 });
 
-// 1.1 step 3: a story whose integration stopped on a conflict goes back to its editor merged onto the current source.
-test('a story stopped by a conflict offers to merge its change onto the current source', async () => {
-  const user = userEvent.setup();
-  controller.attempts = [
-    {
-      id: 'attempt-review',
-      taskId: 'T-1',
-      status: 'accepted',
-      workerId: 'W-1',
-      assignment: { kind: 'studio-development:change-review' },
-      candidateReviewVerdict: 'pass',
-      sourceIntegration: { state: 'rejected', verification: { conflicts: ['src/core/store.mjs'] } },
-    },
-  ];
-  open(
-    taskFixture('T-1', {
-      kind: 'studio-development:change',
-      status: 'done',
-      acceptedAttemptId: 'attempt-review',
-      lastAttemptId: 'attempt-review',
-      sourceStage: {
-        version: 'source-story-stages-v1',
-        phase: 'integration',
-        current: 'failed',
-        review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
-      },
-    }),
-  );
-  const region = await decisions();
-  await user.click(region.getByRole('button', { name: 'Merge onto the current source' }));
-  await waitFor(() =>
+// A story whose passing review's integration stopped, with what its verification recorded.
+const stoppedStory = (verification: NonNullable<AttemptSummary['sourceIntegration']>['verification']) => {
+  const story = passedStory();
+  controller.attempts[1]!.sourceIntegration = { state: 'rejected', verification };
+  return { ...story, sourceStage: { ...story.sourceStage, phase: 'integration', current: 'failed' } };
+};
+const merged = () =>
+  waitFor(() =>
     expect(posted().at(-1)).toEqual({
       url: '/api/tasks/T-1/merge-source',
       method: 'POST',
       body: { projectId: 'project-x' },
     }),
   );
+
+// 1.1 step 3: a story whose integration stopped on a conflict goes back to its editor merged onto the current source.
+test('a story stopped by a conflict offers to merge its change onto the current source', async () => {
+  const user = userEvent.setup();
+  open(stoppedStory({ conflicts: ['src/core/store.mjs'] }));
+  const region = await decisions();
+  // Integrating again as it is stops on the same conflict, so it is the second choice.
+  expect(names(region)).toEqual([
+    'Merge onto the current source',
+    'Integrate again',
+    'Send back to Eli',
+    'Close without integrating',
+  ]);
+  await user.click(region.getByRole('button', { name: 'Merge onto the current source' }));
+  await merged();
+});
+
+// October 27: a change that passed its own tests and fails only merged onto what landed since it was tested.
+test('a story that fails only with what landed since says so, links what landed and offers Merge first', async () => {
+  const user = userEvent.setup();
+  controller.tasks = [taskFixture('T-2', { title: 'Name the stage in plain words' })];
+  open(stoppedStory({ landedSince: { commits: 2, stories: ['T-2'] } }));
+  const region = await decisions();
+  expect(names(region)).toEqual([
+    'Merge onto the current source',
+    'Integrate again',
+    'Send back to Eli',
+    'Close without integrating',
+  ]);
+  expect(region.getByRole('button', { name: 'Merge onto the current source' }).className).toMatch(/sd-btn--primary/);
+  expect(region.getByRole('button', { name: 'Integrate again' }).className).not.toMatch(/sd-btn--primary/);
+  expect(
+    region.getByText(/It passed on its own but fails together with what landed after it was tested/).textContent,
+  ).toBe(
+    'It passed on its own but fails together with what landed after it was tested: Name the stage in plain words and 1 commit made by hand.',
+  );
+  expect(region.getByRole('link', { name: 'Name the stage in plain words' }).getAttribute('href')).toBe(
+    '/p/project-x/tasks/T-2',
+  );
+  expect(region.getByText('1 commit made by hand')).toBeTruthy();
+  await user.click(region.getByRole('button', { name: 'Merge onto the current source' }));
+  await merged();
+});
+
+test('no commit by hand is counted when every commit that landed was a story', async () => {
+  open(stoppedStory({ landedSince: { commits: 1, stories: ['T-2'] } }));
+  const region = await decisions();
+  // A story the page has not read is named by its ID.
+  expect(region.getByRole('link', { name: 'T-2' }).getAttribute('href')).toBe('/p/project-x/tasks/T-2');
+  expect(region.getByText(/landed after it was tested/).textContent).toBe(
+    'It passed on its own but fails together with what landed after it was tested: T-2.',
+  );
+  expect(region.queryByText(/made by hand/)).toBeNull();
+});
+
+test('an integration that failed with nothing landed and no conflict offers Integrate again first', async () => {
+  open(stoppedStory({ conflicts: [] }));
+  const region = await decisions();
+  // Nothing landed and nothing conflicted: Integrate again stays the main action, and nothing offers a merge.
+  expect(names(region)).toEqual(['Integrate again', 'Send back to Eli', 'Close without integrating']);
+  expect(region.getByRole('button', { name: 'Integrate again' }).className).toMatch(/sd-btn--primary/);
+  expect(region.queryByText(/landed after it was tested/)).toBeNull();
 });
 
 // 1.1 step 4: a fix integrated on an older line is carried to the next newer one, or marked not needed there.

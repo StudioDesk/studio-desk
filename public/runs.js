@@ -717,7 +717,8 @@
         );
       let kind = 'integration-approval',
         why = 'The current independent review passed and awaits integration approval.',
-        recovery = `Use ${approvalAction} to request controller-owned integration.`;
+        recovery = `Use ${approvalAction} to request controller-owned integration.`,
+        action = approvalAction;
       if (stopped || refused) {
         kind = 'integration-stopped';
         why = 'The last integration did not complete.';
@@ -731,6 +732,12 @@
           kind = 'integration-formatter';
           why = 'Integration stopped while formatting the reviewed files.';
           recovery = `Resolve the formatter failure or request a corrected candidate, then use ${approvalAction}.`;
+        } else if (journal?.verification?.landedSince) {
+          // It passed its own tests and fails only merged onto work that landed after it was tested (October 27).
+          kind = 'integration-landed';
+          why = 'The change passed its own tests but fails together with work that landed after it was tested.';
+          action = 'Merge onto the current source';
+          recovery = `Use ${action} so its editor makes the change work with what landed. Integrating again fails the same way while the source stays as it is.`;
         } else if (
           journal?.verification?.passed !== true &&
           (phase === 'integration.verification' || journal?.verification?.passed === false)
@@ -744,7 +751,7 @@
           recovery = `Inspect the branch and preserve local edits. Resolve the source mismatch before using ${approvalAction}.`;
         }
       }
-      return result(kind, why, recovery, approvalAction, [error]);
+      return result(kind, why, recovery, action, [error]);
     }
     if (task.status === 'done') {
       if (stage?.current === 'failed' && stage.review?.verdict === 'needs-work' && currentReview)

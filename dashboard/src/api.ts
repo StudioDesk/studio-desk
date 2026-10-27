@@ -17,7 +17,13 @@ export interface AttemptSummary {
   executionTiming?: { durationMs: number | null; activeStart: string | null };
   candidateReviewVerdict?: string;
   workReviewVerdict?: string;
-  sourceIntegration?: { state?: string; error?: string; verification?: { conflicts?: string[] } } | null;
+  // What stopped an integration: the files that conflicted, or what landed after the change was tested when it fails
+  // only merged onto that (the stories that landed, and every commit, so the rest were made by hand).
+  sourceIntegration?: {
+    state?: string;
+    error?: string;
+    verification?: { conflicts?: string[]; landedSince?: { commits: number; stories: string[] } };
+  } | null;
   // A fix integrated on an older line, carried to each newer one (1.1 step 4), or brought back to older ones by the
   // director (`back`), with the stories whose carry to the same line it waits for (`after`).
   sourceCarries?: {

@@ -79,6 +79,13 @@ export function decisionState(task: Task, studio: StudioState) {
       stage?.current === 'failed' &&
       stage.review?.verdict === 'needs-work' &&
       task.acceptedAttemptId === stage.review.attemptId;
+  // An integration that stopped on a conflict (1.1 step 3), or failed only merged onto work that landed after the
+  // change was tested (October 27): the story goes back to its editor merged onto the current source.
+  const landed = journal?.verification?.landedSince,
+    mergeable =
+      journal?.state === 'rejected' &&
+      stage?.current === 'failed' &&
+      (!!journal.verification?.conflicts?.length || !!landed);
   const plan =
       task.kind === 'plan' ? artifact(latest, item => item.path === 'plan.json' && item.kind === 'plan') : undefined,
     proposal =
@@ -106,6 +113,8 @@ export function decisionState(task: Task, studio: StudioState) {
     integrable,
     stage,
     returnable,
+    landed,
+    mergeable,
     plan,
     proposal,
   };

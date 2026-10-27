@@ -4,7 +4,7 @@
 // one recorded step; the change it records refreshes the page. A note or a reason is asked for in a dialog.
 import { useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { send, type Task } from './api';
 import { BringBack } from './bring-back';
 import { decisionState, fileRequest } from './decisions';
@@ -95,6 +95,8 @@ export function TaskDecisions({
       integrable,
       stage,
       returnable,
+      landed,
+      mergeable,
       plan,
       proposal,
     } = decisionState(task, studio),
@@ -229,11 +231,12 @@ export function TaskDecisions({
       emphasis: 'default',
       onClick: () => act('restore-source'),
     });
+  // Where Merge onto the current source is offered, integrating again as it is comes second: it fails the same way.
   if (integrable && review && reviewItem)
     actions.push({
       key: 'integrate',
       label: /again/.test(integrationAction(studio, task, review)) ? 'Integrate again' : 'Integrate',
-      emphasis: 'primary',
+      emphasis: mergeable ? 'default' : 'primary',
       onClick: () =>
         act('integrate-source', { attemptId: review.id, reviewHash: reviewItem.hash }, result =>
           result.state === 'waiting'
@@ -245,10 +248,11 @@ export function TaskDecisions({
                 : 'Reviewed source integrated.',
         ),
     });
-  // A story whose integration stopped on a conflict goes back to its editor with its change merged onto the current
-  // source (1.1 step 3); a fix integrated on an older line is carried to the next newer one, or marked not needed
-  // there (step 4), each through the controller.
-  if (journal?.state === 'rejected' && journal.verification?.conflicts?.length && stage?.current === 'failed')
+  // A story whose integration stopped on a conflict (1.1 step 3), or that fails only merged onto what landed after it
+  // was tested (October 27), goes back to its editor with its change merged onto the current source; a fix
+  // integrated on an older line is carried to the next newer one, or marked not needed there (step 4), each through
+  // the controller.
+  if (mergeable)
     actions.push({
       key: 'merge',
       label: 'Merge onto the current source',
@@ -397,6 +401,21 @@ export function TaskDecisions({
       },
     });
   const sorted = [...actions].sort((a, b) => order[a.emphasis] - order[b.emphasis]);
+  // What landed after the change was tested, as the controller names it (landedText): each story that landed, then
+  // any commits made by hand.
+  const byHand = landed ? landed.commits - landed.stories.length : 0,
+    landedParts = landed
+      ? [
+          ...landed.stories.map(storyId => (
+            <Link key={storyId} to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: storyId }}>
+              {studio.tasks.find(other => other.id === storyId)?.title ?? storyId}
+            </Link>
+          )),
+          ...(byHand > 0
+            ? [<span key="by-hand">{`${byHand} ${byHand === 1 ? 'commit' : 'commits'} made by hand`}</span>]
+            : []),
+        ]
+      : [];
   return (
     <>
       {sorted.length > 0 && (
@@ -424,6 +443,19 @@ export function TaskDecisions({
             ),
           )}
         </div>
+      )}
+      {mergeable && landed && (
+        <p className="sd-stands__detail" style={{ margin: 0, flex: '1 1 100%' }}>
+          It passed on its own but fails together with what landed after it was tested
+          {landedParts.length > 0 && ': '}
+          {landedParts.map((part, index) => (
+            <Fragment key={part.key}>
+              {index > 0 && (index === landedParts.length - 1 ? ' and ' : ', ')}
+              {part}
+            </Fragment>
+          ))}
+          .
+        </p>
       )}
       {backable && (
         <BringBack
