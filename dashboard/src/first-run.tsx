@@ -222,7 +222,7 @@ function CliCard({
             </p>
           ) : builtInSandbox.state === 'unsupported' ? (
             <p className="sd-meta" style={{ margin: 0 }}>
-              A code project’s tests run in the built-in sandbox, which works only on Windows for now. Choose No sandbox
+              A code project’s tests run in the built-in sandbox, which doesn’t run on this system. Choose No sandbox
               under Settings → Candidate tests to run them here.
             </p>
           ) : (

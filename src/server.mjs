@@ -809,7 +809,8 @@ export function createStudio({
           }
         }
         // Set up the built-in sandbox on this computer (1.0.1): the runtime's own setup, which asks Windows for an
-        // administrator, so the director answers Windows' prompt. One at a time; its state is in the shell and state.
+        // administrator, so the director answers Windows' prompt, or on Linux the install of the packages it needs
+        // through the system's password prompt. One at a time; its state is in the shell and state.
         if (url.pathname === '/api/built-in-sandbox' && req.method === 'POST') {
           if (Object.keys(data).some(key => key !== 'projectId')) fail('The sandbox setup takes no settings.');
           const started = runner.builtInSandbox.setup(status =>

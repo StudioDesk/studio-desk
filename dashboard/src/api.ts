@@ -165,10 +165,16 @@ export interface ProjectTemplate {
 // Where candidate tests run (v1.0 item 20): the built-in sandbox (1.0.1), or none by the director's choice.
 export type TestSandbox = 'built-in' | 'none';
 // The built-in sandbox on this computer (src/adapters/built-in-sandbox.mjs): its one-time setup asks Windows for
-// an administrator; `missing` means the packages are not installed, `unsupported` that it is not Windows.
+// an administrator, or installs Linux's packages, and macOS needs none; `missing` means the packages are not
+// installed, `unsupported` that the runtime has no sandbox for this system.
 export interface BuiltInSandbox {
   state: 'ready' | 'not-set-up' | 'outdated' | 'missing' | 'unsupported';
   setup?: { state: 'running' | 'failed'; startedAt?: string; exitCode?: number; output?: string };
+  /** On Linux, not set up: the packages it needs, the command that installs them (null when no known package
+   *  manager is found), and whether Set up can show the system's password prompt itself. */
+  needs?: string[];
+  command?: string | null;
+  prompt?: boolean;
 }
 export interface FirstRunTemplates {
   firstRun: boolean;

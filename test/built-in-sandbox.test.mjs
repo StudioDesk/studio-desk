@@ -7,12 +7,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { EventEmitter } from 'node:events';
 import { setup } from './source-story-setup.mjs';
 import {
+  builtInSandbox,
   builtInSandboxCommand,
   builtInSandboxCommandLine,
   builtInSandboxEnvironment,
   builtInSandboxRunner,
+  builtInSandboxRuntimeEnvironment,
   builtInSandboxSettings,
   builtInSandboxState,
   builtInSandboxVersion,
@@ -71,21 +74,89 @@ test("the runtime's status reads as not set up, out of date or ready", () => {
 });
 
 test('the status is read from the runtime’s helper, and a copy without the packages says so', t => {
-  if (process.platform !== 'win32') {
-    assert.deepEqual(readBuiltInSandboxStatus(), { state: 'unsupported' });
-    return;
-  }
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-built-in-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const files = { cli: path.join(directory, 'cli.js'), srtWin: path.join(directory, 'srt-win.exe') };
-  assert.deepEqual(readBuiltInSandboxStatus(files), { state: 'missing' });
+  const files = { cli: path.join(directory, 'cli.js'), srtWin: path.join(directory, 'srt-win.exe') },
+    windows = { platform: 'win32' };
+  assert.deepEqual(readBuiltInSandboxStatus(files, undefined, windows), { state: 'missing' });
   for (const file of Object.values(files)) fs.writeFileSync(file, '');
   const calls = [];
   const reply = stdout => (binary, args) => (calls.push([binary, args]), { stdout, stderr: '' });
   const ready = { user: { cred_present: true, marker_version: 3, setup_version: 3, user: { exists: true } } };
-  assert.deepEqual(readBuiltInSandboxStatus(files, reply(JSON.stringify(ready))), { state: 'ready' });
+  assert.deepEqual(readBuiltInSandboxStatus(files, reply(JSON.stringify(ready)), windows), { state: 'ready' });
   assert.deepEqual(calls[0], [files.srtWin, ['status']]);
-  assert.equal(readBuiltInSandboxStatus(files, reply('not json')).state, 'not-set-up');
+  assert.equal(readBuiltInSandboxStatus(files, reply('not json'), windows).state, 'not-set-up');
+  assert.deepEqual(readBuiltInSandboxStatus(files, undefined, { platform: 'freebsd' }), { state: 'unsupported' });
+});
+
+test('macOS needs nothing set up, and Linux names the packages it needs and how to install them', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-built-in-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const files = { cli: path.join(directory, 'cli.js'), srtWin: path.join(directory, 'srt-win.exe') },
+    finds = programs => program => (programs.includes(program) ? `/usr/bin/${program}` : null),
+    noHelper = () => assert.fail('Only Windows asks the helper.');
+  // macOS's sandbox is part of the system, so a copy with the packages is ready.
+  const mac = { platform: 'darwin', find: finds(['sandbox-exec']) };
+  assert.deepEqual(readBuiltInSandboxStatus(files, noHelper, mac), { state: 'missing' }, 'npm ci first.');
+  fs.writeFileSync(files.cli, '');
+  assert.deepEqual(readBuiltInSandboxStatus(files, noHelper, mac), { state: 'ready' });
+  // Linux: the programs it lacks, by package, installed by the first package manager found.
+  const linux = (programs, environment = {}) =>
+    readBuiltInSandboxStatus(files, noHelper, { platform: 'linux', find: finds(programs), environment });
+  assert.deepEqual(linux(['bwrap', 'socat', 'rg']), { state: 'ready' });
+  assert.deepEqual(linux(['bwrap', 'apt-get']), {
+    state: 'not-set-up',
+    needs: ['socat', 'ripgrep'],
+    command: 'sudo apt-get install -y socat ripgrep',
+    prompt: false,
+  });
+  assert.equal(linux(['pacman']).command, 'sudo pacman -S --needed --noconfirm bubblewrap socat ripgrep');
+  assert.equal(linux(['dnf', 'pkexec']).prompt, false, 'pkexec shows its prompt only in a desktop session.');
+  assert.equal(linux(['dnf', 'pkexec'], { XDG_CURRENT_DESKTOP: 'GNOME' }).prompt, true);
+  assert.deepEqual(linux(['pkexec'], { XDG_CURRENT_DESKTOP: 'GNOME' }), {
+    state: 'not-set-up',
+    needs: ['bubblewrap', 'socat', 'ripgrep'],
+    command: null,
+    prompt: false,
+  });
+});
+
+test('on Linux the setup installs through pkexec, and packages installed in a terminal are found next time', async () => {
+  let programs = ['bwrap', 'apt-get', 'pkexec'];
+  const find = program => (programs.includes(program) ? `/usr/bin/${program}` : null),
+    read = () =>
+      readBuiltInSandboxStatus({ cli: builtInSandboxRunner }, undefined, {
+        platform: 'linux',
+        find,
+        environment: { XDG_CURRENT_DESKTOP: 'KDE' },
+      }),
+    started = [];
+  const run = (executable, args) => {
+    started.push([executable, ...args]);
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
+    setImmediate(() => {
+      child.stderr.emit('data', 'Request dismissed\n');
+      child.emit('close', 126);
+    });
+    return child;
+  };
+  const sandbox = builtInSandbox({ cli: builtInSandboxRunner }, { read, find, run });
+  const finished = await new Promise(resolve => assert.equal(sandbox.setup(resolve), true));
+  assert.deepEqual(started, [['pkexec', '/usr/bin/apt-get', 'install', '-y', 'socat', 'ripgrep']]);
+  assert.equal(finished.state, 'not-set-up');
+  assert.deepEqual(sandbox.status().setup, { state: 'failed', exitCode: 126, output: 'Request dismissed' });
+  // Installed from a terminal instead: the next read finds them, and the failed setup is forgotten.
+  programs = [...programs, 'socat', 'rg'];
+  assert.deepEqual(sandbox.status(), { state: 'ready' });
+  assert.equal(sandbox.setup(), false, 'Ready.');
+  // Without a desktop prompt there is nothing to start; the director runs the command.
+  programs = ['bwrap'];
+  const headless = builtInSandbox(
+    {},
+    { read: () => readBuiltInSandboxStatus({ cli: builtInSandboxRunner }, undefined, { platform: 'linux', find }) },
+  );
+  assert.equal(headless.status().prompt, false);
+  assert.equal(headless.setup(), false);
 });
 
 test('a run writes only the copy it tests, reads the packages above it, and reaches only this computer', t => {
@@ -94,12 +165,16 @@ test('a run writes only the copy it tests, reads the packages above it, and reac
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(path.join(directory, 'data', 'node_modules'));
-  const settings = builtInSandboxSettings({
+  const run = {
     root,
     nodeDirectory: path.join(directory, 'node'),
     launcherDirectory: path.join(directory, 'adapters'),
     runDirectory: path.join(directory, 'run'),
-  });
+    helper: 'C:\\ProgramData\\Studio desk\\sandbox\\srt-win.exe',
+    seccomp: path.join(directory, 'sandbox-runtime', 'vendor', 'seccomp'),
+    temporary: path.join(directory, 'run', 'tmp'),
+  };
+  const settings = builtInSandboxSettings({ ...run, platform: 'win32' });
   assert.deepEqual(settings.network, { allowedDomains: [], deniedDomains: [], allowLocalBinding: true });
   assert.deepEqual(settings.filesystem.allowWrite, [root]);
   assert.deepEqual(settings.filesystem.allowRead.slice(0, 3), [
@@ -109,16 +184,30 @@ test('a run writes only the copy it tests, reads the packages above it, and reac
   ]);
   assert.ok(settings.filesystem.allowRead.includes(path.join(directory, 'data', 'node_modules')));
   assert.equal(settings.filesystem.allowRead.includes(path.join(root, 'node_modules')), false);
+  assert.deepEqual(settings.windows, { srtWin: { path: run.helper } });
+  // macOS and Linux run as the director's own account: the home folder is denied, and what a run uses is let
+  // back in, the copy and the runtime's seccomp helper among it; the run's own temporary folder is writable too.
+  const home = path.join(directory, 'home'),
+    posix = builtInSandboxSettings({ ...run, platform: 'linux', home });
+  assert.deepEqual(posix.network, settings.network);
+  assert.deepEqual(posix.filesystem.denyRead, [home]);
+  assert.deepEqual(posix.filesystem.allowRead, [root, ...settings.filesystem.allowRead, run.seccomp]);
+  assert.deepEqual(posix.filesystem.allowWrite, [root, run.temporary]);
+  assert.equal(posix.windows, undefined);
   // The command line quotes each path for the shell the runtime starts; the test command is not on it.
   assert.equal(
-    builtInSandboxCommandLine('C:\\Program Files\\node\\node.exe', 'C:\\a b\\launch.mjs', 'C:\\t\\run.json'),
+    builtInSandboxCommandLine('C:\\Program Files\\node\\node.exe', 'C:\\a b\\launch.mjs', 'C:\\t\\run.json', 'win32'),
     '"C:\\Program Files\\node\\node.exe" "C:\\a b\\launch.mjs" "C:\\t\\run.json"',
   );
-  // Only the controller's variables for the tests go in; nothing else from its environment, which may hold sign-ins.
-  assert.deepEqual(
-    builtInSandboxEnvironment({ STUDIO_MODEL_FREE_LEAF_FIXTURES: '1', GH_TOKEN: 'secret', PATH: 'C:\\bin' }),
-    { STUDIO_MODEL_FREE_LEAF_FIXTURES: '1' },
+  assert.equal(
+    builtInSandboxCommandLine('/usr/bin/node', "/home/a b/it's/launch.mjs", '/tmp/$run.json', 'linux'),
+    `'/usr/bin/node' '/home/a b/it'\\''s/launch.mjs' '/tmp/$run.json'`,
   );
+  // Only the controller's variables for the tests go in; nothing else from its environment, which may hold sign-ins.
+  const environment = { STUDIO_MODEL_FREE_LEAF_FIXTURES: '1', GH_TOKEN: 'secret', PATH: '/bin', HOME: '/home/a' };
+  assert.deepEqual(builtInSandboxEnvironment(environment), { STUDIO_MODEL_FREE_LEAF_FIXTURES: '1' });
+  // On macOS and Linux the runtime passes its environment on, so it starts with only the basics.
+  assert.deepEqual(builtInSandboxRuntimeEnvironment(environment), { PATH: '/bin', HOME: '/home/a' });
 });
 
 test('the director sets up the built-in sandbox from Settings, one setup at a time', async t => {

@@ -953,9 +953,9 @@ function Tools({ projectId, state }: { projectId: string; state: StudioState }) 
           {sandbox === 'none'
             ? 'Code an agent wrote runs on this computer with your account’s full access to your files and the network.'
             : builtIn.state === 'ready'
-              ? 'The built-in sandbox runs tests as a separate Windows account that can change only the copy it tests and reach nothing beyond this computer.'
+              ? 'The built-in sandbox runs tests so they can change only the copy they test, can’t read your own files and reach nothing beyond this computer.'
               : builtIn.state === 'unsupported'
-                ? 'The built-in sandbox works only on Windows for now, so code changes can’t run their tests here unless you choose No sandbox.'
+                ? 'The built-in sandbox doesn’t run on this system, so code changes can’t run their tests here unless you choose No sandbox.'
                 : 'Code changes wait to run their tests until the built-in sandbox is set up.'}
         </span>
         <BuiltInSandboxSetup projectId={projectId} sandbox={builtIn} queryKey={queryKeys.shell(projectId)} />

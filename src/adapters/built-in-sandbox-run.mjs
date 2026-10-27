@@ -1,7 +1,8 @@
 // Runs one test command in the built-in sandbox (1.0.1), as a process of its own so the controller never
 // loads the sandbox runtime. It writes the run's settings and instructions to a folder of their own, has
 // the runtime run the launcher inside the sandbox, passes the output and exit code through, and then takes
-// back the write access the runtime keeps on the copy between sessions.
+// back the write access the runtime keeps on the copy between sessions. The helper's shared copy, the folders'
+// see-only entries and the kept write access are Windows' own; macOS and Linux need none of them.
 // Usage: node built-in-sandbox-run.mjs --root <the folder the tests may write> -- <executable> [args...]
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -15,10 +16,13 @@ import {
   builtInSandboxFiles,
   builtInSandboxGitConfiguration,
   builtInSandboxPackages,
+  builtInSandboxRuntimeEnvironment,
   builtInSandboxSettings,
   openBuiltInSandboxPassThrough,
   shareBuiltInSandboxHelper,
 } from './built-in-sandbox.mjs';
+
+const windows = process.platform === 'win32';
 
 const separator = process.argv.indexOf('--');
 if (process.argv[2] !== '--root' || separator !== 4 || process.argv.length < 6) {
@@ -33,12 +37,15 @@ const root = path.resolve(process.argv[3]),
   node = fs.realpathSync(process.execPath),
   runDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-sandbox-')),
   settings = path.join(runDirectory, 'settings.json'),
-  instructions = path.join(runDirectory, `run-${randomUUID()}.json`);
-shareBuiltInSandboxHelper(files);
-openBuiltInSandboxPassThrough(
-  [root, path.dirname(node), path.dirname(launcher), runDirectory, ...builtInSandboxPackages(root)],
-  files,
-);
+  instructions = path.join(runDirectory, `run-${randomUUID()}.json`),
+  temporary = path.join(runDirectory, 'tmp');
+if (windows) {
+  shareBuiltInSandboxHelper(files);
+  openBuiltInSandboxPassThrough(
+    [root, path.dirname(node), path.dirname(launcher), runDirectory, ...builtInSandboxPackages(root)],
+    files,
+  );
+} else fs.mkdirSync(temporary);
 fs.writeFileSync(
   settings,
   JSON.stringify(
@@ -48,6 +55,8 @@ fs.writeFileSync(
       launcherDirectory: path.dirname(launcher),
       runDirectory,
       helper: files.sharedSrtWin,
+      seccomp: files.seccomp,
+      temporary,
     }),
   ),
 );
@@ -62,13 +71,22 @@ fs.writeFileSync(
     cwd: process.cwd(),
     executable: executable === process.execPath ? node : executable,
     args,
-    env: { ...builtInSandboxEnvironment(process.env), GIT_CONFIG_GLOBAL: gitConfiguration },
+    env: {
+      ...builtInSandboxEnvironment(process.env),
+      GIT_CONFIG_GLOBAL: gitConfiguration,
+      ...(windows ? {} : { TMPDIR: temporary, TMP: temporary, TEMP: temporary }),
+    },
   }),
 );
 const child = spawn(
   process.execPath,
   [files.cli, '--settings', settings, '-c', builtInSandboxCommandLine(node, launcher, instructions)],
-  { cwd: process.cwd(), env: process.env, stdio: 'inherit', windowsHide: true },
+  {
+    cwd: process.cwd(),
+    env: windows ? process.env : builtInSandboxRuntimeEnvironment(process.env),
+    stdio: 'inherit',
+    windowsHide: true,
+  },
 );
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
 child.on('error', error => finish(`The sandbox runtime did not start: ${error.message}`, 1));
@@ -78,7 +96,7 @@ function finish(message, code) {
   if (message) console.error(message);
   // The runtime keeps write access on a folder it was given, to save granting it again; a copy is
   // tested once, so it is taken back now.
-  spawnSync(files.srtWin, ['acl', 'forget', root], { stdio: 'ignore', windowsHide: true, timeout: 60000 });
+  if (windows) spawnSync(files.srtWin, ['acl', 'forget', root], { stdio: 'ignore', windowsHide: true, timeout: 60000 });
   fs.rmSync(runDirectory, { recursive: true, force: true });
   process.exit(code);
 }

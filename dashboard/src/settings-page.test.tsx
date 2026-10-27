@@ -5,6 +5,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { BuiltInSandbox } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
@@ -239,9 +240,54 @@ test('the built-in sandbox is set up from Settings: Windows asks, the card waits
   // Set up, it is where the tests run.
   controller.shell = { ...controller.shell, testSandbox: 'built-in', builtInSandbox: { state: 'ready' } };
   tools = await settings();
-  expect(within(tools).getByText('Built-in sandbox set up on this computer')).toBeTruthy();
-  expect(within(tools).getByText(/^The built-in sandbox runs tests as a separate Windows account/)).toBeTruthy();
+  expect(within(tools).getByText('Built-in sandbox ready on this computer')).toBeTruthy();
+  expect(within(tools).getByText(/^The built-in sandbox runs tests so they can change only the copy/)).toBeTruthy();
   expect(within(tools).getByRole('button', { name: 'Built-in sandbox' }).getAttribute('aria-pressed')).toBe('true');
+});
+
+test('on Linux the sandbox names the packages it needs, installs them through the system’s prompt, or shows the command', async () => {
+  const user = userEvent.setup(),
+    command = 'sudo apt-get install -y socat ripgrep';
+  const settings = async (builtInSandbox: BuiltInSandbox) => {
+    cleanup();
+    controller.shell = { ...controller.shell, testSandbox: 'built-in', builtInSandbox };
+    open('/p/project-x/settings');
+    await screen.findByRole('heading', { level: 1, name: 'Settings' });
+    return screen.getByRole('region', { name: 'Command-line tools' });
+  };
+  // A desktop session: Set up shows the system's password prompt, and the command is there too.
+  let tools = await settings({ state: 'not-set-up', needs: ['socat', 'ripgrep'], command, prompt: true });
+  expect(
+    within(tools).getByText(
+      'One-time setup on this computer: the sandbox needs socat and ripgrep from your system’s packages.',
+    ),
+  ).toBeTruthy();
+  expect(within(tools).getByText(command)).toBeTruthy();
+  expect(within(tools).queryByText(/Windows/)).toBeNull();
+  await user.click(within(tools).getByRole('button', { name: 'Set up the sandbox' }));
+  await waitFor(() => expect(commands()).toHaveLength(1));
+  expect(commands()[0]).toEqual({ url: '/api/built-in-sandbox', method: 'POST', body: { projectId: 'project-x' } });
+  tools = await settings({
+    state: 'not-set-up',
+    needs: ['socat', 'ripgrep'],
+    command,
+    prompt: true,
+    setup: { state: 'running' },
+  });
+  expect(within(tools).getByText('Your system is asking for your password. Answer its prompt to finish.')).toBeTruthy();
+  // No prompt to show (WSL, or a server): the command to run, and Check again reads the state again.
+  tools = await settings({ state: 'not-set-up', needs: ['socat', 'ripgrep'], command, prompt: false });
+  expect(within(tools).queryByRole('button', { name: 'Set up the sandbox' })).toBeNull();
+  expect(within(tools).getByText('Install them in a terminal, then check again:')).toBeTruthy();
+  const reads = controller.reads().length;
+  await user.click(within(tools).getByRole('button', { name: 'Check again' }));
+  await waitFor(() => expect(controller.reads().length).toBeGreaterThan(reads));
+  expect(commands()).toHaveLength(1);
+  // No package manager it knows: the packages by name.
+  tools = await settings({ state: 'not-set-up', needs: ['bubblewrap'], command: null, prompt: false });
+  expect(
+    within(tools).getByText('Install bubblewrap with your system’s package manager, then check again.'),
+  ).toBeTruthy();
 });
 
 test("the project's name, goal and direction save against the revision they were read at", async () => {

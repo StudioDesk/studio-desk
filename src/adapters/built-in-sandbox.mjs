@@ -3,7 +3,10 @@
 // never imports it: it runs the runtime's own programs, so the controller keeps no dependencies and
 // starts without them. On Windows the runtime needs a one-time setup that asks for an administrator
 // (a local `srt-sandbox` account and a machine-wide network filter); the director starts it from
-// Settings → Candidate tests.
+// Settings → Candidate tests. macOS needs nothing: the runtime uses its built-in sandbox-exec. Linux needs
+// three programs from the system's packages (bubblewrap, socat, ripgrep), which no npm package can supply:
+// Ubuntu lets only the system's bubblewrap make sandboxes. The same setup installs them through the
+// system's own password prompt, or the director copies the command.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -20,6 +23,8 @@ export function builtInSandboxFiles(root = studioRoot) {
   const runtime = path.join(root, 'node_modules', '@anthropic-ai', 'sandbox-runtime');
   return {
     cli: path.join(runtime, 'dist', 'cli.js'),
+    // On Linux the sandboxed command starts through the runtime's seccomp helper, so it must be readable inside.
+    seccomp: path.join(runtime, 'vendor', 'seccomp'),
     srtWin: path.join(runtime, 'vendor', 'srt-win', process.arch === 'arm64' ? 'arm64' : 'x64', 'srt-win.exe'),
     // The runtime starts its helper again as the sandbox account, which cannot read a copy of Studio desk under
     // the director's profile (where none of the profile is readable to it). So the helper runs from a copy in
@@ -46,12 +51,62 @@ export function shareBuiltInSandboxHelper(files = builtInSandboxFiles()) {
 // packages, Node and Git (the director's choice, October 25).
 export const builtInSandboxSetupArgs = ['windows-install', '--allow-loopback', '--skip-profile-grant'];
 
+// A program on the PATH, as the shell would find it.
+export function onPath(program, environment = process.env) {
+  for (const folder of (environment.PATH || '').split(path.delimiter).filter(Boolean))
+    try {
+      fs.accessSync(path.join(folder, program), fs.constants.X_OK);
+      return path.join(folder, program);
+    } catch {
+      // Not in this folder.
+    }
+  return null;
+}
+
+// What the runtime needs on Linux, as program and package, and how each system's package manager installs
+// them. Every one of them names the three packages alike.
+export const linuxSandboxPrograms = [
+  ['bwrap', 'bubblewrap'],
+  ['socat', 'socat'],
+  ['rg', 'ripgrep'],
+];
+const packageManagers = [
+  ['apt-get', 'install', '-y'],
+  ['dnf', 'install', '-y'],
+  ['pacman', '-S', '--needed', '--noconfirm'],
+  ['zypper', '--non-interactive', 'install'],
+];
+// The install of the packages this computer lacks, by the first package manager found, or null.
+export function linuxSandboxInstall(needs, find = onPath) {
+  const manager = packageManagers.find(([program]) => find(program));
+  return manager ? [...manager, ...needs] : null;
+}
+
 // Where this computer stands: `missing` (the packages are not installed: run npm ci), `unsupported`
-// (not Windows; macOS and Linux come with the platforms), `not-set-up`, `outdated` (set up by another
-// release of the runtime, so the setup has to run again) or `ready`.
-export function readBuiltInSandboxStatus(files = builtInSandboxFiles(), run = spawnSync) {
-  if (process.platform !== 'win32') return { state: 'unsupported' };
-  if (!fs.existsSync(files.cli) || !fs.existsSync(files.srtWin)) return { state: 'missing' };
+// (a system the runtime has no sandbox for), `not-set-up`, `outdated` (set up by another release of the
+// runtime, so the setup has to run again) or `ready`. On Linux, not set up also names the packages it needs,
+// the command that installs them, to copy, and whether the setup can ask for the password itself: with
+// pkexec in a desktop session, which shows the system's prompt (WSL and a server without one have none).
+export function readBuiltInSandboxStatus(
+  files = builtInSandboxFiles(),
+  run = spawnSync,
+  { platform = process.platform, find = onPath, environment = process.env } = {},
+) {
+  if (!['win32', 'darwin', 'linux'].includes(platform)) return { state: 'unsupported' };
+  if (!fs.existsSync(files.cli)) return { state: 'missing' };
+  if (platform === 'darwin') return find('sandbox-exec') ? { state: 'ready' } : { state: 'unsupported' };
+  if (platform === 'linux') {
+    const needs = linuxSandboxPrograms.filter(([program]) => !find(program)).map(([, name]) => name);
+    if (!needs.length) return { state: 'ready' };
+    const install = linuxSandboxInstall(needs, find);
+    return {
+      state: 'not-set-up',
+      needs,
+      command: install && `sudo ${install.join(' ')}`,
+      prompt: Boolean(install && find('pkexec') && (environment.XDG_CURRENT_DESKTOP || environment.DESKTOP_SESSION)),
+    };
+  }
+  if (!fs.existsSync(files.srtWin)) return { state: 'missing' };
   const probe = run(files.srtWin, ['status'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
   let status;
   try {
@@ -70,10 +125,17 @@ export function builtInSandboxState(status) {
   return { state: 'ready' };
 }
 
-// Runs the one-time setup. The runtime asks Windows for an administrator itself, so the director sees
-// Windows' own prompt; `done` gets the exit code and what the setup printed.
-export function startBuiltInSandboxSetup(files = builtInSandboxFiles(), done, run = spawn) {
-  const child = run(process.execPath, [files.cli, ...builtInSandboxSetupArgs], {
+// The one-time setup's command. The runtime asks Windows for an administrator itself, so the director sees
+// Windows' own prompt; on Linux pkexec shows the system's password prompt and runs the install.
+export function builtInSandboxSetupCommand(status, files = builtInSandboxFiles(), find = onPath) {
+  if (!status.needs) return { executable: process.execPath, args: [files.cli, ...builtInSandboxSetupArgs] };
+  const [manager, ...install] = linuxSandboxInstall(status.needs, find);
+  return { executable: 'pkexec', args: [find(manager), ...install] };
+}
+
+// Runs the one-time setup; `done` gets the exit code and what the setup printed.
+export function startBuiltInSandboxSetup(command, done, run = spawn) {
+  const child = run(command.executable, command.args, {
     shell: false,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -88,20 +150,35 @@ export function startBuiltInSandboxSetup(files = builtInSandboxFiles(), done, ru
 
 // The controller's view of the built-in sandbox on this computer: its state, refreshed after a setup, and
 // the setup itself, one at a time. The controller's own start passes this one; tests pass their own, so a
-// sandbox set up on the computer running them never changes what they choose.
-export function builtInSandbox(files = builtInSandboxFiles()) {
-  let status = readBuiltInSandboxStatus(files),
+// sandbox set up on the computer running them never changes what they choose. Linux packages the director
+// installs from a terminal are found when the state is next read; looking for three programs is cheap.
+export function builtInSandbox(
+  files = builtInSandboxFiles(),
+  { read = () => readBuiltInSandboxStatus(files), find = onPath, run = spawn } = {},
+) {
+  let status = read(),
     setup = null;
   return {
-    status: () => (setup ? { ...status, setup } : status),
+    status() {
+      if (status.needs && setup?.state !== 'running') {
+        status = read();
+        if (status.state === 'ready') setup = null;
+      }
+      return setup ? { ...status, setup } : status;
+    },
     setup(done = () => {}) {
       if (setup?.state === 'running' || !['not-set-up', 'outdated'].includes(status.state)) return false;
+      if (status.needs && !status.prompt) return false;
       setup = { state: 'running', startedAt: new Date().toISOString() };
-      startBuiltInSandboxSetup(files, (exitCode, output) => {
-        status = readBuiltInSandboxStatus(files);
-        setup = status.state === 'ready' ? null : { state: 'failed', exitCode, output };
-        done(status);
-      });
+      startBuiltInSandboxSetup(
+        builtInSandboxSetupCommand(status, files, find),
+        (exitCode, output) => {
+          status = read();
+          setup = status.state === 'ready' ? null : { state: 'failed', exitCode, output };
+          done(status);
+        },
+        run,
+      );
       return true;
     },
   };
@@ -122,16 +199,37 @@ export function builtInSandboxPackages(root) {
 
 // What one test run may touch. It writes only the copy it runs on; it reads Node, the packages installed for
 // the copy, the launcher and the run's own instructions; it reaches no network beyond this computer. Git for
-// Windows and Windows' own folders are readable to every account already.
-export function builtInSandboxSettings({ root, nodeDirectory, launcherDirectory, runDirectory, helper }) {
+// Windows and Windows' own folders are readable to every account already. On macOS and Linux the tests run as
+// the director's own account, which can read the whole home folder, so the home folder is denied and only
+// what a run uses is let back in, as Windows' sandbox account sees it, with the runtime's seccomp helper;
+// system folders stay readable. Those systems also give the run a temporary folder of its own to write, where
+// Windows' account has its own.
+export function builtInSandboxSettings({
+  root,
+  nodeDirectory,
+  launcherDirectory,
+  runDirectory,
+  helper,
+  seccomp,
+  temporary,
+  platform = process.platform,
+  home = os.homedir(),
+}) {
+  const network = { allowedDomains: [], deniedDomains: [], allowLocalBinding: true },
+    reads = [nodeDirectory, launcherDirectory, runDirectory, ...builtInSandboxPackages(root)];
+  if (platform !== 'win32')
+    return {
+      network,
+      filesystem: {
+        denyRead: [home],
+        allowRead: [root, ...reads, seccomp],
+        allowWrite: [root, temporary],
+        denyWrite: [],
+      },
+    };
   return {
-    network: { allowedDomains: [], deniedDomains: [], allowLocalBinding: true },
-    filesystem: {
-      denyRead: [],
-      allowRead: [nodeDirectory, launcherDirectory, runDirectory, ...builtInSandboxPackages(root)],
-      allowWrite: [root],
-      denyWrite: [],
-    },
+    network,
+    filesystem: { denyRead: [], allowRead: reads, allowWrite: [root], denyWrite: [] },
     windows: { srtWin: { path: helper } },
   };
 }
@@ -198,16 +296,26 @@ export function openBuiltInSandboxPassThrough(paths, files = builtInSandboxFiles
   return changed;
 }
 
-// The command line the runtime runs inside the sandbox (through cmd.exe on Windows). The test command
-// itself travels in the run's instructions file, so none of its arguments is quoted for a shell.
-export const builtInSandboxCommandLine = (node, launcher, instructions) =>
-  [node, launcher, instructions].map(part => `"${part}"`).join(' ');
+// The command line the runtime runs inside the sandbox, through cmd.exe on Windows and sh elsewhere. The test
+// command itself travels in the run's instructions file, so none of its arguments is quoted for a shell.
+export const builtInSandboxCommandLine = (node, launcher, instructions, platform = process.platform) =>
+  [node, launcher, instructions]
+    .map(part => (platform === 'win32' ? `"${part}"` : `'${part.replaceAll("'", `'\\''`)}'`))
+    .join(' ');
 
 // The runtime hands the sandboxed command only PATH and its own proxy settings, so the controller's
 // variables for the tests (the copied harness's marker) travel in the instructions and the launcher sets
 // them. Nothing else from the controller's environment, which may hold sign-ins, goes in.
 export const builtInSandboxEnvironment = environment =>
   Object.fromEntries(Object.entries(environment).filter(([name]) => /^STUDIO_/i.test(name)));
+// On macOS and Linux the runtime passes its own environment on to the command, so it is started with only
+// what finding programs, the home folder and the language need.
+export const builtInSandboxRuntimeEnvironment = environment =>
+  Object.fromEntries(
+    Object.entries(environment).filter(([name]) =>
+      ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM'].includes(name),
+    ),
+  );
 // git's global settings for the sandbox account, which has none of its own: a neutral name and email.
 export const builtInSandboxGitConfiguration =
   '[user]\n\tname = Studio desk tests\n\temail = tests@studio-desk.invalid\n';
