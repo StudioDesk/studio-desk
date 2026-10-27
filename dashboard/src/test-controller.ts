@@ -19,6 +19,7 @@ import type {
   StoryActivity,
   Task,
 } from './api';
+import type { BringBackTargets } from './bring-back';
 import { settled } from './studio-runs';
 
 export class FakeSource {
@@ -118,6 +119,9 @@ export interface Controller {
   templates?: FirstRunTemplates;
   // The Releases page's records (1.1 step 6); none answers as a project without the source workflow.
   releases?: ReleaseOverview;
+  // Where a landed story, by task, and an idea, by run, can be brought back to (1.1); none listed has no older line.
+  bringBack: Record<string, BringBackTargets>;
+  runBringBack: Record<string, BringBackTargets>;
   // The release an idea's words name, by the words; words not listed name none.
   requests: { url: string; method: string; body?: unknown }[];
   // Answers a command; the default accepts it, and one that throws refuses it with the error's message. A
@@ -161,6 +165,8 @@ export function fakeController(projectId = 'project-x'): Controller {
     activity: [{ events: [], next: null }],
     stories: {},
     shells: {},
+    bringBack: {},
+    runBringBack: {},
     requests: [],
     command: () => ({}),
     reads: () => controller.requests.filter(request => request.method === 'GET').map(request => request.url),
@@ -253,11 +259,15 @@ export function fakeController(projectId = 'project-x'): Controller {
           index = before ? controller.activity.findIndex(page => String(page.events.at(-1)?.seq) === before) + 1 : 0;
         return respond(controller.activity[index] ?? { events: [], next: null });
       }
+      const runBack = path.match(new RegExp(`^/api/projects/${projectId}/runs/([^/]+)/bring-back$`))?.[1];
+      if (runBack) return respond(controller.runBringBack[decodeURIComponent(runBack)] ?? { lines: [] });
       const run = path.match(new RegExp(`^/api/projects/${projectId}/runs/([^/]+)$`))?.[1];
       if (run) {
         const item = controller.runItems[decodeURIComponent(run)];
         return item ? respond(item) : respond({ error: 'Run not found.' }, false);
       }
+      const back = path.match(/^\/api\/tasks\/([^/]+)\/bring-back$/)?.[1];
+      if (back) return respond(controller.bringBack[decodeURIComponent(back)] ?? { lines: [] });
       const story = path.match(/^\/api\/tasks\/([^/]+)\/activity$/)?.[1];
       if (story)
         return respond(controller.stories[decodeURIComponent(story)] ?? { events: [], idea: null, instructions: [] });

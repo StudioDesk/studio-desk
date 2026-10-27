@@ -6,6 +6,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useRef, useState } from 'react';
 import { send, type Task } from './api';
+import { BringBack } from './bring-back';
 import { decisionState, fileRequest } from './decisions';
 import { NoteDialog, overReview } from './note-dialog';
 import { storyPeople } from './story';
@@ -259,17 +260,23 @@ export function TaskDecisions({
           () => `${editor} merges the change onto the current source; then it is tested and reviewed again.`,
         ),
     });
+  // A fix brought back to an older line (`back`) goes through the same carry steps, in words of bringing it back.
   const carry = review?.sourceCarries?.find(item => !['carried', 'skipped'].includes(item.state));
   if (
     carry &&
     (['rejected', 'needs-reconciliation'].includes(carry.state) || (carry.state === 'waiting' && !carry.approved))
-  )
+  ) {
+    const again = carry.state === 'waiting' ? '' : ' again';
     actions.push({
       key: 'carry',
-      label: carry.state === 'waiting' ? `Carry to ${carry.line}` : `Carry to ${carry.line} again`,
+      label: carry.back ? `Bring back to ${carry.line}${again}` : `Carry to ${carry.line}${again}`,
       emphasis: 'primary',
-      onClick: () => act('carry', { line: carry.line }, () => `Carrying the fix to ${carry.line}.`),
+      onClick: () =>
+        act('carry', { line: carry.line }, () =>
+          carry.back ? `Bringing the fix back to ${carry.line}.` : `Carrying the fix to ${carry.line}.`,
+        ),
     });
+  }
   if (carry && ['waiting', 'rejected'].includes(carry.state))
     actions.push({
       key: 'carry-skip',
@@ -278,13 +285,21 @@ export function TaskDecisions({
       onClick: () =>
         setAsking({
           title: `Not needed on ${carry.line}?`,
-          text: `${carry.line} won't get this fix. Your reason is kept with the story, and any newer line is still offered it.`,
+          text: carry.back
+            ? `${carry.line} won't get the fix brought back. Your reason is kept with the story, and any older line it was going on to still gets it.`
+            : `${carry.line} won't get this fix. Your reason is kept with the story, and any newer line is still offered it.`,
           label: 'Why',
           submit: 'Skip it',
           required: true,
-          send: note => act('carry-skip', { line: carry.line, reason: note }, () => `Not needed on ${carry.line}.`),
+          send: note =>
+            act('carry-skip', { line: carry.line, reason: note }, () =>
+              carry.back ? `Not bringing the fix back to ${carry.line}.` : `Not needed on ${carry.line}.`,
+            ),
         }),
     });
+  // A story that landed may be brought back to an older line, at the director's word; a carry story brings back the
+  // fix it carries instead, so it offers nothing.
+  const backable = task.kind === 'studio-development:change' && !task.carryOf && journal?.state === 'integrated';
   // The director may overrule a review that passed (the canvas's Story board, the director's yes on October 23).
   // A pass has no blocking findings by definition, but its summary and notes go back with the story, and the next
   // attempt reads the whole history; the director's note is needed only when the review noted nothing.
@@ -409,6 +424,19 @@ export function TaskDecisions({
             ),
           )}
         </div>
+      )}
+      {backable && (
+        <BringBack
+          projectId={projectId}
+          url={`/api/tasks/${id}/bring-back?projectId=${encodeURIComponent(projectId)}`}
+          path={`/api/tasks/${id}/bring-back`}
+          watch={review?.sourceCarries}
+          label={line => `Bring back to ${line}`}
+          text={({ through }) =>
+            `An older release gets this change: the fix is applied to ${through.join(', then ')}, one line at a time when the project's source is free. A line where it conflicts gets a story of its own.`
+          }
+          done={result => `Bringing the fix back to ${((result.lines as string[] | undefined) ?? []).join(', then ')}.`}
+        />
       )}
       <NoteDialog
         open={asking !== null}

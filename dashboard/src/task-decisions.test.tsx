@@ -6,7 +6,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { Task } from './api';
+import type { AttemptSummary, Task } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
@@ -358,4 +358,150 @@ test('a fix waiting to be carried forward offers Carry to its line and Not neede
       body: { projectId: 'project-x', line: 'main', reason: 'main replaced this code.' },
     }),
   );
+});
+
+// 1.1, October 27: a fix that landed on a newer line is brought back to an older one at the director's word.
+const landedStory = (extra: Partial<Task> = {}, sourceCarries?: AttemptSummary['sourceCarries']) => {
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change-review' },
+      candidateReviewVerdict: 'pass',
+      sourceIntegration: { state: 'integrated' },
+      ...(sourceCarries ? { sourceCarries } : {}),
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'done',
+    acceptedAttemptId: 'attempt-review',
+    lastAttemptId: 'attempt-review',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'integration',
+      current: 'integrated',
+      review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+    },
+    ...extra,
+  });
+};
+const targets = {
+  lines: [
+    { line: 'release/1.1', through: ['release/1.1'] },
+    { line: 'release/1.0', through: ['release/1.1', 'release/1.0'] },
+    { line: 'release/0.9', reason: 'release/0.9 already has it.' },
+  ],
+};
+const backReads = () => controller.reads().filter(url => url.includes('/bring-back')),
+  toast = () => screen.getByRole('status', { hidden: true });
+
+test("a landed story offers Bring back to each older line it can go to, and the controller's reason where it can't", async () => {
+  controller.bringBack['T-1'] = targets;
+  open(landedStory());
+  const offer = await (await decisions()).findByRole('list', { name: 'Bring back' }),
+    items = within(offer).getAllByRole('listitem');
+  expect(backReads()).toEqual(['/api/tasks/T-1/bring-back?projectId=project-x']);
+  expect(names(within(offer))).toEqual(['Bring back to release/1.1', 'Bring back to release/1.0']);
+  // Bringing it back to release/1.0 applies it to release/1.1 on the way, and says so.
+  expect(items[0]!.textContent).toBe('Bring back to release/1.1');
+  const older = within(items[1]!).getByRole('button', { name: 'Bring back to release/1.0' }),
+    note = document.getElementById(older.getAttribute('aria-describedby') ?? '');
+  expect(note?.textContent).toBe('Also reaches release/1.1, the line in between.');
+  // A line it can't go to shows why, with no button.
+  expect(items[2]!.textContent).toBe('release/0.9 already has it.');
+  expect(within(items[2]!).queryByRole('button')).toBeNull();
+});
+
+test('Bring back asks first, naming every line it reaches, and sends nothing when cancelled', async () => {
+  const user = userEvent.setup();
+  controller.bringBack['T-1'] = targets;
+  controller.command = url => {
+    if (!url.endsWith('/bring-back')) return {};
+    // Once planned, the controller offers no line until the carries finish.
+    controller.bringBack['T-1'] = {
+      lines: [
+        { line: 'release/1.1', reason: 'Its bringing back to release/1.1 has not finished.' },
+        { line: 'release/1.0', reason: 'Its bringing back to release/1.1 has not finished.' },
+      ],
+    };
+    return { storyId: 'T-1', lines: ['release/1.1', 'release/1.0'], carries: [] };
+  };
+  open(landedStory());
+  const region = await decisions();
+  await user.click(await region.findByRole('button', { name: 'Bring back to release/1.0' }));
+  let dialog = within(await screen.findByRole('dialog', { name: 'Bring back to release/1.0?' }));
+  expect(dialog.getByText(/An older release gets this change/).textContent).toMatch(
+    /release\/1\.1, then release\/1\.0/,
+  );
+  await user.click(dialog.getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Bring back to release/1.0?' })).toBeNull());
+  expect(posted()).toEqual([]);
+  await user.click(region.getByRole('button', { name: 'Bring back to release/1.0' }));
+  dialog = within(await screen.findByRole('dialog', { name: 'Bring back to release/1.0?' }));
+  await user.click(dialog.getByRole('button', { name: 'Bring back to release/1.0' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/tasks/T-1/bring-back', method: 'POST', body: { projectId: 'project-x', line: 'release/1.0' } },
+    ]),
+  );
+  await waitFor(() => expect(toast().textContent).toBe('Bringing the fix back to release/1.1, then release/1.0.'));
+  // The offer is read again and shows the controller's new answer in place of the buttons.
+  expect(await region.findAllByText('Its bringing back to release/1.1 has not finished.')).toHaveLength(2);
+  expect(backReads()).toHaveLength(2);
+  expect(region.queryByRole('button', { name: /^Bring back to/ })).toBeNull();
+});
+
+test('a project with one line offers no Bring back, and a story that has not landed, or a carry story, never asks', async () => {
+  open(landedStory());
+  await decisions();
+  await waitFor(() => expect(backReads()).toHaveLength(1));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(screen.queryByRole('list', { name: 'Bring back' })).toBeNull();
+  expect(screen.queryByRole('button', { name: /^Bring back/ })).toBeNull();
+  cleanup();
+  controller.requests = [];
+  controller.bringBack['T-1'] = targets;
+  open(passedStory());
+  expect(names(await decisions())).toEqual(['Integrate', 'Send back to Eli', 'Close without integrating']);
+  cleanup();
+  open(
+    landedStory({ carryOf: { storyId: 'T-0', line: 'release/1.1', reviewAttemptId: 'attempt-0', carryId: 'carry-0' } }),
+  );
+  await decisions();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(controller.reads().length).toBeGreaterThan(0);
+  expect(backReads()).toEqual([]);
+  expect(screen.queryByRole('button', { name: /^Bring back/ })).toBeNull();
+});
+
+test('a stopped bring-back offers Bring back again, and Not needed speaks of bringing it back', async () => {
+  const user = userEvent.setup();
+  open(landedStory({}, [{ line: 'release/1.0', state: 'rejected', back: true, approved: true }]));
+  const region = await decisions();
+  expect(names(region)).toEqual(['Bring back to release/1.0 again', 'Not needed on release/1.0…']);
+  await user.click(region.getByRole('button', { name: 'Bring back to release/1.0 again' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/carry',
+      method: 'POST',
+      body: { projectId: 'project-x', line: 'release/1.0' },
+    }),
+  );
+  await waitFor(() => expect(toast().textContent).toBe('Bringing the fix back to release/1.0.'));
+  await user.click(region.getByRole('button', { name: 'Not needed on release/1.0…' }));
+  const skip = within(await screen.findByRole('dialog', { name: 'Not needed on release/1.0?' }));
+  expect(skip.getByText(/^release\/1\.0 won't get the fix brought back\./)).toBeTruthy();
+  await user.type(skip.getByLabelText('Why'), 'release/1.0 is past its last patch.');
+  await user.click(skip.getByRole('button', { name: 'Skip it' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/carry-skip',
+      method: 'POST',
+      body: { projectId: 'project-x', line: 'release/1.0', reason: 'release/1.0 is past its last patch.' },
+    }),
+  );
+  await waitFor(() => expect(toast().textContent).toBe('Not bringing the fix back to release/1.0.'));
 });
