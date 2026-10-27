@@ -1,7 +1,8 @@
 // One event stream per project page (MP-026). Change events name the records that changed; a log watch
 // streams one attempt's events while its activity is on screen. After a reconnect the stream asks the
-// controller what it missed, and reloads what is shown when the controller cannot say.
-import { changesUrl, eventsUrl, getJSON, type ChangeMessage, type LogEvent } from './api';
+// controller what it missed, and reloads what is shown when the controller cannot say. A controller that
+// restarted also has a new request token, which the page picks up for its commands.
+import { changesUrl, eventsUrl, getJSON, refreshToken, type ChangeMessage, type LogEvent } from './api';
 
 export interface LiveListener {
   changes?(message: ChangeMessage): void;
@@ -74,8 +75,8 @@ export class LiveStream {
   private async receive(message: ChangeMessage) {
     if (message.changes || message.reload) return this.emit(message);
     // Each connection opens with where the controller is. The first is where pages start reading, since they
-    // wait for it (`started`); one from another start reloads what is shown, and a reconnect asks for the
-    // changes made while the stream was away.
+    // wait for it (`started`); one from another start reloads what is shown and reads that start's request
+    // token, and a reconnect asks for the changes made while the stream was away.
     const first = !this.start,
       restarted = !first && message.start !== this.start,
       behind = !first && !restarted && message.version > this.version;
@@ -87,7 +88,11 @@ export class LiveStream {
       for (const listener of this.listeners) listener.status?.(this.status);
       return;
     }
-    if (restarted) return this.emit({ ...message, reload: true });
+    if (restarted) {
+      // Nothing waits for it: a token it cannot read is read again by the next command refused for it.
+      void refreshToken();
+      return this.emit({ ...message, reload: true });
+    }
     if (!behind) return;
     try {
       this.emit(await getJSON<ChangeMessage>(changesUrl(this.projectId, since, message.start)));

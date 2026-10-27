@@ -488,19 +488,70 @@ export async function getJSON<T>(url: string, signal?: AbortSignal): Promise<T> 
   return body as T;
 }
 
-// Commands carry this start's request token, as the current dashboard's do.
+// The page's request token, which the controller fills in for its start each time it serves the page.
+const tokenMeta = () => document.querySelector<HTMLMetaElement>('meta[name="studio-token"]');
+let refreshing: Promise<boolean> | null = null;
+
+// Reads this start's request token from the page the controller serves, as loading the page again would, into
+// this page's studio-token meta, where send() reads it. It resolves false and leaves the token as it was when the
+// controller cannot be reached or its page carries no token, and never rejects; callers at the same time share
+// one read.
+export function refreshToken(): Promise<boolean> {
+  refreshing ??= readServedToken().finally(() => {
+    refreshing = null;
+  });
+  return refreshing;
+}
+
+async function readServedToken() {
+  try {
+    const response = await fetch('/', { cache: 'no-store' });
+    // The page that says the dashboard is not built still carries the token.
+    if (!response.ok && response.status !== 503) return false;
+    const page = new DOMParser().parseFromString(await response.text(), 'text/html'),
+      token = page.querySelector<HTMLMetaElement>('meta[name="studio-token"]')?.content;
+    if (!token) return false;
+    let meta = tokenMeta();
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.name = 'studio-token';
+      document.head.append(meta);
+    }
+    meta.content = token;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The controller's answer to a command whose token is not this start's.
+const staleToken = (response: Response, result: { error?: unknown } | null) =>
+  response.status === 403 && result?.error === 'Invalid controller request.';
+const restarted = 'The controller restarted. Reload this page to continue.';
+
+// Commands carry this start's request token, as the current dashboard's do. A controller that restarted since the
+// page loaded refuses the old token, so a command refused for its token reads the new one and is sent once more;
+// refused again, or with no token to read, it asks the director to reload the page.
 export async function send<T>(
   url: string,
   body: Record<string, unknown>,
   method: 'POST' | 'PATCH' = 'POST',
 ): Promise<T> {
-  const token = document.querySelector<HTMLMetaElement>('meta[name="studio-token"]')?.content ?? '';
-  const response = await fetch(url, {
-    method,
-    headers: { 'Content-Type': 'application/json', 'X-Studio-Token': token },
-    body: JSON.stringify(body),
-  });
-  const result = await response.json();
+  const payload = JSON.stringify(body),
+    request = async () => {
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-Studio-Token': tokenMeta()?.content ?? '' },
+        body: payload,
+      });
+      return { response, result: await response.json() };
+    };
+  let { response, result } = await request();
+  if (staleToken(response, result)) {
+    if (!(await refreshToken())) throw new Error(restarted);
+    ({ response, result } = await request());
+    if (staleToken(response, result)) throw new Error(restarted);
+  }
   if (!response.ok) throw new Error(result?.error || `The controller refused the request (${response.status}).`);
   return result as T;
 }

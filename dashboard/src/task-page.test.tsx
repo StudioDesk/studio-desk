@@ -451,10 +451,19 @@ test('the page sits in the frame with the way back to its ideas and where the ta
 test('a reconnecting stream asks for what it missed, and reloads after a restart or when the controller cannot say', async () => {
   FakeSource.hello = null;
   const received: unknown[] = [];
+  // The page the controller serves carries its start's request token; the test can make it unreachable.
+  let served: string | null = '<!doctype html><meta name="studio-token" content="token-b"><title>Studio desk</title>';
+  const meta = Object.assign(document.createElement('meta'), { name: 'studio-token', content: 'token-a' });
+  document.head.append(meta);
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (url: string) => {
-      controller.requests.push({ url, method: 'GET' });
+    vi.fn(async (url: string, options: RequestInit = {}) => {
+      controller.requests.push({ url, method: options.method ?? 'GET' });
+      if (url === '/') {
+        const page = served;
+        if (page === null) throw new TypeError('Failed to fetch');
+        return { ok: true, status: 200, text: async () => page };
+      }
       return url.includes('after=3')
         ? {
             ok: true,
@@ -464,6 +473,7 @@ test('a reconnecting stream asks for what it missed, and reloads after a restart
         : { ok: false, status: 400, json: async () => ({ error: 'unavailable' }) };
     }),
   );
+  const pageReads = () => controller.requests.filter(request => request.url === '/');
   const stream = new LiveStream('project-x', createStream);
   stream.subscribe({ changes: message => received.push(message) });
   stream.open();
@@ -474,10 +484,11 @@ test('a reconnecting stream asks for what it missed, and reloads after a restart
   source.emit('change', { version: 3, start: 'start-a' }); // Reconnected with nothing missed.
   source.emit('change', { version: 8, start: 'start-a' }); // Reconnected after changes.
   await waitFor(() => expect(received).toHaveLength(1));
+  // Neither the first hello nor a reconnect to the same start reads the page.
   expect(controller.requests.map(request => request.url)).toEqual([
     '/api/changes?projectId=project-x&after=3&start=start-a',
   ]);
-  source.emit('change', { version: 2, start: 'start-b' }); // The controller restarted.
+  source.emit('change', { version: 2, start: 'start-b' }); // The controller restarted, with a new token.
   source.emit('change', { version: 9, start: 'start-b' }); // The controller cannot say.
   await waitFor(() => expect(received).toHaveLength(3));
   expect(received).toEqual([
@@ -485,7 +496,20 @@ test('a reconnecting stream asks for what it missed, and reloads after a restart
     { version: 2, start: 'start-b', reload: true },
     { version: 9, start: 'start-b', reload: true },
   ]);
+  expect(pageReads()).toEqual([{ url: '/', method: 'GET' }]);
+  await waitFor(() => expect(meta.content).toBe('token-b'));
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  await settle();
+  // A restart whose page cannot be read still reloads what is shown, and keeps the token it has.
+  served = null;
+  source.emit('change', { version: 1, start: 'start-c' });
+  await waitFor(() => expect(received).toHaveLength(4));
+  expect(received[3]).toEqual({ version: 1, start: 'start-c', reload: true });
+  expect(pageReads()).toHaveLength(2);
+  await settle();
+  expect(meta.content).toBe('token-b');
   stream.close();
+  meta.remove();
 });
 
 test("a reviewed step's Result shows its work first, then the review, unless another attempt is chosen", async () => {
