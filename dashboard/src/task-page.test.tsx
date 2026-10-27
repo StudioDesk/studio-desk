@@ -6,6 +6,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { AttemptSummary } from './api';
 import { App } from './app';
 import { LiveStream } from './live';
 import { createAppRouter } from './router';
@@ -416,6 +417,74 @@ test("a story's Activity has your part beside the agents': what you sent and dec
     '/p/project-x/runs/run-1',
   );
   expect(controller.reads()).toContain('/api/tasks/T-1/activity?projectId=project-x');
+});
+
+// A story that landed, its build and its review, the review carrying the carries the controller planned (1.1).
+const landed = (sourceCarries?: AttemptSummary['sourceCarries']) => {
+  edit({
+    kind: 'studio-development:change',
+    status: 'done',
+    lastAttemptId: 'attempt-2',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'integration',
+      current: 'integrated',
+      review: { attemptId: 'attempt-2' },
+      history: [],
+    },
+  });
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      startedAt: '2026-10-27T05:00:00.000Z',
+      assignment: { kind: 'studio-development:change' },
+    },
+    {
+      id: 'attempt-2',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      startedAt: '2026-10-27T05:20:00.000Z',
+      assignment: { kind: 'studio-development:change-review' },
+      sourceIntegration: { state: 'integrated' },
+      ...(sourceCarries ? { sourceCarries } : {}),
+    },
+  ];
+};
+
+test("a landed story's Activity lists where its fix went under Integration, a story a carry waits for linked", async () => {
+  const user = userEvent.setup();
+  landed([
+    { line: 'release/1.0', state: 'carried', back: true },
+    { line: 'release/0.9', state: 'waiting', back: true, after: ['T-2'] },
+  ]);
+  controller.tasks.push(taskFixture('T-2', { title: 'Keep the folder browser quick' }));
+  open();
+  await user.click(await screen.findByRole('tab', { name: 'Activity' }));
+  const panel = await screen.findByRole('tabpanel'),
+    carries = await within(panel).findByRole('list', { name: 'Carries' }),
+    divider = within(panel).getByText('Integration', { selector: '.sd-divider' });
+  expect(divider.compareDocumentPosition(carries) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const items = within(carries).getAllByRole('listitem');
+  expect(items.map(item => item.textContent)).toEqual([
+    'brought back to release/1.0',
+    "waits for T-2 (“Keep the folder browser quick”)'s turn on release/0.9",
+  ]);
+  expect(within(items[1]!).getByRole('link', { name: 'T-2' }).getAttribute('href')).toBe('/p/project-x/tasks/T-2');
+  expect(panel.textContent).not.toMatch(/carried to release/);
+});
+
+test('a landed story without carries lists none under Integration', async () => {
+  const user = userEvent.setup();
+  landed();
+  open();
+  await user.click(await screen.findByRole('tab', { name: 'Activity' }));
+  const panel = await screen.findByRole('tabpanel');
+  expect(await within(panel).findByText('Integration', { selector: '.sd-divider' })).toBeTruthy();
+  expect(within(panel).queryByRole('list', { name: 'Carries' })).toBeNull();
 });
 
 test('a story stopped for want of a test sandbox points to Settings, not to the employee', async () => {

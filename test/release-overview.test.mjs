@@ -83,6 +83,25 @@ test('the Releases page reads each line, what landed on it since its last releas
   assert.equal(view.milestones[1].id, next.id);
   assert.deepEqual(view.tags, ['v1.0.0']);
   assert.equal(store.leases().length, 0);
+  // A bringing back as the director's Bring back plans it, waiting for another story's carry to the same line: the
+  // page reads it as brought back, naming that story, and the carry forward keeps its shape. Nothing runs while the
+  // carry before it waits for the director.
+  const record = store.attempt(review.id),
+    back = `source-carry:${review.id}:1`;
+  record.sourceCarries.push({
+    id: back,
+    line: 'release/0.9',
+    state: 'waiting',
+    back,
+    after: [{ reviewAttemptId: 'attempt-earlier', carryId: 'source-carry:attempt-earlier:0', storyId: 'T-earlier' }],
+    approvedBy: { type: 'director' },
+    approvedAt: new Date().toISOString(),
+  });
+  store.updateAttempt(record);
+  assert.deepEqual((await overview(c)).milestones[0].movedIn[0].carries, [
+    { line: 'main', state: 'waiting' },
+    { line: 'release/0.9', state: 'waiting', back: true, after: ['T-earlier'] },
+  ]);
 });
 
 test('waiting ideas keep the order the director gives them and move between milestones', async t => {

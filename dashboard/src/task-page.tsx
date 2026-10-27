@@ -21,6 +21,7 @@ import {
 } from './api';
 import { carriedOf, continuation, openPhase, useAttemptDetail } from './attempt-record';
 import { beforeThis, TraceActivity } from './activity';
+import { carryWords, type CarryRecord } from './carries';
 import { askedPaths, fileRequest } from './decisions';
 import { AgentAvatar } from './design/avatar';
 import { agentState, attemptState } from './faces';
@@ -46,6 +47,7 @@ import {
   storyPeople,
   storySteps,
   testingPhases,
+  type Stage,
   type Step,
 } from './story';
 import {
@@ -1257,8 +1259,8 @@ function PartLine({ projectId, part }: { projectId: string; part: Part }) {
 
 // A story's Activity: everything that happened to it, in order. Each attempt's conversation under who worked on
 // which step (Eli's build, then Morgan's review), your part between them (build plan area 16), and for a source
-// story where its integration stands. The director (October 24): it showed one step at a time and felt like it was
-// missing a lot.
+// story where its integration stands and where its fix went from there (1.1). The director (October 24): it showed
+// one step at a time and felt like it was missing a lot.
 function StoryActivity({
   projectId,
   task,
@@ -1290,8 +1292,12 @@ function StoryActivity({
       },
     }),
     integrating = parts.filter(part => part.integration),
+    // The carries of the review attempt whose integration they follow, forward or brought back.
+    review = attempts.find(item => item.id === (stage as Stage | null | undefined)?.review?.attemptId),
+    carries = (isSourceStory(task) && review?.sourceCarries) || [],
     integration =
       integrating.length > 0 ||
+      carries.length > 0 ||
       (isSourceStory(task) && (stage?.phase === 'integration' || stage?.current === 'integrated'));
   // Your part goes before the first attempt that started after it, or before the attempt it started.
   const between = parts.filter(part => !part.integration),
@@ -1329,9 +1335,37 @@ function StoryActivity({
             <PartLine key={part.key} projectId={projectId} part={part} />
           ))}
           {isSourceStory(task) && <p style={{ margin: 0, color: 'var(--ink-2)' }}>{standing(task, studio).title}</p>}
+          {carries.length > 0 && <Carries projectId={projectId} carries={carries} studio={studio} />}
         </>
       )}
     </div>
+  );
+}
+
+// Each carry in the words the Releases page uses, a story it waits for linked to its page.
+function Carries({ projectId, carries, studio }: { projectId: string; carries: CarryRecord[]; studio: StudioState }) {
+  const titleOf = (id: string) => studio.tasks.find(item => item.id === id)?.title;
+  return (
+    <ul aria-label="Carries" style={{ margin: 0, paddingLeft: '20px', color: 'var(--ink-2)' }}>
+      {carries.map((carry, index) => {
+        const words = carryWords(carry, titleOf),
+          parts: ReactNode[] = [];
+        let from = 0;
+        for (const id of carry.after ?? []) {
+          const at = words.indexOf(id, from);
+          if (at < 0) continue;
+          parts.push(
+            words.slice(from, at),
+            <Link key={at} className="sd-link" to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: id }}>
+              {id}
+            </Link>,
+          );
+          from = at + id.length;
+        }
+        parts.push(words.slice(from));
+        return <li key={`${index}-${carry.line}`}>{parts}</li>;
+      })}
+    </ul>
   );
 }
 

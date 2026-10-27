@@ -9,7 +9,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { Milestone, ReleaseOverview } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, type Controller } from './test-controller';
+import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
 
 let controller: Controller;
 const milestone = (version: string, line: string, extra: Partial<Milestone> = {}): Milestone => ({
@@ -141,6 +141,81 @@ test('each line shows its last release, what landed since and its milestones, wh
     within(mainLine).getByText('New features. Each minor or major release is made here: 1.1.0 next.'),
   ).toBeTruthy();
   expect(screen.getByRole('link', { name: 'Releases', current: 'page' })).toBeTruthy();
+});
+
+test("a story's carries read carried forward or brought back, and one waiting for another story's turn names it", async () => {
+  // Two fixes of one idea landed on release/1.1, were carried up to main and are being brought back to release/1.0,
+  // the second after the first.
+  const releases = overview();
+  releases.lines!.splice(1, 0, {
+    branch: 'release/1.1',
+    state: 'maintained',
+    newest: false,
+    head: 'c1',
+    lastRelease: { name: 'v1.1.0', version: '1.1.0' },
+    landed: { studio: 2, hand: 0, more: false, commits: [] },
+    onRemote: { known: false },
+  });
+  releases.milestones!.splice(
+    1,
+    0,
+    milestone('1.1.1', 'release/1.1', {
+      ideas: [
+        {
+          runId: 'run-browser',
+          idea: 'Keep the folder browser quick',
+          at: null,
+          by: 'director',
+          stories: [
+            {
+              id: 'T-cache',
+              title: 'Cache folder listings',
+              status: 'done',
+              started: true,
+              integration: 'integrated',
+              carries: [
+                { line: 'main', state: 'carried' },
+                { line: 'release/1.0', state: 'carried', back: true },
+              ],
+            },
+            {
+              id: 'T-lazy',
+              title: 'List folders lazily',
+              status: 'done',
+              started: true,
+              integration: 'integrated',
+              carries: [
+                { line: 'main', state: 'carried' },
+                { line: 'release/1.0', state: 'waiting', back: true, after: ['T-cache'] },
+              ],
+            },
+          ],
+          movedOut: [],
+        },
+      ],
+      counts: { ideas: 1, waiting: 0, stories: 2, integrated: 2, started: 0 },
+    }),
+  );
+  controller.releases = releases;
+  // The idea is still open, so the page's records hold its stories and their titles.
+  controller.runs = [{ id: 'run-browser', createdAt: '2026-10-27T05:00:00Z' }];
+  controller.tasks = [
+    taskFixture('T-cache', {
+      title: 'Cache folder listings',
+      kind: 'studio-development:change',
+      status: 'done',
+      workflowReference: { runId: 'run-browser' },
+    }),
+  ];
+  open('/p/project-x/releases?milestone=1.1.1');
+  const line = await screen.findByRole('region', { name: 'release/1.1' });
+  expect(await within(line).findByText('carried to main · brought back to release/1.0')).toBeTruthy();
+  expect(
+    await within(line).findByText(
+      "carried to main · waits for T-cache (“Cache folder listings”)'s turn on release/1.0",
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText(/carried to release\/1\.0/)).toBeNull();
 });
 
 test('waiting ideas move in their milestone and to another, and New milestone asks the controller', async () => {

@@ -18,6 +18,7 @@ import {
   type ReleaseOverview,
   type ReleaseStory,
 } from './api';
+import { carryWords } from './carries';
 import { Dialog } from './design/dialog';
 import { Icon } from './design/icons';
 import { Heading } from './layout';
@@ -576,14 +577,8 @@ function storyChip(story: ReleaseStory): [string, string] {
   if (story.status === 'ready') return ['', 'Ready'];
   return ['', story.status];
 }
-const carryText = (carry: { line: string; state: string }) =>
-  carry.state === 'carried'
-    ? `carried to ${carry.line}`
-    : carry.state === 'skipped'
-      ? `not needed on ${carry.line}`
-      : `carry to ${carry.line}: ${carry.state}`;
-
-// A story in a milestone; one that has not started carries its release chip, to move it from here.
+// A story in a milestone; one that has not started carries its release chip, to move it from here. Its carries read
+// as on its page, a story one waits for by its title when the page holds it.
 function StoryRow({
   projectId,
   story,
@@ -594,7 +589,8 @@ function StoryRow({
   studio: StudioState | null;
 }) {
   const [tone, label] = storyChip(story),
-    task = !story.started ? studio?.tasks.find(item => item.id === story.id) : undefined;
+    task = !story.started ? studio?.tasks.find(item => item.id === story.id) : undefined,
+    titleOf = (id: string) => studio?.tasks.find(item => item.id === id)?.title;
   return (
     <span className="sd-storyrow">
       <span className={`sd-chip ${tone}`}>{label}</span>
@@ -611,7 +607,9 @@ function StoryRow({
           compact
         />
       )}
-      {story.carries.length > 0 && <span className="sd-meta">{story.carries.map(carryText).join(' · ')}</span>}
+      {story.carries.length > 0 && (
+        <span className="sd-meta">{story.carries.map(carry => carryWords(carry, titleOf)).join(' · ')}</span>
+      )}
     </span>
   );
 }

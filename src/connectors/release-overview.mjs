@@ -68,7 +68,7 @@ function lineOnRemote(root, remote, branch, head) {
 }
 
 // A story as the page lists it: where it stands, whether it has started, its integration and carries, forward or
-// brought back (`back`).
+// brought back (`back`), with the stories whose carry to the same line one waits for (`after`).
 function storyOf(store, task) {
   const review = task.sourceStage?.review?.attemptId
     ? tries(() => store.attempt(task.sourceStage.review.attemptId))
@@ -83,6 +83,7 @@ function storyOf(store, task) {
       line: carry.line,
       state: carry.state,
       ...(carry.back ? { back: true } : {}),
+      ...(carry.after?.length ? { after: carry.after.map(item => item.storyId) } : {}),
     })),
   };
 }

@@ -18,10 +18,13 @@ export interface AttemptSummary {
   candidateReviewVerdict?: string;
   workReviewVerdict?: string;
   sourceIntegration?: { state?: string; error?: string; verification?: { conflicts?: string[] } } | null;
-  // A fix integrated on an older line, carried to each newer one (1.1 step 4).
+  // A fix integrated on an older line, carried to each newer one (1.1 step 4), or brought back to older ones by the
+  // director (`back`), with the stories whose carry to the same line it waits for (`after`).
   sourceCarries?: {
     line: string;
     state: string;
+    back?: boolean;
+    after?: string[];
     approved?: boolean;
     storyId?: string;
     commit?: string;
@@ -576,7 +579,7 @@ export interface ReleaseStory {
   status: string;
   started: boolean;
   integration: string | null;
-  carries: { line: string; state: string }[];
+  carries: { line: string; state: string; back?: boolean; after?: string[] }[];
 }
 export interface ReleaseIdea {
   runId: string;
