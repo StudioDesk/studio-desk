@@ -662,9 +662,11 @@ function BoardList({ projectId, cards, looks }: { projectId: string; cards: Card
   );
 }
 
-// While work is paused, nothing queued starts: the board says so above its columns, with the way to resume. While
-// it runs there is nothing to say; the filters count what works and waits, and Settings pauses it (the director,
-// October 24: the board's footnote "feels like it was just strapped on").
+// While work is paused, nothing queued starts: the board says so above its columns, with the way to resume. A pause
+// is the director's for every project (state.paused) or this project's (dispatchPaused: the director's, or the one a
+// restart puts on queued work); a queue that ran empty is no pause, whatever pipelineEnabled says. While it runs there
+// is nothing to say; the filters count what works and waits, and Settings pauses it (the director, October 24: the
+// board's footnote "feels like it was just strapped on").
 function Paused({ projectId, state }: { projectId: string; state: StudioState }) {
   const toast = useToast(),
     everywhere = !!state.paused,
@@ -675,7 +677,7 @@ function Paused({ projectId, state }: { projectId: string; state: StudioState })
           : send('/api/pipeline', { projectId, action: 'resume' }),
       onError: failure => toast(failure.message),
     });
-  if (!everywhere && state.pipelineEnabled !== false) return null;
+  if (!everywhere && !state.project.dispatchPaused) return null;
   return (
     <div className="sd-callout" role="status">
       <span className="sd-callout__icon">

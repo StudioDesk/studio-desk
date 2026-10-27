@@ -201,7 +201,7 @@ test("lanes by idea head each idea's lane with its dot, its words and its detail
 
 test('a paused project says so above the board, and resumes from there', async () => {
   const user = userEvent.setup();
-  controller.shell.pipelineEnabled = false;
+  controller.shell.project.dispatchPaused = true;
   open();
   expect(await screen.findByText('This project is paused.')).toBeTruthy();
   await user.click(screen.getByRole('button', { name: 'Resume this project' }));
@@ -212,6 +212,26 @@ test('a paused project says so above the board, and resumes from there', async (
       body: { projectId: 'project-x', action: 'resume' },
     }),
   );
+});
+
+test('a queue that ran empty is no pause: the board says nothing above its columns', async () => {
+  // The controller turns pipelineEnabled off when nothing queued is left (pipeline_finished); nobody paused.
+  controller.shell.pipelineEnabled = false;
+  open();
+  expect(titles(await column('Ready'))).toEqual(['Ready work']);
+  expect(screen.queryByText('This project is paused.')).toBeNull();
+  expect(screen.queryByText('New work is paused in every project.')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Resume this project' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Resume all work' })).toBeNull();
+});
+
+test("a restart's pause on queued work reads as this project's pause, resumed from the board", async () => {
+  // A restart pauses the project's queued work and marks it so (src/core/orchestrator.mjs).
+  Object.assign(controller.shell.project, { dispatchPaused: true, restartPaused: true });
+  open();
+  expect(await screen.findByText('This project is paused.')).toBeTruthy();
+  expect(screen.queryByText('New work is paused in every project.')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Resume this project' })).toBeTruthy();
 });
 
 test('new work paused in every project says so, and resumes everywhere', async () => {
