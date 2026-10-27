@@ -24,7 +24,7 @@ The dashboard (`dashboard/`, React with a Vite build) is served by the controlle
 
 ## What's next
 
-1.1 is releases and branches: milestones as releases, work on release branches with fixes carried forward, stories running side by side, and pushing to your remote, confirmed each time. The [release notes](RELEASE-NOTES.md) list what else is planned after 1.0.
+1.1 is releases and branches: milestones as releases, work on release branches with fixes carried forward (and, at the director's word, a fix that landed on a newer line brought back to an older one), stories running side by side, and pushing to your remote, confirmed each time. The [release notes](RELEASE-NOTES.md) list what else is planned after 1.0.
 
 ## How to work on it
 

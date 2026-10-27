@@ -21,7 +21,14 @@ import {
 } from './connectors/source-changes.mjs';
 import { stopIntegrationProcess } from './connectors/source-integration.mjs';
 import { addProjectLine, retireProjectLine } from './connectors/source-lines.mjs';
-import { approveCarry, skipCarry } from './connectors/source-carries.mjs';
+import {
+  approveCarry,
+  bringBack,
+  bringBackIdea,
+  bringBackTargets,
+  ideaBringBackTargets,
+  skipCarry,
+} from './connectors/source-carries.mjs';
 import { pushRelease, releaseAgain, startRelease } from './connectors/source-releases.mjs';
 import {
   addWaitingIdea,
@@ -451,6 +458,18 @@ export function createStudio({
         req.method === 'GET'
       )
         return json(res, oneRun(store, parts[2], parts[4]));
+      // The older lines an idea whose stories landed can be brought back to, or why not.
+      if (
+        parts[0] === 'api' &&
+        parts[1] === 'projects' &&
+        parts[3] === 'runs' &&
+        parts[5] === 'bring-back' &&
+        parts.length === 6 &&
+        req.method === 'GET'
+      ) {
+        store.project(parts[2]);
+        return json(res, ideaBringBackTargets(store, parts[2], parts[4]));
+      }
       if (parts[0] === 'api' && parts[1] === 'projects' && parts.length === 4 && req.method === 'GET') {
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });
@@ -519,7 +538,7 @@ export function createStudio({
       // One task of the selected project with its attempt summaries: what a task's page shows. Its activity is what
       // happened to it besides its agents' output, which its Activity tab reads.
       const taskRoute = parts[0] === 'api' && parts[1] === 'tasks' && req.method === 'GET';
-      if (taskRoute && (parts.length === 3 || (parts.length === 4 && parts[3] === 'activity'))) {
+      if (taskRoute && (parts.length === 3 || (parts.length === 4 && ['activity', 'bring-back'].includes(parts[3])))) {
         let record;
         try {
           record = store.task(parts[2]);
@@ -527,6 +546,8 @@ export function createStudio({
           fail('Task not found.', 404);
         }
         assertProject(store, record, queryProject);
+        // The older lines a story that landed can be brought back to, or why not, read from records and git.
+        if (parts[3] === 'bring-back') return json(res, bringBackTargets(store, record));
         if (parts[3]) return json(res, storyActivity(store, record));
         return json(res, {
           task: { ...record, directorInputs: directorInputsOf(record) },
@@ -848,6 +869,26 @@ export function createStudio({
             id,
           );
           return json(res, { project, workflow }, 201);
+        }
+        // Bring the idea back to <branch> (1.1, October 27): each of its stories, in the order they landed.
+        if (
+          parts[1] === 'projects' &&
+          parts[3] === 'runs' &&
+          parts[4] &&
+          parts[5] === 'bring-back' &&
+          !parts[6] &&
+          req.method === 'POST'
+        ) {
+          if (parts[2] !== projectId) fail('Select this project before bringing its ideas back.');
+          if (Object.keys(data).some(key => !['projectId', 'line'].includes(key))) fail('Bring back takes the line.');
+          let stories;
+          try {
+            stories = bringBackIdea(store, projectId, parts[4], data.line);
+          } catch (error) {
+            fail(error.message);
+          }
+          runner.autonomy.tryCarries();
+          return json(res, { stories }, 202);
         }
         if (
           parts[1] === 'projects' &&
@@ -1542,6 +1583,19 @@ export function createStudio({
             }
             runner.autonomy.tryCarries();
             return json(res, { carry, carries: store.attempt(t.sourceStage.review.attemptId).sourceCarries }, 202);
+          }
+          // Bring back to <branch> (1.1, October 27): the director brings a fix that landed on a newer line back to an
+          // older one and every maintained line between, carried as carries are when the project's source is free.
+          if (action === 'bring-back') {
+            if (Object.keys(data).some(key => !['projectId', 'line'].includes(key))) fail('Bring back takes the line.');
+            let planned;
+            try {
+              planned = bringBack(store, t, data.line);
+            } catch (error) {
+              fail(error.message);
+            }
+            runner.autonomy.tryCarries();
+            return json(res, { ...planned, carries: store.attempt(t.sourceStage.review.attemptId).sourceCarries }, 202);
           }
           // The director approves commands Claude Code refused to the employee, which then apply to every
           // Claude employee's future attempts, and starts the work again from what it left (v1.0 item 22).

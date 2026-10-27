@@ -67,7 +67,8 @@ function lineOnRemote(root, remote, branch, head) {
   return { known: true, ahead: count(`${tracked}..${head}`), behind: count(`${head}..${tracked}`) };
 }
 
-// A story as the page lists it: where it stands, whether it has started, its integration and carries forward.
+// A story as the page lists it: where it stands, whether it has started, its integration and carries, forward or
+// brought back (`back`).
 function storyOf(store, task) {
   const review = task.sourceStage?.review?.attemptId
     ? tries(() => store.attempt(task.sourceStage.review.attemptId))
@@ -78,7 +79,11 @@ function storyOf(store, task) {
     status: task.status,
     started: store.attempts(task.id).some(attempt => (attempt.assignment?.kind || task.kind) === story),
     integration: review?.sourceIntegration?.state ?? null,
-    carries: (review?.sourceCarries || []).map(carry => ({ line: carry.line, state: carry.state })),
+    carries: (review?.sourceCarries || []).map(carry => ({
+      line: carry.line,
+      state: carry.state,
+      ...(carry.back ? { back: true } : {}),
+    })),
   };
 }
 

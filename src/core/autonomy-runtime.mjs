@@ -14,7 +14,7 @@ import { sendWaitingIdea } from './idea-intake.mjs';
 import { compareVersions, parseVersion, projectMilestones } from '../connectors/source-milestones.mjs';
 import { projectLine } from '../connectors/source-lines.mjs';
 import { mergeSourceStory, sourceStoryIntegrated } from '../connectors/source-changes.mjs';
-import { approveCarry, nextCarry, runCarry } from '../connectors/source-carries.mjs';
+import { approveCarry, carryWaits, nextCarry, runCarry } from '../connectors/source-carries.mjs';
 import { notesAccepted, runRelease } from '../connectors/source-releases.mjs';
 
 const INTEGRATION = 'autonomy-integration';
@@ -442,7 +442,8 @@ export class Autonomy {
 
   // Carries waiting their turn (1.1 step 4): the policy approves a carry when it integrates after a passing review,
   // as it would the integration, and an approved carry runs once no integration or carry runs, none is waiting and
-  // the project's source is free. One at a time, oldest story first.
+  // the project's source is free. One at a time, oldest story first. A fix the director brings back is approved with
+  // the action, and a carry of a brought-back idea waits for the story before it on its line.
   tryCarries() {
     if (
       this.runner.closing ||
@@ -460,7 +461,7 @@ export class Autonomy {
         continue;
       }
       const carry = nextCarry(review);
-      if (carry?.state !== 'waiting') continue;
+      if (carry?.state !== 'waiting' || carryWaits(this.store, carry)) continue;
       if (!carry.approvedBy) {
         const policy = this.policy(story);
         if (!policy.enabled || kindMode(policy, story.kind).integrate !== 'auto') continue;

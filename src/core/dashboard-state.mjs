@@ -187,10 +187,13 @@ export function dashboardAttempt(data, timing, openPhase = null) {
       };
     }
   }
-  // A fix integrated on an older line, carried to each newer one (1.1 step 4): where each carry stands.
+  // A fix integrated on an older line, carried to each newer one (1.1 step 4), or brought back to older ones by the
+  // director (`back`, and the story whose carry to the same line it waits for): where each carry stands.
   if (data.sourceCarries)
     summary.sourceCarries = data.sourceCarries.slice(0, 20).map(carry => ({
       ...fields(carry, ['line', 'state', 'storyId', 'commit', 'finishedAt']),
+      ...(carry.back ? { back: true } : {}),
+      ...(carry.after?.length ? { after: carry.after.map(item => item.storyId) } : {}),
       ...(carry.approvedBy ? { approved: true } : {}),
       ...(carry.reason ? { reason: shortText(carry.reason, 500) } : {}),
       ...(carry.error ? { error: shortText(carry.error, 1000) } : {}),
