@@ -763,3 +763,63 @@ test('compact execution timing keeps enclosing ownership, terminal precedence an
     );
   }
 });
+
+test("a task's attempt summaries read its own attempts' phases through their index, and a project's every phase through the phase index", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-state-indexes-')),
+    app = createStudio({ directory, port: 0 }),
+    store = app.store;
+  t.after(async () => {
+    await app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  // Lookups for what the pages read most (October 27): without them each read scanned the whole history.
+  const indexes = store.db
+    .prepare(
+      "SELECT name, tbl_name AS tableName FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .all()
+    .map(row => `${row.tableName}.${row.name}`);
+  assert.deepEqual(indexes, [
+    'attempts.attempts_by_task',
+    'events.events_by_attempt',
+    'events.events_by_kind',
+    'events.events_by_task',
+  ]);
+  const attempts = [0, 1].map(i => ({
+    id: `index-attempt-${i}`,
+    taskId: `index-task-${i}`,
+    projectId: 'project-legacy',
+    workerId: 'W-01',
+    status: 'review',
+    artifacts: [],
+  }));
+  for (const attempt of attempts) {
+    store.insertAttempt(attempt, { text: 'Fixture', hash: 'fixture' });
+    store.finishPhase(store.startPhase(attempt, 'attempt'), 'succeeded', {});
+  }
+  const prepare = store.db.prepare.bind(store.db),
+    plans = [];
+  store.db.prepare = sql => {
+    if (sql.includes("kind='phase'") && sql.includes('json_extract'))
+      plans.push(
+        prepare(`EXPLAIN QUERY PLAN ${sql}`)
+          .all(...(sql.includes('attempt_id IN') ? ['index-attempt-0'] : []))
+          .map(row => row.detail)
+          .join('; '),
+      );
+    return prepare(sql);
+  };
+  const one = store.dashboardAttempts('project-legacy', 'index-task-0');
+  // A project of more than 200 attempts reads every phase in one pass instead of as many lookups.
+  for (let i = 2; i < 202; i++)
+    store.insertAttempt({ ...attempts[0], id: `index-attempt-${i}`, taskId: `index-task-${i}` }, {});
+  assert.equal(store.dashboardAttempts('project-legacy').length, 202);
+  delete store.db.prepare;
+  assert.deepEqual(
+    one.map(attempt => attempt.id),
+    ['index-attempt-0'],
+  );
+  assert.equal(typeof one[0].executionTiming.durationMs, 'number', 'Its timing still comes from its own phases.');
+  assert.match(plans[0], /USING INDEX events_by_attempt/);
+  assert.match(plans[1], /USING INDEX events_by_kind/);
+});

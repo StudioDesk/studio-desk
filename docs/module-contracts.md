@@ -42,6 +42,8 @@ Cancellation finishes pending execution observations only when the supervisor fi
 
 For the task-dialog timeline and Runs details, protected `GET /api/attempts/:id?projectId=...` returns additive `phaseEvents`, and `GET /api/attempts/:id/phases?projectId=...` returns that complete array directly. Project-protected state/export reads also include `phaseEvents` on each owning project's attempt. These arrays contain chronological event rows (`seq`, `time`, `kind`, `task_id`, `attempt_id`, `message`) plus parsed `payload`; they select all persisted phase events for the exact attempt, independently of bounded recent activity and paged raw logs. They do not join candidate and review identities. Consumers must pair by `occurrenceId`, keep integration occurrences separate, and treat unmatched starts as unavailable terminal timing when the operation is no longer known active. Old attempts return an empty array, so views can explicitly report an unavailable timeline without inferring history from logs. Reads enforce the existing project identity checks before returning any selected attempt's phases.
 
+The store indexes the events by attempt, by task and by kind, and the attempts by task (October 27): reads of one attempt's events, one task's events and attempts, and the compact summaries' timing touch only their own rows instead of scanning the whole history, log lines included. The compact summaries of up to 200 attempts read those attempts' phase events through the attempt index; more, such as a project's, read every attempt-level phase through the kind index. The indexes change no record, and a store opened without them builds them once.
+
 ## Release lines (1.1 step 1, MP-028)
 
 Built on branch `v1.1`, not yet on `main`.

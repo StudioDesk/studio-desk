@@ -45,6 +45,10 @@ const phaseNames = {
   'integration.fast-forward': 'Development fast-forward',
 };
 
+// A few attempts' phase events are read through their attempts; more, such as a whole project's, through every phase
+// event, which one pass over the phase index reads faster than as many lookups.
+const phaseIdsPerQuery = 200;
+
 export class Store {
   constructor(directory, profile) {
     this.directory = path.resolve(directory);
@@ -57,6 +61,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS leases (resource TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, token INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS counters (resource TEXT PRIMARY KEY, value INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT, attempt_id TEXT, message TEXT NOT NULL);`);
+    // Lookups for what the pages read most (October 27): an attempt's events and phases, a task's events, one kind of
+    // event such as every phase, and a task's attempts. Without them every read scanned the whole history, log lines
+    // included, and grew slower each day. Adding them changes no record; the first start after they arrive builds
+    // them once.
+    this.db.exec(`CREATE INDEX IF NOT EXISTS events_by_attempt ON events (attempt_id, seq);
+      CREATE INDEX IF NOT EXISTS events_by_task ON events (task_id, seq);
+      CREATE INDEX IF NOT EXISTS events_by_kind ON events (kind, seq);
+      CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts (task_id);`);
     // Every write raises the version and calls onChange with what changed (MP-026): the dashboard's
     // cache tags and change events follow it, and the scheduler runs on it. Each event also reaches
     // onEvent, so a tab watching an attempt receives its lines. A log line is not a change: the compact
@@ -480,11 +492,17 @@ export class Store {
       )
       .all(LEGACY_PROJECT, projectId, ...(tasks || []))
       .map(row => JSON.parse(row.data));
-    // The same pass reads a working attempt's inner phases, so Today can say what it is doing.
+    // The same pass reads a working attempt's inner phases, so Today can say what it is doing. A few attempts'
+    // phase events are read through their attempts and many through the phase index, rather than by scanning the
+    // whole history (October 27, when one task's page took a fifth of a second in any project).
     const working = rows.filter(data => ['running', 'stopping'].includes(data.status)).map(data => data.id),
-      phases = this.db
-        .prepare(
-          `SELECT attempt_id, task_id,
+      ids = rows.map(data => data.id),
+      few = ids.length <= phaseIdsPerQuery,
+      phases = !ids.length
+        ? []
+        : this.db
+            .prepare(
+              `SELECT attempt_id, task_id,
       json_extract(message, '$.schemaVersion') AS schemaVersion,
       json_extract(message, '$.attemptId') AS attemptId,
       json_extract(message, '$.taskId') AS taskId,
@@ -496,11 +514,12 @@ export class Store {
       CASE WHEN json_type(message, '$.durationMs') IN ('integer', 'real')
         THEN json_extract(message, '$.durationMs') END AS durationMs,
       json_extract(message, '$.timing') AS timing
-      FROM events WHERE kind='phase' AND (json_extract(message, '$.phaseId')='attempt'${working.length ? ` OR attempt_id IN (${working.map(() => '?').join(',')})` : ''})
+      FROM events INDEXED BY ${few ? 'events_by_attempt' : 'events_by_kind'} WHERE ${few ? `attempt_id IN (${ids.map(() => '?').join(',')}) AND ` : ''}kind='phase'
+        AND (json_extract(message, '$.phaseId')='attempt'${working.length ? ` OR attempt_id IN (${working.map(() => '?').join(',')})` : ''})
       ORDER BY seq`,
-        )
-        .all(...working),
-      timings = dashboardTimings(phases),
+            )
+            .all(...(few ? ids : []), ...working);
+    const timings = dashboardTimings(phases),
       open = dashboardOpenPhases(phases);
     return rows.map(data => {
       const owner = JSON.stringify([data.id, data.taskId]);
