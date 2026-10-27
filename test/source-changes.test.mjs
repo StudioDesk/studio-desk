@@ -2806,7 +2806,10 @@ test('a rejected source edit names its reason, and how to report checks the sand
     error =>
       error.message.startsWith(
         'Complete the bounded source change with staged source artifacts: your check "Focused HTTP tests" failed: EACCES connecting to the loopback server..',
-      ) && /as not-run, and use fail only for a defect in the change\.$/.test(error.message),
+      ) &&
+      /or a failure you cannot tie to your change, as not-run with what you saw, and use fail only for a defect in the change\.$/.test(
+        error.message,
+      ),
   );
   assert.throws(() => stagedChanges({}, { ...result, artifacts: [], checks: [] }, read), {
     message:

@@ -1168,7 +1168,7 @@ export function stagedChanges(scope, result, read) {
     throw new Error(
       `Complete the bounded source change with staged source artifacts: ${problems.join('; ')}.` +
         (failed.length
-          ? ' The controller runs the full test suite in its own sandbox after you stop. Report a check your environment could not run (for example local HTTP tests blocked by your sandbox) as not-run, and use fail only for a defect in the change.'
+          ? ' The controller runs the full test suite in its own sandbox after you stop. Report a check your environment could not run (for example local HTTP tests blocked by your sandbox), or a failure you cannot tie to your change, as not-run with what you saw, and use fail only for a defect in the change.'
           : ''),
     );
   // Edits and new files come back as staged copies; a created file has no beforeHash and a deleted
