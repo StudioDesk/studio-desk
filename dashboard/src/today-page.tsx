@@ -255,10 +255,13 @@ function closeAction(task: Task, act: ReturnType<typeof useAct>['act'], label: s
   };
 }
 
-// A story with a passing review, ready to integrate: the change, its tests and the review.
+// A story with a passing review, ready to integrate: the change, its tests and the review. One whose integration
+// stopped on a conflict, or failed only with what landed after it was tested, offers Merge onto the current source
+// first, as the story page does; integrating again as it is fails the same way, so it comes second.
 function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & { task: Task }) {
   const { act, busy } = useAct(projectId),
     decision = decisionState(task, state),
+    { mergeable, landed } = decision,
     review = decision.review!,
     reviewItem = decision.reviewItem!,
     candidate = state.attempts.find(
@@ -274,22 +277,55 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
     built = took(candidate),
     reviewed = took(review);
   const changeShare = stat && stat.added + stat.removed ? (stat.added / (stat.added + stat.removed)) * 100 : 100;
+  // What landed after the change was tested, counted as the controller names it: its stories, then any commits made
+  // by hand. The story page links each one.
+  const byHand = landed ? landed.commits - landed.stories.length : 0,
+    landedParts = landed
+      ? [
+          ...(landed.stories.length
+            ? [`${landed.stories.length} ${plural(landed.stories.length, 'story', 'stories')}`]
+            : []),
+          ...(byHand > 0 ? [`${byHand} ${plural(byHand, 'commit')} made by hand`] : []),
+        ]
+      : [];
   return (
     <Decision
       projectId={projectId}
       busy={busy}
-      chip={chip(
-        'brand',
-        again ? 'Ready to integrate again' : 'Ready to integrate',
-        <Icon name="merge" size={14} weight={2.4} />,
-      )}
+      chip={
+        mergeable
+          ? chip(
+              'you',
+              landed ? 'Fails with what landed since' : 'Conflicts with the current source',
+              <Icon name="merge" size={14} weight={2.4} />,
+            )
+          : chip(
+              'brand',
+              again ? 'Ready to integrate again' : 'Ready to integrate',
+              <Icon name="merge" size={14} weight={2.4} />,
+            )
+      }
       time={when(review.finishedAt)}
       title={task.title}
       origin={<Origin projectId={projectId} place={placeIn(stories, task)} />}
       actions={[
+        ...(mergeable
+          ? [
+              {
+                label: 'Merge onto the current source',
+                emphasis: 'primary' as const,
+                onClick: () =>
+                  act(
+                    taskPath(task, 'merge-source'),
+                    {},
+                    () => `${editor} merges the change onto the current source; then it is tested and reviewed again.`,
+                  ),
+              },
+            ]
+          : []),
         {
           label: again ? 'Integrate again' : 'Integrate',
-          emphasis: 'primary',
+          emphasis: mergeable ? 'default' : 'primary',
           onClick: () =>
             act(taskPath(task, 'integrate-source'), { attemptId: review.id, reviewHash: reviewItem.hash }, result =>
               result.state === 'waiting'
@@ -312,6 +348,13 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
             : undefined
       }
     >
+      {mergeable && (
+        <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
+          {landed
+            ? `It passed on its own but fails together with what landed after it was tested${landedParts.length ? `: ${landedParts.join(' and ')}` : ''}.`
+            : 'It passed on its own but conflicts with the current source.'}
+        </p>
+      )}
       <div className="sd-decision__tiles">
         <Link className="sd-tile" to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: task.id }}>
           <span className="sd-eyebrow">Change</span>

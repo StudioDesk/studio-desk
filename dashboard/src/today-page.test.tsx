@@ -6,6 +6,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import type { AttemptSummary } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
@@ -133,6 +134,169 @@ test('a story whose review asked for changes is sent back, or integrated over th
         reviewHash: 'review-hash',
         overrideReason: 'The draft is kept by the next story.',
       },
+    }),
+  );
+});
+
+// A staged story whose passing review's integration stopped, with what its verification recorded.
+const stoppedStory = (verification: NonNullable<AttemptSummary['sourceIntegration']>['verification']) => {
+  const pin = {
+    taskId: 'T-1',
+    attemptId: 'attempt-edit',
+    workerId: 'W-1',
+    path: 'source-change.json',
+    hash: 'change-hash',
+    candidateHash: 'candidate-hash',
+  };
+  controller.shell.workers = [
+    { id: 'W-1', displayName: 'Eli', team: 'Engineering' },
+    { id: 'W-2', displayName: 'Morgan', team: 'Review' },
+  ];
+  controller.attempts = [
+    {
+      id: 'attempt-edit',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change' },
+      result: { outcome: 'completed' },
+      sourceCandidate: { sourceHash: 'candidate-hash' },
+      artifacts: [{ path: 'source-change.json', hash: 'change-hash', kind: 'source-change' }],
+    },
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-2',
+      finishedAt: '2026-10-27T19:02:00.000Z',
+      assignment: { kind: 'studio-development:change-review' },
+      result: { outcome: 'completed' },
+      candidateReviewVerdict: 'pass',
+      candidateReview: { ...pin, passed: true },
+      inputReferences: [
+        { taskId: 'T-1', attemptId: 'attempt-edit', artifacts: [{ kind: 'source-change', hash: 'change-hash' }] },
+      ],
+      artifacts: [{ path: 'source-change-review.json', hash: 'review-hash', kind: 'source-change-review' }],
+      sourceIntegration: { state: 'rejected', verification },
+    },
+  ];
+  controller.tasks = [
+    taskFixture('T-1', {
+      title: 'Explain a change that fails with what landed',
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'integration',
+        current: 'failed',
+        candidate: pin,
+        review: {
+          taskId: 'T-1',
+          attemptId: 'attempt-review',
+          workerId: 'W-2',
+          path: 'source-change-review.json',
+          hash: 'review-hash',
+          verdict: 'pass',
+        },
+      },
+    }),
+  ];
+};
+const storyCall = async () =>
+  within(
+    (
+      await within(await calls()).findByRole('heading', { name: 'Explain a change that fails with what landed' })
+    ).closest('article')!,
+  );
+// The call's buttons in order, with the primary one marked.
+const buttons = (card: Awaited<ReturnType<typeof storyCall>>) =>
+  card
+    .getAllByRole('button')
+    .filter(button => button.getAttribute('aria-label') !== 'More choices' && !button.closest('[popover]'))
+    .map(button => `${button.textContent}${button.className.includes('sd-btn--primary') ? ' (primary)' : ''}`);
+
+// October 27: a change that passed on its own and fails only with what landed after it was tested goes back to its
+// editor merged onto the current source, as the story page offers.
+test('a story that fails only with what landed since offers Merge onto the current source first', async () => {
+  const user = userEvent.setup();
+  stoppedStory({ landedSince: { commits: 2, stories: ['T-2'] } });
+  open();
+  const card = await storyCall();
+  expect(within(await calls()).getAllByRole('heading', { level: 3 })).toHaveLength(1);
+  expect(card.getByText('Fails with what landed since')).toBeTruthy();
+  expect(card.queryByText('Ready to integrate again')).toBeNull();
+  expect(buttons(card)).toEqual([
+    'Merge onto the current source (primary)',
+    'Integrate again',
+    'Close without integrating',
+  ]);
+  expect(card.getByRole('link', { name: 'See the change' }).getAttribute('href')).toBe('/p/project-x/tasks/T-1');
+  expect(card.getByText(/It passed on its own/).textContent).toBe(
+    'It passed on its own but fails together with what landed after it was tested: 1 story and 1 commit made by hand.',
+  );
+  await user.click(card.getByRole('button', { name: 'Merge onto the current source' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/merge-source',
+      method: 'POST',
+      body: { projectId: 'project-x' },
+    }),
+  );
+  expect(
+    await screen.findByText('Eli merges the change onto the current source; then it is tested and reviewed again.'),
+  ).toBeTruthy();
+});
+
+test('what landed counts its stories, and no commit by hand when every commit was a story', async () => {
+  stoppedStory({ landedSince: { commits: 2, stories: ['T-2', 'T-3'] } });
+  open();
+  const card = await storyCall();
+  expect(card.getByText(/It passed on its own/).textContent).toBe(
+    'It passed on its own but fails together with what landed after it was tested: 2 stories.',
+  );
+});
+
+// 1.1 step 3: a story whose integration stopped on a conflict, as the story page offers it.
+test('a story stopped by a conflict offers Merge onto the current source first and Integrate again second', async () => {
+  const user = userEvent.setup();
+  stoppedStory({ conflicts: ['src/a.mjs'] });
+  open();
+  const card = await storyCall();
+  expect(card.getByText('Conflicts with the current source')).toBeTruthy();
+  expect(buttons(card)).toEqual([
+    'Merge onto the current source (primary)',
+    'Integrate again',
+    'Close without integrating',
+  ]);
+  expect(card.getByText('It passed on its own but conflicts with the current source.')).toBeTruthy();
+  expect(card.queryByText(/landed after it was tested/)).toBeNull();
+  await user.click(card.getByRole('button', { name: 'Integrate again' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/integrate-source',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'attempt-review', reviewHash: 'review-hash' },
+    }),
+  );
+});
+
+test('an integration that failed with nothing landed and no conflict offers Integrate again as before', async () => {
+  const user = userEvent.setup();
+  stoppedStory({ conflicts: [] });
+  open();
+  const card = await storyCall();
+  expect(card.getByText('Ready to integrate again')).toBeTruthy();
+  expect(buttons(card)).toEqual(['Integrate again (primary)', 'Close without integrating']);
+  expect(card.queryByRole('button', { name: 'Merge onto the current source' })).toBeNull();
+  expect(card.queryByText(/It passed on its own/)).toBeNull();
+  await user.click(card.getByRole('button', { name: 'Integrate again' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/integrate-source',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'attempt-review', reviewHash: 'review-hash' },
     }),
   );
 });
