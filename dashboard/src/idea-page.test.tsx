@@ -119,10 +119,12 @@ const targets = {
     { line: 'release/0.9', reason: 'T-2 (“Second”): It builds on T-1 …' },
   ],
 };
+// The page reads the idea, then where it can go back to, so a loaded machine (an idea's checks beside other tests)
+// takes more than the default second to show either (October 27, when this failed a candidate under load).
 const backReads = () => controller.reads().filter(url => url.includes('/bring-back')),
   posted = () => controller.requests.filter(request => request.method !== 'GET'),
-  offer = async () => within(await screen.findByRole('list', { name: 'Bring back' })),
-  title = () => screen.findByRole('heading', { level: 1, name: '“Bring the fixes back.”' });
+  offer = async () => within(await screen.findByRole('list', { name: 'Bring back' }, { timeout: 5000 })),
+  title = () => screen.findByRole('heading', { level: 1, name: '“Bring the fixes back.”' }, { timeout: 5000 });
 
 test("an idea whose stories landed offers each older line, or the controller's reason where it can't go", async () => {
   controller.runBringBack['run-1'] = targets;
