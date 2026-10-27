@@ -5,22 +5,26 @@ if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500));
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'malformed') console.log('No test totals');
 else {
-  if (mode === 'mutate') {
-    const fs = await import('node:fs');
-    fs.writeFileSync('README.md', 'Fixture changed copied source.');
-  }
+  const fs = await import('node:fs');
+  if (mode === 'mutate') fs.writeFileSync('README.md', 'Fixture changed copied source.');
+  // Two changes that pass alone and fail together: the fixture's edit of workflows.mjs and a line in projects.mjs.
+  const holds = (file, text) => fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes(text),
+    fail =
+      mode === 'fail' ||
+      (mode === 'together' &&
+        holds('src/core/workflows.mjs', 'Bounded fixture improvement.') &&
+        holds('src/core/projects.mjs', 'Fails with the improvement.'));
   console.log(
     'TAP version 13\n1..1\n' +
-      (mode === 'fail' ? 'not ok' : 'ok') +
+      (fail ? 'not ok' : 'ok') +
       ' 1 - process fixture\n# tests 1\n# pass ' +
-      (mode === 'fail' ? 0 : 1) +
+      (fail ? 0 : 1) +
       '\n# fail ' +
-      (mode === 'fail' ? 1 : 0) +
+      (fail ? 1 : 0) +
       '\n# cancelled 0\n# skipped 0\n# todo 0',
   );
   // Whether the copy under test carries the Claude fixture's edit (an employee's own test run).
-  const fs = await import('node:fs');
   if (fs.existsSync('src/core/workflows.mjs'))
     console.log(`# edited: ${fs.readFileSync('src/core/workflows.mjs', 'utf8').includes('Claude fixture edit')}`);
-  if (mode === 'fail') process.exitCode = 1;
+  if (fail) process.exitCode = 1;
 }

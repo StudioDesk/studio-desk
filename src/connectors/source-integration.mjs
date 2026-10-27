@@ -320,6 +320,33 @@ export function landed(root, commit, ref = 'HEAD') {
     return false;
   }
 }
+// What landed on the line between the commit a candidate was built and tested on and the one its integration merged
+// it onto: how many commits, and the stories among them by their integration commits' "Change:" line. Null when the
+// line has not moved, or git cannot say.
+export function landedSince(root, journal) {
+  try {
+    const base = git(root, ['rev-parse', `${journal.candidateCommit}^`]);
+    if (base === journal.repository.head) return null;
+    const commits = git(root, ['log', '--format=%H%x00%B%x01', `${base}..${journal.repository.head}`], { raw: true })
+      .split('\x01')
+      .map(entry => entry.trim())
+      .filter(Boolean)
+      .map(entry => {
+        const [commit, message = ''] = entry.split('\x00');
+        return { commit, storyId: /^Change: (T-[\w-]+) /m.exec(message)?.[1] ?? null };
+      });
+    if (!commits.length) return null;
+    return {
+      commits: commits.length,
+      stories: commits
+        .filter(item => item.storyId)
+        .reverse()
+        .map(item => ({ storyId: item.storyId, commit: item.commit })),
+    };
+  } catch {
+    return null;
+  }
+}
 // Paths git reports as changed or untracked, optionally limited to some files.
 export function statusPaths(root, files = []) {
   return git(root, ['status', '--porcelain', '-z', '--untracked-files=all', '--', ...files], { raw: true })

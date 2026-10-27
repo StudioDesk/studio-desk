@@ -18,6 +18,7 @@ import {
   commitIntegration,
   committedIntegration,
   integrationTrailer,
+  landedSince,
   statusPaths,
   verifyCandidateCommit,
   verifyIntegration,
@@ -519,38 +520,66 @@ export function candidateSituation(store, task) {
     requested: !!candidate.sourceChange?.scopeEdits?.some(edit => edit.request),
   };
 }
-// Sends a story whose integration stopped on a conflict back to its editor with its change merged onto the current
-// source (1.1 step 3, the director, October 25: "keep the code that was already built and just have the agent merge it
-// together"). Git applies the reviewed candidate to the line's tip, as integration does; the editor resolves the
-// parts git could not combine. Its tests and a fresh independent review follow. `by` is the director or the policy.
+// The work that landed since a change was tested (landedSince), named as a story's page names it: its stories, then
+// any commits made by hand.
+function landedText(store, landed) {
+  const named = landed.stories.map(({ storyId }) => {
+      let title = null;
+      try {
+        title = store.task(storyId).title;
+      } catch {}
+      return title ? `${storyId} (“${title}”)` : storyId;
+    }),
+    byHand = landed.commits - landed.stories.length;
+  if (byHand > 0) named.push(`${byHand} ${byHand === 1 ? 'commit' : 'commits'} made by hand`);
+  return named.length > 1 ? `${named.slice(0, -1).join(', ')} and ${named.at(-1)}` : named[0];
+}
+// Sends a story back to its editor with its change merged onto the current source (1.1 step 3, the director, October
+// 25: "keep the code that was already built and just have the agent merge it together"): one whose integration stopped
+// on a conflict, or, since October 27, one that passed its own tests and failed them merged onto work that landed
+// since it was tested. Git applies the reviewed candidate to the line's tip, as integration does; the editor resolves
+// the parts git could not combine, or makes the change work with what landed. Its tests and a fresh independent review
+// follow. `by` is the director or the policy.
 export function mergeSourceStory(store, registries, task, by = { type: 'director' }) {
   return store.tx(() => {
     const story = store.task(task.id),
       stage = story.sourceStage,
       review = stage?.review && store.attempt(stage.review.attemptId),
-      journal = review?.sourceIntegration;
+      journal = review?.sourceIntegration,
+      conflicts = journal?.verification?.conflicts || [],
+      landed = journal?.verification?.landedSince;
     if (
       story.kind !== 'studio-development:change' ||
       story.status !== 'done' ||
       stage.current !== 'failed' ||
       stage.phase !== 'integration' ||
       journal?.state !== 'rejected' ||
-      !journal.verification?.conflicts?.length
+      !(conflicts.length || landed)
     )
-      throw new Error('Only a story whose integration stopped on a conflict can be merged onto the current source.');
-    const conflicts = journal.verification.conflicts,
-      named = conflicts.join(', ');
+      throw new Error(
+        'Only a story whose integration stopped on a conflict, or failed its tests merged onto work that landed since, can be merged onto the current source.',
+      );
+    const named = conflicts.join(', '),
+      tests = (journal.verification.failedTests || []).slice(0, 10).map(item => item.name),
+      failing = tests.length
+        ? `these tests fail: ${tests.join('; ')}`
+        : /^The build failed/.test(journal.error || '')
+          ? 'the build fails'
+          : 'its tests fail';
     registries.workflows.stagesOf(story).retry(story);
     stage.merge = {
       candidateAttemptId: journal.candidateAttemptId,
       candidateCommit: journal.candidateCommit,
       files: journal.changes.filter(item => item.afterHash !== null).map(item => item.path),
       conflicts: [...conflicts],
+      ...(conflicts.length ? {} : { landed: landed.stories.map(item => item.storyId), failedTests: tests }),
       at: new Date().toISOString(),
       by,
     };
     stage.merges = (stage.merges || 0) + 1;
-    story.direction = `Independent review ${review.id} passed your change, but work integrated since it started conflicts with it in ${named}. The controller merged your change onto the current source: the files under changes/ hold it, and ${named} hold conflict markers between the current source (<<<<<<<) and your change (>>>>>>>). Resolve each conflict so that both changes work, remove every marker, and keep the rest of your change. Its tests and an independent review follow.`;
+    story.direction = conflicts.length
+      ? `Independent review ${review.id} passed your change, but work integrated since it started conflicts with it in ${named}. The controller merged your change onto the current source: the files under changes/ hold it, and ${named} hold conflict markers between the current source (<<<<<<<) and your change (>>>>>>>). Resolve each conflict so that both changes work, remove every marker, and keep the rest of your change. Its tests and an independent review follow.`
+      : `Independent review ${review.id} passed your change, and it passed its own tests, but ${landedText(store, landed)} landed since it started, and merged onto that, ${failing}. The controller merged your change onto the current source, with no conflicts: the files under changes/ hold it. Make your change work with what landed so the tests pass, without undoing any of what landed, and keep the rest of your change. Its tests and an independent review follow.`;
     delete story.autonomyNote;
     Object.assign(story, { status: 'ready', queued: false, reason: '', controllerWait: false });
     registries.workflows.stageProgress(store, story);
@@ -559,7 +588,9 @@ export function mergeSourceStory(store, registries, task, by = { type: 'director
       'source_merged',
       story.id,
       review.id,
-      `${by.type === 'policy' ? `Autonomy policy revision ${by.revision}` : 'The director'} sent this story back to merge its change onto the current source and resolve the conflicts in ${named}.`,
+      `${by.type === 'policy' ? `Autonomy policy revision ${by.revision}` : 'The director'} sent this story back to merge its change onto the current source and ${
+        conflicts.length ? `resolve the conflicts in ${named}` : `make it work with ${landedText(store, landed)}`
+      }.`,
     );
     return { ok: true, direction: story.direction };
   });
@@ -1866,13 +1897,23 @@ async function finishIntegration(runtime, task, review, candidate) {
     );
     return result;
   };
-  if (!verification.passed)
-    return reject(
+  if (!verification.passed) {
+    const reason =
       verification.error ||
-        (verification.totals
-          ? `${verification.totals.pass}/${verification.totals.tests} tests passed on the formatted change.`
-          : 'The test run did not report complete totals.'),
+      (verification.totals
+        ? `${verification.totals.pass}/${verification.totals.tests} tests passed on the formatted change.`
+        : 'The test run did not report complete totals.');
+    // A change that passed its own tests and fails merged onto work that landed since keeps its change: it can be
+    // merged onto the current source for its editor, as a conflicting one is (October 27).
+    const failed =
+        !verification.conflicts?.length && (verification.totals?.fail > 0 || /^The build failed/.test(reason)),
+      landed = failed ? landedSince(root, journal) : null;
+    if (!landed) return reject(reason);
+    verification.landedSince = landed;
+    return reject(
+      `${reason} It passed its own tests, and ${landedText(store, landed)} landed after it was tested: together they fail. Use Merge onto the current source: its editor makes the change work with what landed.`,
     );
+  }
   journal.changes = journal.changes.map(item => ({
     ...item,
     integratedHash: verification.files.find(file => file.path === item.path).integratedHash,

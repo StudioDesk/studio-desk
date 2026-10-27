@@ -184,6 +184,16 @@ export function dashboardAttempt(data, timing, openPhase = null) {
         ...(verification.conflicts
           ? { conflicts: verification.conflicts.slice(0, 20).map(file => shortText(file)) }
           : {}),
+        // What landed after the change was tested, when it fails only merged onto that: the story offers Merge onto
+        // the current source for it too (October 27).
+        ...(verification.landedSince
+          ? {
+              landedSince: {
+                commits: verification.landedSince.commits,
+                stories: verification.landedSince.stories.slice(0, 20).map(item => shortText(item.storyId)),
+              },
+            }
+          : {}),
       };
     }
   }

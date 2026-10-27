@@ -2,13 +2,16 @@
 // whose change conflicts with work integrated since it started keeps its change. Git applies it to the line's tip, as
 // integration does, and its editor resolves the parts git could not combine (the director, October 25: "keep the code
 // that was already built and just have the agent merge it together"); its tests and a fresh review follow. The policy
-// merges once, then a conflict waits for the director, who can merge again.
+// merges once, then a conflict waits for the director, who can merge again. Since October 27 a change that passed its
+// own tests and fails them merged onto work that landed since it was tested is merged onto the current source the
+// same way.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
-import { git } from '../src/connectors/source-integration.mjs';
+import { waitFor } from './wait-for.mjs';
+import { git, landedSince } from '../src/connectors/source-integration.mjs';
 import { mergeSourceStory, sourceStoryInFlight } from '../src/connectors/source-changes.mjs';
 import { autonomyPolicy, saveAutonomyPolicy } from '../src/core/autonomy.mjs';
 import { approveWork } from '../src/core/proposals.mjs';
@@ -112,6 +115,81 @@ test('a conflicting story keeps its change: merged onto the current source by th
   const final = fs.readFileSync(path.join(c.root, target), 'utf8');
   assert.match(final, /A different change here on main\./);
   assert.match(final, /Bounded fixture improvement\./);
+});
+
+test('a change that passed its own tests and fails them merged onto work that landed since is merged onto the current source for its editor', async t => {
+  const c = await setup(t, 'together'),
+    store = c.app.store;
+  policyOn(c);
+  await c.start();
+  const first = await c.wait(c.taskId),
+    review = await c.review(first);
+  await c.accept(review.taskId);
+  const candidate = {
+    candidateCommit: first.sourceCandidate.commit,
+    repository: { head: first.sourceChange.base.commit },
+  };
+  assert.equal(landedSince(c.root, candidate), null, 'Nothing landed on the commit it was tested on.');
+  // Meanwhile a story landed that passes alone and fails with this change, then a commit by hand.
+  fs.appendFileSync(path.join(c.root, 'src/core/projects.mjs'), '\n// Fails with the improvement.\n');
+  git(c.root, [
+    'commit',
+    '--quiet',
+    '-am',
+    'Change projects\n\nChange: T-landed1 (attempt-landed), candidate abc\n\nStudio-Integration: source-integration:attempt-landed',
+  ]);
+  const landedCommit = git(c.root, ['rev-parse', 'HEAD']);
+  fs.appendFileSync(path.join(c.root, 'README.md'), '\nBy hand.\n');
+  git(c.root, ['commit', '--quiet', '-am', 'By hand']);
+  const tip = git(c.root, ['rev-parse', 'HEAD']);
+  assert.equal((await c.integration(review)).status, 200);
+  const journal = await c.settled(review);
+  assert.equal(journal.state, 'rejected');
+  assert.equal(journal.verification.conflicts, undefined);
+  assert.deepEqual(journal.verification.landedSince, {
+    commits: 2,
+    stories: [{ storyId: 'T-landed1', commit: landedCommit }],
+  });
+  assert.equal(
+    journal.error,
+    '0/1 tests passed on the formatted change. It passed its own tests, and T-landed1 and 1 commit made by hand landed after it was tested: together they fail. Use Merge onto the current source: its editor makes the change work with what landed.',
+  );
+  const summary = store.dashboardAttempts('project-legacy', c.taskId).find(attempt => attempt.id === review.id);
+  assert.deepEqual(summary.sourceIntegration.verification.landedSince, { commits: 2, stories: ['T-landed1'] });
+  // The policy sent the story back with its change merged onto the current source, where git had nothing to mark.
+  const merged = await waitFor(
+    () => store.attempts(c.taskId).find(attempt => attempt.id !== first.id && attempt.sourceChange),
+    'the merged attempt to start',
+  );
+  const story = store.task(c.taskId);
+  assert.equal(story.sourceStage.merges, 1);
+  assert.equal(story.sourceStage.merge.by.type, 'policy');
+  assert.deepEqual(
+    [story.sourceStage.merge.conflicts, story.sourceStage.merge.landed, story.sourceStage.merge.failedTests],
+    [[], ['T-landed1'], (journal.verification.failedTests || []).map(item => item.name)],
+  );
+  assert.match(
+    story.direction,
+    /passed your change, and it passed its own tests, but T-landed1 and 1 commit made by hand landed since it started, and merged onto that, (these tests fail: .+|its tests fail)\. The controller merged your change onto the current source, with no conflicts: the files under changes\/ hold it\. Make your change work with what landed so the tests pass, without undoing any of what landed/,
+  );
+  assert.deepEqual(merged.sourceChange.merge, {
+    from: first.id,
+    candidateCommit: first.sourceCandidate.commit,
+    files: [target],
+    conflicts: [],
+  });
+  assert.equal(merged.sourceChange.base.commit, tip);
+  assert.ok(
+    store
+      .events()
+      .some(
+        event =>
+          event.kind === 'source_merged' &&
+          /sent this story back to merge its change onto the current source and make it work with T-landed1 and 1 commit made by hand\.$/.test(
+            event.message,
+          ),
+      ),
+  );
 });
 
 test('a second conflict waits for the director, who can merge again; markers left in a file stop the candidate', async t => {

@@ -399,8 +399,8 @@ export class Autonomy {
   integrationSettled(task, pending, result) {
     if (this.runner.closing) return;
     if (result?.state !== 'integrated') {
-      // A conflict with work integrated meanwhile is merged onto the current source once, by the policy (1.1 step 3);
-      // a second conflict, or anything else, waits for the director.
+      // A conflict with work integrated meanwhile, or tests that fail only merged onto it, is merged onto the current
+      // source once, by the policy (1.1 step 3; October 27); a second one, or anything else, waits for the director.
       if (!this.mergeConflict(task, pending, result))
         this.attention(task, `Integration did not complete${stays(pending)}. ${result?.error || result?.state}`);
       this.tryIntegration();
@@ -529,19 +529,21 @@ export class Autonomy {
     this.tryReleases();
   }
 
-  // A story whose integration stopped on a conflict goes back to its editor with its change merged onto the current
-  // source, once per story (the director, October 25), when the project's policy is on. Returns whether it did.
+  // A story whose integration stopped on a conflict, or failed its tests merged onto work that landed since it was
+  // tested (October 27), goes back to its editor with its change merged onto the current source, once per story (the
+  // director, October 25), when the project's policy is on. Returns whether it did.
   mergeConflict(task, pending, result) {
     const story = this.store.task(task.id),
-      policy = this.policy(story);
-    if (!policy.enabled || !result?.verification?.conflicts?.length || (story.sourceStage?.merges || 0) >= 1)
+      policy = this.policy(story),
+      conflicted = !!result?.verification?.conflicts?.length;
+    if (!policy.enabled || !(conflicted || result?.verification?.landedSince) || (story.sourceStage?.merges || 0) >= 1)
       return false;
     try {
       mergeSourceStory(this.store, this.runner.registries, story, { type: 'policy', revision: policy.revision });
     } catch (error) {
       this.attention(
         story,
-        `Integration stopped on a conflict, and the change could not be merged onto the current source: ${error.message}`,
+        `Integration stopped ${conflicted ? 'on a conflict' : 'on tests that fail with work that landed since'}, and the change could not be merged onto the current source: ${error.message}`,
       );
       return true;
     }
