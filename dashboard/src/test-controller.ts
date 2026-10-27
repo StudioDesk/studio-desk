@@ -7,6 +7,7 @@ import type {
   AttemptSummary,
   FinishedPage,
   FirstRunTemplates,
+  IdeaName,
   InstructionsPage,
   LogEvent,
   PeopleSummary,
@@ -90,6 +91,8 @@ export interface Controller {
   tasks: Task[];
   attempts: AttemptSummary[];
   runs: RunRecord[];
+  // The finished ideas the live set names for its prerequisites from them; none sends no list.
+  ideas?: IdeaName[];
   finished: FinishedPage;
   // Later pages of finished runs, by the run they start after, and runs read on their own.
   olderRuns: Record<string, FinishedPage>;
@@ -197,18 +200,25 @@ export function fakeController(projectId = 'project-x'): Controller {
       }
       if (path === `/api/projects/${projectId}/shell`) return respond(controller.shell);
       if (path === `/api/projects/${projectId}/live`) {
-        // Unsettled work and every task of the runs the test names as open.
+        // Unsettled work, every task of the runs the test names as open and their direct prerequisites, as the
+        // controller's live set holds them.
         const open = new Set(controller.runs.map(run => run.id)),
-          tasks = controller.tasks.filter(
-            task =>
-              !settled(task, controller.attempts) ||
-              open.has(String((task.workflowReference as { runId?: string } | undefined)?.runId)),
+          wanted = new Set(
+            controller.tasks
+              .filter(
+                task =>
+                  !settled(task, controller.attempts) ||
+                  open.has(String((task.workflowReference as { runId?: string } | undefined)?.runId)),
+              )
+              .flatMap(task => [task.id, ...(task.dependencies ?? [])]),
           ),
+          tasks = controller.tasks.filter(task => wanted.has(task.id)),
           ids = new Set(tasks.map(task => task.id));
         return respond({
           tasks,
           attempts: controller.attempts.filter(attempt => ids.has(attempt.taskId)),
           runs: controller.runs,
+          ...(controller.ideas ? { ideas: controller.ideas } : {}),
         });
       }
       if (path === `/api/projects/${projectId}/runs`) {

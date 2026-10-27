@@ -4,15 +4,21 @@ import { Board } from './board-view';
 import { useStudio } from './records';
 import type { StudioState } from './studio-runs';
 
-// The live set with every loaded page of settled work, so cards read their attempts and the shared rules.
+// The live set with every loaded page of settled work, so cards read their attempts and the shared rules, and
+// the ideas both name, so work from a finished idea keeps its idea.
 export function withSettled(state: StudioState, pages: SettledPage[]): StudioState {
   const tasks = new Map(state.tasks.map(task => [task.id, task])),
-    attempts = new Map(state.attempts.map(attempt => [attempt.id, attempt]));
+    attempts = new Map(state.attempts.map(attempt => [attempt.id, attempt])),
+    ideas = new Map((state.ideas ?? []).map(idea => [idea.id, idea]));
   for (const page of pages) {
     for (const task of page.tasks) if (!tasks.has(task.id)) tasks.set(task.id, task);
     for (const attempt of page.attempts) if (!attempts.has(attempt.id)) attempts.set(attempt.id, attempt);
+    for (const idea of page.ideas ?? []) {
+      const known = ideas.get(idea.id);
+      ideas.set(idea.id, known ? { ...known, taskIds: [...new Set([...known.taskIds, ...idea.taskIds])] } : idea);
+    }
   }
-  return { ...state, tasks: [...tasks.values()], attempts: [...attempts.values()] };
+  return { ...state, tasks: [...tasks.values()], attempts: [...attempts.values()], ideas: [...ideas.values()] };
 }
 
 export function BoardPage({ projectId, accepted, closed }: { projectId: string; accepted: boolean; closed: boolean }) {

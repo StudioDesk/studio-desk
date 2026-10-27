@@ -391,12 +391,22 @@ export interface RunRecord {
   [field: string]: unknown;
 }
 
+// An idea named without its graph or records (src/core/project-records.mjs ideasOf): its words, when it was
+// made, and which of the records that name it are its own.
+export interface IdeaName {
+  id: string;
+  brief: string;
+  createdAt?: string;
+  taskIds: string[];
+}
+
 // The live set: unsettled work, every task of a run with open work, their direct prerequisites, their
-// attempt summaries and those runs.
+// attempt summaries and those runs; a prerequisite from a finished idea names that idea.
 export interface Live {
   tasks: Task[];
   attempts: AttemptSummary[];
   runs: RunRecord[];
+  ideas?: IdeaName[];
 }
 
 // Finished runs, newest first, a page at a time; `next` names the run the following page starts after.
@@ -405,13 +415,15 @@ export interface FinishedPage {
   next: string | null;
 }
 
-// Settled work for the board, newest finished first, a page at a time, with the counts of each kind.
+// Settled work for the board, newest finished first, a page at a time, with the counts of each kind and the ideas
+// its work belongs to.
 export type SettledKind = 'accepted' | 'closed';
 export interface SettledPage {
   tasks: Task[];
   attempts: AttemptSummary[];
   next: string | null;
   counts: Record<SettledKind, number>;
+  ideas?: IdeaName[];
 }
 
 export interface LogEvent {

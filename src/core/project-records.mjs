@@ -66,6 +66,21 @@ const storyTask = task => withInputs(omitted(task, ['direction', 'brief', 'accep
 const storyAttempt = attempt =>
   omitted(attempt, ['inputReferences', 'artifacts', 'candidateReviewNotes', 'continueFrom']);
 
+// The idea each of these tasks belongs to, named for the board's lanes without its graph, tasks or attempts: its ID,
+// words and when it was made, and which of these tasks are its own, newest idea first as projectRuns orders them.
+function ideasOf(runs, runOf, tasks) {
+  const own = new Map();
+  for (const task of tasks) {
+    const runId = runOf.get(task.id);
+    if (!runId) continue;
+    if (!own.has(runId)) own.set(runId, []);
+    own.get(runId).push(task.id);
+  }
+  return runs
+    .filter(run => own.has(run.id))
+    .map(run => ({ id: run.id, brief: run.brief ?? '', createdAt: run.createdAt, taskIds: own.get(run.id) }));
+}
+
 export function liveRecords(store, projectId) {
   store.project(projectId);
   const tasks = projectTasks(store, projectId),
@@ -76,7 +91,8 @@ export function liveRecords(store, projectId) {
   // Direct prerequisites only, so a live story shows what it waits on without pulling in their history.
   const byId = new Map(tasks.map(task => [task.id, task]));
   for (const id of [...live]) for (const dependency of byId.get(id)?.dependencies || []) live.add(dependency);
-  const chosen = tasks.filter(task => live.has(task.id));
+  const chosen = tasks.filter(task => live.has(task.id)),
+    runs = projectRuns(store, projectId, tasks);
   return {
     tasks: chosen.map(withInputs),
     attempts: chosen.length
@@ -85,9 +101,15 @@ export function liveRecords(store, projectId) {
           chosen.map(task => task.id),
         )
       : [],
-    runs: projectRuns(store, projectId, tasks)
+    runs: runs
       .filter(run => openRuns.has(run.id))
       .map(run => ({ ...run, directorInputs: directorInputsOf(store.run(run.id)) })),
+    // A prerequisite from a finished idea names that idea briefly; the runs above tell their own tasks.
+    ideas: ideasOf(
+      runs.filter(run => !openRuns.has(run.id)),
+      runOf,
+      chosen,
+    ),
   };
 }
 
@@ -151,10 +173,12 @@ export function oneRun(store, projectId, runId) {
 // work. The counts let a folded column show its size without its records.
 export const settledKinds = ['accepted', 'closed'];
 // Settled work of one kind, newest finished first, a page at a time; an employee's or a team's page reads only
-// its own (v1.0 item 19c).
+// its own (v1.0 item 19c). Each idea the page's work belongs to is named briefly, so the board keeps a finished
+// idea's work in its lane.
 export function settledTasks(store, projectId, { kind, before = null, limit = 12, workerId = null, team = null }) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId).filter(
+  const all = projectTasks(store, projectId),
+    tasks = all.filter(
       task => (workerId === null || task.workerId === workerId) && (team === null || task.team === team),
     ),
     done = reviewReader(store, projectId, tasks),
@@ -179,6 +203,9 @@ export function settledTasks(store, projectId, { kind, before = null, limit = 12
       : [],
     next: page.length && from + limit < list.length ? page.at(-1).id : null,
     counts: { accepted: groups.accepted.length, closed: groups.closed.length },
+    // Membership reads the project's every task, so a retry or a proposed story finds its idea through work
+    // another employee or team did.
+    ideas: page.length ? ideasOf(projectRuns(store, projectId, all), runMembership(all), page) : [],
   };
 }
 

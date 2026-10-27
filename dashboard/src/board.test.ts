@@ -126,6 +126,36 @@ test('work the controller holds after an attempt waits in grey; a stop is red', 
   expect(cardOf(stopped, state([stopped]), [])).toMatchObject({ chip: { tone: 'bad' } });
 });
 
+test('a settled card keeps the finished idea the records name; work in no idea has none', () => {
+  const integrated = stage({ phase: 'integration', current: 'integrated' }),
+    old = story({ id: 'T-old', status: 'done', sourceStage: integrated }),
+    loose = story({ id: 'T-loose', kind: 'general', status: 'done' }),
+    going = story({ id: 'T-going', status: 'running', lastAttemptId: 'a-1' }),
+    // A page of settled work names its ideas: a finished one, and the live one the live stories tell.
+    board = {
+      ...state([old, loose, going]),
+      ideas: [
+        { id: 'run-1', brief: 'An idea.', createdAt: '2026-10-22T19:00:00Z', taskIds: ['T-going'] },
+        {
+          id: 'run-old',
+          brief: 'Keep finished stories in place',
+          createdAt: '2026-10-20T12:00:00Z',
+          taskIds: ['T-old'],
+        },
+      ],
+    } as StudioState,
+    stories = [idea([going])];
+  // After the one live idea, so its hue differs from the live idea's.
+  expect(cardOf(old, board, stories)!).toMatchObject({
+    column: 'done',
+    idea: { runId: 'run-old', text: '“Keep finished stories in place”', index: 1 },
+  });
+  expect(cardOf(going, board, stories)!.idea).toEqual({ runId: 'run-1', text: '“An idea.”', index: 0 });
+  const none = cardOf(loose, board, stories)!;
+  expect(none.idea).toBeUndefined();
+  expect(none.since).toMatch(/^Started /);
+});
+
 test("an idea lane's details count its stories done, running and waiting for the director", () => {
   const work = (fields: Partial<Task>) => story({ kind: 'general:work', ...fields }),
     accepted = work({ id: 'T-1', status: 'done', acceptedAttemptId: 'a-1', lastAttemptId: 'a-1' }),

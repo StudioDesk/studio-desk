@@ -23,9 +23,13 @@ const task = (id, status, run, extra = {}) => ({
   status,
   dependencies: [],
   createdAt: new Date(Date.UTC(2026, 9, 21, 12, 0, clock++)).toISOString(),
-  ...(run ? { workflowReference: { runId: run, key: id, id: 'flow', name: 'Fixture flow', version: 1 } } : {}),
+  ...(run
+    ? { workflowReference: { runId: run, key: id, id: 'flow', name: 'Fixture flow', version: 1, brief: briefOf(run) } }
+    : {}),
   ...extra,
 });
+// A run from before run records reads its words from its tasks (src/core/graph.mjs legacyRuns).
+const briefOf = run => `The ${run} idea.\nIts second line.`;
 
 async function records(t) {
   const c = await setup(t),
@@ -96,6 +100,11 @@ test('the live set holds unsettled work, every task of a run with open work, and
     ['run-open'],
   );
   assert.ok(Array.isArray(body.runs[0].directorInputs));
+  // The prerequisite from a finished idea names that idea briefly; the open run tells its own tasks, the retry too.
+  const prerequisite = body.tasks.find(item => item.id === 'T-r2-a');
+  assert.deepEqual(body.ideas, [
+    { id: 'run-a', brief: briefOf('run-a'), createdAt: prerequisite.createdAt, taskIds: ['T-r2-a'] },
+  ]);
 });
 
 test('accepted work that still waits for integration keeps its run live', async t => {
@@ -236,7 +245,13 @@ test('settled work reads for the board newest finished first, a page at a time, 
     {},
   );
   const counts = await read('/api/projects/project-legacy/settled?kind=accepted&limit=0');
-  assert.deepEqual(counts.body, { tasks: [], attempts: [], next: null, counts: { accepted: 4, closed: 2 } });
+  assert.deepEqual(counts.body, {
+    tasks: [],
+    attempts: [],
+    next: null,
+    counts: { accepted: 4, closed: 2 },
+    ideas: [],
+  });
   // The latest finish orders the list; work with no finished attempt falls back to when it was created.
   const first = await read('/api/projects/project-legacy/settled?kind=accepted&limit=2');
   assert.deepEqual(
@@ -245,12 +260,22 @@ test('settled work reads for the board newest finished first, a page at a time, 
   );
   assert.equal(first.body.next, 'T-r3');
   assert.deepEqual(first.body.attempts.map(attempt => attempt.id).sort(), ['attempt-late', 'attempt-settled']);
+  // Each idea the page's work belongs to is named briefly; work in no idea is in none.
+  const createdAt = id => store.task(id).createdAt;
+  assert.deepEqual(first.body.ideas, [
+    { id: 'run-b', brief: briefOf('run-b'), createdAt: createdAt('T-r3'), taskIds: ['T-r3'] },
+  ]);
   const second = await read('/api/projects/project-legacy/settled?kind=accepted&limit=2&before=T-r3');
   assert.deepEqual(
     second.body.tasks.map(item => item.id),
     ['T-r2-a', 'T-r1-done'],
   );
   assert.equal(second.body.next, null);
+  // Newest idea first; an idea with open work is named too, and the board tells it from the live set.
+  assert.deepEqual(second.body.ideas, [
+    { id: 'run-a', brief: briefOf('run-a'), createdAt: createdAt('T-r2-a'), taskIds: ['T-r2-a'] },
+    { id: 'run-open', brief: briefOf('run-open'), createdAt: createdAt('T-r1-done'), taskIds: ['T-r1-done'] },
+  ]);
   const closed = await read('/api/projects/project-legacy/settled?kind=closed');
   assert.deepEqual(
     closed.body.tasks.map(item => item.id),
@@ -259,6 +284,39 @@ test('settled work reads for the board newest finished first, a page at a time, 
   assert.equal((await read('/api/projects/project-legacy/settled?kind=other')).status, 400);
   assert.equal((await read('/api/projects/project-legacy/settled?kind=accepted&limit=51')).status, 400);
   assert.equal((await read('/api/projects/project-legacy/settled?kind=accepted&before=T-gone')).status, 404);
+});
+
+test("a page of settled work names a retry's or a proposed story's idea, by the project's every task", async t => {
+  const { read, store } = await records(t);
+  for (const record of [
+    task('T-r3-retry', 'done', null, { retryOf: 'T-r3', workerId: 'W-02' }), // joins its original's idea
+    task('T-r3-proposed', 'done', null, { proposalReference: { taskId: 'T-r3' } }), // joins its proposer's
+    task('T-loose', 'done'), // in no idea
+  ])
+    store.putTask(record);
+  const { body } = await read('/api/projects/project-legacy/settled?kind=accepted&limit=4');
+  assert.deepEqual(
+    body.tasks.map(item => item.id),
+    ['T-loose', 'T-r3-proposed', 'T-r3-retry', 'T-r3'],
+  );
+  assert.deepEqual(body.ideas, [
+    {
+      id: 'run-b',
+      brief: briefOf('run-b'),
+      createdAt: store.task('T-r3').createdAt,
+      taskIds: ['T-r3-proposed', 'T-r3-retry', 'T-r3'],
+    },
+  ]);
+  // An employee's page names the idea its retry joined, though the original is another's and not on the page.
+  const theirs = await read('/api/projects/project-legacy/settled?kind=accepted&workerId=W-02');
+  assert.deepEqual(
+    theirs.body.tasks.map(item => item.id),
+    ['T-r3-retry'],
+  );
+  assert.deepEqual(
+    theirs.body.ideas.map(idea => [idea.id, idea.taskIds]),
+    [['run-b', ['T-r3-retry']]],
+  );
 });
 
 test("an employee's or a team's page reads only its own settled work", async t => {

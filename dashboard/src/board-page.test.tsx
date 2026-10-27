@@ -199,6 +199,125 @@ test("lanes by idea head each idea's lane with its dot, its words and its detail
   expect(person.querySelector('.sd-lanehead__open')).toBeNull();
 });
 
+test("lanes by idea keep a finished idea's stories in its own lane, headed as an open idea's lane is", async () => {
+  const user = userEvent.setup(),
+    words = 'Keep finished stories in their idea’s lane, wherever the board reads them from';
+  controller.tasks = [taskFixture('T-alone', { title: 'Work in no idea', status: 'ready', queued: true })];
+  controller.attempts = [];
+  controller.runs = [];
+  // A page of settled work holds a story whose idea has finished, and names that idea; no live run holds it.
+  controller.settled = {
+    accepted: [
+      {
+        tasks: [
+          taskFixture('T-old', {
+            title: 'Finished story',
+            status: 'done',
+            workflowReference: { runId: 'run-old', key: 'T-old', id: 'workflow-1', name: 'Fixture flow' },
+          }),
+          taskFixture('T-loose', { title: 'Finished work in no idea', status: 'done' }),
+        ],
+        attempts: [],
+        next: null,
+        ideas: [
+          { id: 'run-old', brief: `${words}\nIts second line.`, createdAt: '2026-10-20T12:00:00Z', taskIds: ['T-old'] },
+        ],
+      },
+    ],
+    closed: [],
+  };
+  open();
+  await user.click(await screen.findByRole('button', { name: 'Lanes by idea' }));
+  // Its lane is named by the idea's words, and its head is one link to the idea, holding its dot and words.
+  const lane = await screen.findByRole('region', { name: words });
+  expect(titles(within(lane))).toEqual(['Finished story']);
+  const toIdea = within(lane)
+    .getAllByRole('link')
+    .filter(link => link.getAttribute('href') === '/p/project-x/runs/run-old');
+  expect(toIdea).toHaveLength(1);
+  const head = toIdea[0]!;
+  expect(head.classList.contains('sd-lanehead__open')).toBe(true);
+  expect(head.querySelector('.sd-ideadot')).toBeTruthy();
+  expect(head.querySelector('.sd-lanehead__name')?.textContent).toBe(words);
+  // It counts none of the idea's stories, which the board has not all read.
+  expect(head.querySelector('.sd-meta')?.textContent).toBe('Finished');
+  // Only work in no idea at all, open or settled, is not part of one; its head has no dot and no link.
+  const none = await screen.findByRole('region', { name: 'Not part of an idea' });
+  expect(titles(within(none)).sort()).toEqual(['Finished work in no idea', 'Work in no idea']);
+  const noneHead = none.querySelector('.sd-lanehead')!;
+  expect(noneHead.querySelector('.sd-ideadot')).toBeNull();
+  expect(noneHead.querySelector('a')).toBeNull();
+  // The list names the idea too.
+  await user.click(screen.getByRole('button', { name: 'List' }));
+  const row = (await screen.findByRole('link', { name: 'Finished story' })).closest('tr')!;
+  expect(within(row).getByText('“Keep finished stories in their…”')).toBeTruthy();
+});
+
+test("lanes by idea show an idea's lane only while it has cards shown, a finished idea the live set names too", async () => {
+  const user = userEvent.setup(),
+    member = (id: string, runId: string, extra: Partial<Task>) =>
+      taskFixture(id, { workflowReference: { runId, key: id, id: 'workflow-1', name: 'Fixture flow' }, ...extra }),
+    // The live set holds a finished idea's story as a direct prerequisite of open work, and names that idea.
+    earlier = member('T-earlier', 'run-old', { title: 'Earlier story', status: 'done' }),
+    going = member('T-going', 'run-1', {
+      title: 'Open story',
+      status: 'running',
+      lastAttemptId: 'attempt-going',
+      dependencies: ['T-earlier'],
+    });
+  controller.tasks = [
+    earlier,
+    going,
+    taskFixture('T-alone', { title: 'Work in no idea', status: 'ready', queued: true }),
+  ];
+  controller.attempts = [
+    { id: 'attempt-going', taskId: 'T-going', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+  ];
+  controller.runs = [
+    {
+      id: 'run-1',
+      createdAt: '2026-10-21T12:00:00Z',
+      brief: 'Open idea',
+      workflow: { id: 'workflow-1', name: 'Fixture flow', version: 3 },
+      revisions: [{ revision: 1, at: '2026-10-21T12:00:00Z', reason: 'created' }],
+      nodes: [
+        {
+          taskId: going.id,
+          key: going.id,
+          kind: going.kind,
+          title: going.title,
+          workerId: 'W-1',
+          dependencies: [],
+          revision: 1,
+        },
+      ],
+      archive: { archived: false },
+    },
+  ];
+  controller.ideas = [
+    { id: 'run-old', brief: 'Finished idea', createdAt: '2026-10-20T12:00:00Z', taskIds: ['T-earlier'] },
+  ];
+  controller.settled = { accepted: [], closed: [] };
+  open();
+  await user.click(await screen.findByRole('button', { name: 'Lanes by idea' }));
+  expect(titles(within(await screen.findByRole('region', { name: 'Open idea' })))).toEqual(['Open story']);
+  const finished = await screen.findByRole('region', { name: 'Finished idea' });
+  expect(titles(within(finished))).toEqual(['Earlier story']);
+  expect(finished.querySelector('.sd-lanehead__open')?.getAttribute('href')).toBe('/p/project-x/runs/run-old');
+  // A search that hides every card of both ideas leaves neither idea's lane, open or finished.
+  const search = screen.getByRole('searchbox', { name: 'Find a task' });
+  await user.type(search, 'no idea');
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Finished idea' })).toBeNull());
+  expect(screen.queryByRole('region', { name: 'Open idea' })).toBeNull();
+  expect(titles(within(screen.getByRole('region', { name: 'Not part of an idea' })))).toEqual(['Work in no idea']);
+  // One that hides the work in no idea leaves no lane for it either.
+  await user.clear(search);
+  await user.type(search, 'earlier');
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Not part of an idea' })).toBeNull());
+  expect(screen.queryByRole('region', { name: 'Open idea' })).toBeNull();
+  expect(titles(within(screen.getByRole('region', { name: 'Finished idea' })))).toEqual(['Earlier story']);
+});
+
 test('a paused project says so above the board, and resumes from there', async () => {
   const user = userEvent.setup();
   controller.shell.project.dispatchPaused = true;

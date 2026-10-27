@@ -72,6 +72,7 @@ export interface Card {
   // A review that asked for changes: its findings and the first finding's place.
   blocking?: { count: number; place?: string };
   commit?: string;
+  // The idea it belongs to: its words and its place among the live ideas, then the finished ones, for its hue.
   idea?: { runId: string; text: string; index: number };
   since?: string;
   workerId?: string;
@@ -89,6 +90,15 @@ const clockOf = (value?: string | null, now = new Date()) => {
     ? date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
     : date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 };
+
+// The ideas the records name that the live stories do not tell, all of their work settled: a page of settled work's,
+// or the live set's for a prerequisite from a finished idea. Newest first, after the live ideas, so their hues differ.
+export function finishedIdeas(state: StudioState, stories: RunStory[]) {
+  const live = new Set(stories.map(story => story.id));
+  return (state.ideas ?? [])
+    .filter(idea => !live.has(idea.id))
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
+}
 
 // Everything a card shows of its task.
 export function cardOf(
@@ -119,9 +129,14 @@ export function cardOf(
     workerId: task.workerId,
     face: agentState(state, task.workerId, task),
   };
+  const doneIdeas = place ? [] : finishedIdeas(state, stories),
+    named = doneIdeas.findIndex(idea => idea.taskIds.includes(task.id));
   if (place) {
     const runs = stories.map(story => story.id);
     card.idea = { runId: place.run.id, text: quoted(place.run.brief, 34), index: runs.indexOf(place.run.id) };
+  } else if (named >= 0) {
+    const idea = doneIdeas[named]!;
+    card.idea = { runId: idea.id, text: quoted(idea.brief, 34), index: stories.length + named };
   } else card.since = `Started ${clockOf(task.createdAt) || 'earlier'}`;
   if (task.closed || ['denied', 'cancelled'].includes(task.status)) {
     card.chip = { tone: 'wait', label: task.status === 'cancelled' ? 'Cancelled' : 'Closed' };

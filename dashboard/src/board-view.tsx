@@ -6,7 +6,18 @@ import { useMutation } from '@tanstack/react-query';
 import { Link, useNavigate, useRouter } from '@tanstack/react-router';
 import { useMemo, useState, type DragEvent, type ReactNode } from 'react';
 import { send } from './api';
-import { columns, cardOf, found, laneDetails, matches, newest, type Card, type ColumnId, type Filter } from './board';
+import {
+  columns,
+  cardOf,
+  finishedIdeas,
+  found,
+  laneDetails,
+  matches,
+  newest,
+  type Card,
+  type ColumnId,
+  type Filter,
+} from './board';
 import { withSettled } from './board-page';
 import { AgentAvatar } from './design/avatar';
 import { Icon } from './design/icons';
@@ -180,7 +191,6 @@ export function Board({
             projectId={projectId}
             card={card}
             looks={looks}
-            stories={stories.map(s => s.id)}
             release={releaseOf.get(card.task.id) ?? null}
             newestLine={newestLine}
           />
@@ -236,32 +246,29 @@ export function Board({
   };
   // An idea lane is headed as a person lane is: its dot, its words and its quiet details, the whole head opening the
   // idea. Its words are the brief's first line, uncut; the head's CSS ends a long one in an ellipsis. The details
-  // count from the live set, which holds every task of an open idea.
+  // count from the live set, which holds every task of an open idea. A finished idea's lane follows them, newest
+  // first, for its work the board has read; it counts nothing it cannot see, and says only that the idea finished.
+  const ideaLane = (runId: string, words: string, index: number, details: string) => ({
+    key: runId,
+    label: words,
+    head: (
+      <Link className="sd-lanehead__open" to="/p/$projectId/runs/$runId" params={{ projectId, runId }}>
+        <span className="sd-ideadot" style={{ background: ideaHues[index % ideaHues.length] }}></span>
+        <span className="sd-lanehead__name">{words}</span>
+        {details && <span className="sd-meta">{details}</span>}
+      </Link>
+    ),
+    cards: shown.filter(card => card.idea?.runId === runId),
+  });
   const laneGroups: { key: string; label?: string; head: ReactNode; cards: Card[] }[] =
     lanes === 'idea'
       ? [
-          ...stories
-            .map((story, index) => {
-              const words = (story.brief || story.title).trim().split('\n')[0]!,
-                details = laneDetails(story, state);
-              return {
-                key: story.id,
-                label: words,
-                head: (
-                  <Link
-                    className="sd-lanehead__open"
-                    to="/p/$projectId/runs/$runId"
-                    params={{ projectId, runId: story.id }}
-                  >
-                    <span className="sd-ideadot" style={{ background: ideaHues[index % ideaHues.length] }}></span>
-                    <span className="sd-lanehead__name">{words}</span>
-                    {details && <span className="sd-meta">{details}</span>}
-                  </Link>
-                ),
-                cards: shown.filter(card => card.idea?.runId === story.id),
-              };
-            })
-            .filter(group => group.cards.length),
+          ...stories.map((story, index) =>
+            ideaLane(story.id, (story.brief || story.title).trim().split('\n')[0]!, index, laneDetails(story, state)),
+          ),
+          ...finishedIdeas(board, stories).map((idea, index) =>
+            ideaLane(idea.id, idea.brief.trim().split('\n')[0] || idea.id, stories.length + index, 'Finished'),
+          ),
           {
             key: 'none',
             label: 'Not part of an idea',
@@ -453,14 +460,12 @@ function BoardCard({
   projectId,
   card,
   looks,
-  stories,
   release,
   newestLine,
 }: {
   projectId: string;
   card: Card;
   looks: Map<string, AgentLook>;
-  stories: string[];
   release: ReleaseOf | null;
   newestLine: string | null;
 }) {
@@ -567,10 +572,7 @@ function BoardCard({
       )}
       {card.idea ? (
         <span className="sd-kcard__from">
-          <span
-            className="sd-ideadot"
-            style={{ background: ideaHues[Math.max(0, stories.indexOf(card.idea.runId)) % ideaHues.length] }}
-          ></span>
+          <span className="sd-ideadot" style={{ background: ideaHues[card.idea.index % ideaHues.length] }}></span>
           <span>{card.idea.text}</span>
         </span>
       ) : (
