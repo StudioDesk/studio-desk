@@ -1,5 +1,7 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { subscriptionEnvironment } from './process.mjs';
 import { artifactPath, validateProtectedFiles } from '../core/artifacts.mjs';
 import { hash } from '../core/contracts.mjs';
@@ -171,15 +173,38 @@ function prepareSourceJob(runtime, entry) {
   for (const file of scope.newFiles || [])
     fs.mkdirSync(path.dirname(path.join(entry.output, 'changes', file)), { recursive: true });
   // A story continues from the verified work of its latest stopped attempt (continueFrom), applied
-  // over the seeded source copies; the candidate stays the whole change against this base.
-  const previous = scope.continueFrom && runtime.store.attempt(scope.continueFrom.attemptId);
-  for (const item of scope.continueFrom?.files || [])
-    fs.writeFileSync(
-      path.join(entry.output, 'changes', item.path),
-      continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
-    );
+  // over the seeded source copies; the candidate stays the whole change against this base. Work
+  // whose source was committed since is merged onto this base by git (October 27).
+  const previous = scope.continueFrom && runtime.store.attempt(scope.continueFrom.attemptId),
+    setAside = merged => {
+      if (merged.setAside.length)
+        runtime.store.event(
+          'merge_set_aside',
+          a.taskId,
+          a.id,
+          `Git could not apply the earlier change to ${merged.setAside.join(', ')}: a file deleted on one side and changed on the other. merge-set-aside.json tells the editor why for each.`,
+        );
+    };
+  if (scope.continueFrom?.merge)
+    setAside(mergeContinuedWork(runtime.store, previous, scope.continueFrom, candidate, entry.output));
+  else
+    for (const item of scope.continueFrom?.files || [])
+      fs.writeFileSync(
+        path.join(entry.output, 'changes', item.path),
+        continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
+      );
+  // Earlier edits to a file the source deleted since are set aside for the editor.
+  if (scope.continueFrom?.setAside?.length) {
+    const kept = scope.continueFrom.setAside.map(item => ({
+      path: item.path,
+      reason: deletedReason(item.path),
+      content: continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
+    }));
+    setAsideFiles(entry.output, kept);
+    setAside({ setAside: kept.map(item => item.path) });
+  }
   // A story merged onto the current source (1.1 step 3) starts from its earlier change applied to this base by git.
-  if (scope.merge) mergeEarlierChange(scope.merge, candidate, entry.output);
+  if (scope.merge) setAside(mergeEarlierChange(scope.merge, candidate, entry.output));
   // Neither development AGENTS.md nor the full source tree is placed inside
   // the employee's writable workspace. Retain the job-local instruction scope.
   const scopeFile = path.join(entry.output, 'source-scope.json'),
@@ -201,33 +226,118 @@ function prepareSourceJob(runtime, entry) {
   return { baseline, candidate, startedAt: new Date().toISOString() };
 }
 
-// Applies a story's earlier candidate to the candidate worktree's base with git, as integration applies it, copies
-// the merged files it changed into changes/ (the parts git could not combine marked in them) and resets the worktree,
-// which the candidate is built in. A file deleted on one side and changed on the other cannot be marked; that stops
-// the attempt for the director.
+// Applies a story's earlier change to the candidate worktree's base with git, as integration applies it, copies the
+// merged files it changed into changes/ (the parts git could not combine marked in them) and resets the worktree, which
+// the candidate is built in. A file git cannot mark, deleted on one side and changed on the other, is set aside for the
+// editor rather than stopping the story (October 27): merge-set-aside.json says why for each, and the change's version
+// of a file the current source deleted is under merge-set-aside/ for reference. Returns the marked and set-aside files.
 function mergeEarlierChange(merge, worktree, output) {
   try {
     try {
       git(worktree, ['cherry-pick', '--no-commit', merge.candidateCommit]);
     } catch {}
     const unmerged = git(worktree, ['status', '--porcelain', '-z', '--untracked-files=no'], { raw: true })
-      .split('\0')
-      .filter(entry => /^(DD|AU|UD|UA|DU|AA|UU) /.test(entry));
-    const unmarked = unmerged.filter(entry => !/^(UU|AA) /.test(entry)).map(entry => entry.slice(3));
-    if (unmarked.length)
-      throw new Error(
-        `${unmarked.join(', ')} was deleted on one side and changed on the other since this story started, which a merge cannot mark. Resolve it in the repository by hand, or close the story and send the idea again.`,
-      );
+        .split('\0')
+        .filter(entry => /^(DD|AU|UD|UA|DU|AA|UU) /.test(entry))
+        .map(entry => ({ state: entry.slice(0, 2), file: entry.slice(3) })),
+      setAside = [];
+    for (const { state, file } of unmerged)
+      if (['DU', 'UA'].includes(state))
+        setAside.push({
+          path: file,
+          reason: deletedReason(file),
+          content: git(worktree, ['show', `:3:${file}`], { raw: true }),
+        });
+      else if (['UD', 'AU'].includes(state))
+        setAside.push({
+          path: file,
+          reason: `${file} changed on the current source since your change deleted it, and stays deleted. Read ../source/${file} for what changed there, and carry anything still needed into the approved files.`,
+        });
+    const away = new Set(setAside.map(item => item.path));
     for (const file of merge.files) {
       const source = path.join(worktree, file),
         target = path.join(output, 'changes', file);
-      if (!fs.existsSync(source)) continue;
+      if (away.has(file) || !fs.existsSync(source)) continue;
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.copyFileSync(source, target);
     }
+    setAsideFiles(output, setAside);
+    return {
+      conflicts: unmerged.filter(item => ['UU', 'AA'].includes(item.state)).map(item => item.file),
+      setAside: [...away],
+    };
   } finally {
     git(worktree, ['reset', '--hard', '--quiet']);
   }
+}
+// Why a file the current source deleted since is set aside, and what the editor does with it.
+const deletedReason = file =>
+  `The current source deleted ${file} since; your change to it is under merge-set-aside/${file} for reference. Carry what is still needed into the approved files, or leave it out.`;
+// Lists files git could not apply earlier work to in merge-set-aside.json, after any listed already, and keeps the
+// change's version of a deleted file under merge-set-aside/.
+function setAsideFiles(output, entries) {
+  if (!entries.length) return;
+  const list = path.join(output, 'merge-set-aside.json'),
+    listed = fs.existsSync(list) ? JSON.parse(fs.readFileSync(list, 'utf8')) : [];
+  for (const entry of entries)
+    if (entry.content !== undefined) {
+      const target = path.join(output, 'merge-set-aside', entry.path);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, entry.content);
+    }
+  fs.writeFileSync(
+    list,
+    JSON.stringify([...listed, ...entries.map(entry => ({ path: entry.path, reason: entry.reason }))], null, 2),
+  );
+}
+// Earlier work whose source was committed since (continueFrom.merge, October 27) is applied to this base as a change
+// merged onto the current source is: its files on that attempt's own base make a commit, outside any working tree and
+// with an index of its own, which mergeEarlierChange applies here.
+function mergeContinuedWork(store, previous, carried, worktree, output) {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-continue-')),
+    index = path.join(folder, 'index'),
+    base = carried.merge.base;
+  try {
+    plumbing(worktree, ['read-tree', base], { index });
+    for (const item of carried.files) {
+      const blob = plumbing(worktree, ['hash-object', '-w', '--stdin'], {
+          input: continuationFile(store, previous, 'changes/' + item.path, item.hash),
+        }),
+        mode = plumbing(worktree, ['ls-tree', base, '--', item.path]).split(/\s/)[0] || '100644';
+      plumbing(worktree, ['update-index', '--add', '--cacheinfo', `${mode},${blob},${item.path}`], { index });
+    }
+    const tree = plumbing(worktree, ['write-tree'], { index }),
+      commit = plumbing(worktree, ['commit-tree', tree, '-p', base, '-m', `Earlier work of ${previous.id}`]);
+    return mergeEarlierChange(
+      { candidateCommit: commit, files: carried.files.map(item => item.path) },
+      worktree,
+      output,
+    );
+  } finally {
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+}
+// git for building that commit: an index file of its own when given, input on stdin, and a fixed identity, since the
+// commit is never on a branch.
+function plumbing(cwd, args, { index, input } = {}) {
+  const result = spawnSync('git', ['--literal-pathspecs', '-c', 'core.longpaths=true', ...args], {
+    cwd,
+    input,
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30000,
+    env: {
+      ...process.env,
+      ...(index ? { GIT_INDEX_FILE: index } : {}),
+      GIT_AUTHOR_NAME: 'Studio desk',
+      GIT_AUTHOR_EMAIL: 'studio-desk@localhost',
+      GIT_COMMITTER_NAME: 'Studio desk',
+      GIT_COMMITTER_EMAIL: 'studio-desk@localhost',
+    },
+  });
+  if (result.error || result.status !== 0)
+    throw new Error(`git ${args[0]} failed: ${(result.stderr || result.error?.message || '').trim().slice(0, 500)}`);
+  return result.stdout.trim();
 }
 // The lines git writes around a part it could not combine.
 const conflictMarkers = /^(<{7}|>{7})( |$)/m;
@@ -284,8 +394,9 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     if (result.taskId !== a.taskId) throw new Error('Source edit belongs to another assignment.');
     validateProtectedFiles(entry);
     const changes = stagedChanges(scope, result, name => fs.readFileSync(artifactPath(runtime.store, a, name)));
-    // A merged change goes no further while any part git could not combine is still marked (1.1 step 3).
-    if (scope.merge) {
+    // A merged change goes no further while any part git could not combine is still marked (1.1 step 3), nor does
+    // earlier work git merged onto the current source (October 27).
+    if (scope.merge || scope.continueFrom?.merge) {
       const marked = changes.filter(
         item =>
           item.afterHash !== null &&

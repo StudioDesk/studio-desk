@@ -3452,7 +3452,7 @@ test('work written before a usage limit or a time limit is carried into the next
   }
 });
 
-test('earlier work that can no longer be trusted starts the whole work fresh, with the reason recorded', async t => {
+test('earlier work that can no longer be trusted starts the whole work fresh, with the reason recorded; work committed over is merged', async t => {
   for (const cause of ['committed', 'tampered']) {
     const c = await setup(t, 'pass', continuationFiles),
       store = c.app.store;
@@ -3469,10 +3469,19 @@ test('earlier work that can no longer be trusted starts the whole work fresh, wi
     }
     await c.start('next');
     await nextAttempt(c, 2);
+    if (cause === 'committed') {
+      // Since October 27 git merges work whose source was committed since onto the current source rather than
+      // dropping it. Both edits added to the end of the file, so the part git could not combine is marked, and a
+      // candidate that still holds the markers goes no further.
+      const merged = await c.wait(c.taskId, 'failed');
+      assert.deepEqual(merged.sourceChange.continueFrom.merge.changed, ['src/core/workflows.mjs']);
+      assert.equal(merged.sourceChange.continueFrom.fresh, undefined);
+      assert.match(store.task(c.taskId).reason, /^Conflict markers remain in src\/core\/workflows\.mjs\./);
+      continue;
+    }
     const next = await c.wait(c.taskId);
     const fresh = next.sourceChange.continueFrom.fresh;
-    assert.match(fresh.reason, cause === 'committed' ? /committed since that attempt/ : /could not be verified/, cause);
-    if (cause === 'committed') assert.deepEqual(fresh.paths, ['src/core/workflows.mjs']);
+    assert.match(fresh.reason, /could not be verified/, cause);
     assert.deepEqual(next.sourceChange.continueFrom.files, [], cause);
     for (const file of continuationFiles)
       assert.doesNotMatch(candidateText(store, next, file), /Retained quota fixture work/, `${cause}: ${file}`);

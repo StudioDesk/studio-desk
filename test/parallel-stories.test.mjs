@@ -192,6 +192,65 @@ test('a change that passed its own tests and fails them merged onto work that la
   );
 });
 
+test('a file the current source deleted since the change edited it is set aside for the editor, not a stop', async t => {
+  const c = await setup(t, 'pass', [target, 'src/core/projects.mjs']),
+    store = c.app.store;
+  policyOn(c);
+  await c.start();
+  const first = await c.wait(c.taskId),
+    review = await c.review(first);
+  await c.accept(review.taskId);
+  git(c.root, ['rm', '--quiet', target]);
+  git(c.root, ['commit', '--quiet', '-m', 'Remove the workflows fixture']);
+  assert.equal((await c.integration(review)).status, 200);
+  const journal = await c.settled(review);
+  assert.equal(journal.state, 'rejected');
+  assert.deepEqual(journal.verification.conflicts, [target]);
+  // The policy merged it onto the current source. Git cannot mark a deleted file, so the change's version is set
+  // aside for the editor with what to do, and the attempt goes on.
+  const merged = await waitFor(
+    () =>
+      store
+        .attempts(c.taskId)
+        .find(
+          attempt =>
+            attempt.id !== first.id &&
+            attempt.assignment?.kind === 'studio-development:change' &&
+            !['running', 'stopping'].includes(attempt.status),
+        ),
+    'the merged attempt to finish',
+  );
+  assert.deepEqual(merged.sourceChange.deletedSince, [target]);
+  assert.deepEqual(
+    merged.sourceChange.allowedFiles,
+    ['src/core/projects.mjs'],
+    "The deleted file is not the editor's to write.",
+  );
+  assert.doesNotMatch(store.task(c.taskId).reason ?? '', /no longer exist/);
+  const output = merged.outputFolder,
+    aside = JSON.parse(fs.readFileSync(path.join(output, 'merge-set-aside.json'), 'utf8'));
+  assert.deepEqual(
+    aside.map(item => item.path),
+    [target],
+  );
+  assert.match(
+    aside[0].reason,
+    /^The current source deleted src\/core\/workflows\.mjs since; your change to it is under merge-set-aside\//,
+  );
+  assert.match(fs.readFileSync(path.join(output, 'merge-set-aside', target), 'utf8'), /Bounded fixture improvement\./);
+  assert.equal(fs.existsSync(path.join(output, 'changes', target)), false);
+  assert.ok(
+    store
+      .events()
+      .some(
+        event =>
+          event.kind === 'merge_set_aside' &&
+          event.message.startsWith(`Git could not apply the earlier change to ${target}:`),
+      ),
+  );
+  assert.doesNotMatch(merged.error ?? '', /Resolve it in the repository by hand/);
+});
+
 test('a second conflict waits for the director, who can merge again; markers left in a file stop the candidate', async t => {
   const c = await setup(t),
     store = c.app.store;

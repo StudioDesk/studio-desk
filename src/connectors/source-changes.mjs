@@ -17,6 +17,7 @@ import { builtInSandboxRunner } from '../adapters/built-in-sandbox.mjs';
 import {
   commitIntegration,
   committedIntegration,
+  git,
   integrationTrailer,
   landedSince,
   statusPaths,
@@ -300,7 +301,14 @@ export function measuredSourceEvidence(store, taskId, attemptId, projectId) {
 }
 
 // pathsOf gives a story's current paths, which the director's latest edit replaces (editSourceStory).
-export function breakdownEvidence(store, attempt, projectId, storyKey, pathsOf = story => story) {
+export function breakdownEvidence(
+  store,
+  attempt,
+  projectId,
+  storyKey,
+  pathsOf = story => story,
+  { earlier = false } = {},
+) {
   const pinned = attempt.sourceBreakdown;
   if (!pinned) throw new Error('Recorded breakdown source evidence is missing. Request a fresh breakdown.');
   if (
@@ -346,6 +354,7 @@ export function breakdownEvidence(store, attempt, projectId, storyKey, pathsOf =
       integrated,
       created: integratedChanges(store, siblings),
       files,
+      earlier,
     });
   }
   return { report, source, checkedReference: acceptedReference(store, source.taskId, source.attemptId, projectId) };
@@ -360,12 +369,19 @@ const named = files => files.slice(0, 5).join(', ') + (files.length > 5 ? ` and 
 // that is gone, or that holds uncommitted edits, still stops the story. `files` reads the line the
 // story measured (src/connectors/source-lines.mjs), by default the checked-out folder. A new file the story's
 // integrated prerequisite stories created is edited like any other existing file (MP-014 slice 4);
-// other new files must still be absent, and not ignored by git.
+// other new files must still be absent, and not ignored by git. For a story with earlier work (`earlier`, October
+// 27), a listed file a commit on its line deleted since is left out of this attempt and named in `deletedSince`, and
+// the earlier work on it is set aside for the editor, rather than the story stopping.
 function verifyStoryScope(
   paths,
   current,
   original,
-  { integrated = new Map(), created: prerequisites = new Map(), files: line = lineFiles(current.root) } = {},
+  {
+    integrated = new Map(),
+    created: prerequisites = new Map(),
+    files: line = lineFiles(current.root),
+    earlier = false,
+  } = {},
   stale = staleBreakdown,
 ) {
   validateStoryPaths(paths, original, undefined, profileOf(current));
@@ -373,7 +389,9 @@ function verifyStoryScope(
     now = file => current.files.find(item => item.path === file),
     created = newFiles.filter(file => now(file) && prerequisites.get(file)?.has(now(file).hash)),
     absent = newFiles.filter(file => !created.includes(file));
-  const missing = [...files, ...deleteFiles].filter(file => !now(file)),
+  const absentNow = [...files, ...deleteFiles].filter(file => !now(file)),
+    gone = earlier && absentNow.length ? line.gone(absentNow) : [],
+    missing = absentNow.filter(file => !gone.includes(file)),
     drifted = [...files, ...deleteFiles].filter(file => {
       const item = now(file),
         before = original.find(item => item.path === file);
@@ -395,13 +413,18 @@ function verifyStoryScope(
   const ignored = line.ignored(absent);
   if (ignored.length)
     throw new Error(`git ignores ${ignored.join(', ')}, so a story cannot create it. Choose another path.`);
-  const allowedFiles = [...files, ...created];
+  const allowedFiles = [...files.filter(file => !gone.includes(file)), ...created];
   for (const file of allowedFiles) {
     const bytes = line.read(file);
     if (bytes.includes(0) || !Buffer.from(bytes.toString('utf8')).equals(bytes))
       throw new Error('Approved source files must be UTF-8 text.');
   }
-  return { allowedFiles, newFiles: absent, deleteFiles: [...deleteFiles] };
+  return {
+    allowedFiles,
+    newFiles: absent,
+    deleteFiles: deleteFiles.filter(file => !gone.includes(file)),
+    ...(gone.length ? { deletedSince: gone } : {}),
+  };
 }
 
 // The paths a story may change: the director's latest edit (editSourceStory) when there is one,
@@ -409,6 +432,8 @@ function verifyStoryScope(
 const storyPaths = (task, proposed) => scopePaths(task.scopeEdits?.at(-1) || proposed);
 const implementationAttempts = (store, task) =>
   store.attempts(task.id).filter(attempt => (attempt.assignment?.kind || task.kind) === 'studio-development:change');
+// Whether a story has work to keep: an earlier implementation attempt, or a change to merge onto the current source.
+const hasEarlierWork = (store, task) => !!task.sourceStage?.merge || implementationAttempts(store, task).length > 0;
 // The work a story continues from: the latest stopped implementation attempt of this story (never
 // a candidate review, never an older attempt in place of a newer one), read from its verified
 // checkpoint or, for attempts from before checkpoints, its registered source files. Its work is
@@ -451,11 +476,13 @@ function continuedWork(store, task, paths, current) {
     before = file => scope.source.files.find(entry => entry.path === file)?.hash ?? null,
     now = file => current.files.find(entry => entry.path === file)?.hash ?? null,
     files = [],
-    skipped = [];
+    skipped = [],
+    setAside = [];
   for (const item of manifest.files) {
     const file = item.path.slice('changes/'.length);
     if (!item.path.startsWith('changes/') || item.hash === before(file)) continue;
     if (writable.includes(file)) files.push({ path: file, hash: item.hash });
+    else if (paths.deletedSince?.includes(file)) setAside.push({ path: file, hash: item.hash });
     else skipped.push({ path: file, reason: 'no longer in the approved files' });
   }
   const deleted = scope.deleteFiles || [];
@@ -465,8 +492,20 @@ function continuedWork(store, task, paths, current) {
     ...files.map(item => item.path),
     ...deleted.filter(file => paths.deleteFiles.includes(file)),
   ].filter(file => before(file) !== now(file));
+  // Work whose source was committed since is merged onto the current source by git when the attempt is prepared,
+  // as a change merged onto the current source is, rather than dropped (October 27): `changed` names those files.
+  // It needs that attempt's base commit, which a rewritten history may have lost.
+  let based = false;
+  if (conflicts.length && files.length && scope.base?.commit)
+    try {
+      git(current.root, ['cat-file', '-e', `${scope.base.commit}^{commit}`]);
+      based = true;
+    } catch {}
+  const kept = setAside.length ? { setAside } : {};
+  if (based)
+    return { attemptId: previous.id, files, skipped, ...kept, merge: { base: scope.base.commit, changed: conflicts } };
   if (conflicts.length) return fresh('the source of files it changed was committed since that attempt', conflicts);
-  return files.length || skipped.length ? { attemptId: previous.id, files, skipped } : null;
+  return files.length || skipped.length || setAside.length ? { attemptId: previous.id, files, skipped, ...kept } : null;
 }
 // Why an attempt starts from the current source although earlier work was recorded.
 export const freshStartText = carried =>
@@ -611,7 +650,9 @@ function breakdownChangeScope(store, task, root, dryRun) {
       report,
       source: evidence,
       checkedReference,
-    } = breakdownEvidence(store, attempt, recordProject(task), reference.key, story => storyPaths(task, story)),
+    } = breakdownEvidence(store, attempt, recordProject(task), reference.key, story => storyPaths(task, story), {
+      earlier: hasEarlierWork(store, task),
+    }),
     story = report.stories.find(story => story.key === reference.key);
   if (!story) throw new Error('The exact proposalReference.key is missing from the accepted breakdown.');
   const pinned = task.acceptedInputs || [];
@@ -665,6 +706,7 @@ function breakdownChangeScope(store, task, root, dryRun) {
     integrated: integratedSourceChanges(store, current.root),
     created: integratedChanges(store, siblings),
     files,
+    earlier: hasEarlierWork(store, task),
   });
   return {
     connector: sourceChangesConnector,
@@ -891,10 +933,17 @@ export function editSourceStory(store, task, edit, root, { by = { type: 'directo
         ? `Previous attempt ${reported.id} (${reported.status}): ${reported.result.summary}${reported.result.issues?.length ? `\nIssues: ${reported.result.issues.join(' ')}` : ''}${failing ? `\nFailing tests:\n${failing}` : ''}`
         : '',
       carried?.files.length
-        ? `Your edits from ${carried.attemptId} to ${carried.files.map(item => item.path).join(', ')} are already in changes/ (continueFrom in source-scope.json): continue from them. The controller includes them in the candidate even if you do not return them; to drop one, restore the file to its ../source content.`
+        ? `Your edits from ${carried.attemptId} to ${carried.files.map(item => item.path).join(', ')} are already in changes/ (continueFrom in source-scope.json): continue from them.${
+            carried.merge
+              ? ` ${carried.merge.changed.join(', ')} changed on the source since, so git merged your edits onto the current source; resolve any part it marked and remove every marker.`
+              : ''
+          } The controller includes them in the candidate even if you do not return them; to drop one, restore the file to its ../source content.`
         : '',
       carried?.skipped.length
         ? `Not carried over: ${carried.skipped.map(item => `${item.path} (${item.reason})`).join('; ')}.`
+        : '',
+      carried?.setAside?.length
+        ? `Set aside: your edits to ${carried.setAside.map(item => item.path).join(', ')}, which the source deleted since, are under merge-set-aside/ for reference (merge-set-aside.json).`
         : '',
       freshStartText(carried),
       edit.note?.trim() ? `Director's note: ${edit.note.trim()}` : '',
@@ -1003,7 +1052,7 @@ export function changeScope(store, task, root, { dryRun = false } = {}) {
       storyPaths(task, proposal),
       source,
       checked.sourceCheck.files,
-      { integrated: integratedSourceChanges(store, source.root), files },
+      { integrated: integratedSourceChanges(store, source.root), files, earlier: hasEarlierWork(store, task) },
       { since: 'the proposal', action: 'Request fresh evidence.' },
     );
   return {
@@ -1045,6 +1094,7 @@ export const scopeDocument = scope => ({
         })),
       }
     : {}),
+  ...(scope.deletedSince ? { deletedSince: scope.deletedSince } : {}),
   ...(scope.continueFrom ? { continueFrom: scope.continueFrom } : {}),
   // A change merged onto the current source (1.1 step 3): the files it holds and those with conflict markers.
   ...(scope.merge

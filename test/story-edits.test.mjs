@@ -122,7 +122,7 @@ test("the director edits a blocked story's files; its next attempt continues fro
   assert.equal(later.fresh, undefined);
 });
 
-test('a commit to an edited path starts the whole work fresh, explained; an edit is refused while the story runs or is reviewed', async t => {
+test('a commit to an edited path merges the earlier work onto it, explained; an edit is refused while the story runs or is reviewed', async t => {
   const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),
     store = c.app.store,
     root = c.app.runner.sourceChangeRoot,
@@ -135,25 +135,26 @@ test('a commit to an edited path starts the whole work fresh, explained; an edit
   store.putTask({ ...store.task(ids[0]), direction: 'block' });
   c.app.runner.start(ids[0]);
   const blocked = await c.wait(ids[0], 'blocked');
-  // Meanwhile an independent story integrates a change to the same file.
+  // Meanwhile an independent story integrates a change to the same file, at its top.
   c.app.runner.start(ids[1]);
   const { review } = await c.toReview(ids[1]);
-  c.integrated(ids[1], review, 'src/core/workflows.mjs', '// Integrated by the other story\n');
+  const integrated = `// Integrated by the other story\n${fs.readFileSync(path.join(c.root, 'src/core/workflows.mjs'), 'utf8')}`,
+    staged = blocked.artifacts.find(item => item.path === 'changes/src/core/workflows.mjs'),
+    earlier = fs.readFileSync(path.join(blocked.outputFolder, 'changes/src/core/workflows.mjs'), 'utf8');
+  c.integrated(ids[1], review, 'src/core/workflows.mjs', integrated);
   const result = editSourceStory(store, store.task(ids[0]), edit, root);
+  // Since October 27 the earlier work is merged onto the current source by git, not dropped.
   assert.deepEqual(result.continueFrom, {
     attemptId: blocked.id,
-    files: [],
+    files: [{ path: 'src/core/workflows.mjs', hash: staged.hash }],
     skipped: [],
-    fresh: {
-      reason: 'the source of files it changed was committed since that attempt',
-      paths: ['src/core/workflows.mjs'],
-    },
+    merge: { base: blocked.sourceChange.base.commit, changed: ['src/core/workflows.mjs'] },
   });
   assert.ok(
     store
       .task(ids[0])
       .direction.includes(
-        `This attempt starts from the current source instead of the work of ${blocked.id}: the source of files it changed was committed since that attempt (src/core/workflows.mjs). Its history still shows that work.`,
+        'src/core/workflows.mjs changed on the source since, so git merged your edits onto the current source; resolve any part it marked and remove every marker.',
       ),
   );
   assert.ok(store.attempt(blocked.id), 'The earlier attempt and its history are kept.');
@@ -170,9 +171,12 @@ test('a commit to an edited path starts the whole work fresh, explained; an edit
   const manifest = JSON.parse(fs.readFileSync(path.join(next.outputFolder, 'source-change.json')));
   assert.equal(
     manifest.changes.find(item => item.path === 'src/core/workflows.mjs').beforeHash,
-    hash('// Integrated by the other story\n'),
+    hash(integrated),
     'The editor started from the integrated bytes, not the stale staged copy.',
   );
+  const candidate = git(c.root, ['show', `${next.sourceCandidate.commit}:src/core/workflows.mjs`]);
+  assert.match(candidate, /^\/\/ Integrated by the other story\n/);
+  for (const line of earlier.trim().split('\n')) assert.ok(candidate.includes(line), `The earlier edit kept: ${line}`);
   c.measuredFixture(next);
   acceptAttempt(store, c.app.runner.registries, store.task(ids[0]));
   assert.equal(store.task(ids[0]).sourceStage.phase, 'candidate-review');
@@ -182,7 +186,7 @@ test('a commit to an edited path starts the whole work fresh, explained; an edit
   );
 });
 
-test('a committed hand edit keeps a story startable; an edit drops a file a hand commit deleted, and it starts again', async t => {
+test('a committed hand edit keeps a story startable; with earlier work, a file a hand commit deleted is left out and named', async t => {
   const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),
     store = c.app.store,
     root = c.app.runner.sourceChangeRoot,
@@ -205,23 +209,23 @@ test('a committed hand edit keeps a story startable; an edit drops a file a hand
     'docs/module-contracts.md',
     'src/core/projects.mjs',
   ]);
-  // A file a hand commit deleted still does.
+  // A file a hand commit deleted is left out of the next attempt and named, since the story has earlier work to keep
+  // (October 27); a story with no work yet still stops, its plan naming a file that is gone (source-changes.test.mjs).
   git(c.root, ['rm', '--quiet', 'src/core/projects.mjs']);
   git(c.root, ['commit', '--quiet', '-m', 'Delete a module by hand']);
-  const stale = /Approved source files no longer exist: src\/core\/projects\.mjs\./;
-  assert.throws(() => changeScope(store, store.task(id), root), stale);
-  assert.throws(
-    () =>
-      editSourceStory(
-        store,
-        store.task(id),
-        { files: ['src/core/workflows.mjs', 'src/core/projects.mjs'], reason: 'Drop the contract.' },
-        root,
-      ),
-    stale,
+  const scope = changeScope(store, store.task(id), root);
+  assert.deepEqual(
+    [scope.allowedFiles, scope.deletedSince],
+    [['src/core/workflows.mjs', 'docs/module-contracts.md'], ['src/core/projects.mjs']],
   );
-  assert.equal(store.task(id).scopeEdits, undefined, 'A refused edit records nothing.');
-  // Without the deleted file the story's other paths still hold, so the edit and the start pass.
+  // An uncommitted deletion is the director's own edit in progress, and still stops the story.
+  fs.rmSync(path.join(c.root, 'src/core/workflows.mjs'));
+  assert.throws(
+    () => changeScope(store, store.task(id), root),
+    /Approved source files no longer exist: src\/core\/workflows\.mjs\./,
+  );
+  git(c.root, ['checkout', '--quiet', '--', 'src/core/workflows.mjs']);
+  // The director can also take the deleted file out of the story's paths.
   const result = editSourceStory(
     store,
     store.task(id),

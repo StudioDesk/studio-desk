@@ -3,6 +3,8 @@
 // first, by the director or the policy, always wins.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { autonomyPolicy, saveAutonomyPolicy } from '../src/core/autonomy.mjs';
 import { studioDeskSourceResources } from '../src/connectors/source-projects.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
@@ -167,4 +169,42 @@ test('a story whose integration stopped may be sent back to build it again', asy
   assert.notEqual(store.task(c.taskId).status, 'done');
   assert.equal(store.task(c.taskId).sourceStage.phase, 'implementing');
   assert.equal(store.task(c.taskId).controllerWait, true);
+});
+
+test('sent back after the source of its files moved, the next attempt keeps its work, merged onto the current source by git', async t => {
+  const { c, store, edit } = await passed(t),
+    target = edit.sourceChange.allowedFiles[0],
+    file = path.join(c.root, target);
+  // Another change landed at the top of the same file.
+  fs.writeFileSync(file, `// A change at the top on main.\n${fs.readFileSync(file, 'utf8')}`);
+  git(c.root, ['commit', '--quiet', '-am', 'A change at the top on main']);
+  const tip = git(c.root, ['rev-parse', 'HEAD']);
+  assert.equal((await sendBack(c, 'Keep going.')).status, 202);
+  const next = await c.wait(c.taskId);
+  assert.equal(next.sourceChange.base.commit, tip);
+  assert.deepEqual(next.sourceChange.continueFrom.merge, { base: edit.sourceChange.base.commit, changed: [target] });
+  assert.equal(next.sourceChange.continueFrom.fresh, undefined, 'The earlier work is kept, not dropped.');
+  assert.match(
+    next.instructions.layers.find(layer => layer.title === 'Bounded source change').text,
+    /When continueFrom has merge, the files it names changed on the source since that attempt/,
+  );
+  const merged = git(c.root, ['show', `${next.sourceCandidate.commit}:${target}`]);
+  assert.match(merged, /^\/\/ A change at the top on main\.\n/);
+  assert.match(merged, /Bounded fixture improvement\./);
+  assert.doesNotMatch(merged, /^(<{7}|>{7})/m);
+  const summary = store.dashboardAttempts('project-legacy', c.taskId).find(attempt => attempt.id === next.id);
+  assert.deepEqual(summary.continueFrom.merged, [target]);
+});
+
+test('sent back after the same lines changed on the source, the next attempt gets them marked and cannot leave the markers', async t => {
+  const { c, store, edit } = await passed(t),
+    target = edit.sourceChange.allowedFiles[0];
+  fs.appendFileSync(path.join(c.root, target), '\n// A different change at the end on main.\n');
+  git(c.root, ['commit', '--quiet', '-am', 'A different change at the end on main']);
+  assert.equal((await sendBack(c, 'Keep going.')).status, 202);
+  // The fixture editor returns the file as git merged it, markers and all, which the controller refuses.
+  const next = await c.wait(c.taskId, 'failed');
+  assert.deepEqual(next.sourceChange.continueFrom.merge.changed, [target]);
+  assert.match(next.error, /Conflict markers remain in src\/core\/workflows\.mjs/);
+  assert.equal(store.task(c.taskId).sourceStage.phase, 'implementing');
 });

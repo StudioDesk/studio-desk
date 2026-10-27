@@ -46,6 +46,8 @@ function stopContext(value) {
 // continueFrom or a code story's sourceChange.continueFrom. Paths without their hashes, at
 // most the 30 files a work result may return, with the rest counted; a code story's skipped
 // paths are left out, and the paths its fresh start names join the reason as in freshStartText.
+// Work git merged onto the current source because its source changed since names those files
+// (`merged`, October 27).
 function continuation(value) {
   const files = Array.isArray(value.files) ? value.files : [],
     result = {
@@ -59,6 +61,8 @@ function continuation(value) {
       reason: shortText(paths ? `${value.fresh.reason} (${paths.join(', ')})` : value.fresh.reason, 1000),
     };
   }
+  if (Array.isArray(value.merge?.changed))
+    result.merged = value.merge.changed.slice(0, 30).map(file => shortText(file));
   return result;
 }
 
