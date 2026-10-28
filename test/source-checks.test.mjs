@@ -22,6 +22,7 @@ import {
   sourcePlan,
   sourceTestArgs,
   sourceTestTimeoutMs,
+  testOutput,
   testTotals,
   testPhaseEvidence,
   validateCheckReport,
@@ -234,6 +235,11 @@ for (const mode of ['pass', 'fail'])
       result = c.finish(),
       report = JSON.parse(fs.readFileSync(path.join(c.output, 'check-report.json'), 'utf8')),
       context = JSON.parse(fs.readFileSync(path.join(c.output, 'source-context.json'), 'utf8'));
+    // The adapter keeps the log through testOutput, which leaves out passing tests' details.
+    const kept = testOutput();
+    kept.add(c.run.stdout);
+    const stdout = kept.text();
+    assert.notEqual(stdout, c.run.stdout);
     assert.equal(result.outcome, 'completed');
     assert.equal(result.taskId, c.attempt.taskId);
     assert.equal(result.checks[0].status, mode);
@@ -277,15 +283,15 @@ for (const mode of ['pass', 'fail'])
     assert.equal(phases[1].outcome, mode === 'pass' ? 'succeeded' : 'failed');
     assert.deepEqual(phases[1].totals, report.totals);
     assert.ok(phases[1].durationMs >= 0);
-    assert.deepEqual(report, checkReport(c.attempt.sourceCheck, c.attempt.checkExecution, c.run.stdout, c.run.stderr));
+    assert.deepEqual(report, checkReport(c.attempt.sourceCheck, c.attempt.checkExecution, stdout, c.run.stderr));
     assert.deepEqual(
-      validateCheckReport(report, c.attempt.sourceCheck, c.attempt.checkExecution, c.run.stdout, c.run.stderr),
+      validateCheckReport(report, c.attempt.sourceCheck, c.attempt.checkExecution, stdout, c.run.stderr),
       report,
     );
     const legacy = { ...report };
     delete legacy.failedTests;
     assert.deepEqual(
-      validateCheckReport(legacy, c.attempt.sourceCheck, c.attempt.checkExecution, c.run.stdout, c.run.stderr),
+      validateCheckReport(legacy, c.attempt.sourceCheck, c.attempt.checkExecution, stdout, c.run.stderr),
       legacy,
     );
     assert.throws(
@@ -294,7 +300,7 @@ for (const mode of ['pass', 'fail'])
           { ...report, failedTests: [{ name: 'Invented failure' }] },
           c.attempt.sourceCheck,
           c.attempt.checkExecution,
-          c.run.stdout,
+          stdout,
           c.run.stderr,
         ),
       /does not match/,
@@ -302,7 +308,7 @@ for (const mode of ['pass', 'fail'])
     assert.equal(context.schemaVersion, 'source-context-v1');
     assert.equal(context.sourceHash, report.source.hash);
     assert.equal(context.documents.length, 5);
-    assert.equal(fs.readFileSync(path.join(c.output, 'test-output.txt'), 'utf8'), c.run.stdout);
+    assert.equal(fs.readFileSync(path.join(c.output, 'test-output.txt'), 'utf8'), stdout);
     assert.equal(fs.readFileSync(path.join(c.output, 'test-errors.txt'), 'utf8'), c.run.stderr);
     assert.deepEqual(
       result.artifacts.map(item => item.kind),
@@ -339,6 +345,65 @@ test('partial TAP retains only bounded top-level failures and never invents tota
     20,
   );
   assert.equal(failedTests('not ok 1 - ' + 'x'.repeat(500))[0].name.length, 300);
+});
+
+test('a kept test log drops passing details, stays within its limit and always ends with complete totals', () => {
+  const passing = (n, indent = '') =>
+    [
+      `${indent}# Subtest: passes ${n}`,
+      `${indent}ok ${n} - passes ${n}`,
+      `${indent}  ---`,
+      `${indent}  duration_ms: 1.5`,
+      `${indent}  type: 'test'`,
+      `${indent}  ...`,
+    ].join('\n');
+  const failing = [
+    '# Subtest: breaks',
+    '    # Subtest: inner passes',
+    '    ok 1 - inner passes',
+    '      ---',
+    '      duration_ms: 0.2',
+    '      ...',
+    '    1..1',
+    'not ok 2 - breaks',
+    '  ---',
+    "  location: 'C:\\repo\\test\\breaks.test.mjs:3:1'",
+    "  error: 'expected 1'",
+    '  ...',
+  ].join('\n');
+  const totals = (count, fail) =>
+    [`1..${count}`, `# tests ${count}`, '# suites 0', `# pass ${count - fail}`, `# fail ${fail}`]
+      .concat(['# cancelled 0', '# skipped 0', '# todo 0', '# duration_ms 12.5', ''])
+      .join('\n');
+  const log = ['TAP version 13', passing(1), failing, totals(2, 1)].join('\n');
+  const kept = testOutput();
+  // Chunks split lines anywhere, as a process's output does.
+  for (let at = 0; at < log.length; at += 7) kept.add(log.slice(at, at + 7));
+  assert.equal(
+    kept.text(),
+    [
+      'TAP version 13',
+      'ok 1 - passes 1',
+      '    ok 1 - inner passes',
+      '    1..1',
+      'not ok 2 - breaks',
+      '  ---',
+      "  location: 'C:\\repo\\test\\breaks.test.mjs:3:1'",
+      "  error: 'expected 1'",
+      '  ...',
+      totals(2, 1),
+    ].join('\n'),
+  );
+  assert.deepEqual(testPhaseEvidence(kept.text()), testPhaseEvidence(log));
+
+  // A suite whose passing lines alone pass the limit still reports its totals, after a note.
+  const long = testOutput(4096);
+  long.add(['TAP version 13', ...Array.from({ length: 400 }, (_, i) => passing(i + 1)), totals(400, 0)].join('\n'));
+  const text = long.text();
+  assert.ok(Buffer.byteLength(text) < 4096 + 512);
+  assert.match(text, /^# The rest of this output was left out at its limit; the totals follow\.$/m);
+  assert.deepEqual(testTotals(text), { tests: 400, pass: 400, fail: 0, cancelled: 0, skipped: 0, todo: 0 });
+  assert.equal(testPhaseEvidence(text).tapDurationMs, 12.5);
 });
 
 test('a source-check timeout snapshots partial TAP before an unconfirmed stop', t => {

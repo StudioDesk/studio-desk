@@ -6,6 +6,7 @@ import {
   sourceContext,
   checkReport,
   failedTests,
+  testOutput,
   testPhaseEvidence,
   testsSentence,
 } from '../connectors/source-checks.mjs';
@@ -146,8 +147,11 @@ function runTests(runtime, entry, a, command, snapshot, environment) {
     },
     { cwd: snapshot, environment, resultOnFailure: true },
   );
+  // Kept within its limit as it arrives (testOutput), so a growing suite still reports its totals.
+  const output = testOutput();
   entry.child.stdout.on('data', text => {
-    stdout += text;
+    output.add(text);
+    stdout = output.text();
   });
   entry.child.stderr.on('data', text => {
     stderr += text;

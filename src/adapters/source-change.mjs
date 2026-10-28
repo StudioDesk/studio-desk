@@ -13,6 +13,7 @@ import {
   verifyCopy,
   checkReport,
   failedTests,
+  testOutput,
   testPhaseEvidence,
 } from '../connectors/source-checks.mjs';
 import { scopeDocument, scopeRequest, stagedChanges, sourceChangesConnector } from '../connectors/source-changes.mjs';
@@ -579,8 +580,11 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         },
         { cwd: candidate, environment, resultOnFailure: true },
       );
+      // Kept within its limit as it arrives (testOutput), so a growing suite still reports its totals.
+      const output = testOutput();
       entry.child.stdout.on('data', chunk => {
-        stdout += chunk;
+        output.add(chunk);
+        stdout = output.text();
       });
       entry.child.stderr.on('data', chunk => {
         stderr += chunk;

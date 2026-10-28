@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { command, subscriptionEnvironment } from '../adapters/process.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
 import { hash } from '../core/contracts.mjs';
-import { sourcePlan, testPhaseEvidence } from './source-checks.mjs';
+import { sourcePlan, testOutput, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, studioDeskProfile } from './source-profile.mjs';
 import { installStep, lastLine } from './package-installs.mjs';
 import { buildCommand, buildPassed, buildTail, buildText, buildTimeoutMs, changedByBuild } from './source-build.mjs';
@@ -207,20 +207,20 @@ function run(runtime, executable, args, { cwd, environment, timeoutMs, phase }) 
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     runtime.integrationProcess = child;
-    let stdout = '',
-      stderr = '',
+    const stdout = testOutput(logLimit);
+    let stderr = '',
       timedOut = false,
       observedExit = null,
       observedSignal = null;
     if (phase)
       phase.evidence = () => ({
-        ...(phase.payload.phaseId === 'integration.verification' ? testPhaseEvidence(stdout) : {}),
+        ...(phase.payload.phaseId === 'integration.verification' ? testPhaseEvidence(stdout.text()) : {}),
         timedOut,
         exitCode: observedExit,
         signal: observedSignal,
       });
     child.stdout.on('data', chunk => {
-      if (stdout.length < logLimit) stdout += chunk;
+      stdout.add(chunk);
     });
     child.stderr.on('data', chunk => {
       if (stderr.length < logLimit) stderr += chunk;
@@ -241,7 +241,7 @@ function run(runtime, executable, args, { cwd, environment, timeoutMs, phase }) 
       observedExit = exitCode;
       observedSignal = signal;
       done();
-      resolve({ exitCode, signal, timedOut, stdout, stderr });
+      resolve({ exitCode, signal, timedOut, stdout: stdout.text(), stderr });
     });
   });
 }

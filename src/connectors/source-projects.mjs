@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { recordProject } from '../core/projects.mjs';
 import { subscriptionEnvironment } from '../adapters/process.mjs';
 import { snapshotCommit } from '../adapters/source-snapshot.mjs';
-import { failedTests, sourcePlan, testTotals } from './source-checks.mjs';
+import { failedTests, sourcePlan, testOutput, testTotals } from './source-checks.mjs';
 import { git, gitRefusal, repositoryState } from './source-integration.mjs';
 import { maxProfileEntries, studioDeskProfile, validateSourceProfile } from './source-profile.mjs';
 import { sourceWorktreeRoot } from './source-worktrees.mjs';
@@ -328,23 +328,23 @@ export async function repositoryTests(
           env: environment,
           windowsHide: true,
         }),
-        output = { stdout: '', stderr: '' },
         limit = 192 * 1024,
+        output = { stdout: testOutput(limit), stderr: '' },
         timer = setTimeout(() => {
           output.timedOut = true;
           child.kill();
         }, repositoryTestSeconds * 1000);
-      for (const name of ['stdout', 'stderr'])
-        child[name].on('data', chunk => {
-          if (output[name].length < limit) output[name] += chunk;
-        });
+      child.stdout.on('data', chunk => output.stdout.add(chunk));
+      child.stderr.on('data', chunk => {
+        if (output.stderr.length < limit) output.stderr += chunk;
+      });
       child.on('error', error => {
         clearTimeout(timer);
         reject(error);
       });
       child.on('close', (code, signal) => {
         clearTimeout(timer);
-        resolve({ ...output, code, signal });
+        resolve({ ...output, stdout: output.stdout.text(), code, signal });
       });
     });
     if (run.timedOut)

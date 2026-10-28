@@ -123,6 +123,57 @@ export function testTotals(log) {
     throw new Error('Test totals are inconsistent.');
   return values;
 }
+// A test run's output as the controller keeps it, within limit bytes however far the suite grows. A
+// passing test keeps its "ok" line but not its "# Subtest:" heading or duration block, which more than
+// halves Studio desk's log; past the limit a note marks the cut and only the totals lines are kept,
+// so the run still reports complete totals. Its reviews read the log too, which keeps it bounded.
+export const testOutputLimit = 160 * 1024;
+const totalsLine = /^# (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) \d/;
+export function testOutput(limit = testOutputLimit) {
+  let kept = '',
+    bytes = 0,
+    partial = '',
+    block = null,
+    passed = null,
+    over = false;
+  const line = text => {
+    const bare = text.replace(/\r$/, '');
+    if (block !== null) {
+      if (bare === `${block}...`) block = null;
+      return;
+    }
+    if (passed !== null && bare === `${passed}---`) {
+      block = passed;
+      passed = null;
+      return;
+    }
+    passed = null;
+    if (/^\s*# Subtest: /.test(bare)) return;
+    const ok = /^(\s*)ok \d+ - /.exec(bare);
+    if (ok) passed = `${ok[1]}  `;
+    const size = Buffer.byteLength(text) + 1;
+    if (!over && bytes + size > limit) {
+      over = true;
+      kept += '# The rest of this output was left out at its limit; the totals follow.\n';
+    }
+    if (over && !totalsLine.test(bare)) return;
+    kept += `${text}\n`;
+    bytes += size;
+  };
+  return {
+    add(chunk) {
+      const lines = (partial + chunk).split('\n');
+      partial = lines.pop();
+      lines.forEach(line);
+      // One unterminated line is kept as far as the limit allows.
+      if (partial.length > limit) {
+        line(partial.slice(0, limit));
+        partial = '';
+      }
+    },
+    text: () => (over ? kept : kept + partial),
+  };
+}
 // Partial/cancelled process output may have no final summary. Never invent zero totals.
 export function testPhaseEvidence(log) {
   let totals = null;
