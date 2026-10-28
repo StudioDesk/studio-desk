@@ -309,6 +309,8 @@ for (const mode of ['pass', 'fail'])
     assert.equal(context.sourceHash, report.source.hash);
     assert.equal(context.documents.length, 5);
     assert.equal(fs.readFileSync(path.join(c.output, 'test-output.txt'), 'utf8'), stdout);
+    // The whole output is recorded beside it, nothing left out.
+    assert.equal(fs.readFileSync(path.join(c.output, 'test-output-full.txt'), 'utf8'), c.run.stdout);
     assert.equal(fs.readFileSync(path.join(c.output, 'test-errors.txt'), 'utf8'), c.run.stderr);
     assert.deepEqual(
       result.artifacts.map(item => item.kind),
@@ -396,10 +398,16 @@ test('a kept test log drops passing details, stays within its limit and always e
   );
   assert.deepEqual(testPhaseEvidence(kept.text()), testPhaseEvidence(log));
 
-  // A suite whose passing lines alone pass the limit still reports its totals, after a note.
-  const long = testOutput(4096);
-  long.add(['TAP version 13', ...Array.from({ length: 400 }, (_, i) => passing(i + 1)), totals(400, 0)].join('\n'));
+  // A suite whose passing lines alone pass the limit still reports its totals, after a note, and its
+  // record keeps every byte.
+  const record = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-test-record-')), 'full.txt'),
+    whole = ['TAP version 13', ...Array.from({ length: 400 }, (_, i) => passing(i + 1)), totals(400, 0)].join('\n'),
+    long = testOutput(4096, record);
+  long.add(whole.slice(0, 1000));
+  long.add(Buffer.from(whole.slice(1000)));
   const text = long.text();
+  assert.equal(fs.readFileSync(record, 'utf8'), whole);
+  fs.rmSync(path.dirname(record), { recursive: true, force: true });
   assert.ok(Buffer.byteLength(text) < 4096 + 512);
   assert.match(text, /^# The rest of this output was left out at its limit; the totals follow\.$/m);
   assert.deepEqual(testTotals(text), { tests: 400, pass: 400, fail: 0, cancelled: 0, skipped: 0, todo: 0 });

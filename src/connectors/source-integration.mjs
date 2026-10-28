@@ -196,7 +196,8 @@ export function observeIntegrationPhase(runtime, journal, phaseId, operation) {
     return finish(null, error);
   }
 }
-function run(runtime, executable, args, { cwd, environment, timeoutMs, phase }) {
+// record names the file that keeps the whole of stdout as it arrives (testOutput).
+function run(runtime, executable, args, { cwd, environment, timeoutMs, phase, record = null }) {
   return new Promise((resolve, reject) => {
     const [file, argv] = command(executable, args),
       child = spawn(file, argv, {
@@ -207,7 +208,7 @@ function run(runtime, executable, args, { cwd, environment, timeoutMs, phase }) 
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     runtime.integrationProcess = child;
-    const stdout = testOutput(logLimit);
+    const stdout = testOutput(logLimit, record);
     let stderr = '',
       timedOut = false,
       observedExit = null,
@@ -524,6 +525,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
         environment,
         timeoutMs: testTimeoutMs,
         phase,
+        record: path.join(directory, 'test-output-full.txt'),
       });
       fs.writeFileSync(path.join(directory, 'test-output.txt'), tested.stdout);
       fs.writeFileSync(path.join(directory, 'test-errors.txt'), tested.stderr);

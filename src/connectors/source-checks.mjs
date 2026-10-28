@@ -123,13 +123,26 @@ export function testTotals(log) {
     throw new Error('Test totals are inconsistent.');
   return values;
 }
-// A test run's output as the controller keeps it, within limit bytes however far the suite grows. A
-// passing test keeps its "ok" line but not its "# Subtest:" heading or duration block, which more than
-// halves Studio desk's log; past the limit a note marks the cut and only the totals lines are kept,
-// so the run still reports complete totals. Its reviews read the log too, which keeps it bounded.
-export const testOutputLimit = 160 * 1024;
+// A test run's output as the controller keeps it. With a file, every byte goes there as it arrives:
+// the run's whole record, up to testRecordLimit so a runaway test cannot fill the disk. The text it
+// returns is what the reports and reviews read, within limit bytes however far the suite grows, since a
+// review's input is bounded: a passing test keeps its "ok" line but not its "# Subtest:" heading or
+// duration block, which more than halves Studio desk's log; past the limit a note marks the cut and only
+// the totals lines are kept, so the run still reports complete totals.
+export const testOutputLimit = 160 * 1024,
+  testRecordLimit = 64 * 1024 * 1024;
 const totalsLine = /^# (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) \d/;
-export function testOutput(limit = testOutputLimit) {
+export function testOutput(limit = testOutputLimit, file = null) {
+  if (file) fs.writeFileSync(file, '');
+  let recorded = 0;
+  const record = chunk => {
+    if (!file || recorded >= testRecordLimit) return;
+    const bytes = Buffer.from(chunk),
+      room = testRecordLimit - recorded;
+    fs.appendFileSync(file, bytes.subarray(0, room));
+    recorded += Math.min(bytes.length, room);
+    if (bytes.length > room) fs.appendFileSync(file, '\n# The record stops here, at its 64 MB limit.\n');
+  };
   let kept = '',
     bytes = 0,
     partial = '',
@@ -162,6 +175,7 @@ export function testOutput(limit = testOutputLimit) {
   };
   return {
     add(chunk) {
+      record(chunk);
       const lines = (partial + chunk).split('\n');
       partial = lines.pop();
       lines.forEach(line);

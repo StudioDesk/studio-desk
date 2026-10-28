@@ -7,6 +7,7 @@ import {
   checkReport,
   failedTests,
   testOutput,
+  testOutputLimit,
   testPhaseEvidence,
   testsSentence,
 } from '../connectors/source-checks.mjs';
@@ -147,8 +148,9 @@ function runTests(runtime, entry, a, command, snapshot, environment) {
     },
     { cwd: snapshot, environment, resultOnFailure: true },
   );
-  // Kept within its limit as it arrives (testOutput), so a growing suite still reports its totals.
-  const output = testOutput();
+  // Every byte goes to test-output-full.txt as it arrives; the reports and reviews read the bounded text
+  // (testOutput), so a growing suite still reports its totals.
+  const output = testOutput(testOutputLimit, path.join(entry.output, 'test-output-full.txt'));
   entry.child.stdout.on('data', text => {
     output.add(text);
     stdout = output.text();
