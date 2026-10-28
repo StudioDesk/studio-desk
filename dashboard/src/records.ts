@@ -24,6 +24,7 @@ import {
   type SettledPage,
   type Shell,
   type TaskPage,
+  type TestRecordRun,
 } from './api';
 import { useStreamReady } from './stream-context';
 import { settled, type StudioState } from './studio-runs';
@@ -32,6 +33,9 @@ import { settled, type StudioState } from './studio-runs';
 export const queryKeys = {
   task: (projectId: string, taskId: string) => [projectId, 'task', taskId] as const,
   attempt: (projectId: string, attemptId: string) => [projectId, 'attempt', attemptId] as const,
+  // A measured test run's whole record: its summary, and with `text` its whole output.
+  testRecord: (projectId: string, attemptId: string, run: TestRecordRun, text = false) =>
+    [projectId, 'test-record', attemptId, run, text ? 'text' : 'summary'] as const,
   shell: (projectId: string) => [projectId, 'shell'] as const,
   instructions: (projectId: string) => [projectId, 'instructions'] as const,
   live: (projectId: string) => [projectId, 'live'] as const,

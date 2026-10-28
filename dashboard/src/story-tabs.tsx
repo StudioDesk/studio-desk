@@ -803,7 +803,9 @@ export function RecordPanel({
   const { stage, candidate, review } = storyPeople(task, studio),
     attempt = full ?? shown,
     instructions = full?.instructions,
-    journal = (review ?? shown)?.sourceIntegration as Journal | null | undefined,
+    // The integration journal, and the attempt holding it, whose job folder holds the merge's whole test record.
+    holder = review ?? shown,
+    journal = holder?.sourceIntegration as Journal | null | undefined,
     received = (attempt?.inputReferences as { taskId?: string }[] | undefined) ?? [],
     // The candidate's files and the review's report beside the attempt shown, each from the attempt that recorded it.
     files = [
@@ -968,7 +970,7 @@ export function RecordPanel({
           </a>
         </div>
       )}
-      {journal?.state && <IntegrationJournal journal={journal} />}
+      {journal?.state && holder && <IntegrationJournal projectId={projectId} attemptId={holder.id} journal={journal} />}
       {instructions?.text && (
         <details className="sd-disclosure">
           <summary>The instructions it ran with</summary>

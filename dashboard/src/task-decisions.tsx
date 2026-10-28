@@ -12,6 +12,7 @@ import { NoteDialog, overReview } from './note-dialog';
 import { attemptsUsed, storyPeople } from './story';
 import { useToast } from './toast';
 import { integrationAction, statusLabels, type StudioState } from './studio-runs';
+import { WholeTestRecord } from './test-record';
 
 const busyJournal = ['verifying', 'preparing', 'prepared', 'applying', 'committing', 'needs-reconciliation'];
 
@@ -678,8 +679,17 @@ export interface Journal {
   verification?: { totals?: { pass?: number; tests?: number }; formatter?: string };
 }
 
-// A reviewed change's integration: who approved it, its commit and verification, and the full record.
-export function IntegrationJournal({ journal }: { journal: Journal }) {
+// A reviewed change's integration: who approved it, its commit and verification, and the full record, with the
+// merge's whole test record once it recorded a verification. `attemptId` is the attempt holding the journal.
+export function IntegrationJournal({
+  projectId,
+  attemptId,
+  journal,
+}: {
+  projectId: string;
+  attemptId: string;
+  journal: Journal;
+}) {
   const commit = journal.repository?.commit,
     totals = journal.verification?.totals;
   return (
@@ -704,6 +714,7 @@ export function IntegrationJournal({ journal }: { journal: Journal }) {
         <summary>Recorded source integration{journal.method === 'merge' ? '' : ' and backups'}</summary>
         <pre className="sd-code sd-code--block">{JSON.stringify(journal, null, 2)}</pre>
       </details>
+      {journal.verification && <WholeTestRecord projectId={projectId} attemptId={attemptId} run="merge" />}
     </>
   );
 }

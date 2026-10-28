@@ -19,6 +19,7 @@ import type {
   Shell,
   StoryActivity,
   Task,
+  TestRecordSummary,
 } from './api';
 import type { BringBackTargets } from './bring-back';
 import { settled } from './studio-runs';
@@ -120,6 +121,9 @@ export interface Controller {
   details: Record<string, Record<string, unknown>>;
   // Attempts' traces (item 21), by attempt; one without a trace answers as a controller without the route does.
   traces: Record<string, unknown>;
+  // Measured test runs' whole records, as `<attempt>/<run>` (run `attempt` or `merge`): the summary the record route
+  // answers and the text its /text route sends. A run not listed answers as one the attempt did not measure does.
+  testRecords: Record<string, { summary: TestRecordSummary; text?: string }>;
   instructions: InstructionsPage['instructions'];
   people: PeopleSummary;
   // Pages of recorded events, newest first; each page's `next` names the sequence the following one starts before.
@@ -176,6 +180,7 @@ export function fakeController(projectId = 'project-x'): Controller {
     artifacts: {},
     details: {},
     traces: {},
+    testRecords: {},
     instructions: {
       company: { scope: 'company', id: 'company', revision: 1, text: 'Company direction.', draft: null, history: [] },
       teams: {},
@@ -329,6 +334,17 @@ export function fakeController(projectId = 'project-x'): Controller {
       if (trace) {
         const record = controller.traces[decodeURIComponent(trace)];
         return record ? respond(record) : respond({ error: 'Unknown controller route.' }, false);
+      }
+      // A measured run's whole record: its summary, or with /text the text, when the run kept one.
+      const [, measured, plain] = path.match(/^\/api\/attempts\/([^/]+)\/test-record(\/text)?$/) ?? [];
+      if (measured) {
+        const run = new URLSearchParams(url.split('?')[1] ?? '').get('run') ?? 'attempt',
+          record = controller.testRecords[`${decodeURIComponent(measured)}/${run}`];
+        if (!record) return respond({ error: 'This attempt ran no measured tests.' }, false);
+        if (!plain) return respond(record.summary);
+        return record.summary.recorded && record.text !== undefined
+          ? respond(record.text)
+          : respond({ error: 'This run has no whole record.' }, false);
       }
       const logs = path.match(/^\/api\/attempts\/([^/]+)\/logs$/)?.[1];
       if (logs) {

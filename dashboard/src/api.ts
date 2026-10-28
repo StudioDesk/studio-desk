@@ -450,6 +450,22 @@ export interface LogEvent {
   attempt_id: string | null;
 }
 
+// A measured test run's whole record (src/connectors/test-records.mjs): `attempt` is the attempt's own checks or
+// candidate tests, `merge` its story's merge. A run that kept a record says how large it is, whether it stops at its
+// 64 MB limit, its totals (null when it stopped before reporting them) and its failed tests; one that kept none
+// says so.
+export type TestRecordRun = 'attempt' | 'merge';
+export type TestRecordSummary =
+  | { recorded: false; run: TestRecordRun }
+  | {
+      recorded: true;
+      run: TestRecordRun;
+      bytes: number;
+      limited: boolean;
+      totals: { tests: number; pass: number; fail: number; cancelled: number; skipped: number; todo: number } | null;
+      failedTests: { name: string; file?: string; error?: string }[];
+    };
+
 // What a change event names: the record's type and identity, and its project when it has one.
 export interface Change {
   seq: number;
@@ -515,6 +531,9 @@ export const storyActivityUrl = (projectId: string, taskId: string) =>
   `/api/tasks/${encodeURIComponent(taskId)}/activity?${project(projectId)}`;
 export const logsUrl = (projectId: string, attemptId: string) =>
   `/api/attempts/${encodeURIComponent(attemptId)}/logs?${project(projectId)}`;
+// The run's summary, or with `text` its whole output as plain text.
+export const testRecordUrl = (projectId: string, attemptId: string, run: TestRecordRun, text = false) =>
+  `/api/attempts/${encodeURIComponent(attemptId)}/test-record${text ? '/text' : ''}?${project(projectId)}&run=${run}`;
 export const eventsUrl = (projectId: string, watch?: { attemptId: string; after: number }) =>
   `/api/events?${project(projectId)}${watch ? `&log=${encodeURIComponent(watch.attemptId)}&after=${watch.after}` : ''}`;
 export const changesUrl = (projectId: string, after: number, start: string) =>

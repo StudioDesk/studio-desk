@@ -12,6 +12,7 @@ import { workerName } from './names';
 import { queryKeys } from './records';
 import { cliName } from './story';
 import type { StudioState } from './studio-runs';
+import { WholeTestRecord } from './test-record';
 
 interface PhaseEvent {
   attempt_id: string;
@@ -592,10 +593,14 @@ export const setAsideText = (item: { path: string; reason: string }) =>
   `Git set ${item.path} aside for the editor, because one side deleted it and the other changed it. ${item.reason}`;
 
 const json = (value: unknown) => JSON.stringify(value, null, 2);
+// The checks before a breakdown and a story's candidate tests register the test log of a run the controller measured.
+const measuredTests = (attempt: FullAttempt) =>
+  !!attempt.artifacts?.some(item => item.kind === 'test-log' && item.path === 'test-output.txt');
 
 // Everything the controller recorded about one attempt, under the Record tab: who ran it on what and where, what
 // it received from earlier steps, how its phases ran, and its diagnostics, configuration, result and journals as
-// recorded. What it returned is read on its Result tab.
+// recorded, with the whole record of the tests it ran when the controller measured them. What it returned is read on
+// its Result tab.
 export function AttemptRecord({
   projectId,
   summary,
@@ -718,6 +723,7 @@ export function AttemptRecord({
         </details>
         {full && (
           <>
+            {measuredTests(full) && <WholeTestRecord projectId={projectId} attemptId={full.id} run="attempt" />}
             <details className="sd-disclosure">
               <summary>Configuration and inputs as recorded</summary>
               <pre className="sd-code sd-code--block">{json(metadata)}</pre>
