@@ -14,5 +14,7 @@ export default defineConfig({
   // No file is inlined as a data: URL: the page's security policy loads fonts and other files from the controller
   // only, so an inlined font (Vite inlines files under 4 KB by default) would be refused.
   build: { outDir: '../dist', emptyOutDir: true, assetsInlineLimit: 0 },
-  test: { environment: 'jsdom', include: ['src/**/*.test.{ts,tsx}'] },
+  // Four simulated pages at a time: Vitest's default of one per CPU thread but one (31 on the director's PC) took
+  // about 4.9 GB, and four took 1.5 GB and finished sooner (40 s against 31 s, October 28).
+  test: { environment: 'jsdom', include: ['src/**/*.test.{ts,tsx}'], maxWorkers: 4 },
 });
