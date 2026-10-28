@@ -31,9 +31,13 @@ const request = http.request(
       } catch {
         data = { error: text };
       }
+      // Each answer sets the exit code and lets the program end on its own, rather than calling process.exit:
+      // on macOS a write to a pipe finishes later, and exiting at once cut a long run's output short, its
+      // summary included.
       if (response.statusCode !== 200) {
         console.error(data.error || `The controller answered ${response.statusCode}.`);
-        process.exit(2);
+        process.exitCode = 2;
+        return;
       }
       // The failed tests lead, each with its file and the start of its error, since the output tail may no longer
       // hold an early one; the controller lists at most 20, each already shortened. The summary stays last.
@@ -49,12 +53,12 @@ const request = http.request(
       if (data.errors) process.stderr.write(data.errors);
       console.log(`
 ${data.summary}`);
-      process.exit(data.exitCode === 0 ? 0 : 1);
+      process.exitCode = data.exitCode === 0 ? 0 : 1;
     });
   },
 );
 request.on('error', error => {
   console.error(`The controller could not be reached: ${error.message}`);
-  process.exit(2);
+  process.exitCode = 2;
 });
 request.end(body);
