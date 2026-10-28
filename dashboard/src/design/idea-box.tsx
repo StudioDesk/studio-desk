@@ -36,6 +36,7 @@ export function IdeaBox({
   onTo,
   suggestions = [],
   suggestionsLabel,
+  suggestionMark,
   settings = [],
   release,
   sendLabel,
@@ -63,6 +64,8 @@ export function IdeaBox({
   onTo?: (name: string) => void;
   suggestions?: string[];
   suggestionsLabel?: string;
+  // A short mark on one suggestion, by its place in the list: an agent's recommended option (1.2 step 2).
+  suggestionMark?: { index: number; label: string };
   settings?: IdeaBoxSetting[];
   // The release the idea lands in, a chip the page supplies (1.1).
   release?: ReactNode;
@@ -190,7 +193,7 @@ export function IdeaBox({
         <div className="sd-ideabox__suggestions">
           {suggestionsLabel && <span className="sd-meta">{suggestionsLabel}</span>}
           <div>
-            {suggestions.map(suggestion => (
+            {suggestions.map((suggestion, index) => (
               <button
                 key={suggestion}
                 type="button"
@@ -202,6 +205,9 @@ export function IdeaBox({
               >
                 <Icon name="spark" size={16} />
                 <span>{suggestion}</span>
+                {suggestionMark?.index === index && (
+                  <span className="sd-chip sd-chip--brand sd-chip--inline">{suggestionMark.label}</span>
+                )}
               </button>
             ))}
           </div>
