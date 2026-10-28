@@ -35,6 +35,16 @@ const request = http.request(
         console.error(data.error || `The controller answered ${response.statusCode}.`);
         process.exit(2);
       }
+      // The failed tests lead, each with its file and the start of its error, since the output tail may no longer
+      // hold an early one; the controller lists at most 20, each already shortened. The summary stays last.
+      const failed = Array.isArray(data.failedTests) ? data.failedTests : [];
+      for (const test of failed)
+        console.log(
+          `Failed: ${test.name}${test.file ? ` (${test.file})` : ''}${test.error ? `\n  ${test.error}` : ''}`,
+        );
+      if (failed.length && data.totals?.fail > failed.length)
+        console.log(`and ${data.totals.fail - failed.length} more failed`);
+      if (failed.length) console.log('');
       if (data.output) process.stdout.write(data.output);
       if (data.errors) process.stderr.write(data.errors);
       console.log(`

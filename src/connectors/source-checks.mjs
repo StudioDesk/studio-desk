@@ -139,33 +139,71 @@ export function testPhaseEvidence(log) {
 // Names of failed top-level tests, with their file and, when the TAP diagnostics carry one,
 // the start of their error, for the director's run story and automatic retries.
 export function failedTests(log) {
-  const lines = log.split(/\r?\n/),
-    failed = [];
-  lines.forEach((line, index) => {
-    const match = /^not ok \d+ - (.+)$/.exec(line);
-    if (!match || failed.length >= 20) return;
-    let file = '',
-      error = '';
-    for (let next = index + 1; next < lines.length && next < index + 80 && lines[next] !== '  ...'; next++) {
-      if (/^(?:(?:not ok|ok) \d+ - |# Subtest:)/.test(lines[next])) break;
-      const location = /^ {2}location: '(.+?):\d+:\d+'$/.exec(lines[next]);
-      if (location)
-        file = location[1]
-          .split(/[\\/]+/)
-          .at(-1)
-          .slice(0, 300);
-      const inline = /^ {2}error: (?!\|)(.+)$/.exec(lines[next]);
-      if (inline && !error) error = inline[1].replace(/^'(.*)'$/, '$1');
-      if (/^ {2}error: \|/.test(lines[next]) && !error) {
-        const block = [];
-        for (let more = next + 1; more < lines.length && /^ {4}/.test(lines[more]) && block.length < 8; more++)
-          block.push(lines[more].trim());
-        error = block.filter(Boolean).join(' ');
+  const reader = failedTestReader();
+  reader.push(log);
+  return reader.finish();
+}
+// The same failed tests, read from TAP output as it arrives (an editor's test run), so an early failure in a
+// long run is kept. It holds only the line in progress and the failure whose diagnostics are still open, never
+// the log. A failure's diagnostics are the up to 79 lines after it, until '  ...' or the next test or subtest;
+// an 'error: |' block takes up to 8 indented lines, which may run past them. push(text) takes each chunk;
+// finish() closes what is still open at the end and returns at most 20 entries.
+export function failedTestReader() {
+  const failed = [];
+  let partial = '',
+    open = null;
+  const endBlock = () => {
+    open.error = open.block.filter(Boolean).join(' ');
+    open.block = null;
+  };
+  const close = () => {
+    if (open.block) endBlock();
+    failed.push({ name: open.name, file: open.file, ...(open.error ? { error: open.error.slice(0, 600) } : {}) });
+    open = null;
+  };
+  const read = line => {
+    if (open?.block)
+      if (/^ {4}/.test(line)) {
+        open.block.push(line.trim());
+        if (open.block.length >= 8) endBlock();
+      } else endBlock();
+    if (open?.scanning) {
+      if (++open.lines >= 80 || line === '  ...' || /^(?:(?:not ok|ok) \d+ - |# Subtest:)/.test(line))
+        open.scanning = false;
+      else {
+        const location = /^ {2}location: '(.+?):\d+:\d+'$/.exec(line);
+        if (location)
+          open.file = location[1]
+            .split(/[\\/]+/)
+            .at(-1)
+            .slice(0, 300);
+        const inline = /^ {2}error: (?!\|)(.+)$/.exec(line);
+        if (inline && !open.error) open.error = inline[1].replace(/^'(.*)'$/, '$1');
+        if (/^ {2}error: \|/.test(line) && !open.error) open.block = [];
       }
     }
-    failed.push({ name: match[1].trim().slice(0, 300), file, ...(error ? { error: error.slice(0, 600) } : {}) });
-  });
-  return failed;
+    if (open && !open.scanning && !open.block) close();
+    const match = /^not ok \d+ - (.+)$/.exec(line);
+    if (match && failed.length < 20)
+      open = { name: match[1].trim().slice(0, 300), file: '', error: '', lines: 0, scanning: true, block: null };
+  };
+  return {
+    push(text) {
+      // Nothing after the twentieth failure changes the result.
+      if (failed.length >= 20) return;
+      const lines = String(text).split('\n');
+      lines[0] = partial + lines[0];
+      partial = lines.pop();
+      for (const line of lines) read(line.endsWith('\r') ? line.slice(0, -1) : line);
+    },
+    finish() {
+      // The last line has no line end, so it keeps a trailing carriage return, as splitting the whole text does.
+      if (failed.length < 20) read(partial);
+      partial = '';
+      if (open) close();
+      return failed.slice();
+    },
+  };
 }
 // The context documents the profile names, which the breakdown and reviews read.
 export function sourceContext(plan, destination) {

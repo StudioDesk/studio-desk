@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { subscriptionEnvironment, command as nativeCommand } from '../adapters/process.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
-import { copySource, sourcePlan, sourceTestArgs, testPhaseEvidence } from './source-checks.mjs';
+import { copySource, failedTestReader, sourcePlan, sourceTestArgs, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, profileOf } from './source-profile.mjs';
 import { installStep } from './package-installs.mjs';
 import { installTimeoutMs, testTimeoutMs } from './source-integration.mjs';
@@ -72,7 +72,7 @@ function composeCopy(runtime, a, output, directory) {
   return sourcePlan(directory, profileOf(scope.source));
 }
 
-function run(executable, args, { cwd, environment, timeoutMs, tests }) {
+function run(executable, args, { cwd, environment, timeoutMs, tests, reader }) {
   return new Promise(resolve => {
     const [bin, argv] = nativeCommand(executable, args);
     const child = spawn(bin, argv, { cwd, env: environment, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -81,7 +81,12 @@ function run(executable, args, { cwd, environment, timeoutMs, tests }) {
       stderr = '',
       timedOut = false;
     const keep = (text, chunk, limit) => (text + chunk).slice(-limit * 3);
-    child.stdout.on('data', chunk => (stdout = keep(stdout, chunk, outputLimit)));
+    child.stdout.setEncoding('utf8');
+    // Only the tail is kept, so the failed tests are read from every chunk as it arrives.
+    child.stdout.on('data', chunk => {
+      stdout = keep(stdout, chunk, outputLimit);
+      reader?.push(chunk);
+    });
     child.stderr.on('data', chunk => (stderr = keep(stderr, chunk, errorLimit)));
     const timer = setTimeout(() => {
       timedOut = true;
@@ -145,14 +150,18 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
     }
     const focused = { ...plan, command: { ...plan.command, args: sourceTestArgs(wanted.length ? wanted : suite) } },
       command = runtime.sourceCheckCommand || candidateTestCommand(focused, a.configuration);
-    const started = new Date().toISOString(),
+    const reader = failedTestReader(),
+      started = new Date().toISOString(),
       result = await run(command.executable, command.args, {
         cwd: directory,
         environment,
         timeoutMs: testTimeoutMs,
         tests,
+        reader,
       });
-    const { totals, failedTests } = testPhaseEvidence(result.stdout),
+    // The TAP totals are at the end, in the kept tail; an early failure in a long run is only in what the reader read.
+    const { totals } = testPhaseEvidence(result.stdout),
+      failedTests = reader.finish(),
       where = runtime.sourceCheckCommand ? 'as a protocol fixture' : sandboxLabel(a.configuration),
       summary = result.timedOut
         ? `The tests ran past their ${testTimeoutMs / 60000}-minute limit and were stopped.`
@@ -165,10 +174,17 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
       files: wanted,
       exitCode: result.code,
       totals,
+      failedTests,
     });
     if (a.employeeTestRuns.length > MAX_RUNS) a.employeeTestRuns.shift();
     runtime.store.updateAttempt(a);
-    runtime.store.event('employee_tests', a.taskId, a.id, `The employee ran the tests on its edits: ${summary}`);
+    const first = failedTests.length ? ` First failed: ${failedTests[0].name}` : '';
+    runtime.store.event(
+      'employee_tests',
+      a.taskId,
+      a.id,
+      `The employee ran the tests on its edits: ${summary}${first}`,
+    );
     return {
       exitCode: result.timedOut ? 1 : result.code,
       summary,

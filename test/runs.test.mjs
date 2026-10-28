@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { dashboardAttempt } from '../src/core/dashboard-state.mjs';
-import { failedTests } from '../src/connectors/source-checks.mjs';
+import { failedTestReader, failedTests } from '../src/connectors/source-checks.mjs';
 import { newRun } from '../src/core/graph.mjs';
 import { createStudio } from './model-free-studio.mjs';
 import {
@@ -434,8 +434,7 @@ test("attempt steps show the delivery mode each attempt recorded, never the empl
   assert.deepEqual(stepTexts('workspace'), texts, 'Changing current settings keeps the recorded labels.');
 });
 
-test('failed test names come from top-level TAP failures with their files', () => {
-  const log = [
+const subtestLog = [
     'TAP version 13',
     '# Subtest: keeps records',
     '    not ok 1 - nested detail',
@@ -446,15 +445,8 @@ test('failed test names come from top-level TAP failures with their files', () =
     'ok 2 - passes',
     'not ok 3 - has no location',
     '# tests 3',
-  ].join('\n');
-  assert.deepEqual(failedTests(log), [
-    { name: 'keeps records', file: 'records.test.mjs' },
-    { name: 'has no location', file: '' },
-  ]);
-});
-
-test('failed tests carry the start of their error from block and inline TAP diagnostics', () => {
-  const log = [
+  ],
+  blockErrorLog = [
     'not ok 1 - closes the store',
     '  ---',
     "  location: 'C:\\\\repo\\\\test\\\\stage.test.mjs:40:1'",
@@ -469,7 +461,18 @@ test('failed tests carry the start of their error from block and inline TAP diag
     '  ---',
     "  error: 'Store is closed.'",
     '  ...',
-  ].join('\n');
+  ];
+
+test('failed test names come from top-level TAP failures with their files', () => {
+  const log = subtestLog.join('\n');
+  assert.deepEqual(failedTests(log), [
+    { name: 'keeps records', file: 'records.test.mjs' },
+    { name: 'has no location', file: '' },
+  ]);
+});
+
+test('failed tests carry the start of their error from block and inline TAP diagnostics', () => {
+  const log = blockErrorLog.join('\n');
   assert.deepEqual(failedTests(log), [
     {
       name: 'closes the store',
@@ -478,6 +481,57 @@ test('failed tests carry the start of their error from block and inline TAP diag
     },
     { name: 'reads the journal', file: '', error: 'Store is closed.' },
   ]);
+});
+
+// An error block may run past a failure's 79 lines of diagnostics; an error line after them is not read, and the
+// end of the output closes a block still open.
+const windowLog = [
+  'not ok 1 - has an error block that runs past its diagnostics',
+  '  ---',
+  ...Array(77).fill('  duration_ms: 1'),
+  '  error: |-',
+  '    first line',
+  '    second line',
+  'not ok 2 - has its error after its diagnostics',
+  '  ---',
+  ...Array(78).fill('  duration_ms: 1'),
+  "  error: 'Too late.'",
+  'not ok 3 - ends the output with its error block open',
+  '  ---',
+  "  location: '/repository/test/end.test.mjs:9:1'",
+  '  error: |-',
+  '    Still open',
+];
+
+test("an editor's test run reads the same failed tests as the output arrives, in any chunks and line ends", () => {
+  assert.deepEqual(failedTests(windowLog.join('\n')), [
+    { name: 'has an error block that runs past its diagnostics', file: '', error: 'first line second line' },
+    { name: 'has its error after its diagnostics', file: '' },
+    { name: 'ends the output with its error block open', file: 'end.test.mjs', error: 'Still open' },
+  ]);
+  for (const lines of [blockErrorLog, subtestLog, windowLog])
+    for (const end of ['\n', '\r\n']) {
+      const log = lines.join(end),
+        expected = failedTests(log);
+      assert.deepEqual(expected, failedTests(lines.join('\n')), 'CRLF reads as LF.');
+      for (let size = 1; size <= log.length; size++) {
+        const reader = failedTestReader();
+        for (let at = 0; at < log.length; at += size) reader.push(log.slice(at, at + size));
+        assert.deepEqual(reader.finish(), expected, `${JSON.stringify(end)} line ends in chunks of ${size}`);
+      }
+    }
+});
+
+test('the failed-test reader keeps the first 20 failures', () => {
+  const log = Array.from({ length: 25 }, (_, index) => `not ok ${index + 1} - fails ${index + 1}`).join('\n'),
+    reader = failedTestReader();
+  for (const line of log.split(/(?<=\n)/)) reader.push(line);
+  const read = reader.finish();
+  assert.deepEqual(
+    read,
+    Array.from({ length: 20 }, (_, index) => ({ name: `fails ${index + 1}`, file: '' })),
+  );
+  assert.deepEqual(failedTests(log), read);
 });
 
 // Serialized contract from controller-stages' source-changes tests: one change

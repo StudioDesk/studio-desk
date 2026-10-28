@@ -1844,6 +1844,66 @@ test("a Claude editor runs the project's tests on its edits through the controll
   assert.equal(sourcePlan(c.root).sourceHash, before.sourceHash);
 });
 
+test("a Claude editor's test run leads with a failed test that its kept output no longer holds", async t => {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], { claudeBinary: claudeFixture }),
+    { store, runner } = c.app;
+  const org = store.organization();
+  Object.assign(
+    org.workers.find(worker => worker.id === store.task(c.taskId).workerId),
+    { provider: 'claude' },
+  );
+  store.setOrganization(org);
+  // While the editor edits, the project's tests fail once at the start of a long run; the candidate's run passes.
+  Object.defineProperty(runner, 'sourceCheckCommand', {
+    configurable: true,
+    get: () => ({
+      executable: process.execPath,
+      args: [tests, [...runner.active.values()].some(entry => entry.employeeTests) ? 'early-failure' : 'pass'],
+    }),
+  });
+  await c.start('run-tests');
+  const a = await c.wait(c.taskId);
+  const [focused, unknown] = JSON.parse(fs.readFileSync(path.join(a.outputFolder, '..', 'fixture-tests.json'), 'utf8'));
+  const failure = {
+    name: 'fails early in a long run',
+    file: 'early.test.mjs',
+    error: "Expected values to be strictly equal: 'lost' !== 'kept'",
+  };
+  // The failure leads the client's output, though the output tail it prints no longer holds it.
+  assert.equal(focused.status, 1, focused.stderr);
+  assert.ok(
+    focused.stdout.startsWith(`Failed: ${failure.name} (${failure.file})\n  ${failure.error}\n\n`),
+    focused.stdout.slice(0, 300),
+  );
+  assert.doesNotMatch(focused.stdout, /^not ok 1 - /m);
+  assert.match(focused.stdout, /^ok 5001 - keeps passing in a long run, 5000 of 5000$/m);
+  assert.equal(
+    focused.stdout.trimEnd().split('\n').at(-1),
+    '5000/5001 tests passed, 1 failed on your edits, as a protocol fixture.',
+  );
+  assert.equal(unknown.status, 2);
+  assert.deepEqual(
+    a.employeeTestRuns.map(run => [run.files, run.exitCode, run.totals.fail, run.failedTests]),
+    [[['test/bounded.test.mjs'], 1, 1, [failure]]],
+  );
+  assert.ok(
+    store
+      .events()
+      .some(
+        event =>
+          event.attempt_id === a.id &&
+          /: 5000\/5001 tests passed, 1 failed on your edits, as a protocol fixture\. First failed: fails early in a long run$/.test(
+            event.message,
+          ),
+      ),
+  );
+  assert.equal(fs.existsSync(path.join(c.options.directory, 'tests', a.id.slice(-8))), false, 'The copy is removed.');
+  // The candidate's own tests still decide.
+  const { report } = validateSourceChange(a, name => fs.readFileSync(path.join(a.outputFolder, name)));
+  assert.equal(report.passed, true);
+  assert.deepEqual(report.failedTests, []);
+});
+
 test('a newly registered model adapter edits source through the contract with no step changes', async t => {
   // A test-only model with text delivery and no CLI: it answers its own prompt.
   const registries = createRegistries(),
