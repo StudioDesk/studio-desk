@@ -1124,6 +1124,107 @@ test('a story stopped because its candidate tests have no sandbox needs the dire
   }
 });
 
+// A change story's failure as stagedChanges words it (src/connectors/source-changes.mjs): it ends with the
+// controller's standard advice, which mentions its own sandbox and checks blocked by the employee's.
+const stagedChangesFailure =
+  'Complete the bounded source change with staged source artifacts: the outcome is blocked, not completed; your check "npm test" failed: 2 tests failed in test/runs.test.mjs. The controller runs the full test suite in its own sandbox after you stop. Report a check your environment could not run (for example local HTTP tests blocked by your sandbox) as not-run, and use fail only for a defect in the change.';
+
+test('a failed attempt reads as failed, never as an employee or execution configuration that cannot run the work', () => {
+  // As the controller records it: the attempt's error becomes the task's reason, and a result that failed
+  // validation is not kept on the attempt.
+  const failedAttempt = (error, fields = {}, stateFields = {}) =>
+      explanationFixture(
+        { status: 'failed', reason: error, ...fields },
+        { status: 'failed', result: null, error },
+        stateFields,
+      ),
+    plain = value => JSON.parse(JSON.stringify(value));
+  assert.match(stagedChangesFailure, /sandbox/);
+  assert.match(stagedChangesFailure, /blocked by your sandbox/);
+
+  // At its limit the explanation says the last attempt failed, and keeps the director's override.
+  const limited = failedAttempt(stagedChangesFailure, { maxAttempts: 1 }),
+    atLimit = explain(limited);
+  assert.equal(atLimit.kind, 'attempt-limit');
+  assert.doesNotMatch(atLimit.reason, /configuration cannot run/);
+  assert.equal(
+    atLimit.reason,
+    'The last attempt failed, and automatic execution reached this assignment’s attempt limit.',
+  );
+  assert.equal(atLimit.action, 'Start assignment');
+  assert.equal(
+    atLimit.next,
+    'Use Start assignment for an explicit director attempt-limit override, or close this work.',
+  );
+  assert.ok(atLimit.details.includes(stagedChangesFailure), 'The attempt’s error is listed.');
+  assert.deepEqual(plain(context.StudioRuns.needsYou(limited).map(item => [item.taskId, item.kind, item.action])), [
+    ['E', 'attempt-limit', 'Start assignment'],
+  ]);
+  const run = buildRunStories({
+    ...limited,
+    tasks: [{ ...limited.tasks[0], workflowReference: { runId: 'failed-attempt', name: 'Failed attempt' } }],
+  }).find(story => story.taskIds.includes('E'));
+  assert.deepEqual(plain(run.needsYou.map(item => [item.taskId, item.action])), [['E', 'Start assignment']]);
+
+  // Under its limit it reads as invalid output, or as a used retry allowance when the policy retried it.
+  const under = explain(failedAttempt(stagedChangesFailure, { maxAttempts: 3 }));
+  assert.equal(under.kind, 'invalid-output');
+  assert.equal(under.action, 'Start assignment');
+  assert.ok(under.details.includes(stagedChangesFailure));
+  const retried = explain(
+    failedAttempt(
+      stagedChangesFailure,
+      { maxAttempts: 3, autoRetries: 1, autonomyNote: stagedChangesFailure },
+      { autonomy: { policy: { enabled: true, retries: 1 } } },
+    ),
+  );
+  assert.equal(retried.kind, 'retry-limit');
+  assert.ok(retried.details.includes(stagedChangesFailure));
+
+  // Its own words about configuration or isolation don't make it a configuration stop either.
+  for (const error of [
+    'Workflow output failed semantic validation: the returned execution configuration is not valid JSON.',
+    'The test isolation helper could not create its temporary folder.',
+  ])
+    for (const [maxAttempts, kind] of [
+      [1, 'attempt-limit'],
+      [3, 'invalid-output'],
+    ]) {
+      const e = explain(failedAttempt(error, { maxAttempts }));
+      assert.equal(e.kind, kind, error);
+      assert.notEqual(e.action, 'Execution settings', error);
+      assert.ok(e.details.includes(error), error);
+    }
+
+  // A blocked result's own issues, which the controller records as the reason, read as the employee's report.
+  const issue = 'The sandbox refused to start git, so I could not run the tests.',
+    blocked = explain(
+      explanationFixture(
+        { status: 'blocked', reason: issue },
+        { status: 'blocked', result: { outcome: 'blocked', summary: 'Tests not run.', checks: [], issues: [issue] } },
+      ),
+    );
+  assert.equal(blocked.kind, 'blocked-result');
+  assert.ok(blocked.details.includes(issue));
+
+  // The controller's refusal to start the work again still names the configuration, after a failed attempt too.
+  for (const reason of [
+    'Adapter lacks required capability: source-edit.',
+    candidateSandboxStops.workspace,
+    candidateSandboxStops.windowsMode,
+  ]) {
+    const e = explain(
+      explanationFixture(
+        { status: 'blocked', controllerWait: true, reason, maxAttempts: 3 },
+        { status: 'failed', result: null, error: stagedChangesFailure },
+      ),
+    );
+    assert.equal(e.kind, 'configuration', reason);
+    assert.equal(e.action, 'Execution settings', reason);
+    assert.ok(e.details.includes(reason), reason);
+  }
+});
+
 // A reset time later today reads as the local clock time alone.
 const tonight = () => {
   const at = new Date();

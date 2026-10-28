@@ -1101,10 +1101,21 @@
         'Set up the sandbox under Settings → Candidate tests, or choose No sandbox there.',
         'Candidate tests',
       );
+    // When an attempt stops, the controller records its own error, or its blocked result, as the reason, and a
+    // change story's error ends with advice that mentions sandboxes. Only a reason the controller recorded when
+    // it refused to start the work describes the configuration; a failed attempt reads as failed below.
+    const attemptText = [
+        attempt?.error,
+        attempt?.result?.summary,
+        ...(attempt?.result?.issues || []),
+        attempt?.result?.issues?.join(' '),
+      ].filter(Boolean),
+      refusal = !(task.status === 'failed' && attempt?.status === 'failed') && !attemptText.includes(blocker);
     if (
-      /adapter|capability|configuration|execution settings|isolation|sandbox|ownership|separation of duties|not installed|not available|not configured/i.test(
-        blocker,
-      ) ||
+      (refusal &&
+        /adapter|capability|configuration|execution settings|isolation|sandbox|ownership|separation of duties|not installed|not available|not configured/i.test(
+          blocker,
+        )) ||
       employee?.enabled === false ||
       state.taskKinds?.[view.kind]?.available === false ||
       state.adapters?.[provider]?.available === false
@@ -1212,7 +1223,9 @@
     if ((exhausted || limitNote) && !task.directorStart)
       return result(
         'attempt-limit',
-        'Automatic execution reached this assignment’s attempt limit.',
+        attempt?.status === 'failed'
+          ? 'The last attempt failed, and automatic execution reached this assignment’s attempt limit.'
+          : 'Automatic execution reached this assignment’s attempt limit.',
         'Use Start assignment for an explicit director attempt-limit override, or close this work.',
         'Start assignment',
       );
