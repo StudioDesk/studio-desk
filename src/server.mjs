@@ -52,6 +52,7 @@ import {
   sourceRoot,
 } from './connectors/source-projects.mjs';
 import { testsSentence } from './connectors/source-checks.mjs';
+import { testRecordStream, testRecordSummary } from './connectors/test-records.mjs';
 import { chosenTestSandbox, testSandboxes } from './adapters/source-test-sandbox.mjs';
 import { builtInSandbox } from './adapters/built-in-sandbox.mjs';
 import { applyAgentPermissions, approveCommands, commandRule, taskAutoMode } from './core/agent-permissions.mjs';
@@ -729,6 +730,23 @@ export function createStudio({
             'Cache-Control': 'no-store',
           });
           await pipeline(fs.createReadStream(file), res);
+          return;
+        }
+        // A measured test run's whole record, read-only (src/connectors/test-records.mjs): `run=attempt` (the
+        // default) is the attempt's own checks or candidate tests, `run=merge` its story's merge. The summary
+        // says whether the run kept one; /text sends it as inert plain text, read as it streams.
+        if (parts[3] === 'test-record' && (parts.length === 4 || (parts.length === 5 && parts[4] === 'text'))) {
+          const run = url.searchParams.get('run');
+          if (parts.length === 4) return json(res, await testRecordSummary(store, attempt, run));
+          const record = testRecordStream(store, attempt, run);
+          if (!record) fail('This run has no whole record.', 404);
+          res.writeHead(200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "sandbox; default-src 'none'",
+            'Cache-Control': 'no-store',
+          });
+          await pipeline(record, res);
           return;
         }
         return json(res, { ...attempt, phaseEvents: store.phaseEvents(attempt.id) });
