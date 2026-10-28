@@ -102,7 +102,7 @@ export class Runner {
       );
     }
     // An unacknowledged process may still be alive. Retain its reservations until reconciled.
-    for (const a of store.allAttempts().filter(x => ['running', 'stopping'].includes(x.status))) {
+    for (const a of store.liveAttempts().filter(x => ['running', 'stopping'].includes(x.status))) {
       this.adapters.find(a.contracts?.adapter?.id || a.provider)?.recover?.(this, a);
       a.status = 'interrupted';
       a.finishedAt = new Date().toISOString();
@@ -534,13 +534,8 @@ export class Runner {
       // before any slot, resource or integration it would wait for next.
       if (!reason && t.queued && this.store.project(recordProject(t)).dispatchPaused) reason = projectPaused;
       if (!reason) {
-        const count = this.store
-          .allAttempts()
-          .filter(
-            a =>
-              ['running', 'stopping', 'quarantined'].includes(a.status) ||
-              (a.status === 'interrupted' && !a.reconciledAt),
-          ).length;
+        // The live attempts only, through the status index: this runs for every waiting task on every pass.
+        const count = this.store.liveAttempts().length;
         if (count >= this.store.organization().maxParallel) reason = 'Waiting for a studio execution slot.';
         const execution = this.workflows.stageView(t),
           w = this.store.organization().workers.find(w => w.id === execution.workerId);
@@ -803,15 +798,7 @@ export class Runner {
     this.applyMetadata(a, definition, prepared);
     try {
       store.tx(() => {
-        if (
-          store
-            .allAttempts()
-            .filter(
-              x =>
-                ['running', 'stopping', 'quarantined'].includes(x.status) ||
-                (x.status === 'interrupted' && !x.reconciledAt),
-            ).length >= org.maxParallel
-        )
+        if (store.liveAttempts().length >= org.maxParallel)
           throw Object.assign(new Error('Studio concurrency limit reached.'), { wait: true });
         try {
           store.claim(['employee:' + worker.id, ...resources], id);

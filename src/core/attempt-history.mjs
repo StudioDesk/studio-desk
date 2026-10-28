@@ -493,8 +493,9 @@ export function historyLineage(store, task, currentAttemptId = null) {
         return false;
       }
     },
+    // Only the records that name this work are read: a check of the whole history ran on every attempt's start.
     reviews = store
-      .allAttempts()
+      .attemptsNaming([...worked])
       .filter(
         a =>
           finished(a) &&

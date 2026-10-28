@@ -145,8 +145,10 @@ export function cleanSourceWorktrees(runtime, parent) {
 // controller's records. A code story's setup removes them in its own process (source-setup.mjs).
 export function leftoverWorktrees(runtime, parent) {
   if (!fs.existsSync(parent)) return { worktrees: [], repositories: [] };
-  const kept = new Set();
-  for (const attempt of runtime.store.allAttempts()) {
+  const kept = new Set(),
+    store = runtime.store;
+  // Read through the store's lookups, not the whole history: every code story's setup asks.
+  for (const attempt of [...store.liveAttempts(), ...[...runtime.active.values()].map(entry => entry.attempt)])
     if (
       attempt.sourceWorktree &&
       (runtime.active.has(attempt.id) ||
@@ -154,11 +156,13 @@ export function leftoverWorktrees(runtime, parent) {
         (attempt.status === 'interrupted' && !attempt.reconciledAt))
     )
       kept.add(path.basename(attempt.sourceWorktree.path));
-    // An integration's worktree, and a carry's (1.1 step 4), stay while they run or wait to be reconciled.
-    for (const journal of [attempt.sourceIntegration, ...(attempt.sourceCarries || [])])
-      if (journal?.worktree && ['verifying', 'committing', 'needs-reconciliation'].includes(journal.state))
-        kept.add(path.basename(journal.worktree));
-  }
+  // An integration's worktree, and a carry's (1.1 step 4), stay while they run or wait to be reconciled.
+  const holding = ['verifying', 'committing', 'needs-reconciliation'];
+  for (const journal of [
+    ...store.integrationJournals(...holding).map(record => record.sourceIntegration),
+    ...store.carryJournals().flatMap(record => record.sourceCarries),
+  ])
+    if (journal?.worktree && holding.includes(journal.state)) kept.add(path.basename(journal.worktree));
   // So do a release's two worktrees, its draft and its verification (1.1 step 5), recorded on its milestone.
   for (const project of runtime.store.projects())
     for (const milestone of runtime.store.setting('milestones:' + project.id) || []) {

@@ -609,7 +609,7 @@ export class Autonomy {
     if (!marker) return;
     this.store.putSetting(RESTART, null);
     const fresh = Date.now() - Date.parse(marker.requestedAt) < RESTART_WINDOW_MS,
-      clean = !this.store.allAttempts().some(a => a.status === 'interrupted' && !a.reconciledAt);
+      clean = !this.store.liveAttempts().some(a => a.status === 'interrupted');
     if (!fresh || !clean) {
       this.store.event('restart_planned', null, null, 'Planned restart found stale or interrupted work; not resuming.');
       return;

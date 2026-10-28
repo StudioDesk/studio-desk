@@ -245,14 +245,7 @@ export async function editProjectProfile(store, projectId, runtime, { expectedRe
     const { resources } = projectSource(store, projectId);
     if (
       store.leases().some(lease => resources.includes(lease.resource)) ||
-      store
-        .allAttempts()
-        .some(
-          attempt =>
-            recordProject(attempt) === projectId &&
-            (['running', 'stopping', 'quarantined'].includes(attempt.status) ||
-              (attempt.status === 'interrupted' && !attempt.reconciledAt)),
-        )
+      store.liveAttempts().some(attempt => recordProject(attempt) === projectId)
     )
       throw Object.assign(
         new Error('Wait until nothing in this project is running, then save the repository settings.'),

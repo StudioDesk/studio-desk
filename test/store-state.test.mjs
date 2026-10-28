@@ -9,6 +9,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { createStudio } from './model-free-studio.mjs';
 import { dashboardAttempt } from '../src/core/dashboard-state.mjs';
+import { leftoverWorktrees } from '../src/connectors/source-worktrees.mjs';
 
 test("the dashboard state reads every attempt's phase events with one query, whatever the attempt count", async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-state-phases-')),
@@ -780,6 +781,8 @@ test("a task's attempt summaries read its own attempts' phases through their ind
     .all()
     .map(row => `${row.tableName}.${row.name}`);
   assert.deepEqual(indexes, [
+    'attempts.attempts_by_integration',
+    'attempts.attempts_by_status',
     'attempts.attempts_by_task',
     'events.events_by_attempt',
     'events.events_by_kind',
@@ -822,4 +825,162 @@ test("a task's attempt summaries read its own attempts' phases through their ind
   assert.equal(typeof one[0].executionTiming.durationMs, 'number', 'Its timing still comes from its own phases.');
   assert.match(plans[0], /USING INDEX events_by_attempt/);
   assert.match(plans[1], /USING INDEX events_by_kind/);
+});
+
+test("a story's start reads the live attempts, the integrations and the reviews of its work without parsing the whole history", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-state-lookups-')),
+    app = createStudio({ directory, port: 0 }),
+    store = app.store;
+  t.after(async () => {
+    await app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  // October 28: the scheduler's slot count, a code story's setup and its history read every attempt with its
+  // instructions, and with the live history each story's start froze the controller for seconds.
+  const attempt = (id, fields) => ({
+    id,
+    taskId: `task-${id}`,
+    projectId: 'project-legacy',
+    workerId: 'W-01',
+    artifacts: [],
+    ...fields,
+  });
+  for (const record of [
+    attempt('running', { status: 'running' }),
+    attempt('stopping', { status: 'stopping' }),
+    attempt('quarantined', { status: 'quarantined' }),
+    attempt('interrupted', { status: 'interrupted' }),
+    attempt('reconciled', { status: 'interrupted', reconciledAt: '2026-10-28T00:00:00.000Z' }),
+    attempt('accepted', {
+      status: 'accepted',
+      sourceIntegration: { id: 'integration-1', state: 'integrated', root: 'r' },
+    }),
+    attempt('committing', { status: 'accepted', sourceIntegration: { state: 'committing', worktree: 'w/i' } }),
+    attempt('carried', {
+      status: 'accepted',
+      sourceIntegration: { state: 'integrated', root: 'other' },
+      sourceCarries: [{ id: 'carry-1', state: 'verifying', worktree: 'w/c' }],
+    }),
+    attempt('review', { status: 'accepted', inputReferences: [{ taskId: 'task-running', attemptId: 'running' }] }),
+    attempt('unrelated', { status: 'accepted', inputReferences: [{ taskId: 'task-x', attemptId: 'running-2' }] }),
+  ])
+    store.insertAttempt(record, { text: 'Fixture instructions', hash: 'fixture' });
+  const parse = JSON.parse,
+    prepare = store.db.prepare.bind(store.db),
+    plans = [];
+  let snapshots = 0;
+  JSON.parse = text => {
+    if (typeof text === 'string' && text.includes('Fixture instructions')) snapshots++;
+    return parse(text);
+  };
+  store.db.prepare = sql => {
+    if (sql.includes('json_extract') && sql.includes('FROM attempts'))
+      plans.push(
+        prepare(`EXPLAIN QUERY PLAN ${sql}`)
+          .all(...(sql.includes('IN (?') ? ['committing'] : sql.includes('= ?') ? ['integrated'] : []))
+          .map(row => row.detail)
+          .join('; '),
+      );
+    return prepare(sql);
+  };
+  let live, integrated, holding, carries;
+  try {
+    live = store.liveAttempts();
+    integrated = store.integrationJournals('integrated');
+    holding = store.integrationJournals('verifying', 'committing', 'needs-reconciliation');
+    carries = store.carryJournals();
+  } finally {
+    JSON.parse = parse;
+    delete store.db.prepare;
+  }
+  assert.equal(snapshots, 0, 'No instructions are read for the slot count or the journals.');
+  assert.deepEqual(
+    live.map(record => record.id),
+    ['running', 'stopping', 'quarantined', 'interrupted'],
+  );
+  assert.deepEqual(
+    integrated.map(record => [record.id, record.taskId, record.sourceIntegration.root]),
+    [
+      ['accepted', 'task-accepted', 'r'],
+      ['carried', 'task-carried', 'other'],
+    ],
+  );
+  assert.deepEqual(
+    holding.map(record => record.sourceIntegration.worktree),
+    ['w/i'],
+  );
+  assert.deepEqual(
+    carries.map(record => [record.id, record.sourceCarries.map(carry => carry.worktree)]),
+    [['carried', ['w/c']]],
+  );
+  for (const plan of plans.slice(0, 3)) assert.match(plan, /USING INDEX attempts_by_(status|integration)/);
+  // A review is found by the attempt it names, with its instructions, and nothing that names only a similar ID.
+  const naming = store.attemptsNaming(['running']);
+  assert.deepEqual(naming.map(record => record.id).sort(), ['review', 'running']);
+  assert.equal(naming.find(record => record.id === 'review').instructions.hash, 'fixture');
+  assert.deepEqual(store.attemptsNaming([]), []);
+  // More IDs than one query takes are read in turns, each record once.
+  const many = Array.from({ length: 120 }, (_, i) => `missing-${i}`).concat(['running', 'review']);
+  assert.deepEqual(
+    store
+      .attemptsNaming(many)
+      .map(record => record.id)
+      .sort(),
+    ['review', 'running'],
+  );
+});
+
+test("a code story's setup keeps the worktrees of live work and of integrations and carries in progress, read through the lookups", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-state-worktrees-')),
+    app = createStudio({ directory, port: 0 }),
+    store = app.store,
+    parent = path.join(directory, 'worktrees');
+  t.after(async () => {
+    await app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const attempt = (id, fields) => ({
+    id,
+    taskId: `task-${id}`,
+    projectId: 'project-legacy',
+    workerId: 'W-01',
+    artifacts: [],
+    ...fields,
+  });
+  for (const record of [
+    attempt('quarantined', { status: 'quarantined', sourceWorktree: { path: path.join(parent, 'q') } }),
+    attempt('interrupted', { status: 'interrupted', sourceWorktree: { path: path.join(parent, 'u') } }),
+    attempt('reconciled', {
+      status: 'interrupted',
+      reconciledAt: '2026-10-28T00:00:00.000Z',
+      sourceWorktree: { path: path.join(parent, 'r') },
+    }),
+    attempt('settled', { status: 'accepted', sourceWorktree: { path: path.join(parent, 's') } }),
+    attempt('committing', {
+      status: 'accepted',
+      sourceIntegration: { state: 'committing', worktree: path.join(parent, 'i') },
+    }),
+    attempt('integrated', {
+      status: 'accepted',
+      sourceIntegration: { state: 'integrated', worktree: path.join(parent, 'd') },
+    }),
+    attempt('carrying', {
+      status: 'accepted',
+      sourceIntegration: { state: 'integrated' },
+      sourceCarries: [
+        { id: 'carry-1', state: 'carried', worktree: path.join(parent, 'c1') },
+        { id: 'carry-2', state: 'needs-reconciliation', worktree: path.join(parent, 'c2') },
+      ],
+    }),
+  ])
+    store.insertAttempt(record, { text: 'Fixture', hash: 'fixture' });
+  for (const name of ['q', 'u', 'r', 's', 'i', 'd', 'c1', 'c2', 'a', 'x'])
+    fs.mkdirSync(path.join(parent, name), { recursive: true });
+  // A running attempt the controller holds is kept from its own record, before or after the store has it.
+  const running = attempt('running', { status: 'running', sourceWorktree: { path: path.join(parent, 'a') } }),
+    listed = leftoverWorktrees(
+      { store, active: new Map([[running.id, { attempt: running }]]), sourceChangeRoot: directory },
+      parent,
+    );
+  assert.deepEqual(listed.worktrees.map(worktree => path.basename(worktree.path)).sort(), ['c1', 'd', 'r', 's', 'x']);
 });

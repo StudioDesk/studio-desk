@@ -766,9 +766,8 @@ export function sourceStoryIntegrated(task) {
 // integrated story counts, whichever breakdown, review or project it came from.
 function integratedSourceChanges(store, root) {
   const files = new Map();
-  for (const attempt of store.allAttempts()) {
-    const journal = attempt.sourceIntegration;
-    if (journal?.state === 'integrated' && journal.root === root)
+  for (const { sourceIntegration: journal } of store.integrationJournals('integrated')) {
+    if (journal.root === root)
       for (const change of journal.changes || [])
         files.set(change.path, (files.get(change.path) || new Set()).add(change.integratedHash || change.afterHash));
   }
@@ -1061,7 +1060,9 @@ export function changeScope(store, task, root, { dryRun = false } = {}) {
     throw new Error('Source work no longer matches its accepted proposal.');
   const report = JSON.parse(fs.readFileSync(artifactPath(store, review, proposalReference.path))),
     proposal = report.proposal;
-  const checked = store.allAttempts().find(attempt => attempt.id === review.sourceReview?.attemptId);
+  const checked =
+    review.sourceReview?.attemptId &&
+    store.attempts(review.sourceReview.taskId).find(attempt => attempt.id === review.sourceReview.attemptId);
   if (
     !checked?.sourceCheck ||
     checked.assignment?.kind !== 'studio-development:checks' ||

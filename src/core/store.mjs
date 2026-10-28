@@ -71,10 +71,15 @@ export class Store {
     // event such as every phase, and a task's attempts. Without them every read scanned the whole history, log lines
     // included, and grew slower each day. Adding them changes no record; the first start after they arrive builds
     // them once.
+    // Attempts by their status and by their integration's state (October 28): the scheduler counts the running
+    // attempts on every pass and a code story's start reads what integrations committed, and parsing every recorded
+    // attempt for that (a code story's record is about 190 KB) froze the controller for seconds as each story started.
     this.db.exec(`CREATE INDEX IF NOT EXISTS events_by_attempt ON events (attempt_id, seq);
       CREATE INDEX IF NOT EXISTS events_by_task ON events (task_id, seq);
       CREATE INDEX IF NOT EXISTS events_by_kind ON events (kind, seq);
-      CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts (task_id);`);
+      CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts (task_id);
+      CREATE INDEX IF NOT EXISTS attempts_by_status ON attempts (json_extract(data, '$.status'));
+      CREATE INDEX IF NOT EXISTS attempts_by_integration ON attempts (json_extract(data, '$.sourceIntegration.state'));`);
     // Every write raises the version and calls onChange with what changed (MP-026): the dashboard's
     // cache tags and change events follow it, and the scheduler runs on it. Each event also reaches
     // onEvent, so a tab watching an attempt receives its lines. A log line is not a change: the compact
@@ -267,11 +272,65 @@ export class Store {
       .all(taskId)
       .map(r => ({ ...JSON.parse(r.data), instructions: JSON.parse(r.snapshot) }));
   }
+  // Every recorded attempt with its instructions: a whole read of the history, for startup and rare actions. Work done
+  // while stories start or the scheduler runs reads what it needs through the lookups below instead.
   allAttempts() {
     return this.db
       .prepare('SELECT snapshot,data FROM attempts ORDER BY rowid')
       .all()
       .map(r => ({ ...JSON.parse(r.data), instructions: JSON.parse(r.snapshot) }));
+  }
+  // The attempts that hold or may hold their work's resources: running, stopping, quarantined, or interrupted and not
+  // yet reconciled. Read through the status index; their instructions are not read.
+  liveAttempts() {
+    return this.db
+      .prepare(
+        `SELECT data FROM attempts
+        WHERE json_extract(data, '$.status') IN ('running', 'stopping', 'quarantined', 'interrupted') ORDER BY rowid`,
+      )
+      .all()
+      .map(r => JSON.parse(r.data))
+      .filter(a => a.status !== 'interrupted' || !a.reconciledAt);
+  }
+  // Each attempt's source integration journal in one of these states, with the attempt and task it belongs to: only
+  // the journal is read, through the integration index.
+  integrationJournals(...states) {
+    return this.db
+      .prepare(
+        `SELECT id, task_id, json_extract(data, '$.sourceIntegration') AS journal FROM attempts
+        WHERE json_extract(data, '$.sourceIntegration.state') IN (${states.map(() => '?').join(', ')}) ORDER BY rowid`,
+      )
+      .all(...states)
+      .map(r => ({ id: r.id, taskId: r.task_id, sourceIntegration: JSON.parse(r.journal) }));
+  }
+  // The carry journals of the reviews that recorded any (1.1 step 4), with their attempt and task: only the journals
+  // are read, from the records that name the field.
+  carryJournals() {
+    return this.db
+      .prepare(
+        `SELECT id, task_id, json_extract(data, '$.sourceCarries') AS carries FROM attempts
+        WHERE instr(data, '"sourceCarries"') > 0 ORDER BY rowid`,
+      )
+      .all()
+      .map(r => ({ id: r.id, taskId: r.task_id, sourceCarries: JSON.parse(r.carries || '[]') }))
+      .filter(r => Array.isArray(r.sourceCarries) && r.sourceCarries.length);
+  }
+  // The attempts whose record names one of these attempt IDs (a review or check of that work, which takes it as an
+  // input), found by its text before any record is parsed. Callers check the relation itself.
+  attemptsNaming(ids) {
+    const found = [];
+    for (let start = 0; start < ids.length; start += 50) {
+      const chunk = ids.slice(start, start + 50);
+      found.push(
+        ...this.db
+          .prepare(
+            `SELECT snapshot, data FROM attempts WHERE ${chunk.map(() => 'instr(data, ?) > 0').join(' OR ')} ORDER BY rowid`,
+          )
+          .all(...chunk.map(id => JSON.stringify(id)))
+          .map(r => ({ ...JSON.parse(r.data), instructions: JSON.parse(r.snapshot) })),
+      );
+    }
+    return [...new Map(found.map(a => [a.id, a])).values()];
   }
   attempt(id) {
     const r = this.db.prepare('SELECT snapshot,data FROM attempts WHERE id=?').get(id);

@@ -450,7 +450,13 @@ test('leftover worktrees are removed through the repository each belongs to', t 
   cleanSourceWorktrees(
     {
       // No attempts, and no milestones whose releases keep a worktree (1.1 step 5).
-      store: { allAttempts: () => [], projects: () => [], setting: () => undefined },
+      store: {
+        liveAttempts: () => [],
+        integrationJournals: () => [],
+        carryJournals: () => [],
+        projects: () => [],
+        setting: () => undefined,
+      },
       active: new Map(),
       sourceChangeRoot: first.root,
     },

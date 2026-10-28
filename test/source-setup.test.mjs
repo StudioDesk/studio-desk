@@ -195,7 +195,13 @@ test('the setup process leaves a listed worktree that was made again under its n
   // The controller lists both as left by settled work (no attempt or release keeps either).
   const listed = leftoverWorktrees(
     {
-      store: { allAttempts: () => [], projects: () => [], setting: () => undefined },
+      store: {
+        liveAttempts: () => [],
+        integrationJournals: () => [],
+        carryJournals: () => [],
+        projects: () => [],
+        setting: () => undefined,
+      },
       active: new Map(),
       sourceChangeRoot: c.root,
     },
