@@ -197,8 +197,30 @@ test("a story's carries read carried forward or brought back, and one waiting fo
     }),
   );
   controller.releases = releases;
-  // The idea is still open, so the page's records hold its stories and their titles.
-  controller.runs = [{ id: 'run-browser', createdAt: '2026-10-27T05:00:00Z' }];
+  // The idea is still open, so the page's records hold its stories and their titles. Its run is whole, as the
+  // controller keeps one: the sidebar builds the idea from its nodes once the records load, and they load before the
+  // releases show, since the page asks for those only once the project's shell names a code project.
+  controller.runs = [
+    {
+      id: 'run-browser',
+      createdAt: '2026-10-27T05:00:00Z',
+      brief: 'Keep the folder browser quick',
+      workflow: { id: 'workflow-1', name: 'Source checks and review', version: 3 },
+      revisions: [{ revision: 1, at: '2026-10-27T05:00:00Z', reason: 'created' }],
+      nodes: [
+        {
+          taskId: 'T-cache',
+          key: 'T-cache',
+          kind: 'studio-development:change',
+          title: 'Cache folder listings',
+          workerId: 'W-1',
+          dependencies: [],
+          revision: 1,
+        },
+      ],
+      archive: { archived: false },
+    },
+  ];
   controller.tasks = [
     taskFixture('T-cache', {
       title: 'Cache folder listings',
@@ -371,8 +393,34 @@ test('a line is retired after asking, and a retired line is maintained again fro
   ]);
 });
 
-test('a project without the source workflow says it has no releases', async () => {
+test('a project without the source workflow says releases are for code projects, and points back to Today', async () => {
   controller.releases = undefined;
+  controller.shell.organizationConfiguration = { taskKinds: ['general:plan'] };
   open('/p/project-x/releases');
-  expect(await screen.findByText('Only a project on the source workflow has releases.')).toBeTruthy();
+  expect(await screen.findByText(/Releases are for code projects\./)).toBeTruthy();
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Releases');
+  expect(screen.getByRole('link', { name: 'Back to Today' }).getAttribute('href')).toBe('/p/project-x');
+  expect(screen.queryByText('Only a project on the source workflow has releases.')).toBeNull();
+  // It never asks the controller for releases it cannot have.
+  expect(controller.reads()).not.toContain('/api/projects/project-x/releases');
+});
+
+test("a code project the controller has no releases for shows the controller's reason", async () => {
+  controller.releases = { available: false, reason: 'This project has no repository.' };
+  open('/p/project-x/releases');
+  expect(await screen.findByText('This project has no repository.')).toBeTruthy();
+  expect(screen.queryByText(/Releases are for code projects/)).toBeNull();
+  expect(controller.reads()).toContain('/api/projects/project-x/releases');
+});
+
+test('a project whose shell cannot be read still shows its releases, as the controller answers them', async () => {
+  const answer = globalThis.fetch;
+  vi.stubGlobal('fetch', (url: string, options?: RequestInit) =>
+    url.split('?')[0] === '/api/projects/project-x/shell'
+      ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'The shell could not be read.' }) })
+      : answer(url, options),
+  );
+  open('/p/project-x/releases');
+  expect(await screen.findByRole('region', { name: 'release/1.0' })).toBeTruthy();
+  expect(screen.queryByText(/Releases are for code projects/)).toBeNull();
 });

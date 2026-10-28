@@ -21,18 +21,37 @@ import {
 import { carryWords } from './carries';
 import { Dialog } from './design/dialog';
 import { Icon } from './design/icons';
+import { isCodeProject } from './frame';
 import { Heading } from './layout';
-import { useStudio } from './records';
+import { useShell, useStudio } from './records';
 import { byVersion, runOfTask, StoryReleaseChip } from './release-chip';
 import type { StudioState } from './studio-runs';
 import { useToast } from './toast';
 import { useNarrow } from './use-narrow';
 
+// Only a code project has releases. The page asks for them once the project's shell says it is one, so a project of
+// another kind never does: its address points back to the project's Today page instead. The shell alone decides, not
+// the live records, and a shell that cannot be read leaves the page to show whatever the controller answers.
 export function ReleasesPage({ projectId, milestone }: { projectId: string; milestone?: string }) {
+  const shell = useShell(projectId),
+    code = shell.data ? isCodeProject(shell.data) : undefined;
   const { data, error } = useQuery({
     queryKey: ['releases', projectId],
     queryFn: ({ signal }) => getJSON<ReleaseOverview>(releasesUrl(projectId), signal),
+    enabled: code ?? shell.isError,
   });
+  if (code === false)
+    return (
+      <>
+        <Heading title="Releases" lead="Release lines and milestones, for a project on a git repository." />
+        <p className="sd-meta">
+          Releases are for code projects.{' '}
+          <Link to="/p/$projectId" params={{ projectId }}>
+            Back to Today
+          </Link>
+        </p>
+      </>
+    );
   if (error) return <p role="alert">The releases could not be loaded: {error.message}</p>;
   if (!data)
     return (

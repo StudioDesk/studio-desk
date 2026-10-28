@@ -76,6 +76,31 @@ test("a project's pages share one frame: the project rail, its pages and the con
   expect(localStorage.getItem('studio-next-project')).toBe('project-x');
 });
 
+test("a general-work project's pages leave out Releases, which only a code project has", async () => {
+  controller.shell.organizationConfiguration = { taskKinds: ['general:plan'] };
+  open('/p/project-x/board');
+  // The project's kind shows once its records have loaded, and the pages follow its shell.
+  expect(await screen.findByText('General work')).toBeTruthy();
+  const nav = within(screen.getByRole('navigation', { name: 'Main' }));
+  expect(nav.getAllByRole('link').map(link => [link.textContent, link.getAttribute('href')])).toEqual([
+    ['Today', '/p/project-x'],
+    ['Ideas', '/p/project-x/runs'],
+    ['Board', '/p/project-x/board'],
+    ['Agents', '/p/project-x/agents'],
+    ['Project settings', '/p/project-x/settings'],
+  ]);
+  cleanup();
+  // A project whose intake takes source changes is a code project too, with its label and Releases.
+  controller.shell.organizationConfiguration = { taskKinds: ['studio-development:change'] };
+  open('/p/project-x/board');
+  expect(await screen.findByText('Code · git repository')).toBeTruthy();
+  expect(
+    within(screen.getByRole('navigation', { name: 'Main' }))
+      .getByRole('link', { name: 'Releases' })
+      .getAttribute('href'),
+  ).toBe('/p/project-x/releases');
+});
+
 test('a story belongs to its idea, and the teams pages to the agents', async () => {
   open('/p/project-x/agents/teams');
   const nav = within(await screen.findByRole('navigation', { name: 'Main' }));

@@ -50,10 +50,16 @@ export function initials(name: string) {
   const letters = words.length > 1 ? words[0]!.charAt(0) + words[1]!.charAt(0) : (words[0] ?? '?').slice(0, 2);
   return letters.charAt(0).toUpperCase() + letters.slice(1).toUpperCase();
 }
+// A code project works on a git repository, and only it has releases: its intake takes source breakdowns or changes.
+// The project's shell says, so its live records need not have loaded.
+export function isCodeProject(project: Pick<StudioState, 'organizationConfiguration'>) {
+  const kinds = project.organizationConfiguration?.taskKinds ?? [];
+  return kinds.includes('studio-development:breakdown') || kinds.includes('studio-development:change');
+}
 // What kind of work the project does, from the intake it has.
 export function projectKind(state: StudioState) {
   const kinds = state.organizationConfiguration?.taskKinds ?? [];
-  if (kinds.includes('studio-development:breakdown')) return 'Code · git repository';
+  if (isCodeProject(state)) return 'Code · git repository';
   if (kinds.includes('general:plan')) return 'General work';
   return state.project.legacy ? 'Game prototype' : null;
 }
@@ -315,19 +321,22 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
             </kbd>
           </button>
           <nav aria-label="Main">
-            {pages.map(item => (
-              <a
-                key={item.id}
-                className="sd-navlink"
-                href={href(item.path)}
-                aria-current={page === item.id ? 'page' : undefined}
-                onClick={go(href(item.path))}
-              >
-                <Icon name={item.icon} />
-                {item.label}
-                {item.id === 'today' && count}
-              </a>
-            ))}
+            {/* Releases is for a code project; the list stays whole until the shell says, so it never flickers. */}
+            {pages
+              .filter(item => item.id !== 'releases' || !shell || isCodeProject(shell))
+              .map(item => (
+                <a
+                  key={item.id}
+                  className="sd-navlink"
+                  href={href(item.path)}
+                  aria-current={page === item.id ? 'page' : undefined}
+                  onClick={go(href(item.path))}
+                >
+                  <Icon name={item.icon} />
+                  {item.label}
+                  {item.id === 'today' && count}
+                </a>
+              ))}
           </nav>
           {state && runId && <IdeasHere projectId={projectId} state={state} runId={decodeURIComponent(runId)} />}
           <div className="sd-status">
