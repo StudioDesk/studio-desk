@@ -235,3 +235,99 @@ test('auto mode may answer only a recorded choice inside the work, with a recomm
   assert.equal(answerableInAutoMode({ ...asked({}), scopeRequest: { files: ['a'] } }), false);
   assert.equal(answerableInAutoMode({ question: { problem: 'Unreadable.' } }), false);
 });
+
+test("an answer sets the work's auto mode from then on, as the message box's Auto mode does", async t => {
+  const c = await setup(t),
+    id = await c.work('Auto mode from the answer', `ask ${JSON.stringify(question())}`),
+    attempt = await c.asked(id);
+  const refused = await c.request(`/api/tasks/${id}/answer`, {
+    projectId: c.projectId,
+    attemptId: attempt.id,
+    option: 0,
+    autoMode: 'yes',
+  });
+  assert.ok(refused.status >= 400);
+  assert.match(refused.data.error, /Auto mode must be true, false or null/);
+  const answered = await c.request(`/api/tasks/${id}/answer`, {
+    projectId: c.projectId,
+    attemptId: attempt.id,
+    option: 0,
+    autoMode: true,
+  });
+  assert.equal(answered.status, 202, JSON.stringify(answered.data));
+  assert.equal(answered.data.answer.autoMode, true);
+  assert.equal(c.store.task(id).autoMode, true);
+  const next = await c.reviewed(id);
+  assert.equal(next.configuration.permissions.mode, 'auto', 'The next attempt runs in auto mode.');
+});
+
+test("the director changes auto mode's answer: work in Review is sent back, and running work stops and starts again", async t => {
+  const c = await setup(t),
+    reviewed = await c.work('Change in review', `ask ${JSON.stringify(question())}`, { autoMode: true });
+
+  // In Review: auto mode answered, its work came back; the director's answer sends it back as Request revision does.
+  const first = await c.reviewed(reviewed),
+    asking = c.store.task(reviewed).answers[0].attemptId;
+  assert.equal(c.store.task(reviewed).answers[0].by.type, 'auto-mode');
+  const wrong = await c.request(`/api/tasks/${reviewed}/change-answer`, {
+    projectId: c.projectId,
+    attemptId: 'attempt-other',
+    option: 1,
+  });
+  assert.ok(wrong.status >= 400);
+  assert.match(wrong.data.error, /Only auto mode's latest answer can be changed/);
+  const changed = await c.request(`/api/tasks/${reviewed}/change-answer`, {
+    projectId: c.projectId,
+    attemptId: asking,
+    option: 1,
+    text: 'The steps matter more here.',
+  });
+  assert.equal(changed.status, 202, JSON.stringify(changed.data));
+  assert.equal(changed.data.answer.replaces, 'auto-mode');
+  assert.equal(changed.data.answer.by.type, 'director');
+  assert.equal(c.store.attempt(first.id).status, 'revision_requested');
+  assert.ok(c.store.events(asking).some(event => event.kind === 'answer_changed'));
+  const again = await c.until(() => {
+    const attempt = c.store.task(reviewed).status === 'review' && c.store.attempt(c.store.task(reviewed).lastAttemptId);
+    return attempt && attempt.id !== first.id && attempt;
+  }, 'the reworked attempt in review');
+  assert.match(
+    again.assignment.direction,
+    new RegExp(`The director changed auto mode's answer to the question of ${asking}`),
+  );
+  assert.match(again.assignment.direction, /Auto mode had chosen: Outcome first\./);
+  assert.match(again.assignment.direction, /Chosen: Steps first\./);
+  // The director's answer is now the latest, so there is nothing of auto mode's left to change.
+  const twice = await c.request(`/api/tasks/${reviewed}/change-answer`, {
+    projectId: c.projectId,
+    attemptId: asking,
+    option: 0,
+  });
+  assert.ok(twice.status >= 400);
+
+  // Running: the attempt working on auto mode's answer is stopped, and the work starts again with the director's. The
+  // same agent does both, one attempt at a time, so this work starts once the first is back in Review.
+  const running = await c.work('Change while running', `write hang.next yes\nask ${JSON.stringify(question())}`, {
+    autoMode: true,
+  });
+  const hanging = await c.until(() => {
+    const task = c.store.task(running),
+      attempt = task.lastAttemptId && c.store.attempt(task.lastAttemptId);
+    return task.answers?.length && attempt?.status === 'running' && attempt;
+  }, 'the attempt on auto mode’s answer running');
+  const stopped = await c.request(`/api/tasks/${running}/change-answer`, {
+    projectId: c.projectId,
+    attemptId: c.store.task(running).answers[0].attemptId,
+    option: 1,
+  });
+  assert.equal(stopped.status, 202, JSON.stringify(stopped.data));
+  assert.equal(stopped.data.start, null, 'It starts again only once the running attempt has stopped.');
+  const restarted = await c.until(() => {
+    const task = c.store.task(running),
+      attempt = task.status === 'review' && c.store.attempt(task.lastAttemptId);
+    return attempt && attempt.id !== hanging.id && attempt;
+  }, 'the restarted attempt in review');
+  assert.equal(c.store.attempt(hanging.id).status, 'cancelled');
+  assert.match(restarted.assignment.direction, /The director changed auto mode's answer/);
+  assert.equal(c.store.task(running).answerChange, undefined);
+});

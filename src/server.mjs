@@ -65,7 +65,7 @@ import { createRegistries } from './registry.mjs';
 import { bootstrapFactory } from './core/bootstrap.mjs';
 import { createProject } from './core/project-creation.mjs';
 import { sendWaitingIdea, startIdeaIntake } from './core/idea-intake.mjs';
-import { answerQuestion } from './core/questions.mjs';
+import { answerQuestion, changeAnswer } from './core/questions.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
@@ -1770,24 +1770,37 @@ export function createStudio({
             return json(res, runner.queueStart(t.id), 202);
           }
           // The director answers the question the task's latest attempt stopped to ask (1.2 step 2): one of its options,
-          // their own words, or both. The answer becomes the next attempt's direction and the work starts as by Start,
-          // continuing from the saved work.
-          if (action === 'answer') {
-            if (Object.keys(data).some(key => !['projectId', 'attemptId', 'option', 'text'].includes(key)))
-              fail('An answer takes the attempt that asked, an optional option and optional text.');
-            let answer;
+          // their own words, or both, and optionally the work's auto mode from here on (the message box's Auto mode).
+          // The answer becomes the next attempt's direction and the work starts as by Start, continuing from the saved
+          // work. Change-answer replaces auto mode's answer the same way, stopping an attempt still working on it.
+          if (action === 'answer' || action === 'change-answer') {
+            if (Object.keys(data).some(key => !['projectId', 'attemptId', 'option', 'text', 'autoMode'].includes(key)))
+              fail('An answer takes the attempt that asked, an optional option, optional text and optional auto mode.');
+            const fields = { attemptId: data.attemptId, option: data.option, text: data.text, autoMode: data.autoMode };
+            if (action === 'answer') {
+              let answer;
+              try {
+                answer = answerQuestion(store, registries, t, fields, {
+                  type: 'director',
+                  at: new Date().toISOString(),
+                });
+              } catch (error) {
+                fail(error.message);
+              }
+              return json(res, { answer, start: runner.queueStart(t.id) }, 202);
+            }
+            let changed;
             try {
-              answer = answerQuestion(
-                store,
-                registries,
-                t,
-                { attemptId: data.attemptId, option: data.option, text: data.text },
-                { type: 'director', at: new Date().toISOString() },
-              );
+              changed = changeAnswer(store, registries, t, fields);
             } catch (error) {
               fail(error.message);
             }
-            return json(res, { answer, start: runner.queueStart(t.id) }, 202);
+            if (changed.stop) runner.stop(changed.stop);
+            return json(
+              res,
+              { answer: changed.answer, start: changed.stop || t.answerChange ? null : runner.queueStart(t.id) },
+              202,
+            );
           }
           // overrideReason: the director integrates over a review that requested changes (MP-019).
           if (action === 'integrate-source')

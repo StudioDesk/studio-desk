@@ -6,6 +6,8 @@
 //   block                returns outcome blocked
 //   ask <json>           returns outcome blocked and question.json holding <json> (kind question); a
 //                        direction that answers the question asks nothing (questions, 1.2 step 2)
+// Work it finds holding hang.next makes it hang as above, until a direction changes auto mode's answer: a later
+// attempt continuing that work is still running when the director changes the answer (questions, 1.2 step 2).
 //   hang                after writing, keeps running until the controller stops it (its time limit
 //                        or a cancellation) and returns nothing
 //   quota                after writing, reports a provider usage limit and exits, returning nothing
@@ -69,7 +71,9 @@ const lines = (job.direction || '').split('\n').map(line => line.trim()),
   asked = answered ? undefined : lines.map(line => /^ask (.+)$/.exec(line)).find(Boolean)?.[1],
   blocked = lines.includes('block') || !!asked,
   failed = lines.includes('fail-check'),
-  stop = ['hang', 'quota'].find(mode => lines.includes(mode));
+  stop =
+    ['hang', 'quota'].find(mode => lines.includes(mode)) ||
+    ('hang.next' in found && !/changed auto mode's answer/.test(job.direction || '') ? 'hang' : undefined);
 if (!writes.length) writes.push({ path: 'work.md', content: `# ${job.title}\n` });
 if (asked) writes.push({ path: 'question.json', content: asked + '\n', kind: 'question' });
 // Workspace delivery works on disk; text delivery returns the contents for the controller to stage.

@@ -16,7 +16,7 @@ import { projectLine } from '../connectors/source-lines.mjs';
 import { mergeSourceStory, sourceStoryIntegrated } from '../connectors/source-changes.mjs';
 import { approveCarry, carryWaits, nextCarry, runCarry } from '../connectors/source-carries.mjs';
 import { notesAccepted, runRelease } from '../connectors/source-releases.mjs';
-import { answerableInAutoMode, answerQuestion, waitingQuestion } from './questions.mjs';
+import { answerableInAutoMode, answerChangeSettled, answerQuestion, waitingQuestion } from './questions.mjs';
 import { attemptPermissions } from './agent-permissions.mjs';
 
 const INTEGRATION = 'autonomy-integration';
@@ -74,6 +74,11 @@ export class Autonomy {
     let task = this.store.task(taskId);
     if (task.status === 'blocked') {
       this.answerInAutoMode(task);
+      task = this.store.task(taskId);
+    }
+    // The director changed auto mode's answer while its work ran: that attempt has stopped, so start again with it.
+    if (answerChangeSettled(this.store, this.runner.registries, task)) {
+      this.queue([this.store.task(taskId)]);
       task = this.store.task(taskId);
     }
     const policy = this.policy(task);
