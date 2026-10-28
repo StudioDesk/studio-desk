@@ -203,7 +203,9 @@ export function builtInSandboxPackages(root) {
 // the director's own account, which can read the whole home folder, so the home folder is denied and only
 // what a run uses is let back in, as Windows' sandbox account sees it, with the runtime's seccomp helper;
 // system folders stay readable. Those systems also give the run a temporary folder of its own to write, where
-// Windows' account has its own.
+// Windows' account has its own. The repositories tests make may write their .git/config (`allowGitConfig`):
+// they sit in the disposable copy or the run's temporary folder, and the project's own repository is outside
+// what a run may write. Every .git/hooks stays refused.
 export function builtInSandboxSettings({
   root,
   nodeDirectory,
@@ -225,6 +227,7 @@ export function builtInSandboxSettings({
         allowRead: [root, ...reads, seccomp],
         allowWrite: [root, temporary],
         denyWrite: [],
+        allowGitConfig: true,
       },
     };
   return {

@@ -194,6 +194,9 @@ test('a run writes only the copy it tests, reads the packages above it, and reac
   assert.deepEqual(posix.filesystem.allowRead, [root, ...settings.filesystem.allowRead, run.seccomp]);
   assert.deepEqual(posix.filesystem.allowWrite, [root, run.temporary]);
   assert.equal(posix.windows, undefined);
+  // The repositories tests make write their .git/config there; the runtime refuses every .git/hooks regardless.
+  assert.equal(posix.filesystem.allowGitConfig, true);
+  assert.equal(settings.filesystem.allowGitConfig, undefined, 'Windows is unchanged.');
   // The command line quotes each path for the shell the runtime starts; the test command is not on it.
   assert.equal(
     builtInSandboxCommandLine('C:\\Program Files\\node\\node.exe', 'C:\\a b\\launch.mjs', 'C:\\t\\run.json', 'win32'),

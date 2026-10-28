@@ -38,14 +38,19 @@ const root = path.resolve(process.argv[3]),
   runDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-sandbox-')),
   settings = path.join(runDirectory, 'settings.json'),
   instructions = path.join(runDirectory, `run-${randomUUID()}.json`),
-  temporary = path.join(runDirectory, 'tmp');
+  temporary = path.join(runDirectory, 'tmp'),
+  // On macOS and Linux the tests run as the director's account, whose home folder the sandbox hides, so they get
+  // a home of their own, as Windows' sandbox account has. The runtime refuses writes to any repository's
+  // .git/hooks, so the repositories tests make take git's hook samples from an empty folder.
+  home = path.join(temporary, 'home'),
+  gitTemplates = path.join(runDirectory, 'git-templates');
 if (windows) {
   shareBuiltInSandboxHelper(files);
   openBuiltInSandboxPassThrough(
     [root, path.dirname(node), path.dirname(launcher), runDirectory, ...builtInSandboxPackages(root)],
     files,
   );
-} else fs.mkdirSync(temporary);
+} else for (const folder of [home, gitTemplates]) fs.mkdirSync(folder, { recursive: true });
 fs.writeFileSync(
   settings,
   JSON.stringify(
@@ -74,7 +79,9 @@ fs.writeFileSync(
     env: {
       ...builtInSandboxEnvironment(process.env),
       GIT_CONFIG_GLOBAL: gitConfiguration,
-      ...(windows ? {} : { TMPDIR: temporary, TMP: temporary, TEMP: temporary }),
+      ...(windows
+        ? {}
+        : { TMPDIR: temporary, TMP: temporary, TEMP: temporary, HOME: home, GIT_TEMPLATE_DIR: gitTemplates }),
     },
   }),
 );

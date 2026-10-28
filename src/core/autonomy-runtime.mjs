@@ -598,7 +598,9 @@ export class Autonomy {
     org.pipelineEnabled = this.store.tasks().some(task => task.queued);
     this.store.setOrganization(org);
     this.store.event('restart_planned', null, null, message);
+    // Unless the controller closed first, as a test's teardown can in between (seen on a Mac).
     setImmediate(() => {
+      if (this.runner.closing || !this.store.db.isOpen) return;
       for (const projectId of plan.cycleProjects || []) this.startCycle(projectId);
       this.runner.schedule();
     });
