@@ -3117,8 +3117,10 @@ test('candidate review errors name each problem so a retry can correct it', () =
 test('integration commits work when the commit message path is longer than 260 characters', async t => {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-git-long-')));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const root = path.join(directory, 'repo'),
-    journal = path.join(directory, 'd'.repeat(100), 'e'.repeat(100));
+  // Long enough past 260 characters wherever the temporary folder is: Linux's /tmp is short.
+  const part = Math.max(100, Math.ceil((262 - path.join(directory, 'commit-message.txt').length) / 2)),
+    root = path.join(directory, 'repo'),
+    journal = path.join(directory, 'd'.repeat(part), 'e'.repeat(part));
   fs.mkdirSync(root);
   fs.mkdirSync(journal, { recursive: true });
   assert.ok(path.join(journal, 'commit-message.txt').length > 260);

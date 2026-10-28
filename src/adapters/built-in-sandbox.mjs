@@ -205,7 +205,9 @@ export function builtInSandboxPackages(root) {
 // system folders stay readable. Those systems also give the run a temporary folder of its own to write, where
 // Windows' account has its own. The repositories tests make may write their .git/config (`allowGitConfig`):
 // they sit in the disposable copy or the run's temporary folder, and the project's own repository is outside
-// what a run may write. Every .git/hooks stays refused.
+// what a run may write. Every .git/hooks stays refused. npm and npx run from the npm package of the Node.js
+// install (<install>/lib/node_modules/npm beside its bin), which a home-folder install such as nvm's keeps out
+// of reach otherwise; only that folder is let back in, and only when it is there.
 export function builtInSandboxSettings({
   root,
   nodeDirectory,
@@ -219,17 +221,19 @@ export function builtInSandboxSettings({
 }) {
   const network = { allowedDomains: [], deniedDomains: [], allowLocalBinding: true },
     reads = [nodeDirectory, launcherDirectory, runDirectory, ...builtInSandboxPackages(root)];
-  if (platform !== 'win32')
+  if (platform !== 'win32') {
+    const npm = path.join(path.dirname(nodeDirectory), 'lib', 'node_modules', 'npm');
     return {
       network,
       filesystem: {
         denyRead: [home],
-        allowRead: [root, ...reads, seccomp],
+        allowRead: [root, ...reads, seccomp, ...(fs.existsSync(npm) ? [npm] : [])],
         allowWrite: [root, temporary],
         denyWrite: [],
         allowGitConfig: true,
       },
     };
+  }
   return {
     network,
     filesystem: { denyRead: [], allowRead: reads, allowWrite: [root], denyWrite: [] },

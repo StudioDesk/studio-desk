@@ -197,6 +197,12 @@ test('a run writes only the copy it tests, reads the packages above it, and reac
   // The repositories tests make write their .git/config there; the runtime refuses every .git/hooks regardless.
   assert.equal(posix.filesystem.allowGitConfig, true);
   assert.equal(settings.filesystem.allowGitConfig, undefined, 'Windows is unchanged.');
+  // A Node.js install of its own (nvm's, under the home folder) keeps npm in <install>/lib/node_modules/npm beside
+  // its bin: that one folder is let back in, once it is there, so npm and npx run.
+  const npm = path.join(directory, 'lib', 'node_modules', 'npm');
+  fs.mkdirSync(npm, { recursive: true });
+  assert.equal(builtInSandboxSettings({ ...run, platform: 'linux', home }).filesystem.allowRead.at(-1), npm);
+  assert.equal(builtInSandboxSettings({ ...run, platform: 'win32' }).filesystem.allowRead.includes(npm), false);
   // The command line quotes each path for the shell the runtime starts; the test command is not on it.
   assert.equal(
     builtInSandboxCommandLine('C:\\Program Files\\node\\node.exe', 'C:\\a b\\launch.mjs', 'C:\\t\\run.json', 'win32'),
