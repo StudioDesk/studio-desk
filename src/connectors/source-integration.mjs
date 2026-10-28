@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { command, subscriptionEnvironment } from '../adapters/process.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
 import { hash } from '../core/contracts.mjs';
+import { releaseTestTurn, testTurnResource } from '../core/test-turn.mjs';
 import { sourcePlan, testOutput, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, studioDeskProfile } from './source-profile.mjs';
 import { installStep, lastLine } from './package-installs.mjs';
@@ -141,8 +142,9 @@ function stopProcess(child) {
   } catch {}
 }
 export function stopIntegrationProcess(runtime) {
-  const child = runtime.integrationProcess;
-  if (!child) return;
+  const child = runtime.integrationProcess,
+    turn = runtime.integrationTurn;
+  if (!child && !turn?.waiting) return;
   // Shutdown is an observation, not confirmation of successful process completion.
   if (runtime.closing)
     for (const phase of runtime.integrationPhases || [])
@@ -151,9 +153,112 @@ export function stopIntegrationProcess(runtime) {
         timing: 'shutdown-requested',
         completionConfirmed: false,
       });
+  // A verification waiting for the computer's test turn has no process: it stops waiting and holds no turn.
+  if (!child) return turn.waiting();
   // Same trusted test seam the orchestrator uses for single-process fixtures inside a sandbox.
   if (runtime.fixtureProcessTermination) runtime.fixtureProcessTermination({ child }, true);
   else stopProcess(child);
+  // A stopping controller gives back the turn its test run held while the records are open; the run may end after
+  // they close.
+  if (runtime.closing) turn?.release();
+}
+// The computer's turn for full test suites (core/test-turn.mjs), taken for the verification's test run alone under the
+// journal's identity, which holds the project's source too, so its time limit starts with the turn. Integrations,
+// carries and releases all verify here. While it waits, the journal records { reason, since, holder } as a waiting
+// attempt does, until the turn is taken. It waits outside the attempts' first-come queue, which serves attempts only:
+// when a lease change frees the turn, it is tried once the change has settled and before that queue is served, since
+// it holds its project's source meanwhile. Resolves with the held turn; a controller stop ends the wait holding none.
+async function takeVerificationTurn(runtime, journal) {
+  const store = runtime.store,
+    stopped = () => new Error('The controller stopped while the verification waited for its turn to run the tests.');
+  if (runtime.closing) throw stopped();
+  const turn = {
+      held: false,
+      waiting: null,
+      // Gives the turn back once, when the run ends or the controller stops.
+      release() {
+        if (runtime.integrationTurn === turn) runtime.integrationTurn = null;
+        if (!turn.held) return;
+        turn.held = false;
+        releaseTestTurn(store, journal.id);
+      },
+    },
+    claim = () => {
+      try {
+        store.claim([testTurnResource], journal.id);
+        return null;
+      } catch (error) {
+        if (error.conflict) return error.conflict;
+        throw error;
+      }
+    },
+    conflict = claim();
+  runtime.integrationTurn = turn;
+  turn.held = !conflict;
+  if (turn.held) return turn;
+  return new Promise((resolve, reject) => {
+    let tried = false;
+    const settle = error => {
+      unwatch();
+      turn.waiting = null;
+      delete journal.testTurn;
+      recordTestTurn(store, journal);
+      if (error) {
+        turn.release();
+        reject(error);
+      } else {
+        turn.held = true;
+        resolve(turn);
+      }
+    };
+    const retry = () => {
+      tried = false;
+      if (!turn.waiting) return;
+      let conflict;
+      try {
+        conflict = claim();
+      } catch (error) {
+        return settle(error); // The records closed with the controller.
+      }
+      if (!conflict) return settle();
+      // The record names the current holder; its wait and event stay as they began.
+      if (conflict.ownerAttemptId === journal.testTurn.holder) return;
+      Object.assign(journal.testTurn, { reason: conflict.reason, holder: conflict.ownerAttemptId });
+      recordTestTurn(store, journal);
+    };
+    // A lease change may come inside a transaction, so the turn is tried once the change has settled.
+    const unwatch = store.watchLeases(() => {
+      if (tried || !turn.waiting) return;
+      tried = true;
+      queueMicrotask(retry);
+    });
+    turn.waiting = () => settle(stopped());
+    journal.testTurn = { reason: conflict.reason, since: new Date().toISOString(), holder: conflict.ownerAttemptId };
+    recordTestTurn(store, journal);
+    store.event('test_turn', journal.reviewTaskId, journal.reviewAttemptId, conflict.reason);
+  });
+}
+// Keeps a journal's wait for the test turn where the journal is kept, found by its identity as store.resourceConflict
+// reads it: a release's on its milestone, an integration's or a carry's on its review. A journal kept nowhere (a
+// test's own) waits in memory only, as does one whose records closed with the controller.
+function recordTestTurn(store, journal) {
+  try {
+    const release = /^source-release:(.+):(milestone-[\w-]+)$/.exec(journal.id);
+    let kept, save;
+    if (release) {
+      const milestones = store.setting('milestones:' + release[1], []);
+      kept = milestones.find(item => item.id === release[2])?.release;
+      save = () => store.putSetting('milestones:' + release[1], milestones);
+    } else {
+      const review = store.attempt(journal.reviewAttemptId);
+      kept = [review.sourceIntegration, ...(review.sourceCarries || [])].find(item => item?.id === journal.id);
+      save = () => store.updateAttempt(review);
+    }
+    if (kept?.id !== journal.id || (!journal.testTurn && !kept.testTurn)) return;
+    if (journal.testTurn) kept.testTurn = { ...journal.testTurn };
+    else delete kept.testTurn;
+    save();
+  } catch {}
 }
 // One occurrence per actual step. Journal/lease identity remains unchanged on retries;
 // integrationOccurrenceId separates their observations without changing ownership.
@@ -520,13 +625,20 @@ export async function verifyIntegration(runtime, journal, directory, configurati
       const test = runtime.sourceCheckCommand || candidateTestCommand(plan, configuration);
       // Same command-local test profile and copied-harness marker as candidate tests.
       environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-      const tested = await run(runtime, test.executable, test.args, {
-        cwd: worktree,
-        environment,
-        timeoutMs: testTimeoutMs,
-        phase,
-        record: path.join(directory, 'test-output-full.txt'),
-      });
+      // The test run alone takes the computer's test turn, and gives it back however it ends.
+      const turn = await takeVerificationTurn(runtime, journal);
+      let tested;
+      try {
+        tested = await run(runtime, test.executable, test.args, {
+          cwd: worktree,
+          environment,
+          timeoutMs: testTimeoutMs,
+          phase,
+          record: path.join(directory, 'test-output-full.txt'),
+        });
+      } finally {
+        turn.release();
+      }
       fs.writeFileSync(path.join(directory, 'test-output.txt'), tested.stdout);
       fs.writeFileSync(path.join(directory, 'test-errors.txt'), tested.stderr);
       if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash)
