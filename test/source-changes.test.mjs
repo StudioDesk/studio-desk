@@ -446,13 +446,30 @@ test('candidate format dispatch requires complete deletions while leaving unmark
 test('persisted source phases span execution and distinct failed and successful integrations without replay', async t => {
   const c = await setup(t, 'pass', undefined, {}, true),
     { store, runner } = c.app;
+  // The scope check before the attempt exists takes a known least time here, which its phase must show.
+  const blockReason = runner.blockReason;
+  t.mock.method(runner, 'blockReason', function (task, verifyAuth) {
+    if (verifyAuth) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    return blockReason.call(this, task, verifyAuth);
+  });
+  // Setup runs within start, before the editor's process does.
+  const began = performance.now();
   runner.start(c.taskId);
+  const startTook = performance.now() - began;
   const candidate = await c.wait(c.taskId),
     phases = phasePayloads(store, candidate.id);
   assert.deepEqual(
     phases.map(p => `${p.phaseId}:${p.boundary}`),
     [
       'attempt:start',
+      'setup.scope:start',
+      'setup.scope:finish',
+      'setup.worktree:start',
+      'setup.worktree:finish',
+      'setup.snapshot:start',
+      'setup.snapshot:finish',
+      'setup.copy:start',
+      'setup.copy:finish',
       'source.edit:start',
       'source.edit:finish',
       'candidate.commit:start',
@@ -465,6 +482,26 @@ test('persisted source phases span execution and distinct failed and successful 
     ],
   );
   assert.ok(phases.filter(p => p.boundary === 'finish').every(p => p.outcome === 'succeeded'));
+  // Each setup step records its measured time and its name; a story with no earlier work applies none.
+  const setupNames = {
+      'setup.scope': "Measuring the story's scope",
+      'setup.worktree': 'Making the working copy',
+      'setup.snapshot': 'Checking the snapshot',
+      'setup.copy': 'Copying the source',
+    },
+    setupPhases = phases.filter(p => p.phaseId.startsWith('setup.')),
+    setupDone = setupPhases.filter(p => p.boundary === 'finish');
+  for (const p of setupPhases)
+    assert.equal(p.message, `${setupNames[p.phaseId]} ${p.boundary === 'start' ? 'started' : p.outcome}.`);
+  assert.deepEqual(
+    setupDone.map(p => p.phaseId),
+    Object.keys(setupNames),
+  );
+  assert.ok(setupDone.every(p => typeof p.durationMs === 'number' && p.durationMs >= 0));
+  assert.ok(setupDone.reduce((sum, p) => sum + p.durationMs, 0) <= startTook, 'Every setup step ran within start.');
+  // The scope's time is the check measured before the attempt existed, not a phase opened and closed at once.
+  const scopeDone = setupDone.find(p => p.phaseId === 'setup.scope');
+  assert.ok(scopeDone.durationMs >= 25, `The scope check took ${scopeDone.durationMs} ms.`);
   const testsDone = phases.find(p => p.phaseId === 'test' && p.boundary === 'finish');
   assert.deepEqual(testsDone.totals, { tests: 1, pass: 1, fail: 0, cancelled: 0, skipped: 0, todo: 0 });
   assert.equal(testsDone.elapsedMs, testsDone.durationMs);
@@ -570,6 +607,53 @@ test('persisted source phases span execution and distinct failed and successful 
   const count = store.phaseEvents(review.id).length;
   await integrate();
   assert.equal(store.phaseEvents(review.id).length, count, 'An already integrated review performs no steps.');
+});
+
+test('a story whose base commit does not match its snapshot fails at the recorded snapshot phase', async t => {
+  const c = await setup(t, 'pass', undefined, {}, true),
+    { store, runner } = c.app;
+  // A commit holding other files than the snapshot the story's scope measures, off the checked-out branch.
+  fs.appendFileSync(path.join(c.root, 'src/core/workflows.mjs'), '// Not the approved snapshot.\n');
+  git(c.root, ['commit', '--quiet', '-am', 'A commit the scope did not measure']);
+  const other = git(c.root, ['rev-parse', 'HEAD']);
+  git(c.root, ['reset', '--quiet', '--hard', 'HEAD~1']);
+  // The story's measured scope names that commit as its base.
+  const applyMetadata = runner.applyMetadata;
+  t.mock.method(runner, 'applyMetadata', function (attempt, definition, metadata) {
+    const scope = metadata?.sourceChange;
+    return applyMetadata.call(
+      this,
+      attempt,
+      definition,
+      scope ? { ...metadata, sourceChange: { ...scope, base: { ...scope.base, commit: other } } } : metadata,
+    );
+  });
+  runner.start(c.taskId);
+  const a = await c.wait(c.taskId, 'failed'),
+    phases = phasePayloads(store, a.id);
+  assert.equal(a.sourceChange.base.commit, other);
+  assert.equal(a.error, 'The base commit does not match the approved source snapshot. Start a new attempt.');
+  assert.deepEqual(
+    phases.map(p => `${p.phaseId}:${p.boundary}:${p.outcome}`),
+    [
+      'attempt:start:null',
+      'setup.scope:start:null',
+      'setup.scope:finish:succeeded',
+      'setup.worktree:start:null',
+      'setup.worktree:finish:succeeded',
+      'setup.snapshot:start:null',
+      'setup.snapshot:finish:failed',
+      'attempt:finish:failed',
+    ],
+  );
+  const snapshot = phases.find(p => p.phaseId === 'setup.snapshot' && p.boundary === 'finish');
+  assert.equal(snapshot.error, a.error);
+  assert.equal(snapshot.message, 'Checking the snapshot failed.');
+  assert.ok(snapshot.durationMs >= 0);
+  // Nothing was copied for the editor, no editor ran, and the worktree and reservations are gone.
+  assert.equal(fs.existsSync(path.join(jobDirectory(store, a), 'source')), false);
+  assert.equal(fs.existsSync(a.sourceWorktree.path), false);
+  assert.equal(store.leases().length, 0);
 });
 
 test('a delete-only integration observes performed steps without fabricating formatter work', async t => {
@@ -3619,6 +3703,26 @@ test('a retry after failing candidate tests continues from the earlier work and 
   // The candidate is the whole change: the carried edit and the new one.
   assert.match(candidateText(store, second, 'src/core/workflows.mjs'), /Bounded fixture improvement/);
   assert.match(candidateText(store, second, 'src/core/projects.mjs'), /Bounded fixture improvement/);
+  // Applying the earlier work is a setup step of its own, after the copy and before the editor; the first attempt
+  // had none to apply.
+  const phases = phasePayloads(store, second.id),
+    order = phases.map(p => `${p.phaseId}:${p.boundary}`),
+    applied = phases.filter(p => p.phaseId === 'setup.earlier');
+  assert.deepEqual(order.slice(order.indexOf('setup.copy:finish'), order.indexOf('source.edit:start') + 1), [
+    'setup.copy:finish',
+    'setup.earlier:start',
+    'setup.earlier:finish',
+    'source.edit:start',
+  ]);
+  assert.deepEqual(
+    applied.map(p => [p.outcome, p.message]),
+    [
+      [null, 'Applying earlier work started.'],
+      ['succeeded', 'Applying earlier work succeeded.'],
+    ],
+  );
+  assert.ok(typeof applied[1].durationMs === 'number' && applied[1].durationMs >= 0);
+  assert.ok(!phasePayloads(store, first.id).some(p => p.phaseId === 'setup.earlier'));
 });
 
 test('work written before a usage limit or a time limit is carried into the next attempt', async t => {
@@ -3672,12 +3776,23 @@ test('earlier work that can no longer be trusted starts the whole work fresh, wi
       assert.deepEqual(merged.sourceChange.continueFrom.merge.changed, ['src/core/workflows.mjs']);
       assert.equal(merged.sourceChange.continueFrom.fresh, undefined);
       assert.match(store.task(c.taskId).reason, /^Conflict markers remain in src\/core\/workflows\.mjs\./);
+      // Merging the earlier work onto the current source is its setup step.
+      assert.deepEqual(
+        phasePayloads(store, merged.id)
+          .filter(p => p.phaseId === 'setup.earlier')
+          .map(p => p.outcome),
+        [null, 'succeeded'],
+      );
       continue;
     }
     const next = await c.wait(c.taskId);
     const fresh = next.sourceChange.continueFrom.fresh;
     assert.match(fresh.reason, /could not be verified/, cause);
     assert.deepEqual(next.sourceChange.continueFrom.files, [], cause);
+    assert.ok(
+      !phasePayloads(store, next.id).some(p => p.phaseId === 'setup.earlier'),
+      'A fresh start has no earlier work to apply.',
+    );
     for (const file of continuationFiles)
       assert.doesNotMatch(candidateText(store, next, file), /Retained quota fixture work/, `${cause}: ${file}`);
     assert.ok(store.attempt(stopped.id), 'The earlier attempt and its history stay.');

@@ -645,7 +645,11 @@ export class Runner {
         .some(a => ['interrupted', 'quarantined'].includes(a.status) && store.leases().some(l => l.attemptId === a.id))
     )
       throw new Error('Reconcile the interrupted attempt before starting another.');
+    // Measuring the work's scope (these checks and the attempt's prepared fields below) runs before the attempt
+    // exists; its time is recorded as the attempt's setup.scope phase once it does.
+    let scopeStarted = performance.now();
     const reason = this.blockReason(task, true);
+    let scopeMs = performance.now() - scopeStarted;
     if (reason) {
       task.status = 'blocked';
       task.reason = reason;
@@ -775,19 +779,18 @@ export class Runner {
         responsibility: worker.responsibility,
       };
     if (operation) a.operation = operation;
-    this.applyMetadata(
-      a,
-      definition,
-      definition.prepareAttempt?.({
-        org,
-        task,
-        registries: this.registries,
-        project,
-        store,
-        runtime: this,
-        attemptId: id,
-      }),
-    );
+    scopeStarted = performance.now();
+    const prepared = definition.prepareAttempt?.({
+      org,
+      task,
+      registries: this.registries,
+      project,
+      store,
+      runtime: this,
+      attemptId: id,
+    });
+    scopeMs += performance.now() - scopeStarted;
+    this.applyMetadata(a, definition, prepared);
     try {
       store.tx(() => {
         if (
@@ -846,6 +849,10 @@ export class Runner {
     this.active.set(id, entry);
     try {
       this.startPhase(entry, 'attempt');
+      // An adapter that records its setup as phases (setupPhases) gets the scope measured above as the first,
+      // already finished.
+      if (adapter.setupPhases)
+        store.finishPhase(store.startPhase(a, 'setup.scope', {}, performance.now() - scopeMs), 'succeeded');
       fs.mkdirSync(output, { recursive: true });
       fs.mkdirSync(path.join(job, 'inputs'), { recursive: true });
       stageDirectorInputs(store, entry);

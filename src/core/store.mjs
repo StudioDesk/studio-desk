@@ -33,6 +33,11 @@ function settingChange(id, data) {
 
 const phaseNames = {
   attempt: 'Attempt',
+  'setup.scope': "Measuring the story's scope",
+  'setup.worktree': 'Making the working copy',
+  'setup.snapshot': 'Checking the snapshot',
+  'setup.copy': 'Copying the source',
+  'setup.earlier': 'Applying earlier work',
   'source.edit': 'Source editing',
   install: 'Installing packages',
   build: 'Build',
@@ -558,7 +563,9 @@ export class Store {
       return dashboardAttempt(data, timings.get(owner), open.get(owner) ?? null);
     });
   }
-  startPhase(attempt, phaseId, context = {}) {
+  // clock is the phase's measured start (a performance.now() value) when it began before it could be recorded, such
+  // as the scope measured before its attempt existed; its finish then carries the whole measured time.
+  startPhase(attempt, phaseId, context = {}, clock = null) {
     const payload = {
       schemaVersion: 'source-phase-v1',
       taskId: attempt.taskId,
@@ -574,7 +581,7 @@ export class Store {
       message: `${phaseNames[phaseId] || phaseId} started.`,
     };
     this.event('phase', attempt.taskId, attempt.id, JSON.stringify(payload), null, payload.timestamp);
-    return { payload, clock: performance.now(), closed: false };
+    return { payload, clock: clock ?? performance.now(), closed: false };
   }
   finishPhase(phase, outcome, details = {}) {
     if (phase.closed) return;

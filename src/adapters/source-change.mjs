@@ -60,6 +60,9 @@ export const sourceChangeAdapter = {
   workerSelectable: false,
   subscription: true,
   capabilities: ['source-change'],
+  // Its attempts record their setup as phases (prepareSourceJob), after the scope the controller measured before the
+  // attempt existed (setup.scope), so a slow step shows in the attempt's record.
+  setupPhases: true,
   modelFor: (runtime, worker) => modelAdapter(runtime.adapters, worker),
   quotaKey: worker => worker.provider,
   initialize(runtime, options) {
@@ -150,71 +153,82 @@ function prepareSourceJob(runtime, entry) {
   if (!scope.base?.commit) throw new Error('This source scope has no base commit. Start a new attempt.');
   // The candidate is built in its own git worktree of the story's repository (the root its scope
   // measured), from the story's base commit (MP-016), and removed when the attempt finishes.
-  cleanSourceWorktrees(runtime, sourceWorktreeRoot(runtime));
   const repository = scope.source.root,
-    candidate = createSourceWorktree(
-      repository,
-      sourceWorktreeRoot(runtime),
-      worktreeName(a.id),
-      scope.base.commit,
-      profileOf(scope.source),
-    );
+    candidate = setupPhase(runtime, entry, 'setup.worktree', () => {
+      cleanSourceWorktrees(runtime, sourceWorktreeRoot(runtime));
+      return createSourceWorktree(
+        repository,
+        sourceWorktreeRoot(runtime),
+        worktreeName(a.id),
+        scope.base.commit,
+        profileOf(scope.source),
+      );
+    });
   a.sourceWorktree = { path: candidate, baseCommit: scope.base.commit };
   runtime.store.updateAttempt(a);
   entry.cleanup.push(() => removeSourceWorktree(repository, candidate));
   // The base commit holds exactly the snapshot this scope approved.
-  try {
-    verifyCopy(scope.source, candidate);
-  } catch {
-    throw new Error('The base commit does not match the approved source snapshot. Start a new attempt.');
-  }
-  // The read-only context copy the employee reads at ../source, from that commit: the story's line
-  // may be a branch the project's folder does not have checked out (1.1 step 1).
-  copySource({ ...scope.source, root: candidate }, baseline);
-  for (const file of scope.allowedFiles) {
-    const destination = path.join(entry.output, 'changes', file);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(path.join(baseline, file), destination);
-  }
-  // New files are written at changes/<path>; files listed for deletion are not staged.
-  for (const file of scope.newFiles || [])
-    fs.mkdirSync(path.dirname(path.join(entry.output, 'changes', file)), { recursive: true });
+  setupPhase(runtime, entry, 'setup.snapshot', () => {
+    try {
+      verifyCopy(scope.source, candidate);
+    } catch {
+      throw new Error('The base commit does not match the approved source snapshot. Start a new attempt.');
+    }
+  });
+  setupPhase(runtime, entry, 'setup.copy', () => {
+    // The read-only context copy the employee reads at ../source, from that commit: the story's line
+    // may be a branch the project's folder does not have checked out (1.1 step 1).
+    copySource({ ...scope.source, root: candidate }, baseline);
+    for (const file of scope.allowedFiles) {
+      const destination = path.join(entry.output, 'changes', file);
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(path.join(baseline, file), destination);
+    }
+    // New files are written at changes/<path>; files listed for deletion are not staged.
+    for (const file of scope.newFiles || [])
+      fs.mkdirSync(path.dirname(path.join(entry.output, 'changes', file)), { recursive: true });
+  });
   // A story continues from the verified work of its latest stopped attempt (continueFrom), applied
   // over the seeded source copies; the candidate stays the whole change against this base. Work
   // whose source was committed since is merged onto this base by git (October 27). The attempt records the files set
-  // aside with why, outside its approved scope and hashes (mergeSetAside), so its page names them.
-  const previous = scope.continueFrom && runtime.store.attempt(scope.continueFrom.attemptId),
-    setAside = merged => {
-      if (!merged.setAside.length) return;
-      runtime.store.event(
-        'merge_set_aside',
-        a.taskId,
-        a.id,
-        `Git could not apply the earlier change to ${merged.setAside.map(item => item.path).join(', ')}: a file deleted on one side and changed on the other. merge-set-aside.json tells the editor why for each.`,
-      );
-      a.mergeSetAside = [...(a.mergeSetAside || []), ...merged.setAside];
-      runtime.store.updateAttempt(a);
-    };
-  if (scope.continueFrom?.merge)
-    setAside(mergeContinuedWork(runtime.store, previous, scope.continueFrom, candidate, entry.output));
-  else
-    for (const item of scope.continueFrom?.files || [])
-      fs.writeFileSync(
-        path.join(entry.output, 'changes', item.path),
-        continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
-      );
-  // Earlier edits to a file the source deleted since are set aside for the editor.
-  if (scope.continueFrom?.setAside?.length) {
-    const kept = scope.continueFrom.setAside.map(item => ({
-      path: item.path,
-      reason: deletedReason(item.path),
-      content: continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
-    }));
-    setAsideFiles(entry.output, kept);
-    setAside({ setAside: kept.map(item => ({ path: item.path, reason: item.reason })) });
-  }
-  // A story merged onto the current source (1.1 step 3) starts from its earlier change applied to this base by git.
-  if (scope.merge) setAside(mergeEarlierChange(scope.merge, candidate, entry.output));
+  // aside with why, outside its approved scope and hashes (mergeSetAside), so its page names them. A story with
+  // neither earlier work nor a merge has nothing to apply, and records no phase for it.
+  const carried = scope.continueFrom;
+  if (carried?.merge || carried?.files?.length || carried?.setAside?.length || scope.merge)
+    setupPhase(runtime, entry, 'setup.earlier', () => {
+      const previous = carried && runtime.store.attempt(carried.attemptId),
+        setAside = merged => {
+          if (!merged.setAside.length) return;
+          runtime.store.event(
+            'merge_set_aside',
+            a.taskId,
+            a.id,
+            `Git could not apply the earlier change to ${merged.setAside.map(item => item.path).join(', ')}: a file deleted on one side and changed on the other. merge-set-aside.json tells the editor why for each.`,
+          );
+          a.mergeSetAside = [...(a.mergeSetAside || []), ...merged.setAside];
+          runtime.store.updateAttempt(a);
+        };
+      if (carried?.merge) setAside(mergeContinuedWork(runtime.store, previous, carried, candidate, entry.output));
+      else
+        for (const item of carried?.files || [])
+          fs.writeFileSync(
+            path.join(entry.output, 'changes', item.path),
+            continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
+          );
+      // Earlier edits to a file the source deleted since are set aside for the editor.
+      if (carried?.setAside?.length) {
+        const kept = carried.setAside.map(item => ({
+          path: item.path,
+          reason: deletedReason(item.path),
+          content: continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
+        }));
+        setAsideFiles(entry.output, kept);
+        setAside({ setAside: kept.map(item => ({ path: item.path, reason: item.reason })) });
+      }
+      // A story merged onto the current source (1.1 step 3) starts from its earlier change
+      // applied to this base by git.
+      if (scope.merge) setAside(mergeEarlierChange(scope.merge, candidate, entry.output));
+    });
   // Neither development AGENTS.md nor the full source tree is placed inside
   // the employee's writable workspace. Retain the job-local instruction scope.
   const scopeFile = path.join(entry.output, 'source-scope.json'),
@@ -234,6 +248,19 @@ function prepareSourceJob(runtime, entry) {
     );
   }
   return { baseline, candidate, startedAt: new Date().toISOString() };
+}
+// Runs one step of a story's setup as a phase of its attempt, which finishes failed with the step's error when it
+// throws, and returns what the step returned.
+function setupPhase(runtime, entry, phaseId, step) {
+  const phase = runtime.startPhase(entry, phaseId);
+  try {
+    const value = step();
+    runtime.store.finishPhase(phase, 'succeeded');
+    return value;
+  } catch (error) {
+    runtime.store.finishPhase(phase, 'failed', { error: error.message });
+    throw error;
+  }
 }
 
 // Applies a story's earlier change to the candidate worktree's base with git, as integration applies it, copies the

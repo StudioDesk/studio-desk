@@ -105,6 +105,11 @@ export function useAttemptDetail(projectId: string, attemptId: string, enabled =
 
 const phaseNames: Record<string, string> = {
   attempt: 'Attempt execution',
+  'setup.scope': "Measuring the story's scope",
+  'setup.worktree': 'Making the working copy',
+  'setup.snapshot': 'Checking the snapshot',
+  'setup.copy': 'Copying the source',
+  'setup.earlier': 'Applying earlier work',
   'source.edit': 'Source editing',
   install: 'Installing packages',
   'candidate.commit': 'Candidate commit',
