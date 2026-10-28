@@ -129,6 +129,87 @@ test('a revision note starts from the recorded direction, needs some text, and C
   expect((dialog.getByLabelText('What to change') as HTMLTextAreaElement).value).toBe('Recorded direction.');
 });
 
+// A change story whose one counted attempt failed, with the direction its task recorded.
+const pastLimit = () => {
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'failed',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change' },
+      result: { outcome: 'failed', summary: 'A test failed.' },
+    },
+  ];
+  open(
+    taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'failed',
+      maxAttempts: 1,
+      lastAttemptId: 'attempt-1',
+      direction: 'Recorded direction.',
+    }),
+  );
+};
+const again = async () => within(await screen.findByRole('dialog', { name: 'Start it again?' }));
+
+test('past its attempt limit, Start asks for a note for the next attempt and starts it with that direction', async () => {
+  const user = userEvent.setup();
+  pastLimit();
+  const region = await decisions();
+  await user.click(region.getByRole('button', { name: 'Start assignment' }));
+  // The start waits for the director's note, which starts from the recorded direction.
+  const dialog = await again();
+  expect(posted()).toEqual([]);
+  expect(dialog.getByText(/runs past its attempt limit\. The next attempt gets this note/)).toBeTruthy();
+  const note = dialog.getByLabelText('Note for the next attempt (optional)') as HTMLTextAreaElement;
+  expect(note.value).toBe('Recorded direction.');
+  await user.clear(note);
+  await user.type(note, 'Fix the failing test first.');
+  await user.click(dialog.getByRole('button', { name: 'Start assignment' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-1/start',
+        method: 'POST',
+        body: { projectId: 'project-x', direction: 'Fix the failing test first.' },
+      },
+    ]),
+  );
+  expect(screen.queryByRole('dialog', { name: 'Start it again?' })).toBeNull();
+});
+
+test("the note past the limit starts from the page's draft, may be left empty, and Cancel sends nothing", async () => {
+  const user = userEvent.setup();
+  pastLimit();
+  const region = await decisions();
+  await user.click(region.getByRole('button', { name: 'Start assignment' }));
+  let dialog = await again();
+  await user.click(dialog.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('dialog', { name: 'Start it again?' })).toBeNull();
+  expect(posted()).toEqual([]);
+  await user.click(screen.getByRole('tab', { name: 'Overview' }));
+  const box = screen.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
+  await user.clear(box);
+  await user.type(box, 'Say which test fails.');
+  await user.click(region.getByRole('button', { name: 'Start assignment' }));
+  dialog = await again();
+  const note = dialog.getByLabelText('Note for the next attempt (optional)') as HTMLTextAreaElement;
+  expect(note.value).toBe('Say which test fails.');
+  // The note is optional: an emptied field still starts the work, with the direction the director left.
+  await user.clear(note);
+  const submit = dialog.getByRole('button', { name: 'Start assignment' }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(false);
+  await user.click(submit);
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/tasks/T-1/start', method: 'POST', body: { projectId: 'project-x', direction: '' } },
+    ]),
+  );
+  // Once the start is recorded, the page's draft gives way to the direction the controller holds.
+  await waitFor(() => expect(box.value).toBe('Recorded direction.'));
+});
+
 test('proposed work is approved, or denied with a note', async () => {
   const user = userEvent.setup();
   open(taskFixture('T-1', { status: 'backlog', approval: { status: 'pending' } }));

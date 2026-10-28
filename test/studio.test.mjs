@@ -910,6 +910,49 @@ test('a queued director Start keeps its attempt-limit override until it runs', a
   await c.wait(once.id);
 });
 
+// Past the attempt limit the dashboard's Start asks for a note for the next attempt, which Start records first.
+test('a director Start records its optional direction for the next attempt, and keeps the direction without one', async t => {
+  const c = await setup(t),
+    store = c.app.store;
+  const story = (
+    await c.request('/api/tasks', {
+      title: 'Bounded with a note',
+      brief: 'Return a model-free bounded result.',
+      kind: 'general',
+      workerId: 'W-02',
+    })
+  ).data;
+  store.putTask({ ...store.task(story.id), maxAttempts: 1 });
+  const directed = await c.request(`/api/tasks/${story.id}`, { direction: 'Keep the exit landmark.' }, 'PATCH');
+  assert.equal(directed.status, 200);
+  // A note longer than a direction may be is refused, and nothing starts.
+  const long = await c.request(`/api/tasks/${story.id}/start`, { direction: 'x'.repeat(24001) });
+  assert.equal(long.status, 400);
+  assert.match(long.data.error, /Direction is missing or too long/);
+  assert.equal(store.attempts(story.id).length, 0);
+  assert.equal(store.task(story.id).status, 'ready');
+  assert.equal(store.task(story.id).direction, 'Keep the exit landmark.');
+  // A Start without a direction leaves the recorded one as it is.
+  assert.equal((await c.request(`/api/tasks/${story.id}/start`)).status, 202);
+  const first = await c.wait(story.id);
+  assert.equal(first.task.status, 'review');
+  assert.equal(store.attempt(first.attempt.id).assignment.direction, 'Keep the exit landmark.');
+  assert.equal(store.task(story.id).direction, 'Keep the exit landmark.');
+  // Work that Start refuses for its state keeps its direction.
+  assert.equal((await c.request(`/api/tasks/${story.id}/start`, { direction: 'Not yet.' })).status, 400);
+  assert.equal(store.task(story.id).direction, 'Keep the exit landmark.');
+  // Past its one-attempt limit, the director's Start sends the note to the next attempt.
+  assert.equal((await c.request(`/api/tasks/${story.id}/revise`, { direction: 'Once more.' })).status, 200);
+  const started = await c.request(`/api/tasks/${story.id}/start`, { direction: 'Fix the failing test first.' });
+  assert.equal(started.status, 202, JSON.stringify(started.data));
+  assert.equal(store.task(story.id).direction, 'Fix the failing test first.');
+  const second = await c.wait(story.id);
+  assert.notEqual(second.attempt.id, first.attempt.id);
+  const recorded = store.attempt(second.attempt.id);
+  assert.equal(recorded.assignment.direction, 'Fix the failing test first.');
+  assert.deepEqual(recorded.directorOverride, { attemptLimit: 1, attemptNumber: 2 });
+});
+
 // The dashboard's idea composer (dashboard/src/idea-composer.tsx, tested with the page) sends the director's
 // files as base64; the controller keeps their original bytes and serves them only to their own project.
 test('idea files sent with an idea are kept byte for byte and served only as downloads of their own project', async t => {

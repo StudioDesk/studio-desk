@@ -9,7 +9,7 @@ import { send, type Task } from './api';
 import { BringBack } from './bring-back';
 import { decisionState, fileRequest } from './decisions';
 import { NoteDialog, overReview } from './note-dialog';
-import { storyPeople } from './story';
+import { attemptsUsed, storyPeople } from './story';
 import { useToast } from './toast';
 import { integrationAction, statusLabels, type StudioState } from './studio-runs';
 
@@ -71,11 +71,13 @@ export function TaskDecisions({
   projectId: string;
   task: Task;
   studio: StudioState;
-  // The direction the page shows, its unsaved draft or the recorded one, which a revision request's note starts from.
+  // The direction the page shows, its unsaved draft or the recorded one, which a revision request's note, or the
+  // note of a Start past the attempt limit, starts from.
   direction: string;
   // Opens the story's file form, where a file request can be changed before it is approved.
   onEditFiles?: () => void;
-  // Once the controller records a revision request, the page's draft gives way to the direction it recorded.
+  // Once the controller records a revision request, or a Start with a note, the page's draft gives way to the
+  // direction it recorded.
   onRevised?: () => void;
 }) {
   const request = useRequest(projectId),
@@ -107,7 +109,13 @@ export function TaskDecisions({
       proposal,
     } = decisionState(task, studio),
     { editor, reviewer } = storyPeople(task, studio),
-    filesAsked = fileRequest(task, studio);
+    filesAsked = fileRequest(task, studio),
+    // Counted as the page's attempt counter counts them; the controller sets no limit for a task without one.
+    { used, allowed } = attemptsUsed(
+      task,
+      studio.attempts.filter(attempt => attempt.taskId === task.id),
+    ),
+    pastLimit = task.maxAttempts !== undefined && used >= allowed;
   const deny = (label: string, title: string, noteLabel = 'Decision note (optional)'): Action => ({
     key: `deny-${label}`,
     label,
@@ -157,20 +165,36 @@ export function TaskDecisions({
     !closed &&
     explanation.kind !== 'fixed-limit' &&
     ['ready', 'blocked', 'failed', 'cancelled'].includes(task.status)
-  )
+  ) {
+    const start = (body: Record<string, unknown> = {}, done?: () => void) =>
+      act('start', body, started => {
+        done?.();
+        return started?.queued
+          ? /^Waiting for /.test(String(started.reason ?? ''))
+            ? `Queued. ${started.reason} It starts by itself when it can.`
+            : 'Queued behind busy work. It starts by itself when its agent, resources and an execution slot are free.'
+          : 'Started.';
+      });
     actions.push({
       key: 'start',
       label: 'Start assignment',
       emphasis: approval?.status === 'pending' || filesAsked.request ? 'default' : 'primary',
+      // Past its attempt limit, the director's Start runs it again and may point the next attempt at the fix.
       onClick: () =>
-        act('start', {}, started =>
-          started?.queued
-            ? /^Waiting for /.test(String(started.reason ?? ''))
-              ? `Queued. ${started.reason} It starts by itself when it can.`
-              : 'Queued behind busy work. It starts by itself when its agent, resources and an execution slot are free.'
-            : 'Started.',
-        ),
+        pastLimit
+          ? setAsking({
+              title: 'Start it again?',
+              text: 'It runs past its attempt limit. The next attempt gets this note as its direction, along with everything the work did so far.',
+              label: 'Note for the next attempt (optional)',
+              submit: 'Start assignment',
+              initial: direction,
+              // The controller records a direction of up to 24000 characters, so a long one can still be edited here.
+              limit: 24000,
+              send: note => start({ direction: note }, onRevised),
+            })
+          : start(),
     });
+  }
   if (task.hold && !live && !closed && !['done', 'denied'].includes(task.status))
     actions.push({
       key: 'hold',

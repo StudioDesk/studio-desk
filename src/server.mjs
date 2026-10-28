@@ -1674,7 +1674,20 @@ export function createStudio({
             );
             return json(res, { taskIds: prepared.taskIds });
           }
-          if (action === 'start') return json(res, runner.queueStart(t.id), 202);
+          // A director's Start may carry a note for the next attempt (the dashboard asks for one past the attempt
+          // limit), recorded as a PATCH direction is before the work starts; without one the direction is unchanged.
+          // Work that Start refuses for its state keeps its direction.
+          if (action === 'start') {
+            if (data.direction !== undefined) {
+              const direction = text(data.direction, 'Direction');
+              if (!['ready', 'failed', 'cancelled', 'blocked'].includes(t.status))
+                fail('Only ready or stopped assignments can start.');
+              registries.workflows.direct(t, direction);
+              store.putTask(t);
+              store.event('task_updated', t.id, null, 'Direction for the next attempt updated with Start.');
+            }
+            return json(res, runner.queueStart(t.id), 202);
+          }
           // overrideReason: the director integrates over a review that requested changes (MP-019).
           if (action === 'integrate-source')
             return json(
