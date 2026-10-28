@@ -237,6 +237,16 @@ test('a file the current source deleted since the change edited it is set aside 
     aside[0].reason,
     /^The current source deleted src\/core\/workflows\.mjs since; your change to it is under merge-set-aside\//,
   );
+  // The attempt names the file with the same reason, outside its approved scope, and its summary carries it for the
+  // attempt's page; an attempt that set nothing aside carries none.
+  assert.deepEqual(merged.mergeSetAside, [{ path: target, reason: aside[0].reason }]);
+  assert.match(merged.mergeSetAside[0].reason, /^The current source deleted src\/core\/workflows\.mjs since/);
+  assert.equal(merged.sourceChange.mergeSetAside, undefined);
+  const summaries = store.dashboardAttempts('project-legacy', c.taskId);
+  assert.deepEqual(summaries.find(attempt => attempt.id === merged.id).setAside, [
+    { path: target, reason: aside[0].reason },
+  ]);
+  assert.equal(summaries.find(attempt => attempt.id === first.id).setAside, undefined);
   assert.match(fs.readFileSync(path.join(output, 'merge-set-aside', target), 'utf8'), /Bounded fixture improvement\./);
   assert.equal(fs.existsSync(path.join(output, 'changes', target)), false);
   assert.ok(

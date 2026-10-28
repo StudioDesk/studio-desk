@@ -176,16 +176,19 @@ function prepareSourceJob(runtime, entry) {
     fs.mkdirSync(path.dirname(path.join(entry.output, 'changes', file)), { recursive: true });
   // A story continues from the verified work of its latest stopped attempt (continueFrom), applied
   // over the seeded source copies; the candidate stays the whole change against this base. Work
-  // whose source was committed since is merged onto this base by git (October 27).
+  // whose source was committed since is merged onto this base by git (October 27). The attempt records the files set
+  // aside with why, outside its approved scope and hashes (mergeSetAside), so its page names them.
   const previous = scope.continueFrom && runtime.store.attempt(scope.continueFrom.attemptId),
     setAside = merged => {
-      if (merged.setAside.length)
-        runtime.store.event(
-          'merge_set_aside',
-          a.taskId,
-          a.id,
-          `Git could not apply the earlier change to ${merged.setAside.join(', ')}: a file deleted on one side and changed on the other. merge-set-aside.json tells the editor why for each.`,
-        );
+      if (!merged.setAside.length) return;
+      runtime.store.event(
+        'merge_set_aside',
+        a.taskId,
+        a.id,
+        `Git could not apply the earlier change to ${merged.setAside.map(item => item.path).join(', ')}: a file deleted on one side and changed on the other. merge-set-aside.json tells the editor why for each.`,
+      );
+      a.mergeSetAside = [...(a.mergeSetAside || []), ...merged.setAside];
+      runtime.store.updateAttempt(a);
     };
   if (scope.continueFrom?.merge)
     setAside(mergeContinuedWork(runtime.store, previous, scope.continueFrom, candidate, entry.output));
@@ -203,7 +206,7 @@ function prepareSourceJob(runtime, entry) {
       content: continuationFile(runtime.store, previous, 'changes/' + item.path, item.hash),
     }));
     setAsideFiles(entry.output, kept);
-    setAside({ setAside: kept.map(item => item.path) });
+    setAside({ setAside: kept.map(item => ({ path: item.path, reason: item.reason })) });
   }
   // A story merged onto the current source (1.1 step 3) starts from its earlier change applied to this base by git.
   if (scope.merge) setAside(mergeEarlierChange(scope.merge, candidate, entry.output));
@@ -232,7 +235,8 @@ function prepareSourceJob(runtime, entry) {
 // merged files it changed into changes/ (the parts git could not combine marked in them) and resets the worktree, which
 // the candidate is built in. A file git cannot mark, deleted on one side and changed on the other, is set aside for the
 // editor rather than stopping the story (October 27): merge-set-aside.json says why for each, and the change's version
-// of a file the current source deleted is under merge-set-aside/ for reference. Returns the marked and set-aside files.
+// of a file the current source deleted is under merge-set-aside/ for reference. Returns the marked files, and the
+// set-aside files with their reasons.
 function mergeEarlierChange(merge, worktree, output) {
   try {
     try {
@@ -266,7 +270,7 @@ function mergeEarlierChange(merge, worktree, output) {
     setAsideFiles(output, setAside);
     return {
       conflicts: unmerged.filter(item => ['UU', 'AA'].includes(item.state)).map(item => item.file),
-      setAside: [...away],
+      setAside: setAside.map(item => ({ path: item.path, reason: item.reason })),
     };
   } finally {
     git(worktree, ['reset', '--hard', '--quiet']);

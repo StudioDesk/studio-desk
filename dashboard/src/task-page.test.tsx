@@ -236,6 +236,52 @@ test('an attempt says what earlier work it continued, or why it started fresh', 
   ).toBeTruthy();
 });
 
+test('an attempt says when git merged the work it continued onto the current source, and which files git set aside and why', async () => {
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'running',
+      workerId: 'W-1',
+      continueFrom: { attemptId: 'attempt-0', files: [{ path: 'src/a.mjs' }], merged: ['src/a.mjs'] },
+    },
+  ];
+  open();
+  // Each page waits five seconds for its first render, as a loaded machine needs.
+  expect(
+    await screen.findByText(
+      "Continued from attempt-0's work, which git merged onto the current source because src/a.mjs changed since.",
+      {},
+      { timeout: 5000 },
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText('Continued from attempt-0: src/a.mjs')).toBeNull();
+  cleanup();
+  // A finished attempt's Result tab names each file set aside with why, with or without a continuation.
+  const reason =
+    'The current source deleted src/b.mjs since; your change to it is under merge-set-aside/src/b.mjs for reference.';
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'succeeded',
+      workerId: 'W-1',
+      result: { summary: 'Done.' },
+      setAside: [{ path: 'src/b.mjs', reason }],
+    },
+  ];
+  open();
+  const panel = await screen.findByRole('tabpanel', {}, { timeout: 5000 });
+  expect(
+    await within(panel).findByText(
+      `Git set src/b.mjs aside for the editor, because one side deleted it and the other changed it. ${reason}`,
+      {},
+      { timeout: 5000 },
+    ),
+  ).toBeTruthy();
+  expect(within(panel).queryByText(/Continued from/)).toBeNull();
+});
+
 test("a code story's attempts say what earlier work they continued, or why they started fresh, from their summaries", async () => {
   const user = userEvent.setup(),
     story = (id: string, startedAt: string, summary: string, continueFrom?: object) => ({
@@ -258,7 +304,11 @@ test("a code story's attempts say what earlier work they continued, or why they 
   // As the controller projects a code story's sourceChange.continueFrom: paths without hashes, and a fresh
   // start's reason naming the paths that changed.
   controller.attempts = [
-    story('attempt-1', '2026-10-21T20:00:00Z', 'First try.'),
+    // A merge onto the current source records no continuation, but may set files aside for its editor.
+    {
+      ...story('attempt-1', '2026-10-21T20:00:00Z', 'First try.'),
+      setAside: [{ path: 'src/gone.mjs', reason: 'The current source deleted src/gone.mjs since.' }],
+    },
     story('attempt-2', '2026-10-21T20:10:00Z', 'Second try.', {
       attemptId: 'attempt-1',
       files: [],
@@ -273,6 +323,7 @@ test("a code story's attempts say what earlier work they continued, or why they 
   await user.click(await screen.findByRole('tab', { name: /^Attempts/ }));
   expect(await screen.findByText('Continued from attempt-2: src/a.mjs, test/a.test.mjs')).toBeTruthy();
   expect(screen.queryByText(/Started fresh/)).toBeNull();
+  expect(screen.queryByText(/^Git set /)).toBeNull();
   const [first, second, third] = within(screen.getByRole('tabpanel')).getAllByRole('button');
   expect(third!.getAttribute('aria-pressed')).toBe('true');
   expect(third!.textContent).toMatch(/^Attempt 3 of /);
@@ -286,6 +337,11 @@ test("a code story's attempts say what earlier work they continued, or why they 
   await user.click(first!);
   expect(screen.queryByText(/Continued from/)).toBeNull();
   expect(screen.queryByText(/Started fresh/)).toBeNull();
+  expect(
+    await screen.findByText(
+      'Git set src/gone.mjs aside for the editor, because one side deleted it and the other changed it. The current source deleted src/gone.mjs since.',
+    ),
+  ).toBeTruthy();
   // The attempt chosen is the one the other tabs show: its activity ends with what it handed off.
   await user.click(screen.getByRole('tab', { name: 'Activity' }));
   expect(await screen.findByText('First try.')).toBeTruthy();

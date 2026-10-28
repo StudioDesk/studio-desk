@@ -194,6 +194,9 @@ test('sent back after the source of its files moved, the next attempt keeps its 
   assert.doesNotMatch(merged, /^(<{7}|>{7})/m);
   const summary = store.dashboardAttempts('project-legacy', c.taskId).find(attempt => attempt.id === next.id);
   assert.deepEqual(summary.continueFrom.merged, [target]);
+  // Git combined everything, so nothing was set aside for the editor.
+  assert.equal(next.mergeSetAside, undefined);
+  assert.equal(summary.setAside, undefined);
 });
 
 test('sent back after the same lines changed on the source, the next attempt gets them marked and cannot leave the markers', async t => {

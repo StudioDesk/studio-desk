@@ -120,6 +120,12 @@ export function dashboardAttempt(data, timing, openPhase = null) {
   if (data.stopContext) summary.stopContext = stopContext(data.stopContext);
   const continued = data.continueFrom || data.sourceChange?.continueFrom;
   if (continued) summary.continueFrom = continuation(continued);
+  // The files git set aside for the editor when the attempt was prepared, deleted on one side and changed on the
+  // other, with why (mergeSetAside, October 27).
+  if (Array.isArray(data.mergeSetAside) && data.mergeSetAside.length)
+    summary.setAside = data.mergeSetAside
+      .slice(0, 30)
+      .map(item => ({ path: shortText(item?.path), reason: shortText(item?.reason, 1000) }));
   if (data.acceptedBy) summary.acceptedBy = decision(data.acceptedBy);
   if (data.revisionRequestedBy) summary.revisionRequestedBy = decision(data.revisionRequestedBy);
   // Input bodies/summaries are duplicated elsewhere. These identities are needed

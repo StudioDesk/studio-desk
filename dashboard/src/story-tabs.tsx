@@ -14,6 +14,8 @@ import {
   phaseTimes,
   PlanReview,
   recordedPhases,
+  setAsideOf,
+  setAsideText,
   useAttemptDetail,
   type FullAttempt,
 } from './attempt-record';
@@ -620,6 +622,24 @@ export function attemptChip(attempt: AttemptSummary) {
   return statusChips[attempt.status] ?? ['', attempt.status];
 }
 
+// The files git set aside for the editor when the attempt was prepared, each with why (October 27): on a merge onto
+// the current source as well as on continued work.
+function SetAside({ attempt, top }: { attempt?: AttemptSummary; top?: string }) {
+  const items = attempt ? setAsideOf(attempt) : [];
+  return items.length ? (
+    <div
+      className="sd-meta"
+      style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', marginTop: top }}
+    >
+      {items.map(item => (
+        <p key={item.path} style={{ margin: 0 }}>
+          {setAsideText(item)}
+        </p>
+      ))}
+    </div>
+  ) : null;
+}
+
 // Each attempt: who ran it on what, when and for how long, and how it ended. A story's are grouped by step, its
 // build attempts and then its reviews, so a review never reads as another try at the build (the director, October
 // 24); other work with reviews is grouped the same way, its own attempts counted as the side panel counts them.
@@ -721,6 +741,8 @@ export function AttemptsPanel({
           left > 0 &&
           ` ${left} build ${plural(left, 'attempt is', 'attempts are')} left.`}
       </p>
+      {/* A story has no Result tab: the attempt chosen says here which files git set aside for its editor. */}
+      <SetAside attempt={shown} top="12px" />
     </div>
   );
 }
@@ -995,6 +1017,7 @@ export function ResultPanel({
           {continuation(carried)}
         </p>
       )}
+      <SetAside attempt={shown} />
       {attempt.error && (
         <p style={{ margin: 0, color: 'var(--bad)' }}>
           <b>It stopped:</b> {attempt.error}

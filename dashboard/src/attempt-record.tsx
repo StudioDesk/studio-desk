@@ -512,16 +512,26 @@ interface Carried {
   files?: { path: string }[];
   filesOmitted?: number;
   fresh?: { reason: string };
+  // The files whose source changed since, when git merged the work onto the current source (October 27).
+  merged?: string[];
 }
 // The earlier work an attempt carried on, or why it started fresh instead (item 18).
 export const carriedOf = (attempt: AttemptSummary) => attempt.continueFrom as Carried | undefined;
 export function continuation(carried: Carried) {
   return carried.fresh
     ? `Started fresh instead of the work of ${carried.attemptId}: ${carried.fresh.reason.replace(/\.$/, '')}. Its history still shows that work.`
-    : carried.files?.length
-      ? `Continued from ${carried.attemptId}: ${carried.files.map(file => file.path).join(', ')}${carried.filesOmitted ? ` and ${carried.filesOmitted} more` : ''}`
-      : `Continued from ${carried.attemptId}, which recorded no work files.`;
+    : carried.merged?.length
+      ? `Continued from ${carried.attemptId}'s work, which git merged onto the current source because ${carried.merged.join(', ')} changed since.`
+      : carried.files?.length
+        ? `Continued from ${carried.attemptId}: ${carried.files.map(file => file.path).join(', ')}${carried.filesOmitted ? ` and ${carried.filesOmitted} more` : ''}`
+        : `Continued from ${carried.attemptId}, which recorded no work files.`;
 }
+// The files git set aside for the editor when the attempt was prepared, each deleted on one side and changed on the
+// other, with why (the summary's setAside, October 27).
+export const setAsideOf = (attempt: AttemptSummary) =>
+  (attempt.setAside as { path: string; reason: string }[] | undefined) ?? [];
+export const setAsideText = (item: { path: string; reason: string }) =>
+  `Git set ${item.path} aside for the editor, because one side deleted it and the other changed it. ${item.reason}`;
 
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 
