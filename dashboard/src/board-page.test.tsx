@@ -2,13 +2,14 @@
 // stopped, done work's newest first and the rest a page at a time with the choice in the address, and its filters.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { Task } from './api';
+import type { CommandRecords, Task } from './api';
+import { columnOf, columns } from './board';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
+import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
 
 let controller: Controller;
 beforeEach(() => {
@@ -366,4 +367,96 @@ test('new work paused in every project says so, and resumes everywhere', async (
       body: { projectId: 'project-x', paused: false },
     }),
   );
+});
+
+// A command's answer carries the records it changed (records.ts RecordSync.answer), so the board moves the card with
+// the command's toast, before the stream's change event for it, which changes nothing more.
+const standing = () =>
+  Object.fromEntries(
+    ['Planned', 'Ready'].map(name => {
+      const region = screen.getByRole('region', { name });
+      return [
+        name,
+        { cards: titles(within(region)).sort(), count: region.querySelector('.sd-colhead__count')?.textContent },
+      ];
+    }),
+  );
+// Drag data as a browser keeps it, which jsdom lacks: what the card's drag start sets, the drop reads.
+const dragData = () => {
+  const data: Record<string, string> = {},
+    types: string[] = [];
+  return {
+    types,
+    setData: (type: string, value: string) => {
+      if (!(type in data)) types.push(type);
+      data[type] = value;
+    },
+    getData: (type: string) => data[type] ?? '',
+  };
+};
+const dragToReady = async (title: string) => {
+  const dataTransfer = dragData(),
+    ready = screen.getByRole('region', { name: 'Ready' });
+  fireEvent.dragStart((await column('Planned')).getByRole('link', { name: new RegExp(title) }), { dataTransfer });
+  fireEvent.dragOver(ready, { dataTransfer });
+  fireEvent.drop(ready, { dataTransfer });
+};
+const before = {
+  Planned: { cards: ['Planned work'], count: '1' },
+  Ready: { cards: ['Ready work'], count: '1' },
+};
+
+test("approving a Planned card moves it to its approved status's column with both counts, before any live update", async () => {
+  let answer: CommandRecords | undefined;
+  controller.command = url => {
+    if (url !== '/api/tasks/T-plan/approve-work') return {};
+    // Approved, and queued by the house rules (src/core/proposals.mjs approveWork, autonomy approved).
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-plan'
+        ? { ...task, status: 'ready', approval: { status: 'approved', by: { type: 'director' } }, queued: true }
+        : task,
+    );
+    answer = controller.records(['T-plan']);
+    return { ok: true, records: answer };
+  };
+  open();
+  await waitFor(() => expect(standing()).toEqual(before));
+  const reads = controller.reads().length,
+    seen = whenShown('Approved. It joins Ready.', () => ({
+      standing: standing(),
+      reads: controller.reads().slice(reads),
+    }));
+  await dragToReady('Planned work');
+  // The approved task's status stands in Ready.
+  const approved = controller.tasks.find(task => task.id === 'T-plan')!;
+  expect(columns.find(item => item.id === columnOf(approved))?.name).toBe('Ready');
+  // With the toast, the card has moved and both counts changed, with nothing read again.
+  expect(await seen).toEqual({
+    standing: { Planned: { cards: [], count: '0' }, Ready: { cards: ['Planned work', 'Ready work'], count: '2' } },
+    reads: [],
+  });
+  // The stream's change for the same command reads the task again and leaves the board as it is.
+  latest().emit('change', { version: answer!.version, start: answer!.start, changes: answer!.changes });
+  await waitFor(() => expect(controller.reads().slice(reads)).toEqual(['/api/tasks/T-plan?projectId=project-x']));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(standing()).toEqual({
+    Planned: { cards: [], count: '0' },
+    Ready: { cards: ['Planned work', 'Ready work'], count: '2' },
+  });
+});
+
+test("a refused approval leaves the card in Planned and both counts as they were, with the controller's reason", async () => {
+  controller.command = () => {
+    throw new Error('Only pending Planned work can be approved.');
+  };
+  open();
+  await waitFor(() => expect(standing()).toEqual(before));
+  const seen = whenShown('Only pending Planned work can be approved.', standing);
+  await dragToReady('Planned work');
+  expect(await seen).toEqual(before);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(standing()).toEqual(before);
+  expect(controller.requests.filter(request => request.method === 'POST').map(request => request.url)).toEqual([
+    '/api/tasks/T-plan/approve-work',
+  ]);
 });

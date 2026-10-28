@@ -3,7 +3,7 @@
 // and decisions, the idea in full, who worked on it and what landed. Its actions are the run page's: pausing the
 // project, archiving a finished idea and closing what is left of one, and bringing an idea whose stories landed back
 // to an older line (1.1).
-import { useMutation, useQueries } from '@tanstack/react-query';
+import { notifyManager, useMutation, useQueries } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { getJSON, runUrl, send, taskUrl, type RunRecord, type Task, type TaskPage } from './api';
@@ -691,7 +691,8 @@ function IdeaActions({
   const request = useMutation({
     mutationFn: ({ path, body }: { path: string; body: Record<string, unknown>; done: string }) =>
       send(path, { projectId, ...body }),
-    onSuccess: (_, { done }) => toast(done),
+    // With the records the answer carried (records.ts), which the page hears on the query client's next notice.
+    onSuccess: (_, { done }) => notifyManager.schedule(() => toast(done)),
     onError: failure => toast(failure.message),
   });
   const pause = () =>

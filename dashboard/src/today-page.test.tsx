@@ -6,10 +6,10 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary } from './api';
+import type { AttemptSummary, CommandRecords } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
+import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
 
 let controller: Controller;
 beforeEach(() => {
@@ -615,4 +615,73 @@ test('a usage hold with a known reset clears itself and stays off the calls', as
   open();
   const region = await calls();
   await waitFor(() => expect(within(region).getByText(/Nothing is waiting on you\./)).toBeTruthy());
+});
+
+// A command's answer carries the records it changed (records.ts RecordSync.answer), so Today shows the effect with
+// the command's toast, before the stream's change event for it, which changes nothing more.
+const proposed = () => [
+  taskFixture('T-1', { title: 'Add the board', status: 'backlog', approval: { status: 'pending' } }),
+  taskFixture('T-2', { title: 'Add the list', status: 'backlog', approval: { status: 'pending' } }),
+];
+// The calls' cards and their count, as the page shows them.
+const callsShown = (region: HTMLElement) => ({
+  cards: within(region)
+    .queryAllByRole('heading', { level: 3 })
+    .map(heading => heading.textContent),
+  count: within(region).queryByText(/^\d+ waiting on you$/)?.textContent ?? null,
+});
+
+test("Approve takes the call off Today and lowers the calls' count with its toast, before any live update", async () => {
+  const user = userEvent.setup();
+  controller.tasks = proposed();
+  let answer: CommandRecords | undefined;
+  controller.command = url => {
+    if (url !== '/api/tasks/T-1/approve-work') return {};
+    // Approved, and queued by the house rules (src/core/proposals.mjs approveWork, autonomy approved).
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-1'
+        ? { ...task, status: 'ready', approval: { status: 'approved', by: { type: 'director' } }, queued: true }
+        : task,
+    );
+    answer = controller.records(['T-1']);
+    return { ok: true, records: answer };
+  };
+  open();
+  const region = await calls();
+  await waitFor(() =>
+    expect(callsShown(region)).toEqual({ cards: ['Add the board', 'Add the list'], count: '2 waiting on you' }),
+  );
+  const card = within(within(region).getByRole('heading', { name: 'Add the board' }).closest('article')!),
+    seen = whenShown('Approved “Add the board”.', () => callsShown(region));
+  await user.click(card.getByRole('button', { name: 'Approve work' }));
+  expect(await seen).toEqual({ cards: ['Add the list'], count: '1 waiting on you' });
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('One call is yours to make.');
+  // The stream's change for the same command reads the task again and leaves Today as it is.
+  const before = controller.reads().length;
+  latest().emit('change', { version: answer!.version, start: answer!.start, changes: answer!.changes });
+  await waitFor(() => expect(controller.reads().slice(before)).toEqual(['/api/tasks/T-1?projectId=project-x']));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(callsShown(region)).toEqual({ cards: ['Add the list'], count: '1 waiting on you' });
+  expect(screen.getByText('Approved “Add the board”.')).toBeTruthy();
+});
+
+test("a refused Approve leaves Today's calls and their count as they were and shows the controller's reason", async () => {
+  const user = userEvent.setup();
+  controller.tasks = proposed();
+  controller.command = () => {
+    throw new Error('The proposed employee is no longer enabled.');
+  };
+  open();
+  const region = await calls();
+  await waitFor(() =>
+    expect(callsShown(region)).toEqual({ cards: ['Add the board', 'Add the list'], count: '2 waiting on you' }),
+  );
+  const card = within(within(region).getByRole('heading', { name: 'Add the board' }).closest('article')!),
+    seen = whenShown('The proposed employee is no longer enabled.', () => callsShown(region));
+  await user.click(card.getByRole('button', { name: 'Approve work' }));
+  expect(await seen).toEqual({ cards: ['Add the board', 'Add the list'], count: '2 waiting on you' });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(callsShown(region)).toEqual({ cards: ['Add the board', 'Add the list'], count: '2 waiting on you' });
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
+  expect(posted().map(request => request.url)).toEqual(['/api/tasks/T-1/approve-work']);
 });

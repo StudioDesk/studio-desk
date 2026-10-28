@@ -5,6 +5,7 @@ import { vi } from 'vitest';
 import type {
   ActivityPage,
   AttemptSummary,
+  CommandRecords,
   FinishedPage,
   FirstRunTemplates,
   IdeaName,
@@ -47,6 +48,18 @@ export class FakeSource {
 }
 export const latest = () => FakeSource.all.filter(source => !source.closed).at(-1)!;
 export const createStream = (url: string) => new FakeSource(url) as unknown as EventSource;
+
+// What `read` finds on the page in the render where `text` first shows, such as a command's toast: what changed with
+// it reads changed, and what changes only in a later render reads as it was.
+export const whenShown = <T>(text: string, read: () => T) =>
+  new Promise<T>(resolve => {
+    const observer = new MutationObserver(() => {
+      if (!document.body.textContent?.includes(text)) return;
+      observer.disconnect();
+      resolve(read());
+    });
+    observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+  });
 
 export const shellFixture = (projectId = 'project-x'): Shell => ({
   project: { id: projectId, name: 'Project X' },
@@ -127,6 +140,11 @@ export interface Controller {
   // Answers a command; the default accepts it, and one that throws refuses it with the error's message. A
   // promise holds the answer until the test resolves it, or refuses the command when the test rejects it.
   command(url: string, method: string, body: unknown): unknown;
+  // What the controller answers a command with when the page asks for its records (src/server.mjs commandRecords):
+  // a change for each task named, each with its own seq after the last one recorded, and each task's page from the
+  // current records. A command changes the records first and answers `{ ...answer, records: records([...]) }`; the
+  // stream's change event for the same command carries the same version, start and changes.
+  records(taskIds: string[]): CommandRecords;
   reads(): string[];
 }
 
@@ -143,6 +161,8 @@ const respond = (body: unknown, ok = true) => ({
 export function fakeController(projectId = 'project-x'): Controller {
   FakeSource.all = [];
   FakeSource.hello = { version: 1, start: 'start-a' };
+  // The newest change's seq, from where each connection's hello says the controller is.
+  let version = FakeSource.hello.version;
   const controller: Controller = {
     shell: shellFixture(projectId),
     tasks: [],
@@ -169,6 +189,18 @@ export function fakeController(projectId = 'project-x'): Controller {
     runBringBack: {},
     requests: [],
     command: () => ({}),
+    records: taskIds => {
+      const changes = taskIds.map(id => ({ seq: ++version, type: 'task', id, projectId }));
+      return {
+        projectId,
+        version,
+        start: FakeSource.hello?.start ?? 'start-a',
+        changes,
+        tasks: controller.tasks
+          .filter(task => taskIds.includes(task.id))
+          .map(task => ({ task, attempts: controller.attempts.filter(attempt => attempt.taskId === task.id) })),
+      };
+    },
     reads: () => controller.requests.filter(request => request.method === 'GET').map(request => request.url),
   };
   vi.stubGlobal(

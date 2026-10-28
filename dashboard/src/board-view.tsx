@@ -2,7 +2,7 @@
 // where its task stands and why, with a search, filters for open work, your calls, working and waiting, a filter by
 // person, lanes by idea or by person, and a list. Dragging a Planned card to Ready approves it. Open work comes from
 // the live set; done work a page at a time, its newest three shown until the rest is asked for, kept in the address.
-import { useMutation } from '@tanstack/react-query';
+import { notifyManager, useMutation } from '@tanstack/react-query';
 import { Link, useNavigate, useRouter } from '@tanstack/react-router';
 import { useMemo, useState, type DragEvent, type ReactNode } from 'react';
 import { send } from './api';
@@ -83,7 +83,8 @@ export function Board({
       .sort(newest(board));
   const approve = useMutation({
     mutationFn: (taskId: string) => send(`/api/tasks/${encodeURIComponent(taskId)}/approve-work`, { projectId }),
-    onSuccess: () => toast('Approved. It joins Ready.'),
+    // With the records the answer carried (records.ts), which the page hears on the query client's next notice.
+    onSuccess: () => notifyManager.schedule(() => toast('Approved. It joins Ready.')),
     onError: failure => toast(failure.message),
   });
   // What the live set holds that is settled is counted with the settled lists, not twice.

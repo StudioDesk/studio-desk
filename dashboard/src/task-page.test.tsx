@@ -846,3 +846,93 @@ for (const [source, tab, shows] of [
     expect(within(panel).queryByRole('region', inFull)).toBeNull();
     expect(document.getElementById('stands-in-full')).toBeNull();
   });
+
+// A command's answer carries the records it changed (records.ts RecordSync.answer), so the page shows the task's new
+// status and decisions without reading it again, before the stream's change event for it, which changes nothing more.
+const decisions = () => {
+  const stands = screen.getByRole('region', { name: 'Where it stands' });
+  return {
+    status: document.querySelector('.sd-storyhead__kind.sd-narrow-only .sd-chip')?.textContent,
+    title: stands.querySelector('.sd-stands__title')?.textContent,
+    buttons: [...stands.querySelectorAll('.sd-stands__actions button')].map(button => button.textContent),
+  };
+};
+const proposedWork = {
+  status: 'Planned',
+  title: 'This proposed work needs approval before it can run.',
+  buttons: ['Approve work', 'Deny work'],
+};
+const proposedStory = () => {
+  edit({ status: 'backlog', approval: { status: 'pending' }, lastAttemptId: undefined });
+  controller.attempts = [];
+};
+
+// The controller's decision on proposed work (src/core/proposals.mjs approveWork and denyWork).
+test.each([
+  {
+    name: 'Approve work',
+    step: 'approve-work',
+    fields: { status: 'ready', approval: { status: 'approved', by: { type: 'director' } }, queued: true },
+    shown: { status: 'Ready', title: 'This assignment is queued.' },
+  },
+  {
+    name: 'Deny work',
+    step: 'deny-work',
+    fields: { status: 'denied', approval: { status: 'denied', reason: '' }, reason: 'Director denied this work.' },
+    shown: { status: 'Denied', title: 'This work was denied.' },
+  },
+])(
+  "$name shows the task's new status and decisions at once, before any live update",
+  async ({ name, step, fields, shown }) => {
+    const user = userEvent.setup();
+    proposedStory();
+    let answer: ReturnType<Controller['records']> | undefined;
+    controller.command = url => {
+      if (url !== `/api/tasks/T-1/${step}`) return {};
+      edit({ ...fields, queued: fields.status === 'ready' });
+      answer = controller.records(['T-1']);
+      return { ok: true, records: answer };
+    };
+    open();
+    await screen.findByRole('heading', { name: 'Show finished results' });
+    await waitFor(() => expect(decisions()).toEqual(proposedWork));
+    const reads = controller.reads().length;
+    await user.click(within(screen.getByRole('region', { name: 'Where it stands' })).getByRole('button', { name }));
+    if (name === 'Deny work')
+      await user.click(
+        within(await screen.findByRole('dialog', { name: 'Deny this work?' })).getByRole('button', { name }),
+      );
+    await waitFor(() => expect(decisions()).toMatchObject(shown));
+    const after = decisions();
+    expect(after.buttons).not.toContain('Approve work');
+    expect(after.buttons).not.toContain('Deny work');
+    if (name === 'Approve work') expect(after.buttons).toContain('Withdraw approval and deny');
+    // The task was not read again: the answer's records changed the page (settled work's live set is confirmed).
+    expect(controller.reads().slice(reads)).not.toContain(taskUrl);
+    // The stream's change for the same command reads the task again and leaves the page as it is.
+    latest().emit('change', { version: answer!.version, start: answer!.start, changes: answer!.changes });
+    await waitFor(() => expect(controller.reads().slice(reads)).toContain(taskUrl));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(decisions()).toEqual(after);
+  },
+);
+
+test("a refused Approve work leaves the page's status and decisions as they were and shows the controller's reason", async () => {
+  const user = userEvent.setup(),
+    reason = 'Only pending Planned work can be approved.';
+  proposedStory();
+  controller.command = () => {
+    throw new Error(reason);
+  };
+  open();
+  await screen.findByRole('heading', { name: 'Show finished results' });
+  await waitFor(() => expect(decisions()).toEqual(proposedWork));
+  const toast = () => document.querySelector('.sd-toast')?.textContent;
+  await user.click(
+    within(screen.getByRole('region', { name: 'Where it stands' })).getByRole('button', { name: 'Approve work' }),
+  );
+  await waitFor(() => expect(toast()).toBe(reason));
+  expect(decisions()).toEqual(proposedWork);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(decisions()).toEqual(proposedWork);
+});

@@ -9,7 +9,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary, RunRecord, Task } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
+import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
 
 let controller: Controller;
 const change = 'studio-development:change';
@@ -221,4 +221,82 @@ test('a closed story counts as settled, as long as one of the idea’s stories l
   await new Promise(resolve => setTimeout(resolve, 50));
   expect(backReads()).toEqual([]);
   expect(screen.queryByRole('button', { name: /^Bring the idea back/ })).toBeNull();
+});
+
+// A command's answer carries the records it changed (records.ts RecordSync.answer), so the idea's page shows its
+// unstarted stories closed with the command's toast, before the stream's change event for it.
+const planned = (id: string, title: string, extra: Partial<Task> = {}) =>
+  taskFixture(id, {
+    title,
+    kind: change,
+    status: 'backlog',
+    approval: { status: 'pending' },
+    workflowReference: { runId: 'run-1', key: id },
+    ...extra,
+  });
+const page = () => ({
+  idea: document.querySelector('.sd-ideahead__meta .sd-chip')?.textContent,
+  stories: [...document.querySelectorAll('.sd-storycard')].map(
+    card =>
+      `${card.querySelector('.sd-storycard__title')?.textContent}: ${card.querySelector('.sd-chip')?.textContent}`,
+  ),
+  close: !!screen.queryByRole('menuitem', { name: /^Close what is left/, hidden: true }),
+});
+const proposedIdea = () => [planned('T-1', 'First'), planned('T-2', 'Second')];
+
+test("Close what is left shows the idea's unstarted stories closed with its toast, before any live update", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal('confirm', () => true);
+  let answer: ReturnType<Controller['records']> | undefined;
+  controller.command = (url, _method, body) => {
+    if (url !== '/api/tasks/close') return {};
+    // Each one denied (src/core/proposals.mjs closeWork).
+    const ids = (body as { taskIds: string[] }).taskIds;
+    controller.tasks = controller.tasks.map(task =>
+      ids.includes(task.id)
+        ? { ...task, status: 'denied', approval: { status: 'denied', reason: 'Closed from the idea.' }, queued: false }
+        : task,
+    );
+    answer = controller.records(ids);
+    return { closed: ids, records: answer };
+  };
+  open(proposedIdea());
+  expect(await title()).toBeTruthy();
+  await waitFor(() => expect(page().close).toBe(true));
+  expect(page().stories).toEqual(['First: Your call', 'Second: Your call']);
+  const seen = whenShown('Closed 2 unstarted stories.', page);
+  await user.click(screen.getByRole('menuitem', { name: 'Close what is left (2)', hidden: true }));
+  const closed = await seen;
+  expect(posted()).toEqual([
+    {
+      url: '/api/tasks/close',
+      method: 'POST',
+      body: { projectId: 'project-x', taskIds: ['T-1', 'T-2'], reason: 'Closed from the idea.' },
+    },
+  ]);
+  expect(closed.idea).toBe('Cancelled');
+  expect(closed.close).toBe(false);
+  expect(closed.stories.filter(story => story.endsWith('Your call'))).toEqual([]);
+  // The stream's change for the same command leaves the page as it is.
+  latest().emit('change', { version: answer!.version, start: answer!.start, changes: answer!.changes });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(page()).toEqual(closed);
+});
+
+test("a refused Close what is left leaves the idea's stories as they were and shows the controller's reason", async () => {
+  const user = userEvent.setup(),
+    reason = 'T-2 has started or finished, so it cannot be closed.';
+  vi.stubGlobal('confirm', () => true);
+  controller.command = () => {
+    throw new Error(reason);
+  };
+  open(proposedIdea());
+  expect(await title()).toBeTruthy();
+  await waitFor(() => expect(page().close).toBe(true));
+  const before = page(),
+    seen = whenShown(reason, page);
+  await user.click(screen.getByRole('menuitem', { name: 'Close what is left (2)', hidden: true }));
+  expect(await seen).toEqual(before);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(page()).toEqual(before);
 });

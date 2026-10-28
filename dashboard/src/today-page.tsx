@@ -1,7 +1,7 @@
 // Today (the canvas's Today and Today on a phone, v1.0 item 23): the page's sentence, the New idea box, the calls
 // only the director can make with their evidence and the real actions, what moves without them, who is on the
 // floor and what shipped today. Every action asks the controller for the same recorded step the task page would.
-import { useMutation } from '@tanstack/react-query';
+import { notifyManager, useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useMemo, useState, type ReactNode } from 'react';
 import { send, type AttemptSummary, type Task, type Worker } from './api';
@@ -58,7 +58,8 @@ function useAct(projectId: string) {
       send<Record<string, unknown>>(path, { projectId, ...body }),
     onSuccess: (result, { done }) => {
       const message = done?.(result);
-      if (message) toast(message);
+      // With the records the answer carried (records.ts), which the page hears on the query client's next notice.
+      if (message) notifyManager.schedule(() => toast(message));
     },
     onError: failure => toast(failure.message),
   });
