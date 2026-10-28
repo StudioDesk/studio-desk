@@ -563,6 +563,24 @@
   const turnWait = record =>
     typeof record?.testTurn?.reason === 'string' && record.testTurn.reason.trim() ? record.testTurn.reason : '';
 
+  // The attempt whose question still waits for an answer, as in the controller (src/core/questions.mjs
+  // waitingQuestion): the blocked task's latest attempt, blocked with a question it asked, which no answer names.
+  // A question that could not be read has no ask, so it never waits.
+  function waitingQuestion(task, attempts) {
+    if (task.status !== 'blocked' || !task.lastAttemptId) return null;
+    const asking = attempts.find(a => a.id === task.lastAttemptId);
+    if (asking?.status !== 'blocked' || !asking.question?.ask) return null;
+    return (task.answers || []).some(answer => answer.attemptId === asking.id) ? null : asking;
+  }
+  // Whether auto mode may answer it for the director (src/core/questions.mjs answerableInAutoMode): a choice the agent
+  // marked as inside its story, touching none of the kinds kept for the director, with a recommendation, from an
+  // attempt that asked for no files.
+  const answerableInAutoMode = attempt =>
+    attempt.question.choice === 'inside-story' &&
+    !(attempt.question.topics || []).length &&
+    Number.isInteger(attempt.question.recommended) &&
+    !attempt.scopeRequest;
+
   // One read-only account of the current stop/wait. Text is deliberately unescaped:
   // callers render it as text. This helper grants no eligibility or controller action.
   function taskExplanation(task, state = {}) {
@@ -910,6 +928,35 @@
       );
     }
 
+    // An agent stopped to ask the director a question (1.2 step 2). With the work's own auto mode on, auto mode
+    // answers a choice inside the story with the agent's recommendation; every other question waits for the director.
+    const asking = waitingQuestion(task, attempts);
+    if (asking) {
+      const { ask, why, options = [], recommended } = asking.question,
+        workerId = asking.workerId || view.workerId,
+        agent = (state.workers || []).find(w => w.id === workerId)?.displayName || workerId || 'The agent',
+        exchange = { details: [ask, why].filter(Boolean), attemptId: asking.id },
+        pick = options[recommended]?.label;
+      if (task.autoMode === true && answerableInAutoMode(asking))
+        return {
+          ...passive(
+            'question-auto',
+            `${agent} asked a question that auto mode answers.`,
+            `Auto mode answers with the agent's recommendation${pick ? `, “${pick}”,` : ''} and the work continues from its saved work.`,
+          ),
+          ...exchange,
+        };
+      return {
+        ...result(
+          'question',
+          `${agent} asked you a question.`,
+          `Use Answer to answer it with one of its options, your own words, or both. ${agent} continues from the saved work with your answer.`,
+          'Answer',
+        ),
+        ...exchange,
+      };
+    }
+
     const scope = attempt?.scopeRequest,
       scopeAnswered = (task.scopeEdits || []).some(
         edit =>
@@ -1248,7 +1295,12 @@
         'The employee could not complete the assignment with the available inputs or access.',
         'Resolve the reported missing input or dependency, then use Start assignment, or close the work.',
         'Start assignment',
-        [attempt.result.summary, blocker],
+        [
+          attempt.result.summary,
+          blocker,
+          // A question.json the controller could not read is no question; the agent's stop says why.
+          attempt.question?.problem && `The agent's question could not be read: ${attempt.question.problem}`,
+        ],
       );
     if (task.status === 'failed')
       return result(

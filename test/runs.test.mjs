@@ -1225,6 +1225,114 @@ test('a failed attempt reads as failed, never as an employee or execution config
   }
 });
 
+test("an agent's waiting question is the director's to answer, unless the work's own auto mode answers it", () => {
+  // As the controller records it (src/core/questions.mjs): the blocked attempt carries the question it read, and
+  // the task's reason quotes the ask.
+  const question = {
+      ask: 'Keep the old route for one release?',
+      why: 'Two pages still call it, and removing it breaks their links.',
+      options: [{ label: 'Keep it' }, { label: 'Remove it', detail: 'and update both pages' }],
+      recommended: 0,
+      choice: 'inside-story',
+      topics: [],
+    },
+    asking = (taskFields = {}, attemptFields = {}) =>
+      explanationFixture(
+        { status: 'blocked', reason: `Asks: ${question.ask}`, ...taskFields },
+        {
+          status: 'blocked',
+          result: { outcome: 'blocked', summary: 'I need a call on the old route.', checks: [], issues: [] },
+          question,
+          ...attemptFields,
+        },
+      ),
+    plain = value => JSON.parse(JSON.stringify(value));
+
+  const waiting = explain(asking());
+  assert.equal(waiting.kind, 'question');
+  assert.equal(waiting.requiresDirector, true);
+  assert.equal(waiting.action, 'Answer');
+  assert.equal(waiting.reason, 'Eli asked you a question.');
+  assert.deepEqual(plain(waiting.details), [question.ask, question.why]);
+  assert.equal(waiting.attemptId, 'a-E');
+  assert.match(waiting.next, /^Use Answer to answer it/);
+  assert.match(waiting.next, /Eli continues from the saved work/);
+  assert.deepEqual(plain(context.StudioRuns.needsYou(asking()).map(item => [item.taskId, item.kind, item.action])), [
+    ['E', 'question', 'Answer'],
+  ]);
+
+  // Answered, it no longer waits, even before the task moves on.
+  for (const by of [{ type: 'director' }, { type: 'auto-mode' }]) {
+    const answered = explain(asking({ answers: [{ attemptId: 'a-E', option: 0, label: 'Keep it', by }] }));
+    assert.ok(!['question', 'question-auto'].includes(answered.kind), by.type);
+  }
+  // An answer to another attempt's question leaves this one waiting.
+  assert.equal(explain(asking({ answers: [{ attemptId: 'a-older', text: 'Keep it.' }] })).kind, 'question');
+
+  // The work's own auto mode answers a choice inside the story with the agent's recommendation.
+  const auto = explain(asking({ autoMode: true }));
+  assert.equal(auto.kind, 'question-auto');
+  assert.equal(auto.requiresDirector, false);
+  assert.equal(auto.action, null);
+  assert.equal(auto.attemptId, 'a-E');
+  assert.deepEqual(plain(auto.details), [question.ask, question.why]);
+  assert.match(auto.next, /^Nothing is needed from you\. Auto mode answers with the agent's recommendation, “Keep it”/);
+
+  // Any kept topic, a choice marked as the director's, no recommendation, a file request or the work's auto mode
+  // off or unset leaves the question to the director.
+  const directors = [
+    ...['scope', 'permission', 'package', 'push', 'delete', 'art', 'playtest'].map(topic => [
+      `topic ${topic}`,
+      { autoMode: true },
+      { question: { ...question, topics: [topic] } },
+    ]),
+    ["the director's choice", { autoMode: true }, { question: { ...question, choice: 'director' } }],
+    ['no recommendation', { autoMode: true }, { question: { ...question, recommended: null } }],
+    [
+      'a file request',
+      { autoMode: true },
+      { scopeRequest: { files: ['test/new.test.mjs'], newFiles: [], deleteFiles: [], reason: 'The test asserts it.' } },
+    ],
+    ['auto mode off', { autoMode: false }, {}],
+    ['auto mode unset', {}, {}],
+  ];
+  for (const [name, taskFields, attemptFields] of directors) {
+    const e = explain(asking(taskFields, attemptFields));
+    assert.equal(e.kind, 'question', name);
+    assert.equal(e.requiresDirector, true, name);
+    assert.equal(e.action, 'Answer', name);
+  }
+
+  // The question comes before the attempt's file request and its refused commands.
+  const both = explain(
+    asking(
+      {},
+      {
+        scopeRequest: { files: ['test/new.test.mjs'], reason: 'The test asserts it.' },
+        commandDenials: [{ tool: 'Bash', command: 'npm test', reason: 'Not approved.' }],
+      },
+    ),
+  );
+  assert.equal(both.kind, 'question');
+  assert.deepEqual(plain(both.details), [question.ask, question.why]);
+
+  // A question that could not be read is no question: the agent's blocked result stops it, and says why.
+  const problem = 'question.json must be readable JSON of at most 32 KiB.',
+    unreadable = explain(asking({ reason: 'I need a call on the old route.' }, { question: { problem } }));
+  assert.equal(unreadable.kind, 'blocked-result');
+  assert.equal(unreadable.action, 'Start assignment');
+  assert.ok(unreadable.details.includes('I need a call on the old route.'));
+  assert.ok(
+    unreadable.details.includes(`The agent's question could not be read: ${problem}`),
+    plain(unreadable.details).join('\n'),
+  );
+  // So does one in work on auto mode.
+  assert.equal(
+    explain(asking({ autoMode: true, reason: 'I need a call on the old route.' }, { question: { problem } })).kind,
+    'blocked-result',
+  );
+});
+
 // A reset time later today reads as the local clock time alone.
 const tonight = () => {
   const at = new Date();
