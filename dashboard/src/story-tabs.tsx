@@ -37,8 +37,16 @@ import {
 } from './files';
 import { workerName } from './names';
 import { FileChanges, filesEditable, readArtifact, StoryEdit } from './source-story';
-import { attemptsUsed, cliName, countsTowardLimit, isSourceStory, kindLabel, storyPeople } from './story';
-import { liveSummary, type StudioState } from './studio-runs';
+import {
+  attemptsUsed,
+  cliName,
+  countsTowardLimit,
+  isSourceStory,
+  kindLabel,
+  storyPeople,
+  type Standing,
+} from './story';
+import { active, liveSummary, type StudioState } from './studio-runs';
 import { IntegrationJournal, type Journal } from './task-decisions';
 import { TaskRow } from './task-row';
 import { useNarrow } from './use-narrow';
@@ -279,6 +287,34 @@ const phaseColors: Record<string, string> = {
   'candidate.commit': 'var(--line-2)',
   test: 'var(--ok-dot)',
 };
+
+// Where it stands, in full: the notice's whole account at the top of the Checks tab, or the Result tab for other
+// work, its title and then each part on a row of its own (a failed test with its file). The notice links to it by
+// its id. Nothing shows while the work runs, or when the notice has nothing more to tell.
+export const standsInFullId = 'stands-in-full';
+export function StandsInFull({ task, stand }: { task: Task; stand: Standing }) {
+  if (active(task) || !stand.full.lines.length) return null;
+  return (
+    <section
+      id={standsInFullId}
+      className="sd-tabpanel"
+      aria-labelledby={`${standsInFullId}-title`}
+      style={{ paddingBottom: 0 }}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+        <h2 id={`${standsInFullId}-title`} className="sd-tabpanel__title">
+          Where it stands, in full
+        </h2>
+        <p style={{ margin: 0, fontWeight: 700 }}>{stand.full.title}</p>
+      </div>
+      <div>
+        {stand.full.lines.map((line, index) => (
+          <NoteRow key={index} text={line} />
+        ))}
+      </div>
+    </section>
+  );
+}
 
 // The candidate's tests and where its time went, the editor's own checks, the controller's checks, and what
 // nobody checked.

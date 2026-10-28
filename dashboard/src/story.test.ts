@@ -3,7 +3,7 @@
 import { expect, test } from 'vitest';
 import type { AttemptSummary, Task } from './api';
 import { attemptsUsed, cliName, houseRules, standing, storySteps } from './story';
-import type { StudioState } from './studio-runs';
+import { explain, type StudioState } from './studio-runs';
 
 const studio = (tasks: Task[], attempts: AttemptSummary[], extra: Partial<StudioState> = {}) =>
   ({
@@ -138,6 +138,106 @@ test('a reviewed story waits for the director to integrate it, with the evidence
   expect(standing(task, studio([task], [build(), review]))).toMatchObject({
     tone: 'you',
     title: "Morgan passed it. It's ready to integrate.",
+  });
+});
+
+// The notice's whole account, which the story's Checks tab tells in full while the notice reads as it did.
+test('a stopped story keeps its whole account in full: each failing check, failed test, the error, each issue, then the next step', () => {
+  const failed = build({
+      status: 'failed',
+      controllerChecks: [
+        { name: 'Candidate tests', status: 'fail', evidence: '751 of 752 tests passed.' },
+        { name: 'Artifact paths', status: 'pass', evidence: 'Every path is approved.' },
+      ],
+      testEvidence: {
+        totals: { tests: 752, pass: 751, fail: 1 },
+        failedTests: [{ file: 'test/a.test.mjs', name: 'keeps the label' }, { name: 'names the file' }],
+      },
+      error: 'The candidate did not pass its tests.',
+      result: {
+        outcome: 'completed',
+        summary: 'Shows them.',
+        issues: ['I could not run the browser check.', 'The fixture has no second page.'],
+      },
+      sourceCandidate: undefined,
+    }),
+    task = story({
+      status: 'failed',
+      lastAttemptId: 'attempt-build',
+      sourceStage: stage({ phase: 'implementing', current: 'failed' }),
+    }),
+    state = studio([task], [failed]),
+    { reason, next } = explain(task, state),
+    stand = standing(task, state),
+    lines = [
+      'Candidate tests: 751 of 752 tests passed.',
+      'test/a.test.mjs: keeps the label',
+      'names the file',
+      'The candidate did not pass its tests.',
+      'I could not run the browser check.',
+      'The fixture has no second page.',
+      next,
+    ];
+  expect(next).toBeTruthy();
+  expect(stand.full).toEqual({ title: reason, lines });
+  // The notice itself is as it was: the reason, and every part run together.
+  expect(stand.title).toBe(reason);
+  expect(stand.detail).toBe(lines.join(' '));
+});
+
+test('a notice with one detail tells it as one line, and one without any has nothing more to tell', () => {
+  const review: AttemptSummary = {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      projectId: 'project-x',
+      workerId: 'W-2',
+      status: 'accepted',
+      assignment: { kind: 'studio-development:change-review' },
+      candidateReviewVerdict: 'pass',
+      candidateReview: { ...pin, passed: true },
+      result: { outcome: 'completed', summary: 'Passes.' },
+      inputReferences: [
+        {
+          taskId: 'T-1',
+          attemptId: 'attempt-build',
+          artifacts: [{ path: '../inputs/T-1/0-source-change.json', kind: 'source-change', hash: 'manifest-hash' }],
+        },
+      ],
+      artifacts: [{ path: 'source-change-review.json', kind: 'source-change-review', hash: 'review-hash' }],
+    },
+    task = story({
+      status: 'done',
+      lastAttemptId: 'attempt-review',
+      acceptedAttemptId: 'attempt-review',
+      sourceStage: stage({
+        phase: 'candidate-review',
+        current: 'waiting-for-integration',
+        candidate: pin,
+        review: {
+          taskId: 'T-1',
+          attemptId: 'attempt-review',
+          workerId: 'W-2',
+          verdict: 'pass',
+          path: 'source-change-review.json',
+          hash: 'review-hash',
+        },
+      }),
+    }),
+    ready = standing(task, studio([task], [build(), review]));
+  expect(ready.chip).toBe('Ready to integrate');
+  expect(ready.full).toEqual({
+    title: "Morgan passed it. It's ready to integrate.",
+    lines: [
+      'Integrating merges it onto the current source in its own worktree, formats it, runs the full suite, then moves the branch forward. If any step fails, nothing changes.',
+    ],
+  });
+  expect(ready.full.lines).toEqual([ready.detail]);
+  // Work moving has no detail, so nothing more to tell.
+  const editing = story({ sourceStage: stage({ phase: 'implementing', current: 'implementing' }) }),
+    running = build({ status: 'running', finishedAt: null, testEvidence: undefined });
+  expect(standing(editing, studio([editing], [running]), 'source.edit').full).toEqual({
+    title: 'Eli is editing. Nothing needed from you.',
+    lines: [],
   });
 });
 

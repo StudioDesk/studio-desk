@@ -60,6 +60,7 @@ import {
   ResultPanel,
   ReviewPanel,
   stagedWork,
+  StandsInFull,
 } from './story-tabs';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { active, explain, liveSummary, statusOf, type RunStory, type StudioState } from './studio-runs';
@@ -266,11 +267,13 @@ function Story({
       />
     </OverviewPanel>
   );
+  // The notice's whole account heads a story's Checks, and other work's Result.
   const panels: Record<TabId, () => ReactNode> = {
     overview: () => overview,
     changes: () => <SourceDiff task={task} studio={studio} selectedAttemptId={chosen ?? undefined} />,
     checks: () => (
       <>
+        <StandsInFull task={task} stand={stand} />
         <ChecksPanel projectId={projectId} task={task} studio={studio} attempt={built} full={builtFull} />
         {narrow && (
           <ReviewPanel projectId={projectId} task={task} studio={studio} review={people.review} looks={looks} />
@@ -313,6 +316,7 @@ function Story({
     // While the attempt runs, its result is what it is doing; what it returns replaces that when it hands back.
     result: () => (
       <>
+        <StandsInFull task={task} stand={stand} />
         {work && (
           <>
             <ResultPanel projectId={projectId} task={task} studio={studio} shown={work} />

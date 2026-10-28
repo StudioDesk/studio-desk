@@ -179,10 +179,19 @@ export interface Standing {
   detail: string;
   // The agent whose face the banner shows; none when the call is the director's.
   workerId?: string;
+  // The whole account, unshortened, as the story's Checks or Result tab tells it: the title, then each part of the
+  // detail on a line of its own (each failing check with its evidence, each failed test, the error, the editor's
+  // issues and the next step), or the detail as one line.
+  full: { title: string; lines: string[] };
 }
 
 // Where the story stands, in the agents' plain words: the director's call, the work moving, or how it ended.
 export function standing(task: Task, studio: StudioState, phase: string | null = phaseOf(task, studio)): Standing {
+  const { lines, ...stand } = stands(task, studio, phase);
+  return { ...stand, full: { title: stand.title, lines: lines ?? (stand.detail ? [stand.detail] : []) } };
+}
+
+function stands(task: Task, studio: StudioState, phase: string | null): Omit<Standing, 'full'> & { lines?: string[] } {
   const { stage, build, editor, editorId, reviewer, reviewerId } = storyPeople(task, studio),
     decision = decisionState(task, studio),
     { explanation } = decision,
@@ -268,6 +277,7 @@ export function standing(task: Task, studio: StudioState, phase: string | null =
       detail: '',
       workerId: task.workerId,
     };
+  const lines = [...explanation.details, explanation.next].filter(Boolean);
   return {
     tone: explanation.requiresDirector
       ? 'you'
@@ -277,7 +287,8 @@ export function standing(task: Task, studio: StudioState, phase: string | null =
           ? 'bad'
           : 'wait',
     title: explanation.reason,
-    detail: [...explanation.details, explanation.next].filter(Boolean).join(' '),
+    detail: lines.join(' '),
+    lines,
   };
 }
 

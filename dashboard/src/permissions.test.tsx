@@ -115,7 +115,9 @@ test('a command request offers each refused command as a rule to approve or shor
   ];
   open('/p/project-x/tasks/T-blocked');
   expect(
-    await screen.findByText('The employee stopped after Claude Code refused commands it tried to run.'),
+    await within(await screen.findByRole('region', { name: 'Where it stands' })).findByText(
+      'The employee stopped after Claude Code refused commands it tried to run.',
+    ),
   ).toBeTruthy();
   const rules = screen.getAllByLabelText('Rule to approve') as HTMLInputElement[];
   // Each starts as the longest start that can be a rule.

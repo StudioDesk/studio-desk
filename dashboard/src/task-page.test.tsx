@@ -752,3 +752,97 @@ test("a reviewed step's Attempts lists its work and its reviews apart, and count
   // A review reads as its verdict, as a code story's does.
   expect(within(panel).getAllByRole('button')[2]!.textContent).toContain('Asked for changes');
 });
+
+// The window's width as useNarrow reads it: a phone matches the design's break. afterEach puts the window's own back.
+const width = (phone: boolean) =>
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: phone && query === '(max-width: 860px)',
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+// A code story, or other work, whose attempt stopped with a failing check, a failed test, an error and an issue its
+// editor raised.
+const stopped = (source: boolean) => {
+  controller.tasks = [
+    taskFixture('T-1', {
+      title: 'Show finished results',
+      status: 'failed',
+      lastAttemptId: 'attempt-1',
+      ...(source
+        ? {
+            kind: 'studio-development:change',
+            sourceStage: { version: 'source-story-stages-v1', phase: 'implementing', current: 'failed', history: [] },
+          }
+        : {}),
+    }),
+  ];
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'failed',
+      workerId: 'W-1',
+      startedAt: '2026-10-27T05:00:00.000Z',
+      finishedAt: '2026-10-27T05:20:00.000Z',
+      assignment: { kind: source ? 'studio-development:change' : 'general' },
+      controllerChecks: [{ name: 'Candidate tests', status: 'fail', evidence: '751 of 752 tests passed.' }],
+      testEvidence: {
+        totals: { tests: 752, pass: 751, fail: 1 },
+        failedTests: [{ file: 'test/a.test.mjs', name: 'keeps the label' }],
+      },
+      error: 'The candidate did not pass its tests.',
+      result: { outcome: 'completed', summary: 'Shows them.', issues: ['I could not run the browser check.'] },
+    },
+  ];
+};
+const inFull = { name: 'Where it stands, in full' };
+
+// One page to a test, each waiting five seconds for its first render as a loaded machine needs: four pages in one
+// test outran its own time limit once the whole suite ran beside it.
+for (const [source, tab] of [
+  [true, 'Checks'],
+  [false, 'Result'],
+] as const)
+  for (const phone of [false, true])
+    test(`a stopped ${source ? "story's Checks" : "work's Result"} starts with where it stands in full${phone ? ', on a phone too' : ''}`, async () => {
+      const user = userEvent.setup();
+      width(phone);
+      stopped(source);
+      open();
+      await user.click(await screen.findByRole('tab', { name: tab }, { timeout: 5000 }));
+      const panel = await screen.findByRole('tabpanel'),
+        region = await within(panel).findByRole('region', inFull),
+        full = within(region),
+        notice = screen.getByRole('region', { name: 'Where it stands' }).querySelector('.sd-stands__title')!;
+      // It heads the tab with the notice's own title, and has an id the notice can link to.
+      expect(panel.firstElementChild).toBe(region);
+      expect(region.id).toBe('stands-in-full');
+      expect(notice.textContent).toBeTruthy();
+      expect(full.getByText(notice.textContent!)).toBeTruthy();
+      expect(full.getByText('Candidate tests: 751 of 752 tests passed.')).toBeTruthy();
+      // A failed test shows its file as a chip.
+      expect(full.getByText('keeps the label')).toBeTruthy();
+      expect(full.getByText('test/a.test.mjs').className).toBe('sd-file');
+      expect(full.getByText('The candidate did not pass its tests.')).toBeTruthy();
+      expect(full.getByText('I could not run the browser check.')).toBeTruthy();
+    });
+
+for (const [source, tab, shows] of [
+  [true, 'Checks', 'The candidate has not been tested yet.'],
+  [false, 'Result', /is working on it now/],
+] as const)
+  test(`while the work runs, its ${tab} does not tell where it stands in full`, async () => {
+    const user = userEvent.setup();
+    stopped(source);
+    edit({ status: 'running' });
+    controller.attempts = [
+      { ...controller.attempts[0]!, status: 'running', finishedAt: null, testEvidence: undefined, error: undefined },
+    ];
+    open();
+    await user.click(await screen.findByRole('tab', { name: tab }, { timeout: 5000 }));
+    const panel = await screen.findByRole('tabpanel');
+    expect(await within(panel).findByText(shows, {}, { timeout: 5000 })).toBeTruthy();
+    expect(within(panel).queryByRole('region', inFull)).toBeNull();
+    expect(document.getElementById('stands-in-full')).toBeNull();
+  });
