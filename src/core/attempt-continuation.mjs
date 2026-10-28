@@ -198,7 +198,7 @@ export function prepareSourceContinuation(store, a) {
 }
 
 const controls =
-  /^(?:agents\.md|instructions\.json|assignment\.json|result(?:-schema)?\.json|source-(?:scope|change|breakdown|review|context|check-report|change-review)\.json|scope-(?:request|report)\.json|change\.diff|check-report\.json|test-output\.txt|test-errors\.txt|review\.json|(?:claude|codex|provider)[^/]*|delivery(?:-schema)?\.json)$/i;
+  /^(?:agents\.md|instructions\.json|assignment\.json|result(?:-schema)?\.json|question\.json|source-(?:scope|change|breakdown|review|context|check-report|change-review)\.json|scope-(?:request|report)\.json|change\.diff|check-report\.json|test-output\.txt|test-errors\.txt|review\.json|(?:claude|codex|provider)[^/]*|delivery(?:-schema)?\.json)$/i;
 function workPath(relative) {
   return (
     safe(relative) &&

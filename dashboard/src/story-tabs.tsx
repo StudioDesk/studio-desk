@@ -613,7 +613,7 @@ export function attemptName(task: Task, attempts: AttemptSummary[], attempt: Att
   if (isReview(attempt)) return `Review${same.length > 1 ? ` ${same.indexOf(attempt) + 1}` : ''}`;
   const name = countsTowardLimit(attempt)
     ? `attempt ${counted.indexOf(attempt) + 1} of ${task.maxAttempts ?? counted.length}`
-    : `${attempt.subscriptionHold ? 'stopped by a usage limit' : 'interrupted'}, not counted`;
+    : `${attempt.subscriptionHold ? 'stopped by a usage limit' : attempt.question?.ask ? 'asked you a question' : 'interrupted'}, not counted`;
   return source && !short ? `Build, ${name}` : name[0]!.toUpperCase() + name.slice(1);
 }
 

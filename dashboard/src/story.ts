@@ -368,10 +368,10 @@ export function houseRules(task: Task, studio: StudioState) {
   return [yoursText, ...automatic].filter(Boolean).join(' ').replace('Proposed stories is', 'Proposed stories are');
 }
 
-// As in the controller (countsTowardLimit): an attempt a usage limit stopped, or one the controller's stop
-// interrupted and the director reconciled, doesn't use up one of a story's attempts.
+// As in the controller (countsTowardLimit): an attempt a usage limit stopped, one the controller's stop interrupted
+// and the director reconciled, or one that stopped to ask a question, doesn't use up one of a story's attempts.
 export const countsTowardLimit = (attempt: AttemptSummary) =>
-  !attempt.subscriptionHold && !(attempt.status === 'interrupted' && attempt.reconciledAt);
+  !attempt.subscriptionHold && !(attempt.status === 'interrupted' && attempt.reconciledAt) && !attempt.question?.ask;
 
 // Whether integrating this project's stories replaces the running controller's source: a controller that develops
 // itself, on the project without a repository of its own. A repository project's story integrates into its own

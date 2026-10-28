@@ -269,6 +269,27 @@ function answers(item, edits) {
       : ['- Recorded answer: none (unanswered).']),
   ];
 }
+// The question an attempt stopped to ask (1.2 step 2), its options and the answer it got, if any.
+function questionLines(facts) {
+  const q = facts.attempt.question;
+  if (!q) return [];
+  if (q.problem) return [line(`- The attempt returned a question the controller could not read: ${q.problem}`)];
+  const answer = facts.answer;
+  return [
+    line(`- Asked: ${q.ask}`),
+    line(`- Why: ${q.why}`),
+    ...q.options.map((option, index) =>
+      line(
+        `- Option ${index + 1}${q.recommended === index ? ' (recommended)' : ''}: ${option.label}${option.detail ? `: ${option.detail}` : ''}`,
+      ),
+    ),
+    answer
+      ? line(
+          `- Answer (${answer.by?.type === 'auto-mode' ? 'auto mode' : 'the director'}, ${answer.at}): ${answer.label || ''}${answer.label && answer.text ? '; ' : ''}${answer.text || ''}`,
+        )
+      : '- Answer: none yet.',
+  ];
+}
 const editLine = edit =>
   line(
     `director scope edit at ${edit.at} — files ${JSON.stringify(edit.files || [])}, newFiles ${JSON.stringify(edit.newFiles || [])}, deleteFiles ${JSON.stringify(edit.deleteFiles || [])}; reason: ${edit.reason}${edit.request ? `; answers the file request of ${edit.request.attemptId}` : ''}`,
@@ -333,6 +354,8 @@ function renderEntry(facts, edits, span) {
     );
   const requests = answers(facts, edits);
   if (requests.length) out.push('', '## File request', ...requests);
+  const asked = questionLines(facts);
+  if (asked.length) out.push('', '## Question to the director', ...asked);
   out.push(
     '',
     '## Direction snapshot (director notes recorded on the assignment for this attempt)',
@@ -407,6 +430,7 @@ function projectionItem(facts, edits) {
         ...(review ? { review: review.text !== undefined ? excerpt(review.text, span / 2) : review.missing } : {}),
         ...(log && !a.failedTests?.length ? { testOutput: excerpt(log.text, span / 4) } : {}),
         ...(a.scopeRequest ? { fileRequest: answers(facts, edits).map(text => excerpt(text, span / 8)) } : {}),
+        ...(a.question ? { question: questionLines(facts).map(text => excerpt(text, span / 8)) } : {}),
         direction: a.assignment?.direction ? excerpt(a.assignment.direction, span / 4) : null,
       };
     if (size(JSON.stringify(item)) <= historyLimits.projectionItemBytes || span < 256)
@@ -518,6 +542,7 @@ function assemble(store, task, { attemptId = null, now = new Date().toISOString(
   const { tasks, ordered, issues } = historyLineage(store, task, attemptId);
   if (!ordered.length) return null;
   const edits = structuredClone(tasks[0].scopeEdits || []),
+    replies = tasks.flatMap(item => item.answers || []),
     budget = { read: 0 },
     newest = [...ordered].reverse(),
     read = newest.slice(0, historyLimits.attempts),
@@ -528,7 +553,10 @@ function assemble(store, task, { attemptId = null, now = new Date().toISOString(
   let total = 0;
   for (const item of read) {
     if (files.length >= historyLimits.completeEntries) break;
-    const facts = collect(store, item, budget),
+    const facts = {
+        ...collect(store, item, budget),
+        answer: replies.find(reply => reply.attemptId === item.attempt.id),
+      },
       content = boundedEntry(facts, edits),
       name = `${String(item.number).padStart(3, '0')}-${item.attempt.id}.md`;
     if (total + size(content) > historyLimits.bundleBytes - historyLimits.indexBytes) break;

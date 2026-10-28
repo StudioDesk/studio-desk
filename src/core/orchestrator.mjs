@@ -21,6 +21,7 @@ import { joinStatus } from './fanout.mjs';
 import { applyTransform } from './transforms.mjs';
 import { captureContinuation, continuationFile } from './attempt-continuation.mjs';
 import { buildAttemptHistory, stageAttemptHistory } from './attempt-history.mjs';
+import { questionFile, questionReason, readQuestion } from './questions.mjs';
 import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
 
 // Reasons that clear by themselves as other work finishes.
@@ -1080,6 +1081,8 @@ export class Runner {
         }
         if (result.outcome === 'completed' && !a.artifacts.length)
           throw new Error('Completed work requires at least one staged artifact.');
+        if (result.outcome === 'completed' && a.artifacts.some(item => item.path === questionFile))
+          throw new Error(`Return ${questionFile} only with outcome blocked; completed work asks nothing.`);
         if (result.outcome === 'completed') {
           const readArtifact = relative => {
             const item = a.artifacts.find(item => item.path === relative);
@@ -1131,6 +1134,11 @@ export class Runner {
             ? 'blocked'
             : 'review';
     a.error = entry.timedOut ? 'Assignment time limit reached.' : error;
+    // An agent that stopped to ask (1.2 step 2): the question is recorded on the attempt, or why it could not be.
+    if (a.status === 'blocked' && !error && result?.outcome === 'blocked') {
+      const question = readQuestion(a, this.store);
+      if (question) a.question = question;
+    }
     // The provider's usage limit stopped this attempt, not its work; it doesn't count toward the attempt limit.
     if (a.status === 'blocked' && error && entry.quota) {
       a.subscriptionHold = entry.quota;
@@ -1138,7 +1146,12 @@ export class Runner {
     }
     task.status = a.status;
     task.reason =
-      a.error || (a.status === 'blocked' ? result?.issues.join(' ') || result?.summary || 'Worker is blocked.' : '');
+      a.error ||
+      (a.status === 'blocked'
+        ? a.question?.ask
+          ? questionReason(a.question)
+          : result?.issues.join(' ') || result?.summary || 'Worker is blocked.'
+        : '');
     // Queued work a usage limit stopped stays queued when the CLI named its reset time: it waits on
     // the hold and starts again once the hold clears itself. Without a known time, or after a
     // cancellation, the director decides.

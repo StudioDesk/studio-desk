@@ -1216,9 +1216,9 @@ export function stagedChanges(scope, result, read) {
     seen = new Set();
   for (const artifact of result.artifacts) {
     const file = artifact.path.slice('changes/'.length);
-    if (artifact.path === scopeRequestFile)
+    if (artifact.path === scopeRequestFile || artifact.path === 'question.json')
       throw new Error(
-        `Return ${scopeRequestFile} only with outcome blocked; a completed change stays inside the approved paths.`,
+        `Return ${artifact.path} only with outcome blocked; a completed change stays inside the approved paths.`,
       );
     if (
       !artifact.path.startsWith('changes/') ||

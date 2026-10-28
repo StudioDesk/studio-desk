@@ -38,6 +38,16 @@ export interface AttemptSummary {
     error?: string;
   }[];
   artifacts?: { path: string; hash: string; kind?: string }[];
+  // A question the agent stopped to ask the director (1.2 step 2), or why its question could not be read.
+  question?: {
+    ask?: string;
+    why?: string;
+    options?: { label: string; detail?: string }[];
+    recommended?: number | null;
+    choice?: string;
+    topics?: string[];
+    problem?: string;
+  };
   [field: string]: unknown;
 }
 

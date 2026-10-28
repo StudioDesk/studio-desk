@@ -103,10 +103,11 @@ export class OrganizationPresetRegistry {
 ].forEach(field => controllerFields.add(field));
 
 // Whether an attempt counts toward its stage's attempt limit (WorkflowRegistry.stageAttempts): not one a usage limit
-// stopped, nor one interrupted by the controller's stop and then reconciled. public/runs.js and the dashboard's
-// story page apply the same rule.
+// stopped, nor one interrupted by the controller's stop and then reconciled, nor one that stopped to ask the director
+// a question (1.2 step 2), since asking is not a failure and an agent near the limit should ask rather than guess.
+// public/runs.js and the dashboard's story page apply the same rule.
 export const countsTowardLimit = attempt =>
-  !attempt.subscriptionHold && !(attempt.status === 'interrupted' && attempt.reconciledAt);
+  !attempt.subscriptionHold && !(attempt.status === 'interrupted' && attempt.reconciledAt) && !attempt.question?.ask;
 
 // A task definition's stages run one task record through several execution views.
 // Each view runs as its own attempt with its own kind, employee, inputs and limits;

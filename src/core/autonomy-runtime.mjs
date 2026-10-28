@@ -16,6 +16,8 @@ import { projectLine } from '../connectors/source-lines.mjs';
 import { mergeSourceStory, sourceStoryIntegrated } from '../connectors/source-changes.mjs';
 import { approveCarry, carryWaits, nextCarry, runCarry } from '../connectors/source-carries.mjs';
 import { notesAccepted, runRelease } from '../connectors/source-releases.mjs';
+import { answerableInAutoMode, answerQuestion, waitingQuestion } from './questions.mjs';
+import { attemptPermissions } from './agent-permissions.mjs';
 
 const INTEGRATION = 'autonomy-integration';
 const RESTART = 'planned-restart';
@@ -70,6 +72,10 @@ export class Autonomy {
   settled(taskId) {
     if (this.runner.closing) return;
     let task = this.store.task(taskId);
+    if (task.status === 'blocked') {
+      this.answerInAutoMode(task);
+      task = this.store.task(taskId);
+    }
     const policy = this.policy(task);
     if (policy.enabled)
       try {
@@ -229,6 +235,27 @@ export class Autonomy {
   // policy approves it within the task's attempt limit, through the task type's own operation and the
   // director's checks; the task's later stages, such as an independent review, still judge the result.
   // Otherwise, or when the operation refuses, the request waits for the director.
+  // A question the agent marked as a choice inside its story, in work that runs in auto mode, goes ahead on the
+  // agent's own recommendation, recorded as auto mode's answer (1.2 step 2). Auto mode is the work's own setting,
+  // not the project's policy; every other question waits for the director.
+  answerInAutoMode(task) {
+    const attempt = waitingQuestion(this.store, task);
+    if (!attempt || !answerableInAutoMode(attempt)) return;
+    if (attemptPermissions(this.store.organization(), task).mode !== 'auto') return;
+    try {
+      answerQuestion(
+        this.store,
+        this.runner.registries,
+        task,
+        { attemptId: attempt.id, option: attempt.question.recommended },
+        { type: 'auto-mode', at: new Date().toISOString() },
+      );
+      this.queue([this.store.task(task.id)]);
+    } catch (error) {
+      this.attention(task, `Auto mode could not answer the question: ${error.message}`);
+    }
+  }
+
   scopeRequested(task, policy) {
     const workflows = this.runner.registries.workflows,
       operation = workflows.get(task.kind).autonomy?.scopeRequest,

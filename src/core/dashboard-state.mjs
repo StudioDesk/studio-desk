@@ -157,6 +157,9 @@ export function dashboardAttempt(data, timing, openPhase = null) {
     summary.commandDenials = data.commandDenials.map(denial => fields(denial, ['tool', 'command', 'reason']));
   if (data.scopeRequest)
     summary.scopeRequest = fields(data.scopeRequest, ['files', 'newFiles', 'deleteFiles', 'reason', 'problem']);
+  // A question the agent stopped to ask (1.2 step 2), bounded when it was read: at most five short options.
+  if (data.question)
+    summary.question = fields(data.question, ['ask', 'why', 'options', 'recommended', 'choice', 'topics', 'problem']);
   if (data.plan) summary.plan = { tasks: (data.plan.tasks || []).map(task => fields(task, ['title'])) };
   if (data.integration) summary.integration = fields(data.integration, ['state']);
   if (data.sourceIntegration) {

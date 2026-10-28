@@ -604,12 +604,13 @@
       // state. Only use a measured assignment limit or an explicit controller note.
       knownLimit = task.stageState && view.kind !== task.kind ? attempt?.assignment?.maxAttempts : limit,
       fixed = view.kind === 'unreal-integration' || state.taskKinds?.[view.kind]?.fixedAttemptLimit === true,
-      // As in the controller, an attempt a provider's usage limit stopped, or one the controller's stop interrupted
-      // and the director reconciled, doesn't count, except under a fixed limit.
+      // As in the controller, an attempt a provider's usage limit stopped, one the controller's stop interrupted
+      // and the director reconciled, or one that stopped to ask a question, doesn't count, except under a fixed limit.
       exhausted =
         Number.isInteger(knownLimit) &&
-        current.filter(a => fixed || (!a.subscriptionHold && !(a.status === 'interrupted' && a.reconciledAt))).length >=
-          knownLimit,
+        current.filter(
+          a => fixed || (!a.subscriptionHold && !(a.status === 'interrupted' && a.reconciledAt) && !a.question?.ask),
+        ).length >= knownLimit,
       note =
         task.approval?.status === 'approved' &&
         /approve or deny proposed work|work approval is required/i.test(task.autonomyNote || '')

@@ -4,7 +4,9 @@
 //   delete <path>        removes <path> from the output folder (workspace delivery only)
 //   fail-check           reports a failed check
 //   block                returns outcome blocked
-//   hang                 after writing, keeps running until the controller stops it (its time limit
+//   ask <json>           returns outcome blocked and question.json holding <json> (kind question); a
+//                        direction that answers the question asks nothing (questions, 1.2 step 2)
+//   hang                after writing, keeps running until the controller stops it (its time limit
 //                        or a cancellation) and returns nothing
 //   quota                after writing, reports a provider usage limit and exits, returning nothing
 // The stop modes write in workspace delivery and say so on stdout ({"type":"fixture.work-written"}).
@@ -62,10 +64,14 @@ const lines = (job.direction || '').split('\n').map(line => line.trim()),
     .map(line => /^delete (\S+)$/.exec(line))
     .filter(Boolean)
     .map(([, file]) => file),
-  blocked = lines.includes('block'),
+  // An answer is the next attempt's direction: it asks nothing more.
+  answered = /answered.* the question of /.test(job.direction || ''),
+  asked = answered ? undefined : lines.map(line => /^ask (.+)$/.exec(line)).find(Boolean)?.[1],
+  blocked = lines.includes('block') || !!asked,
   failed = lines.includes('fail-check'),
   stop = ['hang', 'quota'].find(mode => lines.includes(mode));
 if (!writes.length) writes.push({ path: 'work.md', content: `# ${job.title}\n` });
+if (asked) writes.push({ path: 'question.json', content: asked + '\n', kind: 'question' });
 // Workspace delivery works on disk; text delivery returns the contents for the controller to stage.
 if (!text) {
   for (const file of deletes) fs.rmSync(file, { force: true });
@@ -100,7 +106,7 @@ const result = {
   taskId: job.id,
   outcome: blocked ? 'blocked' : 'completed',
   summary: `Fixture general work wrote ${writes.map(file => file.path).join(', ')}.`,
-  artifacts: writes.map(file => ({ path: file.path, kind: 'work-file' })),
+  artifacts: writes.map(file => ({ path: file.path, kind: file.kind || 'work-file' })),
   checks: [
     failed
       ? { name: 'Fixture check', status: 'fail', evidence: 'The direction asked for a failed check.' }
@@ -114,5 +120,7 @@ emit({
   type: 'result',
   subtype: 'success',
   is_error: false,
-  structured_output: text ? { result, files: writes } : result,
+  structured_output: text
+    ? { result, files: writes.map(file => ({ path: file.path, content: file.content })) }
+    : result,
 });

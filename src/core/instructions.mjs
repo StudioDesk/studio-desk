@@ -1,4 +1,5 @@
 import { hash } from './contracts.mjs';
+import { keptTopics, questionFile, questionKind, questionSchema } from './questions.mjs';
 
 // Domain context and adapter delivery details are resolved before compilation.
 // This compiler has no task-kind or provider-specific dispatch branches.
@@ -51,6 +52,11 @@ export function compileInstructions(org, worker, task, attemptId, workspace, inp
   layers.push({
     title: 'Granted scope',
     text: `Attempt: ${attemptId}\nOutput directory: ${workspace}\n${context.deliveryScope} ${context.scopeNote || ''} Your result's taskId is ${task.id}, this assignment's ID; input references and reviewed work name other tasks. Return blockers instead of expanding access. Do not modify AGENTS.md. Stop after the result. Time limit: ${task.maxSeconds} seconds.`,
+  });
+  // Every agent may stop to ask the director (1.2 step 2), whatever its task type.
+  layers.push({
+    title: 'Asking the director',
+    text: `When the right choice depends on a call that is not yours to make alone, stop and ask instead of guessing. Keep the work you have so far, return outcome blocked, and return ${questionFile} (artifact kind ${questionKind}) as UTF-8 JSON: {"schemaVersion": "${questionSchema}", "ask": the question in one or two sentences, "why": why the answer matters and what you found, "options": at most ${5} options, each {"label", "detail"?}, "recommended": the index of the option you recommend or null, "choice": "inside-story" when every option stays within this assignment's files and scope, otherwise "director", "topics": any of ${keptTopics.map(topic => `"${topic}"`).join(', ')} the question touches (a file outside the scope, a permission, a new package, a push, deleting work, art direction, playtesting)}. The next attempt continues from your saved work with the answer as its direction. Asking uses none of your attempts. Return ${questionFile} only with outcome blocked; do not ask about what the assignment already decides.`,
   });
   layers.push({
     title: 'Assignment',
