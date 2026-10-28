@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -307,6 +308,14 @@ test('cancellation retains the reference and reservations until the employee clo
 });
 
 test('restart and quarantined ownership retain references until explicit stopped-process reconciliation', async t => {
+  // A live process as the controller starts one: on macOS and Linux an attempt leads a process group of its own,
+  // which is what the liveness check looks for there.
+  const recorded = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: process.platform !== 'win32',
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  t.after(() => recorded.kill());
   for (const status of ['running', 'quarantined']) {
     const c = await setup(t),
       { store, runner } = c.app,
@@ -317,7 +326,7 @@ test('restart and quarantined ownership retain references until explicit stopped
         workerId: 'W-01',
         provider: 'source-breakdown',
         status,
-        pid: process.pid,
+        pid: recorded.pid,
         contracts: { adapter: { id: 'source-breakdown' } },
         sourceBreakdownContext: { mode: 'workspace', path: '../source' },
       },

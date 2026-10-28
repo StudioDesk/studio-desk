@@ -23,6 +23,10 @@ if (process.env.STUDIO_MODEL_FREE_LEAF_FIXTURES === '1') {
   process.env.TMP = fixtureTemporaryDirectory;
   process.env.TMPDIR = fixtureTemporaryDirectory;
 }
+// The tests' git identity, never the computer's: one with no global user.name and email (a fresh Mac or Linux
+// install) refuses to add a project, and one with settings of its own (signing, hooks) changes what git does.
+// The built-in sandbox already gives its runs a neutral identity, which is kept.
+process.env.GIT_CONFIG_GLOBAL ||= fileURLToPath(new URL('./fixture-gitconfig', import.meta.url));
 
 // Protocol fixtures are single Node processes. Terminate their known leaf
 // directly so model-free tests can run inside a test sandbox, which need not offer taskkill (MXC had none).

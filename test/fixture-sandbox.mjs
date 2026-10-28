@@ -4,11 +4,21 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 const args = process.argv.slice(2),
   mode = process.env.STUDIO_SANDBOX_FIXTURE_CASE || 'pass';
+// Paths compare by real path: macOS's temporary folder is reached through a link (/var is /private/var), and
+// the working folder is reported by its real path.
+const real = file => {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    return null;
+  }
+};
+const cwd = real(process.cwd());
 if (
   args[0] !== 'sandbox' ||
   !args.includes('--include-managed-config') ||
   args[args.indexOf('--permission-profile') + 1] !== ':workspace' ||
-  args[args.indexOf('--cd') + 1] !== process.cwd() ||
+  real(args[args.indexOf('--cd') + 1]) !== cwd ||
   process.env.OPENAI_API_KEY ||
   process.env.CODEX_API_KEY
 )
@@ -33,8 +43,9 @@ if (mode === 'misleading-report' || mode === 'invalid-report') {
 } else {
   // Emulate expected denials for the probe code; all files are test fixtures.
   fs.writeFileSync = (file, ...rest) => {
-    const target = path.resolve(file);
-    if (target.startsWith(process.cwd() + path.sep)) {
+    const resolved = path.resolve(file),
+      target = path.join(real(path.dirname(resolved)) ?? path.dirname(resolved), path.basename(resolved));
+    if (target.startsWith(cwd + path.sep)) {
       if (mode === 'missing-inside' && path.basename(target) === 'inside.txt') return;
       return write(file, ...rest);
     }

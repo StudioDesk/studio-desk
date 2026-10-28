@@ -64,7 +64,9 @@ if (
       !['acceptEdits', 'auto'].includes(value('--permission-mode')) ||
       process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS !== '1' ||
       value('--disallowedTools') !== 'ScheduleWakeup' ||
-      path.resolve(value('--add-dir')) !== path.resolve('..') ||
+      // By real path: macOS's temporary folder is reached through a link (/var is /private/var), and the
+      // working folder is reported by its real path.
+      fs.realpathSync(path.resolve(value('--add-dir'))) !== fs.realpathSync(path.resolve('..')) ||
       !JSON.parse(value('--json-schema')).properties.taskId
 ) {
   console.error('The execution mode was not applied.');
