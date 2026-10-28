@@ -138,7 +138,13 @@ export function worktreeRepository(worktree) {
 // quarantined or unreconciled interrupted attempts, and of integrations that have not settled,
 // stay for inspection until they are reconciled.
 export function cleanSourceWorktrees(runtime, parent) {
-  if (!fs.existsSync(parent)) return;
+  removeWorktrees(leftoverWorktrees(runtime, parent));
+}
+
+// The worktrees cleanSourceWorktrees removes, each with its repository, and the repositories to prune, read from the
+// controller's records. A code story's setup removes them in its own process (source-setup.mjs).
+export function leftoverWorktrees(runtime, parent) {
+  if (!fs.existsSync(parent)) return { worktrees: [], repositories: [] };
   const kept = new Set();
   for (const attempt of runtime.store.allAttempts()) {
     if (
@@ -160,13 +166,33 @@ export function cleanSourceWorktrees(runtime, parent) {
       if (release?.worktree && ['verifying', 'committing', 'needs-reconciliation'].includes(release.state))
         for (const worktree of [release.worktree, `${release.worktree}d`]) kept.add(path.basename(worktree));
     }
-  const repositories = new Set([runtime.sourceChangeRoot]);
+  const repositories = new Set([runtime.sourceChangeRoot]),
+    worktrees = [];
   for (const name of fs.readdirSync(parent)) {
     if (kept.has(name)) continue;
     const target = path.join(parent, name),
       repository = worktreeRepository(target) || runtime.sourceChangeRoot;
     repositories.add(repository);
-    removeSourceWorktree(repository, target);
+    worktrees.push({ repository, path: target, identity: folderIdentity(target) });
   }
+  return { worktrees, repositories: [...repositories] };
+}
+
+// Removes the listed worktrees and prunes their repositories. A folder made again under a listed name since it was
+// listed, as a retried integration of the same review makes its i- worktree, is no longer the one listed and stays.
+export function removeWorktrees({ worktrees, repositories }) {
+  for (const worktree of worktrees)
+    if (!worktree.identity || folderIdentity(worktree.path) === worktree.identity)
+      removeSourceWorktree(worktree.repository, worktree.path);
   for (const repository of repositories) git(repository, ['worktree', 'prune']);
+}
+
+// What tells a folder from another made later at the same path: its file number, birth and change times.
+function folderIdentity(target) {
+  try {
+    const stat = fs.lstatSync(target, { bigint: true });
+    return `${stat.ino}:${stat.birthtimeNs}:${stat.ctimeNs}`;
+  } catch {
+    return null;
+  }
 }

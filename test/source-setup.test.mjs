@@ -1,0 +1,212 @@
+// A code story's setup runs in a process of its own (src/connectors/source-setup.mjs): the controller keeps answering
+// while the working copy is made, checked and copied, a stop ends that process and removes the working copy, and a
+// base commit other than the approved snapshot still fails the attempt with the same message.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { setup } from './source-story-setup.mjs';
+import { waitFor } from './wait-for.mjs';
+import { git } from '../src/connectors/source-integration.mjs';
+import {
+  createSourceWorktree,
+  leftoverWorktrees,
+  removeSourceWorktree,
+  removeWorktrees,
+} from '../src/connectors/source-worktrees.mjs';
+import { jobDirectory } from '../src/core/projects.mjs';
+
+const snapshotMismatch = 'The base commit does not match the approved source snapshot. Start a new attempt.',
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// The file whose presence holds a story's setup process once its working copy is made (the runner's sourceSetupHold,
+// a trusted test seam), in a folder of its own.
+function holdFile(t) {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-setup-hold-')),
+    file = path.join(folder, 'hold');
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  fs.writeFileSync(file, '');
+  return file;
+}
+
+const phases = (store, attemptId) => store.phaseEvents(attemptId).map(event => event.payload);
+
+// The setup phases an attempt has started and not finished, from its phase events.
+function openSetup(store, attemptId) {
+  const open = new Map();
+  for (const p of phases(store, attemptId))
+    if (p.phaseId.startsWith('setup.'))
+      if (p.boundary === 'start') open.set(p.occurrenceId, p.phaseId);
+      else open.delete(p.occurrenceId);
+  return [...open.values()];
+}
+
+test('the controller keeps answering while a story’s setup process is held, and the story then edits, tests and reaches review', async t => {
+  const hold = holdFile(t),
+    c = await setup(t, 'pass', undefined, { sourceSetupHold: hold }),
+    { store } = c.app;
+  await c.start();
+  const attemptId = store.task(c.taskId).lastAttemptId,
+    answers = [];
+  // A small controller file, every 200 ms until the setup is held and ten times more while it stays held.
+  const ask = async () => {
+    const began = performance.now(),
+      response = await fetch(c.origin + '/theme.js');
+    await response.arrayBuffer();
+    assert.equal(response.status, 200);
+    answers.push(performance.now() - began);
+  };
+  await waitFor(
+    async () => {
+      await ask();
+      return openSetup(store, attemptId).includes('setup.snapshot');
+    },
+    'the setup process to be held',
+    { interval: 200 },
+  );
+  const heldAt = performance.now();
+  for (let i = 0; i < 10; i++) {
+    await sleep(200);
+    await ask();
+  }
+  assert.ok(
+    answers.every(ms => ms < 1000),
+    `Every request answers within a second: ${answers.map(Math.round).join(', ')} ms.`,
+  );
+  // Still held: the snapshot step is open on a working copy already made, and no editor has started.
+  assert.deepEqual(openSetup(store, attemptId), ['setup.snapshot']);
+  assert.ok(fs.existsSync(store.attempt(attemptId).sourceWorktree.path));
+  assert.ok(!phases(store, attemptId).some(p => p.phaseId === 'source.edit'));
+  assert.equal(store.task(c.taskId).status, 'running');
+  fs.rmSync(hold);
+  const heldMs = performance.now() - heldAt,
+    a = await c.wait(c.taskId),
+    recorded = phases(store, a.id);
+  assert.deepEqual(
+    recorded.map(p => `${p.phaseId}:${p.boundary}`),
+    [
+      'attempt:start',
+      'setup.scope:start',
+      'setup.scope:finish',
+      'setup.worktree:start',
+      'setup.worktree:finish',
+      'setup.snapshot:start',
+      'setup.snapshot:finish',
+      'setup.copy:start',
+      'setup.copy:finish',
+      'source.edit:start',
+      'source.edit:finish',
+      'candidate.commit:start',
+      'candidate.commit:finish',
+      'install:start',
+      'install:finish',
+      'test:start',
+      'test:finish',
+      'attempt:finish',
+    ],
+  );
+  assert.ok(recorded.filter(p => p.boundary === 'finish').every(p => p.outcome === 'succeeded'));
+  // The snapshot step's time is the one its process measured, the hold included.
+  const snapshot = recorded.find(p => p.phaseId === 'setup.snapshot' && p.boundary === 'finish');
+  assert.ok(snapshot.durationMs >= heldMs, `The snapshot step took ${snapshot.durationMs} ms, held ${heldMs} ms.`);
+  // The setup process staged the approved file, the editor edited it, the candidate was tested in the working copy,
+  // and that is gone.
+  assert.equal(
+    fs.readFileSync(path.join(a.outputFolder, 'changes/src/core/workflows.mjs'), 'utf8'),
+    '// Fixture source: src/core/workflows.mjs\n\n// Bounded fixture improvement.\n',
+  );
+  assert.ok(a.artifacts.some(item => item.path === 'changes/src/core/workflows.mjs' && item.kind === 'source-file'));
+  assert.equal(a.sourceCandidate.root, a.sourceWorktree.path);
+  assert.equal(fs.existsSync(a.sourceWorktree.path), false);
+  assert.equal(store.leases().length, 0);
+});
+
+test('stopping a story while its setup is held ends the setup process and leaves no working copy', async t => {
+  const hold = holdFile(t),
+    c = await setup(t, 'pass', undefined, { sourceSetupHold: hold }),
+    { store, runner } = c.app;
+  await c.start();
+  const attemptId = store.task(c.taskId).lastAttemptId;
+  await waitFor(() => openSetup(store, attemptId).includes('setup.snapshot'), 'the setup process to be held');
+  const child = runner.active.get(attemptId).child,
+    worktree = store.attempt(attemptId).sourceWorktree.path;
+  assert.ok(fs.existsSync(worktree), 'The working copy was made before the hold.');
+  assert.equal((await c.request(`/api/tasks/${c.taskId}/cancel`)).status, 202);
+  const a = await c.wait(c.taskId, 'cancelled'),
+    recorded = phases(store, a.id),
+    snapshot = recorded.find(p => p.phaseId === 'setup.snapshot' && p.boundary === 'finish');
+  assert.ok(child.exitCode !== null || child.signalCode !== null, 'The setup process ended.');
+  assert.ok(['cancelled', 'failed'].includes(snapshot.outcome), `The snapshot step finished ${snapshot.outcome}.`);
+  assert.deepEqual(openSetup(store, a.id), []);
+  assert.ok(!recorded.some(p => ['setup.copy', 'source.edit'].includes(p.phaseId)));
+  assert.equal(fs.existsSync(worktree), false);
+  assert.deepEqual(fs.readdirSync(path.join(store.directory, 'wt')), []);
+  assert.equal(git(c.root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
+  assert.equal(store.leases().length, 0);
+});
+
+test('a base commit that does not match the snapshot fails the attempt in its setup process', async t => {
+  const c = await setup(t),
+    { store, runner } = c.app;
+  // A commit holding other files than the snapshot the story's scope measures, off the checked-out branch.
+  fs.appendFileSync(path.join(c.root, 'src/core/workflows.mjs'), '// Not the approved snapshot.\n');
+  git(c.root, ['commit', '--quiet', '-am', 'A commit the scope did not measure']);
+  const other = git(c.root, ['rev-parse', 'HEAD']);
+  git(c.root, ['reset', '--quiet', '--hard', 'HEAD~1']);
+  // The story's measured scope names that commit as its base.
+  const applyMetadata = runner.applyMetadata;
+  t.mock.method(runner, 'applyMetadata', function (attempt, definition, metadata) {
+    const scope = metadata?.sourceChange;
+    return applyMetadata.call(
+      this,
+      attempt,
+      definition,
+      scope ? { ...metadata, sourceChange: { ...scope, base: { ...scope.base, commit: other } } } : metadata,
+    );
+  });
+  await c.start();
+  const a = await c.wait(c.taskId, 'failed'),
+    recorded = phases(store, a.id);
+  assert.equal(a.sourceChange.base.commit, other);
+  assert.equal(a.error, snapshotMismatch);
+  assert.deepEqual(
+    recorded.filter(p => p.phaseId.startsWith('setup.') && p.boundary === 'finish').map(p => [p.phaseId, p.outcome]),
+    [
+      ['setup.scope', 'succeeded'],
+      ['setup.worktree', 'succeeded'],
+      ['setup.snapshot', 'failed'],
+    ],
+  );
+  assert.equal(recorded.find(p => p.phaseId === 'setup.snapshot' && p.boundary === 'finish').error, snapshotMismatch);
+  // Nothing was copied for the editor, no editor ran, and the working copy and reservations are gone.
+  assert.ok(!recorded.some(p => p.phaseId === 'source.edit'));
+  assert.equal(fs.existsSync(path.join(jobDirectory(store, a), 'source')), false);
+  assert.equal(fs.existsSync(a.sourceWorktree.path), false);
+  assert.deepEqual(fs.readdirSync(path.join(store.directory, 'wt')), []);
+  assert.equal(store.leases().length, 0);
+});
+
+test('the setup process leaves a listed worktree that was made again under its name since the controller listed it', async t => {
+  const c = await setup(t, 'pass', undefined, {}, true),
+    parent = path.join(c.directory, 'wt'),
+    head = git(c.root, ['rev-parse', 'HEAD']);
+  for (const name of ['left', 'i-retried']) createSourceWorktree(c.root, parent, name, head);
+  // The controller lists both as left by settled work (no attempt or release keeps either).
+  const listed = leftoverWorktrees(
+    {
+      store: { allAttempts: () => [], projects: () => [], setting: () => undefined },
+      active: new Map(),
+      sourceChangeRoot: c.root,
+    },
+    parent,
+  );
+  assert.deepEqual(listed.worktrees.map(item => path.basename(item.path)).sort(), ['i-retried', 'left']);
+  // Before the setup process removes them, a retried integration of the same review replaces its worktree.
+  removeSourceWorktree(c.root, path.join(parent, 'i-retried'));
+  createSourceWorktree(c.root, parent, 'i-retried', head);
+  removeWorktrees(listed);
+  assert.deepEqual(fs.readdirSync(parent), ['i-retried']);
+  assert.equal(git(c.root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 2);
+  removeSourceWorktree(c.root, path.join(parent, 'i-retried'));
+});

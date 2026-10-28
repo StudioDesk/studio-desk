@@ -7,7 +7,6 @@ import { artifactPath, validateProtectedFiles } from '../core/artifacts.mjs';
 import { hash } from '../core/contracts.mjs';
 import { adapterText, modelAdapter, modelMode } from '../core/execution.mjs';
 import {
-  copySource,
   sourcePlan,
   studioSourceRoot,
   verifyCopy,
@@ -21,13 +20,13 @@ import { scopeDocument, scopeRequest, stagedChanges, sourceChangesConnector } fr
 import { sourceDiff, sourceDiffFormat, sourceDiffLimit, sourceDiffStat } from '../connectors/source-diff.mjs';
 import { TEXT_DELIVERY_FILES } from './text-delivery.mjs';
 import {
-  cleanSourceWorktrees,
   commitCandidate,
-  createSourceWorktree,
+  leftoverWorktrees,
   removeSourceWorktree,
   sourceWorktreeRoot,
   worktreeName,
 } from '../connectors/source-worktrees.mjs';
+import { runSourceSetup } from '../connectors/source-setup.mjs';
 import { candidateTestCommand, chosenTestSandbox, sandboxLabel, sandboxRecord } from './source-test-sandbox.mjs';
 import { builtInSandboxReady, noBuiltInSandbox } from './built-in-sandbox.mjs';
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
@@ -73,6 +72,7 @@ export const sourceChangeAdapter = {
     runtime.sourceFormatCommand = options.sourceFormatCommand; // trusted model-free test seam, never exposed by HTTP
     runtime.packageInstallCommand = options.packageInstallCommand; // trusted model-free stand-in for npm ci, never exposed by HTTP
     runtime.sourceWorktreeRoot = options.sourceWorktreeRoot; // defaults to <data>/wt, a short path
+    runtime.sourceSetupHold = options.sourceSetupHold; // trusted model-free test seam, never exposed by HTTP
     runtime.builtInSandbox = options.builtInSandbox || noBuiltInSandbox; // the controller's start probes this computer
   },
   status: () => ({ available: true, label: 'Isolated source edit by the employee’s model; measured candidate tests' }),
@@ -119,24 +119,25 @@ export const sourceChangeAdapter = {
       throw new Error(
         `This story lists ${writable} files to edit or create, and text delivery returns at most ${TEXT_DELIVERY_FILES}. Use workspace delivery for this employee or task.`,
       );
-    const job = prepareSourceJob(runtime, entry);
-    if (entry.attempt.configuration.permissions?.tools?.length) {
-      entry.toolEnvironment = openEmployeeTests(runtime, entry);
-      entry.cleanup.push(() => closeEmployeeTests(entry));
-    }
-    entry.model = model;
-    entry.editPhase = runtime.startPhase(entry, 'source.edit');
-    model.run(runtime, entry, worker, {
-      mode,
-      // Carried new files already exist under changes/, so they are offered for editing too.
-      editable: [
-        ...new Set([
-          ...entry.attempt.sourceChange.allowedFiles,
-          ...(entry.attempt.sourceChange.continueFrom?.files || []).map(item => item.path),
-        ]),
-      ].map(file => 'changes/' + file),
-      context: ['source-scope.json'],
-      onComplete: candidatePhase(runtime, entry, job, model.name),
+    prepareSourceJob(runtime, entry, job => {
+      if (entry.attempt.configuration.permissions?.tools?.length) {
+        entry.toolEnvironment = openEmployeeTests(runtime, entry);
+        entry.cleanup.push(() => closeEmployeeTests(entry));
+      }
+      entry.model = model;
+      entry.editPhase = runtime.startPhase(entry, 'source.edit');
+      model.run(runtime, entry, worker, {
+        mode,
+        // Carried new files already exist under changes/, so they are offered for editing too.
+        editable: [
+          ...new Set([
+            ...entry.attempt.sourceChange.allowedFiles,
+            ...(entry.attempt.sourceChange.continueFrom?.files || []).map(item => item.path),
+          ]),
+        ].map(file => 'changes/' + file),
+        context: ['source-scope.json'],
+        onComplete: candidatePhase(runtime, entry, job, model.name),
+      });
     });
   },
   recordEvent: (runtime, entry, data) => entry.model?.recordEvent?.(runtime, entry, data),
@@ -146,48 +147,48 @@ export const sourceChangeAdapter = {
   },
 };
 
-function prepareSourceJob(runtime, entry) {
+// Sets up a story's attempt, then calls `edit` with its folders. The working copy, its snapshot check and the copies
+// run in a process of their own (source-setup.mjs), so the controller keeps answering meanwhile; earlier work and the
+// scope file follow here once it succeeds.
+function prepareSourceJob(runtime, entry, edit) {
   const a = entry.attempt,
     scope = a.sourceChange,
     baseline = path.join(entry.job, 'source');
   if (!scope.base?.commit) throw new Error('This source scope has no base commit. Start a new attempt.');
   // The candidate is built in its own git worktree of the story's repository (the root its scope
-  // measured), from the story's base commit (MP-016), and removed when the attempt finishes.
+  // measured), from the story's base commit (MP-016), and removed when the attempt finishes. Worktrees left by settled
+  // attempts are listed before this one is recorded; its path and removal are recorded before the setup process
+  // starts, so a stop or failure during setup still removes it.
   const repository = scope.source.root,
-    candidate = setupPhase(runtime, entry, 'setup.worktree', () => {
-      cleanSourceWorktrees(runtime, sourceWorktreeRoot(runtime));
-      return createSourceWorktree(
-        repository,
-        sourceWorktreeRoot(runtime),
-        worktreeName(a.id),
-        scope.base.commit,
-        profileOf(scope.source),
-      );
-    });
+    parent = sourceWorktreeRoot(runtime),
+    leftovers = leftoverWorktrees(runtime, parent);
+  fs.mkdirSync(parent, { recursive: true });
+  const candidate = path.join(fs.realpathSync(parent), worktreeName(a.id));
   a.sourceWorktree = { path: candidate, baseCommit: scope.base.commit };
   runtime.store.updateAttempt(a);
   entry.cleanup.push(() => removeSourceWorktree(repository, candidate));
-  // The base commit holds exactly the snapshot this scope approved.
-  setupPhase(runtime, entry, 'setup.snapshot', () => {
-    try {
-      verifyCopy(scope.source, candidate);
-    } catch {
-      throw new Error('The base commit does not match the approved source snapshot. Start a new attempt.');
-    }
-  });
-  setupPhase(runtime, entry, 'setup.copy', () => {
-    // The read-only context copy the employee reads at ../source, from that commit: the story's line
-    // may be a branch the project's folder does not have checked out (1.1 step 1).
-    copySource({ ...scope.source, root: candidate }, baseline);
-    for (const file of scope.allowedFiles) {
-      const destination = path.join(entry.output, 'changes', file);
-      fs.mkdirSync(path.dirname(destination), { recursive: true });
-      fs.copyFileSync(path.join(baseline, file), destination);
-    }
-    // New files are written at changes/<path>; files listed for deletion are not staged.
-    for (const file of scope.newFiles || [])
-      fs.mkdirSync(path.dirname(path.join(entry.output, 'changes', file)), { recursive: true });
-  });
+  const request = {
+    repository,
+    parent,
+    name: worktreeName(a.id),
+    commit: scope.base.commit,
+    profile: profileOf(scope.source),
+    snapshot: scope.source,
+    source: baseline,
+    changes: path.join(entry.output, 'changes'),
+    allowedFiles: scope.allowedFiles,
+    newFiles: scope.newFiles || [],
+    // The git work of removing them runs there too, when there is any.
+    leftovers: leftovers.worktrees.length ? leftovers : null,
+    hold: runtime.sourceSetupHold || null,
+  };
+  runSourceSetup(runtime, entry, request, () => edit(finishSourceJob(runtime, entry, baseline, candidate)));
+}
+// The rest of a story's setup, in the controller once the setup process succeeded: its earlier work, its scope file and
+// its continuation record.
+function finishSourceJob(runtime, entry, baseline, candidate) {
+  const a = entry.attempt,
+    scope = a.sourceChange;
   // A story continues from the verified work of its latest stopped attempt (continueFrom), applied
   // over the seeded source copies; the candidate stays the whole change against this base. Work
   // whose source was committed since is merged onto this base by git (October 27). The attempt records the files set

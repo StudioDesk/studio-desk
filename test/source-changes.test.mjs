@@ -171,11 +171,12 @@ test('restart retains live ownership and checkpoints retained source output only
   task.direction = 'hang';
   store.putTask(task);
   const { attemptId } = runner.start(task.id),
-    entry = runner.active.get(attemptId);
+    entry = runner.active.get(attemptId),
+    staged = path.join(entry.output, 'changes/src/core/workflows.mjs');
+  // The setup process stages the file a moment after start returns, and the editor then writes it.
   for (
     let i = 0;
-    i < 300 &&
-    !fs.readFileSync(path.join(entry.output, 'changes/src/core/workflows.mjs'), 'utf8').includes('Retained hang');
+    i < 1000 && !(fs.existsSync(staged) && fs.readFileSync(staged, 'utf8').includes('Retained hang'));
     i++
   )
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -452,10 +453,8 @@ test('persisted source phases span execution and distinct failed and successful 
     if (verifyAuth) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     return blockReason.call(this, task, verifyAuth);
   });
-  // Setup runs within start, before the editor's process does.
-  const began = performance.now();
+  // Setup runs in a process of its own after start returns, before the editor's process does.
   runner.start(c.taskId);
-  const startTook = performance.now() - began;
   const candidate = await c.wait(c.taskId),
     phases = phasePayloads(store, candidate.id);
   assert.deepEqual(
@@ -498,7 +497,11 @@ test('persisted source phases span execution and distinct failed and successful 
     Object.keys(setupNames),
   );
   assert.ok(setupDone.every(p => typeof p.durationMs === 'number' && p.durationMs >= 0));
-  assert.ok(setupDone.reduce((sum, p) => sum + p.durationMs, 0) <= startTook, 'Every setup step ran within start.');
+  const editStarted = Date.parse(phases.find(p => p.phaseId === 'source.edit' && p.boundary === 'start').timestamp);
+  assert.ok(
+    setupDone.every(p => Date.parse(p.timestamp) <= editStarted),
+    'Every setup step finished before the editor started.',
+  );
   // The scope's time is the check measured before the attempt existed, not a phase opened and closed at once.
   const scopeDone = setupDone.find(p => p.phaseId === 'setup.scope');
   assert.ok(scopeDone.durationMs >= 25, `The scope check took ${scopeDone.durationMs} ms.`);
