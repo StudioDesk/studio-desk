@@ -157,6 +157,75 @@ test("a step's Result shows what it handed on and how its time went; its Record,
   expect(record.getByText('You are the engineer.')).toBeTruthy();
 });
 
+test("the editor's own test runs show their failed tests and open each saved run's output", async () => {
+  controller.details['attempt-1']!.employeeTestRuns = [
+    // Recorded before runs were saved: no number, no failed tests, no saved files.
+    {
+      startedAt: '2026-10-22T10:01:00Z',
+      files: ['test/a.test.mjs'],
+      exitCode: 0,
+      totals: { pass: 12, fail: 0, tests: 12 },
+    },
+    {
+      number: 1,
+      startedAt: '2026-10-22T10:02:00Z',
+      files: [],
+      exitCode: 1,
+      totals: null,
+      failedTests: [],
+      output: { bytes: 40, hash: 'h-output-1' },
+      errors: { bytes: 120, hash: 'h-errors-1' },
+    },
+    {
+      number: 2,
+      startedAt: '2026-10-22T10:03:00Z',
+      files: [],
+      exitCode: 1,
+      totals: { pass: 755, fail: 1, tests: 756 },
+      failedTests: [
+        {
+          name: 'a saved run is served while its bytes match',
+          file: 'test/source-changes.test.mjs',
+          error: 'Expected values to be strictly equal: 409 !== 200',
+        },
+      ],
+      output: { bytes: 412000, hash: 'h-output-2' },
+      errors: { bytes: 0, hash: 'h-empty' },
+    },
+  ];
+  open('/p/project-x/tasks/T-1');
+  const runs = await screen.findByRole('region', { name: "Eli's test runs" });
+  // One row a run, in the order they ran; a row's failed tests are a list of their own.
+  const rows = Array.from(runs.querySelector('ol')!.children) as HTMLElement[];
+  expect(rows).toHaveLength(3);
+  const [older, stopped, failing] = rows as [HTMLElement, HTMLElement, HTMLElement];
+  // The run that failed a test names it, where it is and how its error starts, and opens its whole output.
+  expect(within(failing).getByText('755/756 passed, 1 failed')).toBeTruthy();
+  const failed = within(within(failing).getByRole('list', { name: 'Failed tests' }));
+  expect(failed.getByText('a saved run is served while its bytes match')).toBeTruthy();
+  expect(failed.getByText(/test\/source-changes\.test\.mjs/)).toBeTruthy();
+  expect(failed.getByText(/Expected values to be strictly equal: 409 !== 200/)).toBeTruthy();
+  expect(
+    within(failing)
+      .getByRole('link', { name: /Test output/ })
+      .getAttribute('href'),
+  ).toBe('/api/attempts/attempt-1/test-runs/2?projectId=project-x&file=output');
+  // Its errors file is empty, so there is nothing to open.
+  expect(within(failing).queryByRole('link', { name: /Errors/ })).toBeNull();
+  // A run that stopped before its totals still opens what it printed, errors too.
+  expect(within(stopped).getByText('Stopped with exit code 1 before reporting totals')).toBeTruthy();
+  expect(within(stopped).queryByRole('list', { name: 'Failed tests' })).toBeNull();
+  expect(
+    within(stopped)
+      .getByRole('link', { name: /Errors/ })
+      .getAttribute('href'),
+  ).toBe('/api/attempts/attempt-1/test-runs/1?projectId=project-x&file=errors');
+  // A run recorded before runs were saved shows as before, without links.
+  expect(within(older).getByText('12/12 passed')).toBeTruthy();
+  expect(within(older).getByText('test/a.test.mjs')).toBeTruthy();
+  expect(within(older).queryByRole('link')).toBeNull();
+});
+
 test('the files a step returned are listed beside the one open, and a review reads as its findings', async () => {
   const user = userEvent.setup();
   open('/p/project-x/tasks/T-1');

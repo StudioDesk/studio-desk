@@ -21,6 +21,9 @@ export interface FileRecord {
 
 export const artifactUrl = (projectId: string, attemptId: string, path: string) =>
   `/api/attempts/${encodeURIComponent(attemptId)}/artifact?projectId=${encodeURIComponent(projectId)}&path=${encodeURIComponent(path)}`;
+// The whole output or errors one of an editor's own test runs printed, saved with its attempt.
+export const testRunUrl = (projectId: string, attemptId: string, number: number, file: 'output' | 'errors') =>
+  `/api/attempts/${encodeURIComponent(attemptId)}/test-runs/${encodeURIComponent(String(number))}?projectId=${encodeURIComponent(projectId)}&file=${encodeURIComponent(file)}`;
 export const imageFile = (path: string) => /\.(svg|png|jpe?g|webp|gif)$/i.test(path);
 const sourceEvidence = (attempt: AttemptSummary) =>
   ['studio-development:change', 'studio-development:change-review'].includes(

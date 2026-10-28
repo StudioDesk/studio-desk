@@ -3,11 +3,11 @@
 // result, for the Record tab; and the parts the Result tab shows. The full record is read once for the attempt
 // shown and again only when that attempt or its phases change.
 import { useQueries, useQuery } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
+import { Link, useParams } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 import { getJSON, taskUrl, type AttemptSummary, type Task, type TaskPage } from './api';
 import { effortWords } from './evidence';
-import { FileActions, FileText, readableFile } from './files';
+import { FileActions, FileText, readableFile, testRunUrl } from './files';
 import { workerName } from './names';
 import { queryKeys } from './records';
 import { cliName } from './story';
@@ -71,13 +71,23 @@ export interface FullAttempt extends AttemptSummary {
     checkpoint?: unknown;
     operations?: { kind: string; status: string }[];
   };
-  // Tests a code-editing agent ran on its edits through the controller (v1.0 item 22).
+  // Tests a code-editing agent ran on its edits through the controller (v1.0 item 22). A run records the tests that
+  // failed, and a saved run its number and each saved stream's size and hash; runs recorded earlier have none.
   employeeTestRuns?: {
+    number?: number;
     startedAt?: string;
     files?: string[];
     exitCode?: number | null;
     totals?: { pass: number; fail: number; tests: number } | null;
+    failedTests?: { name: string; file?: string; error?: string }[];
+    output?: SavedRunFile;
+    errors?: SavedRunFile;
   }[];
+}
+type TestRun = NonNullable<FullAttempt['employeeTestRuns']>[number];
+interface SavedRunFile {
+  bytes: number;
+  hash: string;
 }
 
 export function useAttemptDetail(projectId: string, attemptId: string, enabled = true) {
@@ -472,8 +482,19 @@ export function PlanReview({ projectId, attempt, task }: { projectId: string; at
   );
 }
 
-// The tests a code-editing agent ran on its edits through the controller (v1.0 item 22).
+// A run's saved output or errors, when it has some to read: runs recorded before runs were saved have no number.
+const savedRun = (run: TestRun, file: 'output' | 'errors') =>
+  !!run.number &&
+  Number.isSafeInteger(run.number) &&
+  run.number > 0 &&
+  typeof run[file]?.hash === 'string' &&
+  (run[file]?.bytes ?? 0) > 0;
+
+// The tests a code-editing agent ran on its edits through the controller (v1.0 item 22): each run's totals, the
+// tests that failed and, when the run was saved, its whole output and errors to open or download.
 export function AgentTestRuns({ attempt, name }: { attempt: FullAttempt; name: string }) {
+  // Both places that show the runs are a project's pages; the attempt's record does not name its project.
+  const { projectId } = useParams({ strict: false });
   if (!attempt.employeeTestRuns?.length) return null;
   return (
     <section
@@ -495,6 +516,43 @@ export function AgentTestRuns({ attempt, name }: { attempt: FullAttempt; name: s
             </span>
             <span className="sd-phases__time">{when(run.startedAt)}</span>
             <span className="sd-phases__detail">{run.files?.length ? run.files.join(', ') : 'Every test'}</span>
+            {run.failedTests?.length ? (
+              <ul
+                className="sd-phases__detail"
+                aria-label="Failed tests"
+                style={{ margin: 0, paddingLeft: 'var(--space-16)', overflowWrap: 'anywhere' }}
+              >
+                {run.failedTests.map((test, at) => (
+                  <li key={at}>
+                    <b>{test.name}</b>
+                    {test.file && <span className="sd-mono"> · {test.file}</span>}
+                    {test.error && <span>: {test.error}</span>}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {projectId && savedRun(run, 'output') && (
+              <span className="sd-returned__actions" style={{ gridColumn: '1 / -1' }}>
+                <a
+                  className="sd-btn sd-btn--sm"
+                  href={testRunUrl(projectId, attempt.id, run.number!, 'output')}
+                  download
+                  aria-label={`Test output of run ${run.number}`}
+                >
+                  Test output
+                </a>
+                {savedRun(run, 'errors') && (
+                  <a
+                    className="sd-btn sd-btn--sm sd-btn--ghost"
+                    href={testRunUrl(projectId, attempt.id, run.number!, 'errors')}
+                    download
+                    aria-label={`Errors of run ${run.number}`}
+                  >
+                    Errors
+                  </a>
+                )}
+              </span>
+            )}
           </li>
         ))}
       </ol>
