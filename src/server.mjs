@@ -55,7 +55,7 @@ import { testsSentence } from './connectors/source-checks.mjs';
 import { chosenTestSandbox, testSandboxes } from './adapters/source-test-sandbox.mjs';
 import { builtInSandbox } from './adapters/built-in-sandbox.mjs';
 import { applyAgentPermissions, approveCommands, commandRule, taskAutoMode } from './core/agent-permissions.mjs';
-import { employeeTestsAllowed, runEmployeeTests } from './connectors/employee-tests.mjs';
+import { employeeTestsAllowed, runEmployeeTests, savedTestRun } from './connectors/employee-tests.mjs';
 import { attemptTrace } from './core/attempt-trace.mjs';
 import { storyActivity } from './core/story-activity.mjs';
 import { validateReview } from './packs/game-production/contracts.mjs';
@@ -713,6 +713,22 @@ export function createStudio({
             'Cache-Control': 'no-store',
           });
           fs.createReadStream(file).pipe(res);
+          return;
+        }
+        // The whole output or errors of one of a code-editing employee's own test runs, saved in its job folder
+        // as the run printed them and read only while the bytes match the run's record.
+        if (parts.length === 5 && parts[3] === 'test-runs') {
+          const names = url.searchParams.getAll('file');
+          if (names.length !== 1 || !['output', 'errors'].includes(names[0])) fail('file must be output or errors.');
+          if (!/^[1-9][0-9]{0,8}$/.test(parts[4])) fail('Test run not found.', 404);
+          const number = Number(parts[4]),
+            file = await savedTestRun(store, attempt, number, names[0]);
+          res.writeHead(200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Disposition': `inline; filename="${attempt.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100)}-test-run-${number}-${names[0]}.txt"`,
+            'Cache-Control': 'no-store',
+          });
+          await pipeline(fs.createReadStream(file), res);
           return;
         }
         return json(res, { ...attempt, phaseEvents: store.phaseEvents(attempt.id) });

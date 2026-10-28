@@ -5,11 +5,13 @@
 // candidate tests run (the attempt's recorded test sandbox). The request carries a token that exists only
 // while the editor runs, and nothing but the test command can be run; the candidate is tested again after.
 import { spawn } from 'node:child_process';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { subscriptionEnvironment, command as nativeCommand } from '../adapters/process.mjs';
+import { jobDirectory } from '../core/projects.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
 import { copySource, failedTestReader, sourcePlan, sourceTestArgs, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, profileOf } from './source-profile.mjs';
@@ -72,7 +74,104 @@ function composeCopy(runtime, a, output, directory) {
   return sourcePlan(directory, profileOf(scope.source));
 }
 
-function run(executable, args, { cwd, environment, timeoutMs, tests, reader }) {
+// Each test run's whole output and errors are saved in the attempt's job folder, outside output/, so the editor
+// does not change them and they are not staged: test-runs/<number>-output.txt and <number>-errors.txt.
+const SAVED = ['output', 'errors'];
+const runFolder = (store, attempt) => path.join(jobDirectory(store, attempt), 'test-runs'),
+  // Runs recorded before runs were saved have no number.
+  runNumber = run => (Number.isSafeInteger(run.number) && run.number > 0 ? run.number : null);
+function runFile(store, attempt, number, name) {
+  if (!runNumber({ number }) || !SAVED.includes(name)) throw new Error('Invalid test run file.');
+  return path.join(runFolder(store, attempt), `${number}-${name}.txt`);
+}
+
+// Writes one stream of a run to its file as it arrives, counting its bytes and SHA-256, so nothing but the
+// reply's tail is held. A file that cannot be written is dropped, and the run is recorded without it.
+function savedStream(file) {
+  const digest = createHash('sha256');
+  let fd = null,
+    bytes = 0;
+  const drop = () => {
+    try {
+      fs.closeSync(fd);
+    } catch {}
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {}
+    fd = null;
+  };
+  try {
+    // Created anew, never through a link left in its place.
+    fs.rmSync(file, { force: true });
+    fd = fs.openSync(file, 'wx');
+  } catch {}
+  return {
+    write(chunk) {
+      if (fd === null) return;
+      try {
+        for (let offset = 0; offset < chunk.length; ) offset += fs.writeSync(fd, chunk, offset);
+      } catch {
+        return drop();
+      }
+      bytes += chunk.length;
+      digest.update(chunk);
+    },
+    close() {
+      if (fd === null) return undefined;
+      try {
+        fs.closeSync(fd);
+      } catch {
+        return drop();
+      }
+      fd = null;
+      return { bytes, hash: digest.digest('hex') };
+    },
+  };
+}
+
+function saveRun(store, attempt, number) {
+  const folder = runFolder(store, attempt);
+  let plain = false;
+  try {
+    fs.mkdirSync(folder, { recursive: true });
+    plain = fs.lstatSync(folder).isDirectory();
+  } catch {}
+  const [output, errors] = SAVED.map(name =>
+    plain ? savedStream(runFile(store, attempt, number, name)) : { write() {}, close() {} },
+  );
+  return { output, errors, close: () => ({ output: output.close(), errors: errors.close() }) };
+}
+
+function removeSavedRun(store, attempt, run) {
+  if (!runNumber(run)) return;
+  for (const name of SAVED)
+    try {
+      fs.rmSync(runFile(store, attempt, run.number, name), { force: true });
+    } catch {}
+}
+
+// The saved output or errors of one of the attempt's test runs, as a plain file whose bytes still match its
+// record; the server streams it. 404 when no run has the number or it was recorded without the file.
+export async function savedTestRun(store, attempt, number, name) {
+  const run = (attempt.employeeTestRuns || []).find(item => item.number === number),
+    saved = SAVED.includes(name) ? run?.[name] : null;
+  if (typeof saved?.hash !== 'string')
+    throw Object.assign(new Error('This test run has no saved file of that name.'), { status: 404 });
+  const file = runFile(store, attempt, number, name),
+    digest = createHash('sha256');
+  let matches = false;
+  try {
+    if (fs.lstatSync(runFolder(store, attempt)).isDirectory() && fs.lstatSync(file).isFile()) {
+      for await (const chunk of fs.createReadStream(file)) digest.update(chunk);
+      matches = digest.digest('hex') === saved.hash;
+    }
+  } catch {}
+  if (!matches)
+    throw Object.assign(new Error('The saved test run was changed after its run was recorded.'), { status: 409 });
+  return file;
+}
+
+function run(executable, args, { cwd, environment, timeoutMs, tests, reader, saved }) {
   return new Promise(resolve => {
     const [bin, argv] = nativeCommand(executable, args);
     const child = spawn(bin, argv, { cwd, env: environment, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -80,22 +179,35 @@ function run(executable, args, { cwd, environment, timeoutMs, tests, reader }) {
     let stdout = '',
       stderr = '',
       timedOut = false;
-    const keep = (text, chunk, limit) => (text + chunk).slice(-limit * 3);
-    child.stdout.setEncoding('utf8');
-    // Only the tail is kept, so the failed tests are read from every chunk as it arrives.
+    const keep = (text, chunk, limit) => (text + chunk).slice(-limit * 3),
+      decoder = new StringDecoder('utf8'),
+      read = text => {
+        stdout = keep(stdout, text, outputLimit);
+        reader?.push(text);
+      };
+    // Only the tail is kept, so the failed tests are read from every chunk as it arrives, and a saved run's
+    // bytes are written to disk as they arrive.
     child.stdout.on('data', chunk => {
-      stdout = keep(stdout, chunk, outputLimit);
-      reader?.push(chunk);
+      saved?.output.write(chunk);
+      read(decoder.write(chunk));
     });
-    child.stderr.on('data', chunk => (stderr = keep(stderr, chunk, errorLimit)));
+    child.stderr.on('data', chunk => {
+      saved?.errors.write(chunk);
+      stderr = keep(stderr, chunk, errorLimit);
+    });
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill();
     }, timeoutMs);
-    child.on('error', error => (stderr += `\n${error.message}`));
+    child.on('error', error => {
+      saved?.errors.write(Buffer.from(`\n${error.message}`));
+      stderr += `\n${error.message}`;
+    });
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       tests.child = null;
+      const rest = decoder.end();
+      if (rest) read(rest);
       resolve({ code, signal, stdout, stderr, timedOut });
     });
   });
@@ -150,15 +262,25 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
     }
     const focused = { ...plan, command: { ...plan.command, args: sourceTestArgs(wanted.length ? wanted : suite) } },
       command = runtime.sourceCheckCommand || candidateTestCommand(focused, a.configuration);
+    // A run's number increases across the attempt and stays its own when the oldest runs are dropped.
     const reader = failedTestReader(),
       started = new Date().toISOString(),
+      number = Math.max(0, ...(a.employeeTestRuns || []).map(run => runNumber(run) || 0)) + 1,
+      saved = saveRun(runtime.store, a, number);
+    let result, kept;
+    try {
       result = await run(command.executable, command.args, {
         cwd: directory,
         environment,
         timeoutMs: testTimeoutMs,
         tests,
         reader,
+        saved,
       });
+    } finally {
+      // A run stopped early (its time limit, the editor stopping, the client leaving) keeps what it printed.
+      kept = saved.close();
+    }
     // The TAP totals are at the end, in the kept tail; an early failure in a long run is only in what the reader read.
     const { totals } = testPhaseEvidence(result.stdout),
       failedTests = reader.finish(),
@@ -169,15 +291,20 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
           ? `${totals.pass}/${totals.tests} tests passed${totals.fail ? `, ${totals.fail} failed` : ''} on your edits, ${where}.`
           : `The tests stopped with exit code ${result.code} before reporting totals, ${where}.`;
     (a.employeeTestRuns ||= []).push({
+      number,
       startedAt: started,
       finishedAt: new Date().toISOString(),
       files: wanted,
       exitCode: result.code,
       totals,
       failedTests,
+      ...(kept.output ? { output: kept.output } : {}),
+      ...(kept.errors ? { errors: kept.errors } : {}),
     });
-    if (a.employeeTestRuns.length > MAX_RUNS) a.employeeTestRuns.shift();
+    const dropped = a.employeeTestRuns.splice(0, Math.max(0, a.employeeTestRuns.length - MAX_RUNS));
     runtime.store.updateAttempt(a);
+    // A dropped run's saved files go once its record no longer names them.
+    for (const old of dropped) removeSavedRun(runtime.store, a, old);
     const first = failedTests.length ? ` First failed: ${failedTests[0].name}` : '';
     runtime.store.event(
       'employee_tests',

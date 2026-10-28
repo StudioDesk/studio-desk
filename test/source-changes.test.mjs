@@ -1898,10 +1898,142 @@ test("a Claude editor's test run leads with a failed test that its kept output n
       ),
   );
   assert.equal(fs.existsSync(path.join(c.options.directory, 'tests', a.id.slice(-8))), false, 'The copy is removed.');
+  // The run's whole output and errors are saved in the job folder, outside output/, as its record names them.
+  const [run] = a.employeeTestRuns,
+    folder = path.join(jobDirectory(store, a), 'test-runs'),
+    output = fs.readFileSync(path.join(folder, '1-output.txt')),
+    errors = fs.readFileSync(path.join(folder, '1-errors.txt'));
+  assert.equal(run.number, 1);
+  assert.deepEqual(run.output, { bytes: output.length, hash: hash(output) });
+  assert.deepEqual(run.errors, { bytes: errors.length, hash: hash(errors) });
+  assert.ok(output.toString().startsWith('TAP version 13\nnot ok 1 - fails early in a long run\n'));
+  assert.ok(
+    output
+      .toString()
+      .endsWith('\n1..5001\n# tests 5001\n# pass 5000\n# fail 1\n# cancelled 0\n# skipped 0\n# todo 0\n'),
+  );
+  assert.ok(
+    output.length > Buffer.byteLength(focused.stdout),
+    "The saved output is the whole run, not the reply's tail.",
+  );
+  assert.equal(fs.existsSync(path.join(a.outputFolder, 'test-runs')), false);
+  // The candidate's own check log is test-output.txt; a saved run's files are <number>-output.txt and -errors.txt.
+  assert.ok(
+    a.artifacts.every(item => !/(^|\/)(test-runs\/|\d+-(output|errors)\.txt$)/.test(item.path)),
+    'The saved run is not staged output.',
+  );
+  // The controller serves it read-only, with the attempt's project, while its bytes match the record.
+  store.putProject({ id: 'project-other', name: 'Other', goal: '', direction: '', revision: 1 });
+  const read = (number, file, projectId = 'project-legacy') =>
+    fetch(`${c.origin}/api/attempts/${a.id}/test-runs/${number}?projectId=${projectId}&file=${file}`);
+  const served = await read(1, 'output');
+  assert.equal(served.status, 200);
+  assert.equal(served.headers.get('content-type'), 'text/plain; charset=utf-8');
+  assert.equal(served.headers.get('cache-control'), 'no-store');
+  assert.match(served.headers.get('content-disposition'), /^inline; filename="[a-zA-Z0-9_-]+-test-run-1-output\.txt"$/);
+  assert.deepEqual(Buffer.from(await served.arrayBuffer()), output);
+  const servedErrors = await read(1, 'errors');
+  assert.equal(servedErrors.status, 200);
+  assert.deepEqual(Buffer.from(await servedErrors.arrayBuffer()), errors);
+  assert.equal((await read(2, 'output')).status, 404);
+  for (const [number, file] of [
+    [1, 'source'],
+    [1, '..%2F..%2Fstudio.sqlite'],
+  ])
+    assert.equal((await read(number, file)).status, 400);
+  for (const number of ['0', '01', '1.txt', '-1', '1%2F..']) assert.equal((await read(number, 'output')).status, 404);
+  const foreign = await read(1, 'output', 'project-other');
+  assert.equal(foreign.status, 400);
+  assert.match((await foreign.json()).error, /belongs to another project/);
+  assert.equal((await fetch(`${c.origin}/api/attempts/${a.id}?projectId=project-other`)).status, 400);
+  fs.appendFileSync(path.join(folder, '1-output.txt'), 'altered');
+  assert.equal((await read(1, 'output')).status, 409);
+  assert.equal((await read(1, 'errors')).status, 200);
   // The candidate's own tests still decide.
   const { report } = validateSourceChange(a, name => fs.readFileSync(path.join(a.outputFolder, name)));
   assert.equal(report.passed, true);
   assert.deepEqual(report.failedTests, []);
+});
+
+test("an editor's saved test runs keep their numbers and files when the oldest is dropped, and older runs still load", async t => {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], { claudeBinary: claudeFixture }),
+    { store, runner } = c.app;
+  const org = store.organization();
+  Object.assign(
+    org.workers.find(worker => worker.id === store.task(c.taskId).workerId),
+    { provider: 'claude' },
+  );
+  store.setOrganization(org);
+  // When the editor's run starts, its attempt already holds the 20 runs it keeps, numbered 1 to 20 with saved
+  // files; the editor's run prints to both streams. The candidate's run is the plain check fixture.
+  const seeded = new Map(),
+    printed = [
+      "console.log('TAP version 13\\n1..1\\nok 1 - prints to both streams')",
+      "console.log('# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0')",
+      "console.error('a warning on stderr')",
+    ].join(';');
+  Object.defineProperty(runner, 'sourceCheckCommand', {
+    configurable: true,
+    get: () => {
+      const entry = [...runner.active.values()].find(item => item.employeeTests);
+      if (!entry) return { executable: process.execPath, args: [tests, 'pass'] };
+      if (!seeded.size) {
+        const folder = path.join(jobDirectory(store, entry.attempt), 'test-runs');
+        fs.mkdirSync(folder, { recursive: true });
+        entry.attempt.employeeTestRuns = Array.from({ length: 20 }, (_, index) => {
+          const number = index + 1,
+            seed = { number, startedAt: '2026-10-27T00:00:00.000Z', files: [], exitCode: 0, failedTests: [] };
+          for (const name of ['output', 'errors']) {
+            const bytes = Buffer.from(`Run ${number} ${name}\n`);
+            fs.writeFileSync(path.join(folder, `${number}-${name}.txt`), bytes);
+            seed[name] = { bytes: bytes.length, hash: hash(bytes) };
+            seeded.set(`${number}-${name}`, bytes);
+          }
+          return seed;
+        });
+      }
+      return { executable: process.execPath, args: ['-e', printed] };
+    },
+  });
+  await c.start('run-tests');
+  const a = await c.wait(c.taskId),
+    folder = path.join(jobDirectory(store, a), 'test-runs');
+  assert.equal(seeded.size, 40);
+  // The oldest run is dropped with its files; the others keep their numbers and files, and the new run is 21.
+  assert.deepEqual(
+    a.employeeTestRuns.map(run => run.number),
+    Array.from({ length: 20 }, (_, index) => index + 2),
+  );
+  assert.equal(fs.existsSync(path.join(folder, '1-output.txt')), false);
+  assert.equal(fs.existsSync(path.join(folder, '1-errors.txt')), false);
+  const read = (number, file) =>
+    fetch(`${c.origin}/api/attempts/${a.id}/test-runs/${number}?projectId=project-legacy&file=${file}`);
+  assert.equal((await read(1, 'output')).status, 404);
+  for (const number of [2, 20])
+    for (const name of ['output', 'errors']) {
+      const response = await read(number, name);
+      assert.equal(response.status, 200);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), seeded.get(`${number}-${name}`));
+    }
+  const latest = a.employeeTestRuns.at(-1);
+  assert.deepEqual([latest.number, latest.exitCode, latest.totals.pass], [21, 0, 1]);
+  const errors = await read(21, 'errors'),
+    text = await errors.text();
+  assert.equal(errors.status, 200);
+  assert.equal(text, 'a warning on stderr\n');
+  assert.deepEqual(latest.errors, { bytes: Buffer.byteLength(text), hash: hash(text) });
+  assert.match(await (await read(21, 'output')).text(), /^ok 1 - prints to both streams$/m);
+  // A run recorded before runs were saved has no number and still loads; one recorded without files has none.
+  const stored = store.attempt(a.id),
+    older = { startedAt: '2026-10-26T00:00:00.000Z', files: [], exitCode: 0, totals: { tests: 1, pass: 1, fail: 0 } };
+  store.updateAttempt({ ...stored, employeeTestRuns: [older, ...stored.employeeTestRuns, { ...older, number: 22 }] });
+  const loaded = await fetch(`${c.origin}/api/attempts/${a.id}?projectId=project-legacy`);
+  assert.equal(loaded.status, 200);
+  const runs = (await loaded.json()).employeeTestRuns;
+  assert.deepEqual(runs[0], older);
+  assert.equal(runs.length, 22);
+  assert.equal((await read(22, 'output')).status, 404);
+  assert.equal((await read(2, 'output')).status, 200);
 });
 
 test('a newly registered model adapter edits source through the contract with no step changes', async t => {
