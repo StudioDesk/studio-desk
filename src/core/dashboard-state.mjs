@@ -26,6 +26,14 @@ function testEvidence(value) {
   if (value?.failedTests) result.failedTests = failedNames(value.failedTests);
   return result;
 }
+// A run's wait for the computer's one full test suite at a time (core/test-turn.mjs), on an attempt or an
+// integration's journal: whose suite it waits for, since when and who holds the turn. The controller clears it with
+// the wait.
+const testTurn = value => ({
+  reason: shortText(value.reason, 1000),
+  since: shortText(value.since, 40),
+  holder: shortText(value.holder),
+});
 function stopContext(value) {
   const result = fields(value, [
     'reason',
@@ -164,6 +172,7 @@ export function dashboardAttempt(data, timing, openPhase = null) {
       'finishedAt',
       'error',
     ]);
+    if (journal.testTurn) summary.sourceIntegration.testTurn = testTurn(journal.testTurn);
     if (journal.approvedBy) summary.sourceIntegration.approvedBy = decision(journal.approvedBy);
     if (journal.repository) summary.sourceIntegration.repository = fields(journal.repository, ['commit', 'branch']);
     if (journal.verification) {
@@ -219,10 +228,11 @@ export function dashboardAttempt(data, timing, openPhase = null) {
       ...(carry.error ? { error: shortText(carry.error, 1000) } : {}),
     }));
   summary.executionTiming = executionTiming(data, timing || []);
-  // While the attempt works, Today shows its latest message and what it is doing (v1.0 items 21 and 23); a
-  // finished attempt carries neither, so the state does not grow with history.
+  // While the attempt works, Today shows its latest message and what it is doing (v1.0 items 21 and 23), and the story
+  // whose suite it waits for; a finished attempt carries none of them, so the state does not grow with history.
   if (['running', 'stopping'].includes(data.status)) {
     if (data.lastSay) summary.lastSay = { text: shortText(data.lastSay.text, 280), at: shortText(data.lastSay.at, 40) };
+    if (data.testTurn) summary.testTurn = testTurn(data.testTurn);
     summary.openPhase = openPhase;
   }
   return summary;

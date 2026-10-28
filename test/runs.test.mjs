@@ -660,7 +660,7 @@ const explain = s => {
       expected = context.StudioRuns.taskExplanation(current, state),
       run = buildRunStories(state).find(run => run.taskIds.includes(current.id)),
       rows = run.needsYou.filter(item => item.taskId === current.id),
-      resolved = ['running', 'accepted', 'closed', 'denied', 'integrated'].includes(expected.kind);
+      resolved = ['running', 'test-turn-wait', 'accepted', 'closed', 'denied', 'integrated'].includes(expected.kind);
     assert.equal(rows.length, resolved ? 0 : 1, expected.kind);
     if (!resolved) {
       for (const key of ['kind', 'reason', 'next', 'action', 'requiresDirector', 'details'])
@@ -2563,4 +2563,70 @@ test('a run shows a final outcome when it integrated, finished, stopped or was c
       .join(' '),
     /abcdef1/,
   );
+});
+
+// The computer runs one full test suite at a time (core/test-turn.mjs); a run waiting for its turn records whose
+// suite it waits for, on its attempt or on its integration's journal, and the page reads that record.
+test("a run waiting for the computer's test turn says whose suite it waits for and never needs the director", () => {
+  const reason =
+      'Waiting for the tests of T-x (Other story) to finish: this computer runs one full test suite at a time.',
+    turn = { reason, since: at(5), holder: 'attempt-other' },
+    needs = s =>
+      buildRunStories({
+        ...s,
+        tasks: s.tasks.map(item => ({ ...item, workflowReference: { runId: 'test-turn', name: 'Turn' } })),
+      })[0],
+    // The page reads attempts through the dashboard's compact projection.
+    paged = s => {
+      const state = { ...s, attempts: s.attempts.map(a => dashboardAttempt(a)) };
+      return context.StudioRuns.taskExplanation(state.tasks[0], state);
+    };
+  const s = explanationFixture(
+    { status: 'running', queued: true, lastAttemptId: 'a-E' },
+    { status: 'running', finishedAt: null, testTurn: turn },
+  );
+  let e = explain(s);
+  assert.equal(e.kind, 'test-turn-wait');
+  assert.equal(e.reason, reason);
+  assert.match(e.next, /^Nothing is needed from you\. The controller runs its tests once that suite finishes/);
+  assert.equal(e.action, null);
+  assert.equal(e.requiresDirector, false);
+  assert.equal(e.attemptId, 'a-E');
+  assert.deepEqual(dashboardAttempt(s.attempts[0]).testTurn, turn);
+  assert.deepEqual(paged(s), e);
+  assert.equal(context.StudioRuns.needsYou(s).length, 0, 'The wait is not counted as needing the director.');
+  assert.equal(needs(s).needsYou.length, 0);
+  assert.notEqual(needs(s).outcome.label, 'Needs you');
+  // Once the turn is taken the record is cleared, and the run reads as running again.
+  delete s.attempts[0].testTurn;
+  e = explain(s);
+  assert.equal(e.kind, 'running');
+  assert.equal(e.reason, 'This assignment is running.');
+  assert.equal(dashboardAttempt(s.attempts[0]).testTurn, undefined);
+  assert.equal(paged(s).kind, 'running');
+  assert.equal(context.StudioRuns.needsYou(s).length, 0);
+  // A finished attempt's leftover record is history, not a wait, and the page's state does not carry it.
+  Object.assign(s.tasks[0], { status: 'review' });
+  Object.assign(s.attempts[0], { status: 'review', finishedAt: at(9), testTurn: turn });
+  assert.notEqual(explain(s).kind, 'test-turn-wait');
+  assert.equal(dashboardAttempt(s.attempts[0]).testTurn, undefined);
+
+  // An integration's verification waiting for the turn says the same in its running explanation.
+  const staged = stagedSourceState();
+  staged.attempts[1].sourceIntegration = { state: 'verifying', testTurn: turn };
+  e = explain(staged);
+  assert.equal(e.kind, 'integration-running');
+  assert.equal(e.reason, reason);
+  assert.equal(e.action, null);
+  assert.equal(e.requiresDirector, false);
+  assert.deepEqual(dashboardAttempt(staged.attempts[1]).sourceIntegration.testTurn, turn);
+  assert.equal(paged(staged).reason, reason);
+  assert.ok(context.StudioRuns.needsYou(staged).every(item => !item.requiresDirector));
+  assert.notEqual(needs(staged).outcome.label, 'Needs you');
+  delete staged.attempts[1].sourceIntegration.testTurn;
+  e = explain(staged);
+  assert.equal(e.kind, 'integration-running');
+  assert.equal(e.reason, 'The controller is integrating the approved change.');
+  assert.equal(dashboardAttempt(staged.attempts[1]).sourceIntegration.testTurn, undefined);
+  assert.equal(paged(staged).reason, 'The controller is integrating the approved change.');
 });

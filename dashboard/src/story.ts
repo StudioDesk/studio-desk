@@ -282,6 +282,14 @@ function stands(task: Task, studio: StudioState, phase: string | null): Told {
       title: `${reviewer} asked for changes.`,
       detail: `Send it back and ${editor} gets the findings, or integrate over the review with your reason.`,
     };
+  // A run waiting for the computer's one full test suite at a time says whose suite it waits for, as recorded.
+  if (live && explanation.kind === 'test-turn-wait')
+    return {
+      tone: 'wait',
+      title: explanation.reason,
+      detail: explanation.next,
+      workerId: source ? editorId : task.workerId,
+    };
   if (live && source && (!stage.phase || stage.phase === 'implementing'))
     return testingPhases.includes(phase ?? '')
       ? {

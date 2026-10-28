@@ -559,6 +559,10 @@
     ];
   }
 
+  // The recorded wait for the computer's one full test suite at a time, on an attempt or an integration's journal.
+  const turnWait = record =>
+    typeof record?.testTurn?.reason === 'string' && record.testTurn.reason.trim() ? record.testTurn.reason : '';
+
   // One read-only account of the current stop/wait. Text is deliberately unescaped:
   // callers render it as text. This helper grants no eligibility or controller action.
   function taskExplanation(task, state = {}) {
@@ -681,7 +685,8 @@
     if (['waiting', 'verifying', 'preparing', 'prepared', 'applying', 'committing'].includes(integrationState))
       return passive(
         'integration-running',
-        'The controller is integrating the approved change.',
+        // While its verification waits for the computer's test turn, the journal names whose suite runs.
+        turnWait(journal) || 'The controller is integrating the approved change.',
         'It will finish verification and record the integration outcome. If interrupted, reconcile the journal before another write.',
       );
 
@@ -812,6 +817,13 @@
           ? `${timeoutReason(attempt, reason)} The process has not yet confirmed it stopped.`
           : 'Cancellation was requested; the process has not yet confirmed it stopped.',
         'The controller waits for process termination before releasing reservations.',
+      );
+    // A running attempt waiting for the computer's test turn (core/test-turn.mjs) only waits, as its record says.
+    if (task.status === 'running' && turnWait(attempt))
+      return passive(
+        'test-turn-wait',
+        turnWait(attempt),
+        'The controller runs its tests once that suite finishes. The wait does not count toward its time limit.',
       );
     if (task.status === 'running')
       return passive(
@@ -1300,7 +1312,8 @@
   // reservation and policy context, including facts outside this run.
   // Callers may supply the task presenter for legacy control compatibility.
   function needsYou(state, tasks = state.tasks || [], explain = taskExplanation) {
-    const resolved = new Set(['running', 'accepted', 'closed', 'denied', 'integrated']),
+    // A running attempt's wait for the test turn is running work, never the director's.
+    const resolved = new Set(['running', 'test-turn-wait', 'accepted', 'closed', 'denied', 'integrated']),
       byId = new Map((state.tasks || []).map(task => [task.id, task]));
     return tasks.flatMap(task => {
       const explanation = explain(task, state);
