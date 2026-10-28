@@ -7,6 +7,7 @@ import { openPhaseOf, plural, sandboxed, testingPhases, took, totalsOf } from '.
 import { workerName } from './names';
 import { active, type RunStory, type StudioState } from './studio-runs';
 import { placeIn, quoted } from './today';
+import { clip } from './your-part';
 
 export type Tone = 'you' | 'live' | 'ok' | 'bad' | 'wait';
 export interface Step {
@@ -183,15 +184,40 @@ export interface Standing {
   // detail on a line of its own (each failing check with its evidence, each failed test, the error, the editor's
   // issues and the next step), or the detail as one line.
   full: { title: string; lines: string[] };
+  // Whether the title or detail leaves out some of the full account, which the notice then links to.
+  shortened: boolean;
 }
+
+// The notice reads in a line or two: a title or detail past these lengths keeps its first sentence, clipped if that
+// is still long. A shorter one stays as it is.
+const titleLength = 160,
+  detailLength = 200;
+const firstSentence = (text: string) => /^[\s\S]*?[.!?](?=\s|$)/.exec(text)?.[0] ?? text;
+const brief = (text: string, length: number) => (text.length > length ? clip(firstSentence(text), length) : text);
 
 // Where the story stands, in the agents' plain words: the director's call, the work moving, or how it ended.
 export function standing(task: Task, studio: StudioState, phase: string | null = phaseOf(task, studio)): Standing {
-  const { lines, ...stand } = stands(task, studio, phase);
-  return { ...stand, full: { title: stand.title, lines: lines ?? (stand.detail ? [stand.detail] : []) } };
+  const { lines, short, whole, ...stand } = stands(task, studio, phase),
+    title = brief(short?.title ?? stand.title, titleLength),
+    detail = whole ? stand.detail : brief(short ? short.detail : stand.detail, detailLength);
+  return {
+    ...stand,
+    title,
+    detail,
+    full: { title: stand.title, lines: lines ?? (stand.detail ? [stand.detail] : []) },
+    shortened: title !== stand.title || detail !== stand.detail,
+  };
 }
 
-function stands(task: Task, studio: StudioState, phase: string | null): Omit<Standing, 'full'> & { lines?: string[] } {
+// A notice as stands tells it in full, with what its short form says instead (short), or that its detail is the
+// decision's own words and stays whole.
+type Told = Omit<Standing, 'full' | 'shortened'> & {
+  lines?: string[];
+  short?: { title?: string; detail: string };
+  whole?: boolean;
+};
+
+function stands(task: Task, studio: StudioState, phase: string | null): Told {
   const { stage, build, editor, editorId, reviewer, reviewerId } = storyPeople(task, studio),
     decision = decisionState(task, studio),
     { explanation } = decision,
@@ -240,12 +266,14 @@ function stands(task: Task, studio: StudioState, phase: string | null): Omit<Sta
       workerId: asking.requested.workerId,
     };
   }
+  // What integrating does, and that the controller restarts, the director reads whole before deciding.
   if (decision.integrable)
     return {
       tone: 'you',
       chip: 'Ready to integrate',
       title: `${reviewer} passed it. It's ready to integrate.`,
       detail: `Integrating merges it onto the current source in its own worktree, formats it, runs the full suite, then moves the branch forward. If any step fails, nothing changes.${integratesController(studio) ? ' The controller pauses new work, waits for running work to finish, integrates, then restarts.' : ''}`,
+      whole: true,
     };
   if (decision.returnable)
     return {
@@ -277,7 +305,13 @@ function stands(task: Task, studio: StudioState, phase: string | null): Omit<Sta
       detail: '',
       workerId: task.workerId,
     };
-  const lines = [...explanation.details, explanation.next].filter(Boolean);
+  const lines = [...explanation.details, explanation.next].filter(Boolean),
+    // A stop, not one of the controller's own waits, as the build step decides; and the tests of the build the story
+    // is on, not of a candidate already past it.
+    stopped =
+      ['failed', 'cancelled', 'blocked'].includes(task.status) &&
+      (!task.controllerWait || explanation.requiresDirector),
+    tried = !stage.phase || stage.phase === 'implementing' ? totalsOf(build) : null;
   return {
     tone: explanation.requiresDirector
       ? 'you'
@@ -289,6 +323,15 @@ function stands(task: Task, studio: StudioState, phase: string | null): Omit<Sta
     title: explanation.reason,
     detail: lines.join(' '),
     lines,
+    // The notice says what failed in plain words and what the director can do; the checks' evidence, the failed
+    // tests, the error and the issues are told in full under Checks or Result.
+    short: {
+      title:
+        stopped && tried?.tests && tried.fail
+          ? `The attempt's tests did not pass: ${tried.pass ?? 0} of ${tried.tests}.`
+          : undefined,
+      detail: explanation.next,
+    },
   };
 }
 

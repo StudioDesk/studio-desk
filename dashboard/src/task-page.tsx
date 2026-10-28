@@ -61,6 +61,7 @@ import {
   ReviewPanel,
   stagedWork,
   StandsInFull,
+  standsInFullId,
 } from './story-tabs';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { active, explain, liveSummary, statusOf, type RunStory, type StudioState } from './studio-runs';
@@ -167,6 +168,8 @@ function Story({
     [draft, setDraft] = useState<string | null>(null),
     [chosen, setChosen] = useState<string | null>(null),
     [picked, setPicked] = useState<TabId | null>(null),
+    // Each use of the notice's link to its full account, which brings that account into view once its tab shows.
+    [reading, setReading] = useState(0),
     looks = useMemo(
       () => agentLooks(projectId, [...studio.workers, ...(studio.employeeDirectory ?? [])]),
       [projectId, studio.workers, studio.employeeDirectory],
@@ -385,6 +388,13 @@ function Story({
       within = row.getBoundingClientRect();
     if (at.left < within.left || at.right > within.right) row.scrollLeft += at.left - within.left - 16;
   }, [tab]);
+  useEffect(() => {
+    if (reading) document.getElementById(standsInFullId)?.scrollIntoView?.({ block: 'start' });
+  }, [reading]);
+  const readInFull = () => {
+    setPicked(source ? 'checks' : 'result');
+    setReading(count => count + 1);
+  };
   const choose = (event: KeyboardEvent<HTMLDivElement>) => {
     const index = tabs.findIndex(item => item.id === tab),
       next =
@@ -461,6 +471,7 @@ function Story({
         direction={direction}
         onEditFiles={() => setPicked(narrow ? 'details' : 'overview')}
         onRevised={() => setDraft(null)}
+        onReadInFull={readInFull}
       >
         {explanation.kind === 'test-sandbox' && (
           <Link
@@ -538,7 +549,8 @@ function Steps({ steps }: { steps: Step[] }) {
   );
 }
 
-// Where it stands: the director's call or the work moving, in the agents' words, with the decisions it offers.
+// Where it stands: the director's call or the work moving, in the agents' words, with the decisions it offers. A
+// shortened notice links to its full account under Checks, or other work's Result.
 function Stands({
   projectId,
   task,
@@ -550,6 +562,7 @@ function Stands({
   direction,
   onEditFiles,
   onRevised,
+  onReadInFull,
   children,
 }: {
   projectId: string;
@@ -562,6 +575,7 @@ function Stands({
   direction: string;
   onEditFiles: () => void;
   onRevised: () => void;
+  onReadInFull: () => void;
   children?: ReactNode;
 }) {
   const stand = standing(task, studio, phase),
@@ -591,7 +605,19 @@ function Stands({
           {narrow && icon(36) && <span className="sd-stands__icon">{icon(36)}</span>}
           <div className="sd-stands__title">{stand.title}</div>
         </div>
-        {stand.detail && <div className="sd-stands__detail">{stand.detail}</div>}
+        {(stand.detail || stand.shortened) && (
+          <div className="sd-stands__detail">
+            {stand.detail}
+            {stand.shortened && (
+              <>
+                {stand.detail && ' '}
+                <button type="button" className="sd-link" onClick={onReadInFull}>
+                  Read why in {isSourceStory(task) ? 'Checks' : 'Result'}
+                </button>
+              </>
+            )}
+          </div>
+        )}
         {elapsed !== null && limit > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', marginTop: 'var(--space-6)' }}>
             <span className="sd-bar" aria-hidden="true">

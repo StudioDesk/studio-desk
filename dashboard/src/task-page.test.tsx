@@ -569,6 +569,8 @@ test('the page sits in the frame with the way back to its ideas and where the ta
   expect(trail.textContent).toBe('Ideas/T-1');
   const stands = within(screen.getByRole('region', { name: 'Where it stands' }));
   expect(await stands.findByText('This assignment is ready to be queued.')).toBeTruthy();
+  // A short notice has nothing more to tell, so no link to it.
+  expect(stands.queryByRole('button', { name: /^Read why/ })).toBeNull();
   await user.click(screen.getByRole('tab', { name: 'Attempts' }));
   expect(screen.getByText('No attempt has been launched.')).toBeTruthy();
 });
@@ -813,13 +815,11 @@ for (const [source, tab] of [
       await user.click(await screen.findByRole('tab', { name: tab }, { timeout: 5000 }));
       const panel = await screen.findByRole('tabpanel'),
         region = await within(panel).findByRole('region', inFull),
-        full = within(region),
-        notice = screen.getByRole('region', { name: 'Where it stands' }).querySelector('.sd-stands__title')!;
-      // It heads the tab with the notice's own title, and has an id the notice can link to.
+        full = within(region);
+      // It heads the tab with the reason the notice shortens, and has an id the notice links to.
       expect(panel.firstElementChild).toBe(region);
       expect(region.id).toBe('stands-in-full');
-      expect(notice.textContent).toBeTruthy();
-      expect(full.getByText(notice.textContent!)).toBeTruthy();
+      expect(full.getByText('The attempt did not pass: Candidate tests.')).toBeTruthy();
       expect(full.getByText('Candidate tests: 751 of 752 tests passed.')).toBeTruthy();
       // A failed test shows its file as a chip.
       expect(full.getByText('keeps the label')).toBeTruthy();
@@ -827,6 +827,44 @@ for (const [source, tab] of [
       expect(full.getByText('The candidate did not pass its tests.')).toBeTruthy();
       expect(full.getByText('I could not run the browser check.')).toBeTruthy();
     });
+
+// The notice at the top reads in a line or two, and links to its full account.
+for (const [source, tab] of [
+  [true, 'Checks'],
+  [false, 'Result'],
+] as const)
+  test(`a stopped ${source ? 'story' : 'work'}'s notice says its tests did not pass and what to do, and Read why opens ${tab} at the full account`, async () => {
+    const user = userEvent.setup(),
+      scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      stopped(source);
+      open();
+      const notice = await screen.findByRole('region', { name: 'Where it stands' }, { timeout: 5000 }),
+        stands = within(notice);
+      expect(await stands.findByText("The attempt's tests did not pass: 751 of 752.")).toBeTruthy();
+      expect(
+        stands.getByText(/^Inspect the failing checks and tests, then use Start assignment to repair the work\./),
+      ).toBeTruthy();
+      expect(notice.textContent).not.toMatch(
+        /751 of 752 tests passed|keeps the label|did not pass its tests|browser check|The attempt did not pass/,
+      );
+      // Its decisions stay.
+      expect(stands.getByRole('button', { name: 'Start assignment' })).toBeTruthy();
+      await user.click(stands.getByRole('button', { name: `Read why in ${tab}` }));
+      expect(screen.getByRole('tab', { name: tab }).getAttribute('aria-selected')).toBe('true');
+      const region = await within(screen.getByRole('tabpanel')).findByRole('region', inFull),
+        full = within(region);
+      expect(full.getByText('Candidate tests: 751 of 752 tests passed.')).toBeTruthy();
+      expect(full.getByText('keeps the label')).toBeTruthy();
+      expect(full.getByText('The candidate did not pass its tests.')).toBeTruthy();
+      expect(full.getByText('I could not run the browser check.')).toBeTruthy();
+      // It brings the full account into view.
+      await waitFor(() => expect(scrolled.mock.contexts).toContain(region));
+    } finally {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
+  });
 
 for (const [source, tab, shows] of [
   [true, 'Checks', 'The candidate has not been tested yet.'],

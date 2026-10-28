@@ -141,8 +141,8 @@ test('a reviewed story waits for the director to integrate it, with the evidence
   });
 });
 
-// The notice's whole account, which the story's Checks tab tells in full while the notice reads as it did.
-test('a stopped story keeps its whole account in full: each failing check, failed test, the error, each issue, then the next step', () => {
+// The notice reads in a line or two, and its whole account is told in full under the story's Checks tab.
+test('a stopped story says its tests did not pass and what to do, and keeps its whole account in full', () => {
   const failed = build({
       status: 'failed',
       controllerChecks: [
@@ -180,9 +180,44 @@ test('a stopped story keeps its whole account in full: each failing check, faile
     ];
   expect(next).toBeTruthy();
   expect(stand.full).toEqual({ title: reason, lines });
-  // The notice itself is as it was: the reason, and every part run together.
-  expect(stand.title).toBe(reason);
-  expect(stand.detail).toBe(lines.join(' '));
+  // The notice says in plain words what the measured tests found, then the one thing the director can do.
+  expect(stand.title).toBe("The attempt's tests did not pass: 751 of 752.");
+  expect(stand.detail).toBe(next);
+  expect(stand.detail.match(/[.!?](\s|$)/g)).toHaveLength(1);
+  for (const told of lines.slice(0, -1)) expect(stand.detail).not.toContain(told);
+  expect(stand.detail).not.toMatch(/keeps the label|browser check|did not pass its tests/);
+  expect(stand.shortened).toBe(true);
+});
+
+test('a long reason keeps its first sentence, and the whole of it is told in full', () => {
+  const why =
+      'The guide was replaced by the onboarding tour that landed in October, so this work is no longer needed. Its notes were moved to the tour story, its files were never integrated, and nothing else waits on it.',
+    closed = story({ status: 'cancelled', closed: { reason: why } }),
+    shut = standing(closed, studio([closed], []));
+  expect(why.length).toBeGreaterThan(200);
+  expect(shut).toMatchObject({
+    title: 'Closed.',
+    detail: 'The guide was replaced by the onboarding tour that landed in October, so this work is no longer needed.',
+    shortened: true,
+    full: { title: 'Closed.', lines: [why] },
+  });
+  // A controller's reason the notice titles with is cut the same way.
+  const waiting =
+      'Waiting for T-0 (“Show the received files on the story page with their sizes, hashes and the attempts that made them”) to be integrated. Source stories run one at a time, in the order their idea gave them.',
+    held = story({
+      status: 'blocked',
+      reason: waiting,
+      queued: true,
+      controllerWait: true,
+      sourceStage: stage({ phase: 'implementing', current: 'blocked', reason: waiting }),
+    }),
+    stand = standing(held, studio([held], []));
+  expect(waiting.length).toBeGreaterThan(160);
+  expect(stand.title).toBe(
+    'Waiting for T-0 (“Show the received files on the story page with their sizes, hashes and the attempts that made them”) to be integrated.',
+  );
+  expect(stand.full.title).toBe(waiting);
+  expect(stand.shortened).toBe(true);
 });
 
 test('a notice with one detail tells it as one line, and one without any has nothing more to tell', () => {
@@ -225,6 +260,7 @@ test('a notice with one detail tells it as one line, and one without any has not
     }),
     ready = standing(task, studio([task], [build(), review]));
   expect(ready.chip).toBe('Ready to integrate');
+  expect(ready.shortened).toBe(false);
   expect(ready.full).toEqual({
     title: "Morgan passed it. It's ready to integrate.",
     lines: [
@@ -232,6 +268,17 @@ test('a notice with one detail tells it as one line, and one without any has not
     ],
   });
   expect(ready.full.lines).toEqual([ready.detail]);
+  // On a controller that develops itself, what integrating does and that the controller restarts stays whole.
+  const restarts = standing(task, studio([task], [build(), review], { autonomy: { selfHosted: true } }));
+  expect(restarts.detail.length).toBeGreaterThan(200);
+  expect(restarts.detail).toMatch(/nothing changes\. The controller pauses new work.*then restarts\.$/);
+  expect(restarts.shortened).toBe(false);
+  // Work ready to queue is told as it was.
+  const notes: Task = { id: 'T-2', title: 'Write the notes', kind: 'general', status: 'ready', workerId: 'W-2' },
+    queue = standing(notes, studio([notes], []));
+  expect(queue.title).toBe('This assignment is ready to be queued.');
+  expect(queue.detail).toBe(queue.full.lines.join(' '));
+  expect(queue.shortened).toBe(false);
   // Work moving has no detail, so nothing more to tell.
   const editing = story({ sourceStage: stage({ phase: 'implementing', current: 'implementing' }) }),
     running = build({ status: 'running', finishedAt: null, testEvidence: undefined });
