@@ -471,39 +471,46 @@ test('Simulator reviews every accepted layout with provenance and labels missing
   assert.equal(c.app.store.leases().length, 0);
 });
 
-test(
-  'Windows Codex attempts retain their selected sandbox and reject weaker future selections',
-  { skip: process.platform !== 'win32' },
-  async t => {
-    const c = await setup(t, true);
-    c.app.runner.codexWindowsSandbox = 'mxc';
-    await c.request('/api/workers/W-03', { provider: 'codex', model: '', expectedVersion: 1 }, 'PATCH');
-    const policy = id =>
-      c.app.store
-        .events(id)
-        .filter(e => e.kind === 'log' && e.message.startsWith('stdout: {'))
-        .map(e => JSON.parse(e.message.slice(8)))
-        .find(e => e.type === 'fixture.policy').windowsSandbox;
-    assert.equal((await c.request('/api/tasks/D-001/start')).status, 202);
+// It runs on every system rather than skipping elsewhere, since a skipped test fails the pipeline's checks.
+test('Windows Codex attempts retain their selected sandbox and reject weaker future selections, and select none elsewhere', async t => {
+  const c = await setup(t, true);
+  await c.request('/api/workers/W-03', { provider: 'codex', model: '', expectedVersion: 1 }, 'PATCH');
+  const policy = id =>
+    c.app.store
+      .events(id)
+      .filter(e => e.kind === 'log' && e.message.startsWith('stdout: {'))
+      .map(e => JSON.parse(e.message.slice(8)))
+      .find(e => e.type === 'fixture.policy').windowsSandbox;
+  if (process.platform !== 'win32') {
+    // Off Windows Codex has no Windows sandbox to select: the setting is not read, and an attempt records none.
     c.app.runner.codexWindowsSandbox = 'unelevated';
-    const first = await c.wait('D-001');
-    assert.equal(first.task.status, 'review');
-    assert.equal(first.attempt.configuration.windowsSandbox, 'mxc');
-    assert.equal(policy(first.attempt.id), 'windows.sandbox="mxc"');
-    await c.request('/api/tasks/D-001/revise', { direction: 'Use the same isolated output contract.' });
-    assert.equal((await c.request('/api/tasks/D-001/start')).status, 400);
-    assert.match(c.app.store.task('D-001').reason, /must be mxc or elevated/);
-    assert.equal(c.app.store.attempts('D-001').length, 1);
-    assert.equal(c.app.store.leases().length, 0);
-    c.app.runner.codexWindowsSandbox = 'elevated';
     assert.equal((await c.request('/api/tasks/D-001/start')).status, 202);
-    const second = await c.wait('D-001');
-    assert.equal(second.task.status, 'review');
-    assert.equal(second.attempt.configuration.windowsSandbox, 'elevated');
-    assert.equal(policy(second.attempt.id), 'windows.sandbox="elevated"');
-    assert.equal(c.app.store.attempt(first.attempt.id).configuration.windowsSandbox, 'mxc');
-  },
-);
+    const run = await c.wait('D-001');
+    assert.equal(run.task.status, 'review');
+    assert.equal(run.attempt.configuration.windowsSandbox, undefined);
+    assert.equal(policy(run.attempt.id), null);
+    return;
+  }
+  c.app.runner.codexWindowsSandbox = 'mxc';
+  assert.equal((await c.request('/api/tasks/D-001/start')).status, 202);
+  c.app.runner.codexWindowsSandbox = 'unelevated';
+  const first = await c.wait('D-001');
+  assert.equal(first.task.status, 'review');
+  assert.equal(first.attempt.configuration.windowsSandbox, 'mxc');
+  assert.equal(policy(first.attempt.id), 'windows.sandbox="mxc"');
+  await c.request('/api/tasks/D-001/revise', { direction: 'Use the same isolated output contract.' });
+  assert.equal((await c.request('/api/tasks/D-001/start')).status, 400);
+  assert.match(c.app.store.task('D-001').reason, /must be mxc or elevated/);
+  assert.equal(c.app.store.attempts('D-001').length, 1);
+  assert.equal(c.app.store.leases().length, 0);
+  c.app.runner.codexWindowsSandbox = 'elevated';
+  assert.equal((await c.request('/api/tasks/D-001/start')).status, 202);
+  const second = await c.wait('D-001');
+  assert.equal(second.task.status, 'review');
+  assert.equal(second.attempt.configuration.windowsSandbox, 'elevated');
+  assert.equal(policy(second.attempt.id), 'windows.sandbox="elevated"');
+  assert.equal(c.app.store.attempt(first.attempt.id).configuration.windowsSandbox, 'mxc');
+});
 
 test('Claude subscription adapter: isolated text delivery, immutable snapshots, revision and accepted review inputs', async t => {
   const c = await setup(t, 'claude');
