@@ -67,6 +67,37 @@ async function controller(t) {
   return { ...c, store, watch };
 }
 
+// A command as the dashboard sends it, by default asking for the records it changed (X-Studio-Records: 1). The
+// answer's text is kept, so an answer without records can be compared byte for byte.
+async function command(c, url, body, { records = true } = {}) {
+  const response = await fetch(c.origin + url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Studio-Token': c.token,
+      ...(records ? { 'X-Studio-Records': '1' } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  return { status: response.status, text, data: JSON.parse(text) };
+}
+
+// A director assignment of the legacy project: Planned work waiting for approval, or ready work.
+async function assignment(c, planned = true) {
+  const created = await c.request('/api/tasks', {
+    title: 'Answered with its records',
+    brief: 'Return a model-free bounded result.',
+    kind: 'general',
+    workerId: 'W-02',
+    planned,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  return created.data.id;
+}
+
+const page = async (c, id) => (await fetch(`${c.origin}/api/tasks/${id}?projectId=project-legacy`)).json();
+
 test('every write raises the version and notifies; a log line changes neither and wakes neither the scheduler nor other tabs', async t => {
   const { store, app } = await controller(t),
     calls = { change: 0, schedule: 0, events: [], changes: [] },
@@ -387,4 +418,146 @@ test("a task's page reads that task and its attempt summaries, from its own proj
   const foreign = await fetch(`${origin}/api/tasks/T-elsewhere`);
   assert.equal(foreign.status, 400);
   assert.match((await foreign.json()).error, /another project/);
+});
+
+// A button's effect shows the moment the controller accepts it: the dashboard asks a command for the records it
+// changed, so its page need not wait for the stream's throttled change event.
+test('a command asked for its records answers with the changes it recorded and the pages of the tasks they name', async t => {
+  const c = await controller(t),
+    { store, watch, until } = c;
+  const [id, plain, unnamed] = [await assignment(c), await assignment(c), await assignment(c)];
+  const stream = await watch();
+  await until(() => stream.named('change').length === 1, 'the connection change event');
+  const { start } = stream.named('change')[0].data,
+    before = store.version,
+    body = { projectId: 'project-legacy' };
+  const answer = await command(c, `/api/tasks/${id}/approve-work`, body);
+  assert.equal(answer.status, 200, answer.text);
+  const { records, ...rest } = answer.data;
+  assert.deepEqual(rest, { ok: true }, 'The command answers as it did, with one field more.');
+  assert.deepEqual(Object.keys(records), ['projectId', 'version', 'start', 'changes', 'tasks']);
+  assert.equal(records.projectId, 'project-legacy');
+  assert.equal(records.version, store.version);
+  assert.equal(records.start, start);
+  assert.ok(records.changes.every(change => change.seq > before));
+  assert.ok(records.changes.some(change => change.type === 'task' && change.id === id));
+  assert.ok(records.changes.some(change => change.type === 'event' && change.kind === 'work_approved'));
+  assert.deepEqual(
+    records.tasks.map(item => item.task.id),
+    [id],
+  );
+  assert.equal(records.tasks[0].task.approval.status, 'approved');
+  assert.deepEqual(records.tasks[0], await page(c, id), 'The page is the one the task route answers.');
+  // A stream opened before the command still hears it, in the same shape.
+  const heard = () =>
+    stream
+      .named('change')
+      .slice(1)
+      .flatMap(event => event.data.changes ?? [])
+      .filter(change => change.seq > before);
+  await until(() => heard().length === records.changes.length, 'the change events for the command');
+  assert.deepEqual(heard(), records.changes);
+  assert.equal(stream.named('change').at(-1).data.start, start);
+  // Without the header, or without a projectId to answer for, the answer is what it always was.
+  const without = await command(c, `/api/tasks/${plain}/approve-work`, body, { records: false });
+  assert.equal(without.status, 200);
+  assert.equal(without.text, '{"ok":true}');
+  assert.deepEqual(without.data, { ok: true });
+  const noProject = await command(c, `/api/tasks/${unnamed}/approve-work`, {});
+  assert.equal(noProject.status, 200);
+  assert.equal(noProject.text, '{"ok":true}');
+  assert.equal(store.task(unnamed).approval.status, 'approved');
+});
+
+test('a refused command answers its error without records, and nothing about its task changes', async t => {
+  const c = await controller(t),
+    { store } = c,
+    id = await assignment(c);
+  assert.equal((await c.request(`/api/tasks/${id}/approve-work`)).status, 200);
+  // Approved work that has started can no longer be denied.
+  store.insertAttempt({ id: 'attempt-started', taskId: id, status: 'review' }, {});
+  const task = store.task(id),
+    shown = await page(c, id),
+    url = `/api/tasks/${id}/deny-work`,
+    body = { projectId: 'project-legacy', reason: 'Not now.' };
+  const refused = await command(c, url, body);
+  assert.equal(refused.status, 400);
+  assert.match(refused.data.error, /can be denied/);
+  assert.equal(Object.hasOwn(refused.data, 'records'), false);
+  assert.deepEqual(store.task(id), task);
+  assert.deepEqual(await page(c, id), shown);
+  const plain = await command(c, url, body, { records: false });
+  assert.equal(refused.text, plain.text, 'The header changes nothing about a refusal.');
+});
+
+test("a command's records hold no change or task of another project", async t => {
+  const c = await controller(t),
+    { store } = c,
+    id = await assignment(c);
+  store.putTask({ ...store.task(id), id: 'T-elsewhere', projectId: 'project-other' });
+  // Writes recorded while the command runs, as the controller's own work may record them: another project's task,
+  // event and attempt, an attempt of this project whose task does not exist, and a shared setting.
+  const event = store.event.bind(store);
+  t.mock.method(store, 'event', (kind, ...rest) => {
+    event(kind, ...rest);
+    if (kind !== 'work_approved') return;
+    store.putTask({ ...store.task('T-elsewhere'), reason: 'Changed meanwhile.' });
+    event('note', 'T-elsewhere', null, 'A step of another project.');
+    store.updateAttempt(store.attempt('attempt-watch-other'));
+    store.updateAttempt(store.attempt('attempt-watch-a'));
+    store.putSetting('command-records-shared', { value: true });
+  });
+  const answer = await command(c, `/api/tasks/${id}/approve-work`, { projectId: 'project-legacy' });
+  assert.equal(answer.status, 200, answer.text);
+  const { changes, tasks } = answer.data.records;
+  assert.ok(changes.every(change => !change.projectId || change.projectId === 'project-legacy'));
+  assert.ok(!changes.some(change => [change.id, change.taskId].includes('T-elsewhere')));
+  assert.ok(!changes.some(change => change.id === 'attempt-watch-other'));
+  assert.ok(changes.some(change => change.type === 'setting' && change.id === 'command-records-shared'));
+  assert.ok(changes.some(change => change.type === 'attempt' && change.id === 'attempt-watch-a'));
+  assert.deepEqual(
+    tasks.map(item => item.task.id),
+    [id],
+    'Only this project’s existing tasks have pages.',
+  );
+  assert.equal(store.task('T-elsewhere').reason, 'Changed meanwhile.');
+});
+
+test('a command that changes more than 50 tasks, or records more than 200 changes, answers reload instead', async t => {
+  const c = await controller(t),
+    { store, origin } = c;
+  const { start } = await (await fetch(`${origin}/api/changes?after=0`)).json(),
+    reload = () => ({ projectId: 'project-legacy', version: store.version, start, reload: true });
+  // Fifty tasks closed together is still within the records an answer carries.
+  const planned = store.task(await assignment(c)),
+    closing = Array.from({ length: 50 }, (_, index) => `T-close-${index}`);
+  for (const id of closing) store.putTask({ ...planned, id });
+  const closed = await command(c, '/api/tasks/close', { projectId: 'project-legacy', taskIds: closing });
+  assert.equal(closed.status, 200, closed.text);
+  assert.deepEqual(closed.data.closed, closing);
+  assert.equal(closed.data.records.reload, undefined);
+  assert.deepEqual(
+    closed.data.records.tasks.map(item => [item.task.id, item.task.status]),
+    closing.map(id => [id, 'denied']),
+  );
+  // Pausing the project marks each of its 51 queued tasks as waiting: more tasks than an answer carries.
+  const ready = store.task(await assignment(c, false));
+  for (let index = 0; index < 51; index++) store.putTask({ ...ready, id: `T-queued-${index}`, queued: true });
+  const before = store.version,
+    paused = await command(c, '/api/pipeline', { projectId: 'project-legacy', action: 'pause' });
+  assert.equal(paused.status, 200, paused.text);
+  assert.equal(store.task('T-queued-50').status, 'blocked');
+  assert.ok(store.version - before <= 200, 'The tasks, not the changes, are more than an answer carries.');
+  assert.deepEqual(paused.data, { ok: true, records: reload() });
+  // More than 200 changes recorded while one task is approved.
+  const id = await assignment(c),
+    event = store.event.bind(store);
+  t.mock.method(store, 'event', (kind, ...rest) => {
+    event(kind, ...rest);
+    if (kind === 'work_approved')
+      for (let index = 0; index < 201; index++) store.putSetting('command-records-burst', { index });
+  });
+  const approved = await command(c, `/api/tasks/${id}/approve-work`, { projectId: 'project-legacy' });
+  assert.equal(approved.status, 200, approved.text);
+  assert.deepEqual(approved.data, { ok: true, records: reload() });
 });

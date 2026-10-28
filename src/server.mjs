@@ -371,13 +371,58 @@ export function createStudio({
     res.writeHead(status, headers);
     res.end(body);
   };
-  const json = (res, data, status = 200) =>
-    send(
+  // One task as its page reads it, and as a command's records carry it.
+  const taskPage = (projectId, record) => ({
+    task: { ...record, directorInputs: directorInputsOf(record) },
+    attempts: store.dashboardAttempts(projectId, record.id),
+  });
+  // A command the dashboard sends with X-Studio-Records: 1 is answered with what it changed: the changes recorded
+  // since it began that its project's tab would hear, as a change event names them, and the page of each task of
+  // that project they name, so the page shows the effect without waiting for the stream. Beyond the stream's 200
+  // changes, or 50 tasks, or past the capped list, the answer says reload instead. Kept per response.
+  const commands = new WeakMap();
+  const commandRecords = ({ projectId, after }) => {
+    const base = { projectId, version: store.version, start: startId },
+      changes = journal.filter(change => change.seq > after && relevant(change, projectId));
+    if ((journal[0]?.seq ?? after + 1) > after + 1 || changes.length > 200) return { ...base, reload: true };
+    // A task change names its task by its id, an attempt or event change by its taskId (dashboard/src/records.ts).
+    const named = new Set();
+    for (const change of changes)
+      if (change.type === 'task') named.add(String(change.id));
+      else if (['attempt', 'event'].includes(change.type) && change.taskId) named.add(String(change.taskId));
+    const tasks = [];
+    for (const id of named) {
+      let record;
+      try {
+        record = store.task(id);
+      } catch {
+        continue;
+      }
+      if (recordProject(record) === projectId) tasks.push(record);
+    }
+    if (tasks.length > 50) return { ...base, reload: true };
+    return { ...base, changes, tasks: tasks.map(record => taskPage(projectId, record)) };
+  };
+  const json = (res, data, status = 200) => {
+    const command = status < 400 && data && typeof data === 'object' && !Array.isArray(data) && commands.get(res);
+    let answer = data;
+    if (command) {
+      // The command has already succeeded: records that cannot be read never turn its answer into an error.
+      let records;
+      try {
+        records = commandRecords(command);
+      } catch {
+        records = { projectId: command.projectId, version: store.version, start: startId, reload: true };
+      }
+      answer = { ...data, records };
+    }
+    return send(
       res,
       status,
       { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-      JSON.stringify(data),
+      JSON.stringify(answer),
     );
+  };
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -549,10 +594,7 @@ export function createStudio({
         // The older lines a story that landed can be brought back to, or why not, read from records and git.
         if (parts[3] === 'bring-back') return json(res, bringBackTargets(store, record));
         if (parts[3]) return json(res, storyActivity(store, record));
-        return json(res, {
-          task: { ...record, directorInputs: directorInputsOf(record) },
-          attempts: store.dashboardAttempts(queryProject, record.id),
-        });
+        return json(res, taskPage(queryProject, record));
       }
       if (url.pathname === '/api/state' && req.method === 'GET') {
         const mode = url.searchParams.get('mode') ?? 'full';
@@ -698,6 +740,9 @@ export function createStudio({
         const intake =
           ['/api/studio-development/intake', '/api/intake'].includes(url.pathname) && req.method === 'POST';
         const data = await body(req, intake ? ideaInputLimits.wireBytes : undefined);
+        // The newest change's seq before the command runs: its answer's records are what was recorded after it.
+        if (req.headers['x-studio-records'] === '1' && typeof data?.projectId === 'string')
+          commands.set(res, { projectId: data.projectId, after: store.version });
         if (intake) {
           if (
             !data ||
