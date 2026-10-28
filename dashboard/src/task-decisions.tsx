@@ -54,6 +54,8 @@ interface Asking {
   label: string;
   submit: string;
   required?: boolean;
+  initial?: string;
+  limit?: number;
   send: (note: string) => void;
 }
 
@@ -64,13 +66,17 @@ export function TaskDecisions({
   studio,
   direction,
   onEditFiles,
+  onRevised,
 }: {
   projectId: string;
   task: Task;
   studio: StudioState;
+  // The direction the page shows, its unsaved draft or the recorded one, which a revision request's note starts from.
   direction: string;
   // Opens the story's file form, where a file request can be changed before it is approved.
   onEditFiles?: () => void;
+  // Once the controller records a revision request, the page's draft gives way to the direction it recorded.
+  onRevised?: () => void;
 }) {
   const request = useRequest(projectId),
     [asking, setAsking] = useState<Asking | null>(null);
@@ -214,7 +220,22 @@ export function TaskDecisions({
         key: 'revise',
         label: 'Request revision',
         emphasis: 'default',
-        onClick: () => act('revise', { direction }, () => 'Revision requested with your direction.'),
+        onClick: () =>
+          setAsking({
+            title: 'Request a revision?',
+            text: 'The next attempt gets this note as its direction, along with everything the work did so far.',
+            label: 'What to change',
+            submit: 'Request revision',
+            required: true,
+            initial: direction,
+            // The controller records a direction of up to 24000 characters, so a long one can still be edited here.
+            limit: 24000,
+            send: note =>
+              act('revise', { direction: note }, () => {
+                onRevised?.();
+                return 'Revision requested with your direction.';
+              }),
+          }),
       });
   }
   if (unsettled)
@@ -477,6 +498,8 @@ export function TaskDecisions({
         label={asking?.label ?? ''}
         submit={asking?.submit ?? ''}
         required={asking?.required}
+        initial={asking?.initial}
+        limit={asking?.limit}
         onClose={() => setAsking(null)}
         onSubmit={note => {
           asking?.send(note);

@@ -456,6 +456,7 @@ function Story({
         narrow={narrow}
         direction={direction}
         onEditFiles={() => setPicked(narrow ? 'details' : 'overview')}
+        onRevised={() => setDraft(null)}
       >
         {explanation.kind === 'test-sandbox' && (
           <Link
@@ -544,6 +545,7 @@ function Stands({
   narrow,
   direction,
   onEditFiles,
+  onRevised,
   children,
 }: {
   projectId: string;
@@ -555,6 +557,7 @@ function Stands({
   narrow: boolean;
   direction: string;
   onEditFiles: () => void;
+  onRevised: () => void;
   children?: ReactNode;
 }) {
   const stand = standing(task, studio, phase),
@@ -614,6 +617,7 @@ function Stands({
         studio={studio}
         direction={direction}
         onEditFiles={onEditFiles}
+        onRevised={onRevised}
       />
     </section>
   );
@@ -975,7 +979,8 @@ function TaskExecution({ projectId, task, studio }: { projectId: string; task: T
 }
 
 // The draft is the page's own state: it starts from the recorded direction and survives every refresh. A
-// revision request sends it too.
+// revision request's note starts from it; once the controller records that request, the draft is dropped and the
+// field shows the direction it recorded.
 function Direction({
   projectId,
   taskId,

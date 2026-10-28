@@ -9,6 +9,9 @@ interface Question {
   label: string;
   submit: string;
   required?: boolean;
+  // The text the field starts from, such as a revision's current direction, and how long the note may be.
+  initial?: string;
+  limit?: number;
 }
 
 export function NoteDialog({
@@ -28,17 +31,20 @@ export function NoteDialog({
   );
 }
 
-// Each question starts empty: a note written for one decision never carries into the next.
+// Each question starts from its own initial text each time it opens, empty unless it gives one (a revision request
+// starts from the current direction): a note written for one decision never carries into the next.
 function Note({
   title,
   text,
   label,
   submit,
   required = false,
+  initial = '',
+  limit = 2000,
   onClose,
   onSubmit,
 }: Question & { onClose: () => void; onSubmit: (note: string) => void }) {
-  const [note, setNote] = useState(''),
+  const [note, setNote] = useState(initial),
     field = useId();
   return (
     <form
@@ -58,7 +64,7 @@ function Note({
           id={field}
           className="sd-textarea"
           value={note}
-          maxLength={2000}
+          maxLength={limit}
           onChange={event => setNote(event.target.value)}
         />
       </div>

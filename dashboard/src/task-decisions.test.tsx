@@ -57,8 +57,8 @@ test('ready work starts, and the controller says when it queued it instead', asy
   );
 });
 
-test('a result in review is accepted, or sent for revision with the direction written on the page', async () => {
-  const user = userEvent.setup();
+// A result in review, with the direction its task recorded.
+const inReview = () => {
   controller.attempts = [
     {
       id: 'attempt-1',
@@ -68,15 +68,31 @@ test('a result in review is accepted, or sent for revision with the direction wr
       result: { outcome: 'completed', summary: 'Ready.' },
     },
   ];
-  open(taskFixture('T-1', { status: 'review', lastAttemptId: 'attempt-1' }));
+  open(taskFixture('T-1', { status: 'review', lastAttemptId: 'attempt-1', direction: 'Recorded direction.' }));
+};
+const revision = async () => within(await screen.findByRole('dialog', { name: 'Request a revision?' }));
+
+test("a result in review is accepted, or sent for revision with a note that starts from the page's direction draft", async () => {
+  const user = userEvent.setup();
+  inReview();
   const region = await decisions();
   expect(names(region)).toEqual(
     expect.arrayContaining(['Accept result', 'Request revision', 'Close without accepting']),
   );
   await user.click(screen.getByRole('tab', { name: 'Overview' }));
-  const box = screen.getByLabelText('Direction for the next attempt');
-  await user.type(box, 'Name the failing test.');
+  const box = screen.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
+  await user.clear(box);
+  await user.type(box, 'Say which test fails.');
   await user.click(region.getByRole('button', { name: 'Request revision' }));
+  // The request waits for the director's note, which starts from the draft written on the page.
+  const dialog = await revision();
+  expect(posted()).toEqual([]);
+  expect(dialog.getByText(/gets this note as its direction, along with everything the work did so far/)).toBeTruthy();
+  const note = dialog.getByLabelText('What to change') as HTMLTextAreaElement;
+  expect(note.value).toBe('Say which test fails.');
+  await user.clear(note);
+  await user.type(note, 'Name the failing test.');
+  await user.click(dialog.getByRole('button', { name: 'Request revision' }));
   await waitFor(() =>
     expect(posted().at(-1)).toEqual({
       url: '/api/tasks/T-1/revise',
@@ -84,8 +100,33 @@ test('a result in review is accepted, or sent for revision with the direction wr
       body: { projectId: 'project-x', direction: 'Name the failing test.' },
     }),
   );
+  expect(screen.queryByRole('dialog', { name: 'Request a revision?' })).toBeNull();
+  // Once the request is recorded, the page's draft gives way to the direction the controller holds.
+  await waitFor(() => expect(box.value).toBe('Recorded direction.'));
   await user.click(region.getByRole('button', { name: 'Accept result' }));
   await waitFor(() => expect(posted().at(-1)?.url).toBe('/api/tasks/T-1/accept'));
+});
+
+test('a revision note starts from the recorded direction, needs some text, and Cancel sends nothing', async () => {
+  const user = userEvent.setup();
+  inReview();
+  const region = await decisions();
+  await user.click(region.getByRole('button', { name: 'Request revision' }));
+  let dialog = await revision();
+  const note = dialog.getByLabelText('What to change') as HTMLTextAreaElement;
+  expect(note.value).toBe('Recorded direction.');
+  // The controller's revise step needs a direction.
+  await user.clear(note);
+  const submit = dialog.getByRole('button', { name: 'Request revision' }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  await user.click(submit);
+  await user.click(dialog.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('dialog', { name: 'Request a revision?' })).toBeNull();
+  expect(posted()).toEqual([]);
+  // A cleared note does not carry into the next time the dialog opens.
+  await user.click(region.getByRole('button', { name: 'Request revision' }));
+  dialog = await revision();
+  expect((dialog.getByLabelText('What to change') as HTMLTextAreaElement).value).toBe('Recorded direction.');
 });
 
 test('proposed work is approved, or denied with a note', async () => {
