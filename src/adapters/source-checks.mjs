@@ -18,6 +18,7 @@ import { snapshotCommit } from './source-snapshot.mjs';
 import { subscriptionEnvironment } from './process.mjs';
 import { chosenTestSandbox } from './source-test-sandbox.mjs';
 import { builtInSandboxCommand, builtInSandboxReady } from './built-in-sandbox.mjs';
+import { releaseTestTurn, takeTestTurn } from '../core/test-turn.mjs';
 
 // An idea's first checks run in the built-in sandbox when candidate tests do (1.0.1), so the pipeline
 // tests in one place; without a sandbox, by the director's choice, they run on the copy as before.
@@ -76,10 +77,18 @@ export const sourceChecksAdapter = {
     for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
     // In a sandbox the copied harness runs as candidate tests do; only it reads this marker.
     if (sandboxed) environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-    // The copy gets its installed packages first (MP-026), then the tests run on it.
+    // The copy gets its installed packages first (MP-026), then the tests run on it. The test run alone waits for the
+    // computer's test turn, and the attempt's time limit starts again with it.
     runInstallStep(runtime, entry, snapshot, installsPackages(profileOf(a.sourceCheck)), environment, () =>
-      runTests(runtime, entry, a, command, snapshot, environment),
+      takeTestTurn(runtime, entry, {
+        limitMs: a.assignment?.maxSeconds * 1000,
+        start: () => runTests(runtime, entry, a, command, snapshot, environment),
+      }),
     );
+  },
+  // An attempt that waited for the test turn when the controller stopped no longer waits.
+  recover: (runtime, a) => {
+    delete a.testTurn;
   },
 };
 
@@ -100,6 +109,8 @@ function runTests(runtime, entry, a, command, snapshot, environment) {
     command.args,
     '',
     (exitCode, signal) => {
+      // The test process has closed; a stop or a failed start releases the turn with the attempt's other leases.
+      releaseTestTurn(runtime.store, a.id);
       verifyCopy(a.sourceCheck, snapshot);
       if (Buffer.byteLength(stdout + stderr) > 192 * 1024) throw new Error('Source test evidence exceeds 192 KB.');
       a.checkExecution = {

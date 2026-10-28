@@ -44,6 +44,7 @@ import {
 } from '../connectors/source-build.mjs';
 import { continuationFile, prepareSourceContinuation } from '../core/attempt-continuation.mjs';
 import { closeEmployeeTests, employeeTestsCommand, openEmployeeTests } from '../connectors/employee-tests.mjs';
+import { releaseTestTurn, takeTestTurn } from '../core/test-turn.mjs';
 
 const SCOPE =
   'Edit only the approved files under changes/, and create only the approved new files there. The controller owns source snapshots, candidate tests and integration. Live source, runtime records and editor tools are outside this attempt scope.';
@@ -136,6 +137,10 @@ export const sourceChangeAdapter = {
     });
   },
   recordEvent: (runtime, entry, data) => entry.model?.recordEvent?.(runtime, entry, data),
+  // An attempt that waited for the test turn when the controller stopped no longer waits.
+  recover: (runtime, a) => {
+    delete a.testTurn;
+  },
 };
 
 function prepareSourceJob(runtime, entry) {
@@ -476,15 +481,14 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     fs.writeFileSync(path.join(entry.output, 'change.diff'), diff);
     // The story's time limit bounds the editor and ends when it stops. The controller's install and
     // candidate tests then get the limits integration verification uses, so a long edit never leaves
-    // them no time (v1.0 tally row 7). The reservations stay held throughout.
+    // them no time (v1.0 tally row 7). The reservations stay held throughout. The limit starts again when the test
+    // run takes the computer's test turn, so waiting for it never counts.
+    const limitMs = runtime.candidateTimeoutMs ?? installTimeoutMs + (build ? buildTimeoutMs : 0) + testTimeoutMs;
     clearTimeout(entry.timer);
-    entry.timer = setTimeout(
-      () => {
-        entry.timedOut = true;
-        runtime.stop(a.id);
-      },
-      runtime.candidateTimeoutMs ?? installTimeoutMs + (build ? buildTimeoutMs : 0) + testTimeoutMs,
-    );
+    entry.timer = setTimeout(() => {
+      entry.timedOut = true;
+      runtime.stop(a.id);
+    }, limitMs);
     runtime.store.event(
       'candidate_checks',
       a.taskId,
@@ -497,8 +501,10 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     // Only the copied test harness consumes this marker. Controller runtime
     // code never selects a termination policy from an environment variable.
     environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-    // The candidate gets its installed packages first (MP-026), then its build (1.1), then the tests run on it.
-    const tests = () => {
+    // The candidate gets its installed packages first (MP-026), then its build (1.1), then the tests run on it. The test
+    // run alone waits for the computer's test turn.
+    const tests = () => takeTestTurn(runtime, entry, { limitMs, start: runTests });
+    const runTests = () => {
       let stdout = '',
         stderr = '';
       const testPhase = runtime.startPhase(entry, 'test', () => {
@@ -515,6 +521,8 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         command.args,
         '',
         (code, checkSignal) => {
+          // The test run has ended; a stop or a failed start releases the turn with the attempt's other leases.
+          releaseTestTurn(runtime.store, a.id);
           verifyCopy(a.sourceCandidate, candidate);
           if (Buffer.byteLength(stdout + stderr) > 192 * 1024)
             throw new Error('Candidate test evidence exceeds 192 KB.');

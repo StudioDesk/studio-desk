@@ -166,6 +166,9 @@ function measuredConsumer(t, mode, partial) {
       directory,
       startPhase: phaseStore.startPhase.bind(phaseStore),
       finishPhase: phaseStore.finishPhase.bind(phaseStore),
+      // The test run takes the computer's test turn (src/core/test-turn.mjs) as a lease.
+      claim: phaseStore.claim.bind(phaseStore),
+      releaseResource: phaseStore.releaseResource.bind(phaseStore),
       updateAttempt: a => {
         recorded = structuredClone(a);
       },
@@ -232,13 +235,17 @@ function measuredConsumer(t, mode, partial) {
 for (const mode of ['pass', 'fail'])
   test(`the checks adapter retains measured ${mode} reports when using the shared snapshot helper`, t => {
     const c = measuredConsumer(t, mode),
-      result = c.finish(),
+      turn = () => c.phaseStore.leases().map(lease => [lease.resource, lease.attemptId]);
+    // The test run holds the computer's test turn until its process closes.
+    assert.deepEqual(turn(), [['computer:test-suite', c.attempt.id]]);
+    const result = c.finish(),
       report = JSON.parse(fs.readFileSync(path.join(c.output, 'check-report.json'), 'utf8')),
       context = JSON.parse(fs.readFileSync(path.join(c.output, 'source-context.json'), 'utf8'));
     // The adapter keeps the log through testOutput, which leaves out passing tests' details.
     const kept = testOutput();
     kept.add(c.run.stdout);
     const stdout = kept.text();
+    assert.deepEqual(turn(), []);
     assert.notEqual(stdout, c.run.stdout);
     assert.equal(result.outcome, 'completed');
     assert.equal(result.taskId, c.attempt.taskId);

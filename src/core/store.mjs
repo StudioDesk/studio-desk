@@ -7,6 +7,7 @@ import { projectOrganization, organizationConfiguration } from './project-organi
 import { directoryFor } from './project-agents.mjs';
 import { assertUnchangedDirectorInputs, directorInputsOf } from './idea-inputs.mjs';
 import { dashboardAttempt, dashboardOpenPhases, dashboardTimings } from './dashboard-state.mjs';
+import { testTurnResource } from './test-turn.mjs';
 
 const attemptChange = a => ({ type: 'attempt', id: a.id, taskId: a.taskId, projectId: recordProject(a) });
 // A setting's change names a run or workflow as its own record, and its project when the setting has one:
@@ -76,6 +77,8 @@ export class Store {
     this.version = 0;
     this.onChange = () => {};
     this.onEvent = () => {};
+    // Whatever waits for a lease to come free (the computer's test turn, core/test-turn.mjs) is told of each change.
+    this.leaseWatchers = new Set();
     try {
       this.tx(() => {
         if (!this.db.prepare('SELECT id FROM settings WHERE id=?').get('organization')) {
@@ -94,6 +97,11 @@ export class Store {
   changed(change) {
     this.version++;
     this.onChange({ seq: this.version, ...change });
+    if (change.type === 'leases') for (const watch of this.leaseWatchers) watch();
+  }
+  watchLeases(watch) {
+    this.leaseWatchers.add(watch);
+    return () => this.leaseWatchers.delete(watch);
   }
   tx(fn) {
     this.db.exec('BEGIN IMMEDIATE');
@@ -307,6 +315,24 @@ export class Store {
         ownerAttemptId,
       };
     }
+    // The computer's test turn (core/test-turn.mjs) names whose full test suite runs: an idea's checks, a story's
+    // candidate tests or an integration's verification.
+    if (resource === testTurnResource) {
+      let suite = 'another full test suite';
+      try {
+        const attempt = this.attempt(integration ? ownerAttemptId.slice('source-integration:'.length) : ownerAttemptId),
+          task = this.task(integration ? attempt.candidateReview?.taskId || attempt.taskId : attempt.taskId);
+        if (task.id && typeof task.title === 'string' && task.title.trim())
+          suite = `the tests of ${task.id} (${task.title})`;
+      } catch {
+        // A holder whose records are missing is still named by its lease.
+      }
+      return {
+        reason: `Waiting for ${suite} to finish: this computer runs one full test suite at a time.`,
+        resource,
+        ownerAttemptId,
+      };
+    }
     // Diagnostics must remain useful for historical or incomplete records without
     // changing ownership or treating a synthetic integration owner as an employee.
     try {
@@ -367,6 +393,12 @@ export class Store {
     // An integration settles by releasing its resources with no event of its own; the change
     // lets the scheduler start the work that waited on them.
     if (this.db.prepare('DELETE FROM leases WHERE attempt_id=?').run(id).changes) this.changed({ type: 'leases' });
+  }
+  // Releases one resource of an owner and keeps its others, as a test run gives back the computer's test turn while
+  // its attempt keeps its employee and source.
+  releaseResource(resource, id) {
+    if (this.db.prepare('DELETE FROM leases WHERE resource=? AND attempt_id=?').run(resource, id).changes)
+      this.changed({ type: 'leases' });
   }
   event(kind, taskId, attemptId, message, projectId = null, time = new Date().toISOString()) {
     const event = {
