@@ -50,15 +50,53 @@ export const sourceIntegrationResources = studioDeskSourceResources;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // Where a release line that is not checked out is measured, in a worktree removed at once (src/connectors/source-lines.mjs).
 const measureParent = store => path.join(store.directory, 'wt');
-// The source a story's scope is checked against: its project's line as its measured checks recorded it, or the one the
-// director moved the story to before it started (1.1 step 2a).
-function storySource(store, projectId, root, sourceCheck, profile, task) {
-  const line = projectLine(store, projectId, task?.release?.line ?? sourceCheck.base?.branch);
+// The measurements of the open measuring pass, by root, line and profile, or null outside one.
+let pass = null;
+// Runs fn as one measuring pass (a scheduler pass, or a director's start): every story checked in it reuses the first
+// measurement of the same root, line and profile, and which of the same files are committed, instead of reading and
+// hashing the whole live source and asking git again for each check. A pass opened inside one joins it. Outside a pass
+// every check measures.
+export function measuringPass(fn) {
+  if (pass) return fn();
+  pass = new Map();
+  try {
+    return fn();
+  } finally {
+    pass = null;
+  }
+}
+// An attempt that claimed a line ends the reuse: the checks after it in the pass measure again.
+export function measureAgain() {
+  pass?.clear();
+}
+// One measurement of a line for the rest of the pass, asking git once for each list of files whose commits it checks.
+function passMeasurement({ current, files }) {
+  const committed = new Map();
   return {
-    line,
-    current: measureLine(root, line, profile, measureParent(store)),
-    files: lineFiles(root, line, profile, measureParent(store)),
+    current,
+    files: {
+      ...files,
+      committed: paths => {
+        const key = JSON.stringify(paths);
+        if (!committed.has(key)) committed.set(key, files.committed(paths));
+        return [...committed.get(key)];
+      },
+    },
   };
+}
+// The source a story's scope is checked against: its project's line as its measured checks recorded it, or the one the
+// director moved the story to before it started (1.1 step 2a). In a measuring pass, as the pass first measured it.
+function storySource(store, projectId, root, sourceCheck, profile, task) {
+  const line = projectLine(store, projectId, task?.release?.line ?? sourceCheck.base?.branch),
+    measure = () => ({
+      current: measureLine(root, line, profile, measureParent(store)),
+      files: lineFiles(root, line, profile, measureParent(store)),
+    });
+  if (!pass) return { line, ...measure() };
+  const key = JSON.stringify([root, line ?? null, profile]);
+  if (!pass.has(key)) pass.set(key, passMeasurement(measure()));
+  const { current, files } = pass.get(key);
+  return { line, current: structuredClone(current), files };
 }
 function closedFields(value, allowed, name) {
   if (

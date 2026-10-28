@@ -21,6 +21,7 @@ import { joinStatus } from './fanout.mjs';
 import { applyTransform } from './transforms.mjs';
 import { captureContinuation, continuationFile } from './attempt-continuation.mjs';
 import { buildAttemptHistory, stageAttemptHistory } from './attempt-history.mjs';
+import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
 
 // Reasons that clear by themselves as other work finishes.
 const waiting = reason => /^Waiting for /.test(reason || '');
@@ -298,37 +299,40 @@ export class Runner {
     if (this.closing || this.dispatching || !this.store.organization().pipelineEnabled) return;
     this.dispatching = true;
     try {
-      this.refreshReadiness();
-      for (const task of this.store
-        .tasks()
-        .filter(
-          task => task.queued && task.status === 'ready' && !this.store.project(recordProject(task)).dispatchPaused,
-        )) {
-        // Refresh after each claim, so later jobs observe the same slots and leases.
+      // The pass measures each live source once for all its checks, and again after each start (measuringPass).
+      measuringPass(() => {
         this.refreshReadiness();
-        if (this.store.task(task.id).status !== 'ready') continue;
-        try {
-          this.start(task.id, { director: !!this.store.task(task.id).directorStart });
-        } catch (error) {
-          const current = this.store.task(task.id);
-          if (!current.controllerWait || current.status === 'ready') {
-            current.queued = false;
-            delete current.directorStart;
-            current.status = 'blocked';
-            current.controllerWait = false;
-            current.reason = error.message;
-            if (current.autonomyNote) current.autonomyNote = current.reason;
-            this.putTask(current);
-            this.store.event('pipeline_attention', current.id, null, error.message);
+        for (const task of this.store
+          .tasks()
+          .filter(
+            task => task.queued && task.status === 'ready' && !this.store.project(recordProject(task)).dispatchPaused,
+          )) {
+          // Refresh after each claim, so later jobs observe the same slots and leases.
+          this.refreshReadiness();
+          if (this.store.task(task.id).status !== 'ready') continue;
+          try {
+            this.start(task.id, { director: !!this.store.task(task.id).directorStart });
+          } catch (error) {
+            const current = this.store.task(task.id);
+            if (!current.controllerWait || current.status === 'ready') {
+              current.queued = false;
+              delete current.directorStart;
+              current.status = 'blocked';
+              current.controllerWait = false;
+              current.reason = error.message;
+              if (current.autonomyNote) current.autonomyNote = current.reason;
+              this.putTask(current);
+              this.store.event('pipeline_attention', current.id, null, error.message);
+            }
           }
         }
-      }
-      if (!this.store.tasks().some(task => task.queued)) {
-        const org = this.store.organization();
-        org.pipelineEnabled = false;
-        this.store.setOrganization(org);
-        this.store.event('pipeline_finished', null, null, 'The selected pipeline has no queued work remaining.');
-      }
+        if (!this.store.tasks().some(task => task.queued)) {
+          const org = this.store.organization();
+          org.pipelineEnabled = false;
+          this.store.setOrganization(org);
+          this.store.event('pipeline_finished', null, null, 'The selected pipeline has no queued work remaining.');
+        }
+      });
     } finally {
       this.dispatching = false;
     }
@@ -631,8 +635,13 @@ export class Runner {
     }
   }
   // The attempt limit bounds automatic dispatch and retries. A director's explicit
-  // start may go past it; the attempt records that override.
-  start(taskId, { director = false } = {}) {
+  // start may go past it; the attempt records that override. Its checks and the scope its attempt records are measured
+  // in one measuring pass, the dispatch's or its own, which ends before the attempt's own setup begins.
+  start(taskId, options = {}) {
+    return this.setUpAttempt(measuringPass(() => this.claimAttempt(taskId, options)));
+  }
+  // Checks the work and prepares its attempt, then claims its slot, employee and resources and records it.
+  claimAttempt(taskId, { director = false } = {}) {
     const store = this.store,
       task = this.workflows.stageView(store.task(taskId));
     if (task.approval && task.approval.status !== 'approved')
@@ -828,6 +837,17 @@ export class Runner {
       if (err.conflict) store.recordResourceConflict(task.id, err.conflict, true);
       throw err;
     }
+    // The attempt holds its line now, so the checks after it in the pass measure the source again.
+    measureAgain();
+    return { task, worker, definition, adapter, a, job, history, references, inputs, transformed, snapshot, scopeMs };
+  }
+  // The attempt's own setup, once its own pass has ended (in a dispatch, once the dispatch's pass let go of what it
+  // measured): its folders, inputs and instructions, then its adapter.
+  setUpAttempt(claimed) {
+    const { task, worker, definition, adapter, a, job, history, references, inputs, transformed, snapshot } = claimed,
+      store = this.store,
+      id = a.id,
+      output = a.outputFolder;
     const entry = {
       definition,
       adapter,
@@ -849,10 +869,10 @@ export class Runner {
     this.active.set(id, entry);
     try {
       this.startPhase(entry, 'attempt');
-      // An adapter that records its setup as phases (setupPhases) gets the scope measured above as the first,
-      // already finished.
+      // An adapter that records its setup as phases (setupPhases) gets the scope measured before the attempt existed
+      // (claimAttempt) as the first, already finished.
       if (adapter.setupPhases)
-        store.finishPhase(store.startPhase(a, 'setup.scope', {}, performance.now() - scopeMs), 'succeeded');
+        store.finishPhase(store.startPhase(a, 'setup.scope', {}, performance.now() - claimed.scopeMs), 'succeeded');
       fs.mkdirSync(output, { recursive: true });
       fs.mkdirSync(path.join(job, 'inputs'), { recursive: true });
       stageDirectorInputs(store, entry);
