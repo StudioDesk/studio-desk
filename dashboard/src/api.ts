@@ -468,6 +468,18 @@ export interface ChangeMessage {
   reload?: boolean;
 }
 
+// What a command's answer says it changed (src/server.mjs commandRecords): the changes recorded since it began that
+// its project's page would hear, as a change event names them, and the page of each task they name, as the task's
+// own route reads it; or reload, when the controller cannot say.
+export interface CommandRecords {
+  projectId: string;
+  version: number;
+  start: string;
+  changes?: Change[];
+  tasks?: TaskPage[];
+  reload?: boolean;
+}
+
 const project = (projectId: string) => `projectId=${encodeURIComponent(projectId)}`;
 const projectPath = (projectId: string, page: string) => `/api/projects/${encodeURIComponent(projectId)}/${page}`;
 export const projectsUrl = '/api/projects';
@@ -556,9 +568,22 @@ const staleToken = (response: Response, result: { error?: unknown } | null) =>
   response.status === 403 && result?.error === 'Invalid controller request.';
 const restarted = 'The controller restarted. Reload this page to continue.';
 
+export type RecordsListener = (records: CommandRecords) => void;
+const recordsListeners = new Set<RecordsListener>();
+
+// Hears the records of each successful command's answer, before send() resolves with it, so a page's records change
+// together with the command's own message. It returns the way to stop.
+export function onRecords(listener: RecordsListener) {
+  recordsListeners.add(listener);
+  return () => {
+    recordsListeners.delete(listener);
+  };
+}
+
 // Commands carry this start's request token, as the current dashboard's do. A controller that restarted since the
 // page loaded refuses the old token, so a command refused for its token reads the new one and is sent once more;
-// refused again, or with no token to read, it asks the director to reload the page.
+// refused again, or with no token to read, it asks the director to reload the page. Each command asks for the records
+// it changed, and a successful answer's records go to every listener (onRecords); a refused command has none.
 export async function send<T>(
   url: string,
   body: Record<string, unknown>,
@@ -568,7 +593,11 @@ export async function send<T>(
     request = async () => {
       const response = await fetch(url, {
         method,
-        headers: { 'Content-Type': 'application/json', 'X-Studio-Token': tokenMeta()?.content ?? '' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Studio-Token': tokenMeta()?.content ?? '',
+          'X-Studio-Records': '1',
+        },
         body: payload,
       });
       return { response, result: await response.json() };
@@ -580,6 +609,8 @@ export async function send<T>(
     if (staleToken(response, result)) throw new Error(restarted);
   }
   if (!response.ok) throw new Error(result?.error || `The controller refused the request (${response.status}).`);
+  const records: CommandRecords | undefined = result?.records;
+  if (records && typeof records === 'object') for (const listener of [...recordsListeners]) listener(records);
   return result as T;
 }
 

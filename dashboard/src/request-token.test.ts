@@ -1,17 +1,20 @@
 // A command refused for a request token that is not this start's, as after a controller restart, reads the new
 // token from the page the controller serves and is sent once more (api.ts send() and refreshToken()). Nothing
-// else is sent again, and a command still refused, or without a token to read, asks for a reload.
+// else is sent again, and a command still refused, or without a token to read, asks for a reload. Each command asks
+// for the records it changed, and only a successful answer's records reach the listeners (onRecords).
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { refreshToken, send } from './api';
+import { onRecords, refreshToken, send, type CommandRecords } from './api';
 
 interface Sent {
   url: string;
   method: string;
   token?: string;
+  records?: string;
   cache?: RequestCache;
   body?: string;
 }
 let requests: Sent[], meta: HTMLMetaElement;
+const stops: (() => void)[] = [];
 
 beforeEach(() => {
   requests = [];
@@ -19,6 +22,7 @@ beforeEach(() => {
   document.head.append(meta);
 });
 afterEach(() => {
+  stops.splice(0).forEach(stop => stop());
   document.head.querySelectorAll('meta[name="studio-token"]').forEach(element => element.remove());
   vi.unstubAllGlobals();
 });
@@ -40,13 +44,15 @@ function answer(respond: (request: Sent) => unknown) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, options: RequestInit = {}) => {
-      const request: Sent = {
-        url,
-        method: options.method ?? 'GET',
-        token: (options.headers as Record<string, string> | undefined)?.['X-Studio-Token'],
-        cache: options.cache,
-        body: options.body as string | undefined,
-      };
+      const headers = options.headers as Record<string, string> | undefined,
+        request: Sent = {
+          url,
+          method: options.method ?? 'GET',
+          token: headers?.['X-Studio-Token'],
+          records: headers?.['X-Studio-Records'],
+          cache: options.cache,
+          body: options.body as string | undefined,
+        };
       requests.push(request);
       return respond(request);
     }),
@@ -72,9 +78,9 @@ test.each(['POST', 'PATCH'] as const)(
     const body = JSON.stringify({ projectId: 'project-x', title: 'Renamed' });
     expect(await send('/api/tasks/T-1', { projectId: 'project-x', title: 'Renamed' }, method)).toEqual({ ok: true });
     expect(requests).toEqual([
-      { url: '/api/tasks/T-1', method, token: 'old', body },
+      { url: '/api/tasks/T-1', method, token: 'old', records: '1', body },
       { url: '/', method: 'GET', cache: 'no-store' },
-      { url: '/api/tasks/T-1', method, token: 'new', body },
+      { url: '/api/tasks/T-1', method, token: 'new', records: '1', body },
     ]);
     expect(meta.content).toBe('new');
   },
@@ -163,4 +169,81 @@ test('the refresh reads the token from the page that says the dashboard is not b
   expect(await refreshToken()).toBe(true);
   expect(document.querySelector<HTMLMetaElement>('meta[name="studio-token"]')?.content).toBe('new');
   expect(requests.map(request => request.url)).toEqual(['/', '/', '/']);
+});
+
+// What a command's answer says it changed, and a listener that keeps what it hears.
+const records: CommandRecords = {
+    projectId: 'project-x',
+    version: 7,
+    start: 'start-a',
+    changes: [{ seq: 7, type: 'task', id: 'T-1' }],
+    tasks: [{ task: { id: 'T-1', title: 'T-1', kind: 'general', status: 'ready' }, attempts: [] }],
+  },
+  listen = () => {
+    const heard: CommandRecords[] = [];
+    stops.push(onRecords(item => heard.push(item)));
+    return heard;
+  };
+
+test('a successful answer hands its records to each listener once before send() resolves with the whole answer', async () => {
+  const first = listen(),
+    second = listen();
+  answer(() => reply(200, { ok: true, records }));
+  const heard = await send('/api/tasks/T-1/approve-work', { projectId: 'project-x' }).then(result => ({
+    result,
+    first: [...first],
+  }));
+  expect(heard).toEqual({ result: { ok: true, records }, first: [records] });
+  expect(second).toEqual([records]);
+  expect(requests.map(request => [request.token, request.records])).toEqual([['old', '1']]);
+});
+
+test('records reach a listener once after a resend for a stale token, and no longer once it stops', async () => {
+  const heard = listen();
+  let commands = 0;
+  answer(request =>
+    request.method === 'GET'
+      ? reply(200, page('new'))
+      : ++commands === 1
+        ? reply(403, { ...stale, records })
+        : reply(200, { ok: true, records }),
+  );
+  expect(await send('/api/tasks/T-1', { projectId: 'project-x', title: 'Renamed' }, 'PATCH')).toEqual({
+    ok: true,
+    records,
+  });
+  expect(heard).toEqual([records]);
+  expect(requests.map(request => `${request.method} ${request.token ?? ''} ${request.records ?? ''}`.trim())).toEqual([
+    'PATCH old 1',
+    'GET',
+    'PATCH new 1',
+  ]);
+  stops.splice(0).forEach(stop => stop());
+  expect(await send('/api/tasks/T-1', { projectId: 'project-x' }, 'PATCH')).toEqual({ ok: true, records });
+  expect(heard).toEqual([records]);
+});
+
+const unheard: [string, (request: Sent) => unknown, string][] = [
+  ['a refused command', () => reply(400, { error: 'A task needs a title.', records }), 'A task needs a title.'],
+  [
+    'a command still refused for its token',
+    request => (request.method === 'GET' ? reply(200, page('new')) : reply(403, { ...stale, records })),
+    restarted,
+  ],
+  [
+    'a command whose new token cannot be read',
+    request =>
+      request.method === 'GET'
+        ? reply(200, '<!doctype html><title>Studio desk</title>')
+        : reply(403, { ...stale, records }),
+    restarted,
+  ],
+  ['an answer without records', () => reply(200, { ok: true }), 'resolved'],
+];
+test.each(unheard)('%s hands no records to a listener', async (_, respond, outcome) => {
+  const heard = listen();
+  answer(respond);
+  expect(await refusal(send('/api/tasks/T-1/approve-work', { projectId: 'project-x' }))).toBe(outcome);
+  expect(heard).toEqual([]);
+  expect(requests.filter(request => request.method !== 'GET').every(request => request.records === '1')).toBe(true);
 });

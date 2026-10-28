@@ -1,7 +1,8 @@
 // The records a project's pages hold, and how each change reaches them (MP-026). Every page of a project shares
 // its shell and its live set. A change to one task fetches that task alone and patches it into whatever holds
 // it; the live set reloads only when work joins or leaves it, and finished runs reload when a run finishes or
-// changes. Nothing is fetched for a task no page holds.
+// changes. Nothing is fetched for a task no page holds. A command's answer carries the pages of the tasks it
+// changed, which go in at once without a read.
 import { useInfiniteQuery, useQuery, type InfiniteData, type QueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import {
@@ -12,7 +13,9 @@ import {
   settledUrl,
   shellUrl,
   taskUrl,
+  type Change,
   type ChangeMessage,
+  type CommandRecords,
   type FinishedPage,
   type Live,
   type PeopleSummary,
@@ -45,7 +48,7 @@ export const queryKeys = {
 const taskTypes = new Set(['task', 'attempt', 'event']);
 export type RunItem = FinishedPage['runs'][number];
 
-// One task's record and attempts in place of the ones the live set holds.
+// One task's record and attempts in place of the ones the live set holds, or added to it.
 function patched(live: Live, page: TaskPage): Live {
   const id = page.task.id,
     fresh = new Map(page.attempts.map(attempt => [attempt.id, attempt])),
@@ -58,7 +61,9 @@ function patched(live: Live, page: TaskPage): Live {
       });
   return {
     ...live,
-    tasks: live.tasks.map(task => (task.id === id ? page.task : task)),
+    tasks: live.tasks.some(task => task.id === id)
+      ? live.tasks.map(task => (task.id === id ? page.task : task))
+      : [...live.tasks, page.task],
     attempts: [...attempts, ...fresh.values()],
   };
 }
@@ -79,25 +84,43 @@ export class RecordSync {
   }
 
   async apply(message: ChangeMessage) {
+    if (message.reload) return void (await this.client.invalidateQueries({ queryKey: [this.projectId] }));
+    await this.changed(message.changes ?? []);
+  }
+
+  // A command's answer names what it changed as the stream's message for it will, with the page of each task it
+  // names (api.ts onRecords). Each supplied page goes in at once in place of a read, and every read the message would
+  // start starts now; the stream's message confirms them afterwards. Another project's answer changes nothing.
+  async answer(records: CommandRecords) {
+    if (records.projectId !== this.projectId) return;
+    if (records.reload) return void (await this.client.invalidateQueries({ queryKey: [this.projectId] }));
+    await this.changed(records.changes ?? [], records.tasks ?? []);
+  }
+
+  private async changed(changes: Change[], supplied: TaskPage[] = []) {
     const { client, projectId } = this;
-    if (message.reload) return void (await client.invalidateQueries({ queryKey: [projectId] }));
-    const tasks = new Set<string>();
+    const given = new Set(supplied.map(page => page.task.id)),
+      read = new Set<string>();
     let runs = false,
       shell = false,
       events = false;
-    for (const change of message.changes ?? []) {
+    for (const change of changes) {
       const taskId = change.type === 'task' && change.id !== undefined ? String(change.id) : change.taskId;
       if (change.type === 'event') events = true;
       if (taskTypes.has(change.type)) {
-        if (taskId) tasks.add(taskId);
+        if (taskId && !given.has(taskId)) read.add(taskId);
       } else if (change.type === 'run') runs = true;
       else shell = true;
     }
     const work: Promise<unknown>[] = [];
+    // Supplied tasks go in before this answer starts any read, so only a reload already reading can predate them;
+    // one reload of the live set confirms them, as it does a run change.
+    let reload = false;
+    for (const page of supplied) reload = this.place(page) || reload;
     // The organization pages' counts and the activity log refresh only while a page shows them.
-    if (tasks.size) work.push(client.invalidateQueries({ queryKey: queryKeys.people(projectId) }));
+    if (given.size || read.size) work.push(client.invalidateQueries({ queryKey: queryKeys.people(projectId) }));
     // An attempt's full record changes with the attempt and with each phase it records.
-    for (const change of message.changes ?? []) {
+    for (const change of changes) {
       const attemptId =
         change.type === 'attempt'
           ? change.id
@@ -108,7 +131,7 @@ export class RecordSync {
     }
     if (events) work.push(client.invalidateQueries({ queryKey: queryKeys.activity(projectId) }));
     // A story's Activity reads its task's events, but not its phases, and the instructions published while it ran.
-    for (const change of message.changes ?? [])
+    for (const change of changes)
       if (change.type === 'event' && change.taskId && change.kind !== 'phase')
         work.push(client.invalidateQueries({ queryKey: queryKeys.story(projectId, change.taskId) }));
     // Instruction texts change with the organization records the shell holds; only an open page reads them.
@@ -118,14 +141,37 @@ export class RecordSync {
         client.invalidateQueries({ queryKey: queryKeys.instructions(projectId) }),
         client.invalidateQueries({ queryKey: [projectId, 'story'] }),
       );
+    if (runs || reload) work.push(this.reloadLive());
     if (runs)
       work.push(
-        this.reloadLive(),
         client.invalidateQueries({ queryKey: queryKeys.finished(projectId) }),
         client.invalidateQueries({ queryKey: [projectId, 'run'] }),
       );
-    for (const id of tasks) work.push(this.refreshTask(id, !runs));
+    for (const id of read) work.push(this.refreshTask(id, !runs));
     await Promise.all(work);
+  }
+
+  // Puts a task's supplied page wherever a page holds it, as a read of it would, and counts it as the task's newest
+  // read; the lists it is in read again. The live set takes it at once, joining or settling included (settled work
+  // stays until the confirming reload drops it). Returns whether the live set must be read again: work joined or
+  // settled, or a reload already reading may have read the task before this change.
+  private place(page: TaskPage) {
+    const { client, projectId } = this,
+      id = page.task.id,
+      key = queryKeys.task(projectId, id);
+    this.tickets.set(id, ++this.counter);
+    if (client.getQueryData(key) !== undefined) client.setQueryData(key, page);
+    this.confirm(id);
+    const current = client.getQueryData<Live>(queryKeys.live(projectId));
+    if (!current) return false;
+    const before = current.tasks.find(task => task.id === id),
+      now = settled(page.task, page.attempts);
+    // A settled task the set does not hold stays out of it.
+    if (!before && now) return false;
+    client.setQueryData(queryKeys.live(projectId), patched(current, page));
+    if (before && settled(before, current.attempts) === now) return this.reloading !== null;
+    void client.invalidateQueries({ queryKey: [projectId, 'settled'] });
+    return true;
   }
 
   // Fetches one task when a page holds it, or when the live set may need it, and patches it in. The newest
@@ -148,10 +194,7 @@ export class RecordSync {
     }
     if (this.tickets.get(id) !== ticket) return;
     if (shown) client.setQueryData(key, page);
-    if (this.inFinished(id)) void client.invalidateQueries({ queryKey: queryKeys.finished(projectId) });
-    if (this.inSettled(id)) void client.invalidateQueries({ queryKey: [projectId, 'settled'] });
-    for (const [key, item] of client.getQueriesData<RunItem>({ queryKey: [projectId, 'run'] }))
-      if (item?.tasks.some(task => task.id === id)) void client.invalidateQueries({ queryKey: key, exact: true });
+    this.confirm(id);
     if (!live) return;
     // A reload in flight may have read the task before this change; read the set once more after it.
     if (this.reloading) return void (this.again = true);
@@ -165,6 +208,15 @@ export class RecordSync {
       return this.reloadLive();
     }
     if (before) client.setQueryData(queryKeys.live(projectId), patched(current, page));
+  }
+
+  // Starts the reads of the lists that hold a changed task: finished runs, settled work and runs read on their own.
+  private confirm(id: string) {
+    const { client, projectId } = this;
+    if (this.inFinished(id)) void client.invalidateQueries({ queryKey: queryKeys.finished(projectId) });
+    if (this.inSettled(id)) void client.invalidateQueries({ queryKey: [projectId, 'settled'] });
+    for (const [key, item] of client.getQueriesData<RunItem>({ queryKey: [projectId, 'run'] }))
+      if (item?.tasks.some(task => task.id === id)) void client.invalidateQueries({ queryKey: key, exact: true });
   }
 
   private inFinished(id: string) {

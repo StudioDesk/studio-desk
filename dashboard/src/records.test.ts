@@ -1,11 +1,28 @@
 // How each change reaches the records a project's pages hold (records.ts): one task's change fetches that task
 // alone and patches it in; the live set reloads only when work joins or settles; finished runs reload when a run
-// leaves the live set; nothing is fetched for a task no page holds.
-import { InfiniteQueryObserver, QueryClient, QueryObserver } from '@tanstack/react-query';
+// leaves the live set; nothing is fetched for a task no page holds. A command's answer puts the tasks it supplies in
+// at once, without reading them, and starts the confirming reads right away.
+import { InfiniteQueryObserver, QueryClient, QueryClientProvider, QueryObserver } from '@tanstack/react-query';
+import { render } from '@testing-library/react';
+import { createElement } from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { finishedUrl, getJSON, liveUrl, type FinishedPage, type Live } from './api';
+import {
+  finishedUrl,
+  getJSON,
+  liveUrl,
+  send,
+  taskUrl,
+  type Change,
+  type CommandRecords,
+  type FinishedPage,
+  type Live,
+  type Task,
+  type TaskPage,
+} from './api';
+import { ProjectLive } from './live-context';
 import { RecordSync, queryKeys } from './records';
-import { fakeController, taskFixture, type Controller } from './test-controller';
+import { StreamFactoryContext } from './stream-context';
+import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
 
 let controller: Controller, client: QueryClient, sync: RecordSync;
 const unsubscribe: (() => void)[] = [];
@@ -111,4 +128,173 @@ test('a task change during a reload reads the set once more rather than patching
   await Promise.all([reload, sync.apply(changeTo('T-1', 3))]);
   expect(live().tasks.find(task => task.id === 'T-1')?.title).toBe('Renamed during the reload');
   expect(controller.reads().filter(url => url.endsWith('/live'))).toHaveLength(2);
+});
+
+// A page holding one task's own record.
+async function holdTask(id: string) {
+  const page = new QueryObserver(client, {
+    queryKey: queryKeys.task('project-x', id),
+    queryFn: () => getJSON<TaskPage>(taskUrl('project-x', id)),
+  });
+  unsubscribe.push(page.subscribe(() => {}));
+  await vi.waitFor(() => expect(client.getQueryData(queryKeys.task('project-x', id))).toBeDefined());
+  controller.requests.length = 0;
+}
+const shown = (id: string) => client.getQueryData<TaskPage>(queryKeys.task('project-x', id));
+// A command's answer: the changes it recorded (a change to each given task unless named) and each given task's page.
+const answered = (
+  tasks: Task[],
+  changes: Change[] = tasks.map((task, i) => ({ seq: 10 + i, type: 'task', id: task.id })),
+) =>
+  ({
+    projectId: 'project-x',
+    version: 20,
+    start: 's',
+    changes,
+    tasks: tasks.map(task => ({ task, attempts: controller.attempts.filter(attempt => attempt.taskId === task.id) })),
+  }) satisfies CommandRecords;
+
+test("an answer's task goes into its page and the live set at once, without reading it", async () => {
+  await holdLive();
+  await holdTask('T-1');
+  const approved = { ...controller.tasks[0]!, title: 'Approved' };
+  controller.attempts.push({ id: 'attempt-2', taskId: 'T-1', status: 'running' });
+  const records = answered([approved]),
+    done = sync.answer(records);
+  expect(shown('T-1')).toEqual(records.tasks[0]);
+  expect(live().tasks.map(task => task.title)).toEqual(['Approved']);
+  expect(live().attempts.map(attempt => attempt.id)).toEqual(['attempt-1', 'attempt-2']);
+  await done;
+  expect(controller.reads()).toEqual([]);
+  expect(live().tasks.map(task => task.title)).toEqual(['Approved']);
+});
+
+test('work an answer settles shows its new record in the live set at once, and one reload drops it', async () => {
+  await holdLive();
+  await holdTask('T-1');
+  controller.tasks[0] = { ...controller.tasks[0]!, status: 'denied' };
+  const done = sync.answer(answered([controller.tasks[0]]));
+  expect(live().tasks.map(task => [task.id, task.status])).toEqual([['T-1', 'denied']]);
+  expect(shown('T-1')?.task.status).toBe('denied');
+  await done;
+  expect(controller.reads()).toEqual(['/api/projects/project-x/live']);
+  expect(live().tasks).toEqual([]);
+});
+
+test('work an answer starts joins the live set at once with its attempts, and a reload follows', async () => {
+  await holdLive();
+  controller.tasks.push(taskFixture('T-new', { status: 'running', lastAttemptId: 'attempt-n' }));
+  controller.attempts.push({ id: 'attempt-n', taskId: 'T-new', status: 'running' });
+  const done = sync.answer(answered([controller.tasks[2]!]));
+  expect(live().tasks.map(task => task.id)).toEqual(['T-1', 'T-new']);
+  expect(live().attempts.map(attempt => attempt.id)).toEqual(['attempt-1', 'attempt-n']);
+  await done;
+  expect(controller.reads()).toEqual(['/api/projects/project-x/live']);
+  expect(live().tasks.map(task => task.id)).toEqual(['T-1', 'T-new']);
+});
+
+test('an answer naming a run reloads the live set and finished runs right away, once with the work it starts', async () => {
+  await holdLive({ finished: true });
+  await sync.answer(answered([], [{ seq: 4, type: 'run', id: 'run-1' }]));
+  expect([...controller.reads()].sort()).toEqual([
+    '/api/projects/project-x/live',
+    '/api/projects/project-x/runs?limit=10',
+  ]);
+  controller.requests.length = 0;
+  controller.tasks.push(taskFixture('T-new'));
+  const done = sync.answer(
+    answered(
+      [controller.tasks[2]!],
+      [
+        { seq: 5, type: 'run', id: 'run-1' },
+        { seq: 6, type: 'task', id: 'T-new' },
+      ],
+    ),
+  );
+  expect(live().tasks.map(task => task.id)).toEqual(['T-1', 'T-new']);
+  await done;
+  expect([...controller.reads()].sort()).toEqual([
+    '/api/projects/project-x/live',
+    '/api/projects/project-x/runs?limit=10',
+  ]);
+});
+
+test('an answer that says reload refreshes every held record, as the stream reload does', async () => {
+  await holdLive({ finished: true });
+  await holdTask('T-1');
+  await sync.answer({ projectId: 'project-x', version: 21, start: 's', reload: true });
+  expect([...controller.reads()].sort()).toEqual([
+    '/api/projects/project-x/live',
+    '/api/projects/project-x/runs?limit=10',
+    '/api/tasks/T-1?projectId=project-x',
+  ]);
+});
+
+test("another project's answer changes nothing", async () => {
+  await holdLive({ finished: true });
+  await holdTask('T-1');
+  const before = live(),
+    page = shown('T-1'),
+    other = { ...answered([{ ...controller.tasks[0]!, title: 'Elsewhere' }]), projectId: 'project-y' };
+  await sync.answer({ ...other, changes: [...other.changes, { seq: 11, type: 'run', id: 'run-1' }] });
+  await sync.answer({ projectId: 'project-y', version: 21, start: 's', reload: true });
+  expect(controller.requests).toEqual([]);
+  expect(live()).toBe(before);
+  expect(shown('T-1')).toBe(page);
+});
+
+test('a stream change after an answer reads and patches the task as before; a read the answer overtook is dropped', async () => {
+  await holdLive();
+  await holdTask('T-1');
+  controller.tasks[0] = { ...controller.tasks[0]!, title: 'Read before the answer' };
+  const overtaken = sync.apply(changeTo('T-1'));
+  await sync.answer(answered([{ ...controller.tasks[0], title: 'Approved' }]));
+  await overtaken;
+  expect(live().tasks.map(task => task.title)).toEqual(['Approved']);
+  expect(shown('T-1')?.task.title).toBe('Approved');
+  controller.requests.length = 0;
+  controller.tasks[0] = { ...controller.tasks[0], title: 'Running now' };
+  await sync.apply(changeTo('T-1', 30));
+  expect(controller.reads()).toEqual(['/api/tasks/T-1?projectId=project-x']);
+  expect(live().tasks.map(task => task.title)).toEqual(['Running now']);
+  expect(shown('T-1')?.task.title).toBe('Running now');
+});
+
+test('an answer during a reload goes in at once and the set is read once more after it', async () => {
+  await holdLive();
+  // A run's change starts a reload, which reads the set before the command changes T-1.
+  const reload = sync.apply({ version: 2, start: 's', changes: [{ seq: 2, type: 'run', id: 'run-1' }] });
+  controller.tasks[0] = { ...controller.tasks[0]!, title: 'Approved during the reload' };
+  const done = sync.answer(answered([controller.tasks[0]]));
+  expect(live().tasks.find(task => task.id === 'T-1')?.title).toBe('Approved during the reload');
+  await Promise.all([reload, done]);
+  expect(live().tasks.find(task => task.id === 'T-1')?.title).toBe('Approved during the reload');
+  expect(controller.reads().filter(url => url.endsWith('/live'))).toHaveLength(2);
+});
+
+test("a project's pages take its commands' answers before send() resolves, until they close", async () => {
+  const view = render(
+    createElement(
+      QueryClientProvider,
+      { client },
+      createElement(
+        StreamFactoryContext.Provider,
+        { value: createStream },
+        createElement(ProjectLive, { projectId: 'project-x', children: null }),
+      ),
+    ),
+  );
+  unsubscribe.push(() => view.unmount());
+  await holdLive();
+  const titled = (title: string) => answered([{ ...controller.tasks[0]!, title }]);
+  controller.command = () => ({ ok: true, records: titled('Approved') });
+  await send('/api/tasks/T-1/approve-work', { projectId: 'project-x' });
+  expect(live().tasks.map(task => task.title)).toEqual(['Approved']);
+  controller.command = () => ({ ok: true, records: { ...titled('Elsewhere'), projectId: 'project-y' } });
+  await send('/api/tasks/T-1/approve-work', { projectId: 'project-y' });
+  view.unmount();
+  controller.command = () => ({ ok: true, records: titled('After closing') });
+  await send('/api/tasks/T-1/approve-work', { projectId: 'project-x' });
+  expect(live().tasks.map(task => task.title)).toEqual(['Approved']);
+  expect(controller.reads()).toEqual([]);
 });
