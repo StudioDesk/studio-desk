@@ -177,7 +177,10 @@ test("a story without pages, or a project with the check off, is not captured; t
       })
       .layers.map(layer => layer.title);
   assert.ok(breakdownLayers().includes('Pages to capture'));
-  // The pages route, and the plan reading the director's.
+  // The pages route, and the plan reading the director's. Before a change the dashboard reads none of the director's.
+  const pagesRead = async () =>
+    (await fetch(`${c.origin}/api/tasks/${c.taskId}/pages?projectId=project-legacy`)).json();
+  assert.deepEqual(await pagesRead(), { pages: [], changed: false, editable: true, reason: null });
   const changed = await c.request(`/api/tasks/${c.taskId}/pages`, {
     projectId: 'project-legacy',
     pages: [{ name: 'Board', path: '/' }],
@@ -193,6 +196,24 @@ test("a story without pages, or a project with the check off, is not captured; t
     pages: [{ name: 'Board', path: 'board' }],
   });
   assert.equal(refused.status, 400);
+  assert.deepEqual(await pagesRead(), {
+    pages: [{ name: 'Board', path: '/', steps: [] }],
+    changed: true,
+    editable: true,
+    reason: null,
+  });
+  // A closed story's pages read as fixed, with the reason the change gives.
+  const story = store.task(c.taskId);
+  store.putTask({ ...story, closed: true });
+  assert.deepEqual(await pagesRead(), {
+    pages: [{ name: 'Board', path: '/', steps: [] }],
+    changed: true,
+    editable: false,
+    reason: 'This story is closed or integrated; its pages can no longer change.',
+  });
+  const closedChange = await c.request(`/api/tasks/${c.taskId}/pages`, { projectId: 'project-legacy', pages: [] });
+  assert.equal(closedChange.status, 409);
+  store.putTask(story);
   // The settings route and view: the browser found, and why it would not run here.
   const settings = await c.request('/api/projects/project-legacy/visual-check', {
     projectId: 'project-legacy',

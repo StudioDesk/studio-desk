@@ -75,7 +75,7 @@ import {
   tryStory,
   tryView,
 } from './connectors/try-copy.mjs';
-import { saveVisualSettings, setStoryPages, visualView } from './connectors/visual-check.mjs';
+import { saveVisualSettings, setStoryPages, storyPagesView, visualView } from './connectors/visual-check.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
@@ -621,7 +621,10 @@ export function createStudio({
       // One task of the selected project with its attempt summaries: what a task's page shows. Its activity is what
       // happened to it besides its agents' output, which its Activity tab reads.
       const taskRoute = parts[0] === 'api' && parts[1] === 'tasks' && req.method === 'GET';
-      if (taskRoute && (parts.length === 3 || (parts.length === 4 && ['activity', 'bring-back'].includes(parts[3])))) {
+      if (
+        taskRoute &&
+        (parts.length === 3 || (parts.length === 4 && ['activity', 'bring-back', 'pages'].includes(parts[3])))
+      ) {
         let record;
         try {
           record = store.task(parts[2]);
@@ -631,6 +634,8 @@ export function createStudio({
         assertProject(store, record, queryProject);
         // The older lines a story that landed can be brought back to, or why not, read from records and git.
         if (parts[3] === 'bring-back') return json(res, bringBackTargets(store, record));
+        // A story's pages for the visual check, its planned ones until the director changes them (1.2 step 8).
+        if (parts[3] === 'pages') return json(res, storyPagesView(store, record));
         if (parts[3]) return json(res, storyActivity(store, record));
         return json(res, taskPage(queryProject, record));
       }

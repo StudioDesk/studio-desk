@@ -38,11 +38,32 @@ export function storyPages(store, task) {
   }
 }
 
+// Why a story's pages can no longer change, or null while they can: only a code story has pages, and they change until
+// it is closed or integrated. One rule for the change and for what the dashboard reads.
+function pagesLocked(task) {
+  if (task.kind !== 'studio-development:change')
+    return { message: 'Only a code story has pages to check.', status: 400 };
+  if (task.closed || task.status === 'denied' || task.sourceStage?.current === 'integrated')
+    return { message: 'This story is closed or integrated; its pages can no longer change.', status: 409 };
+  return null;
+}
+
+// A story's pages as the dashboard reads them: the pages its next check captures, whether they are the director's own,
+// and whether they may still change, with the reason when not.
+export function storyPagesView(store, task) {
+  const locked = pagesLocked(task);
+  return {
+    pages: task.kind === 'studio-development:change' ? storyPages(store, task) : [],
+    changed: !!task.pages,
+    editable: !locked,
+    reason: locked?.message ?? null,
+  };
+}
+
 // The director changes a story's pages. Allowed until the story is closed or integrated; it applies to the next check.
 export function setStoryPages(store, task, pages) {
-  if (task.kind !== 'studio-development:change') throw failure('Only a code story has pages to check.');
-  if (task.closed || task.status === 'denied' || task.sourceStage?.current === 'integrated')
-    throw failure('This story is closed or integrated; its pages can no longer change.', 409);
+  const locked = pagesLocked(task);
+  if (locked) throw failure(locked.message, locked.status);
   task.pages = validateStoryPages(pages);
   store.putTask(task);
   store.event(
