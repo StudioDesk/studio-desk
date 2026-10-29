@@ -1140,3 +1140,165 @@ test("the story's Attempts names the attempt that asked as not counted, and the 
     );
   expect(rows).toEqual(['Build · 1 of 3 attempts used', 'Asked you a question, not counted', 'Attempt 1 of 3']);
 });
+
+// What an attempt said, as its trace records it, so its conversation shows in the story's Activity.
+const said = (attemptId: string, status: string, at: string, text: string) =>
+  (controller.traces[attemptId] = {
+    schemaVersion: 'attempt-trace-v1',
+    attemptId,
+    taskId: 'T-1',
+    provider: 'claude',
+    status,
+    source: 'activity-file',
+    lines: 1,
+    counts: { say: 1 },
+    steps: [{ seq: 0, at, kind: 'say', text }],
+    phases: [],
+    handoff: null,
+  });
+// A code story whose first attempt asked and whose second works on the answers recorded for it.
+const answeredStory = (answers: object[]) => {
+  askingStory({
+    status: 'running',
+    lastAttemptId: 'attempt-2',
+    sourceStage: { version: 'source-story-stages-v1', phase: 'implementing', current: 'implementing', history: [] },
+    answers,
+  });
+  controller.attempts = [
+    asked(),
+    {
+      id: 'attempt-2',
+      taskId: 'T-1',
+      status: 'running',
+      workerId: 'W-1',
+      startedAt: '2026-10-28T10:20:00.000Z',
+      assignment: { kind: 'studio-development:change' },
+    },
+  ];
+  said('attempt-1', 'blocked', '2026-10-28T10:05:00.000Z', 'Asking first.');
+  said('attempt-2', 'running', '2026-10-28T10:21:00.000Z', 'Removing the old route now.');
+};
+// The story's Activity once the asking attempt's conversation shows.
+const storyActivity = async () => {
+  const user = userEvent.setup();
+  open();
+  await user.click(await screen.findByRole('tab', { name: 'Activity' }, { timeout: 5000 }));
+  const panel = await screen.findByRole('tabpanel');
+  await within(panel).findByText('Asking first.', {}, { timeout: 5000 });
+  return panel;
+};
+const exchangeOf = (panel: HTMLElement) =>
+  within(panel).getByRole('region', { name: "Eli's question and its answers" });
+// Each of the words shows in the panel, in this order.
+const inOrder = (panel: HTMLElement, words: string[]) => {
+  const text = panel.textContent ?? '',
+    at = words.map(item => text.indexOf(item));
+  expect(words.filter((_, index) => at[index]! < 0)).toEqual([]);
+  expect(at).toEqual([...at].sort((a, b) => a - b));
+};
+
+test("a story's Activity shows the question right after the attempt that asked, every option with the recommended one marked, then your answer", async () => {
+  const at = '2026-10-28T10:15:00.000Z';
+  answeredStory([
+    {
+      attemptId: 'attempt-1',
+      option: 1,
+      label: 'Remove it',
+      text: 'Update both pages too.',
+      autoMode: true,
+      by: { type: 'director', at },
+      at,
+    },
+  ]);
+  const panel = await storyActivity(),
+    shown = within(exchangeOf(panel));
+  expect(shown.getByText(question.ask)).toBeTruthy();
+  expect(shown.getByText(question.why)).toBeTruthy();
+  expect(
+    within(shown.getByRole('list', { name: "Eli's options" }))
+      .getAllByRole('listitem')
+      .map(item => item.textContent),
+  ).toEqual(['Keep it', 'Remove it and update both pages Recommended']);
+  // Your answer is your own message: the option you picked, your words, and the Auto mode it set.
+  const yours = shown.getByText('Answered: Remove it').closest('.sd-bubble--mine')!;
+  expect(yours.textContent).toContain('Update both pages too.');
+  expect(yours.querySelector('.sd-meta')?.textContent).toMatch(/^You · .+ · Set Auto mode on$/);
+  expect(shown.queryByText(/^Chose /)).toBeNull();
+  expect(shown.queryByText('No answer yet.')).toBeNull();
+  // After the attempt that asked, before the next; the attempt that asked nothing has no exchange.
+  inOrder(panel, [
+    'Asking first.',
+    question.ask,
+    question.why,
+    'Keep it',
+    'Remove it and update both pages',
+    'Recommended',
+    'Answered: Remove it',
+    'Update both pages too.',
+    'You ·',
+    'Removing the old route now.',
+  ]);
+  expect(within(panel).getAllByRole('region', { name: /question and its answers$/ })).toHaveLength(1);
+});
+
+test("auto mode's answer shows as a quiet line after the attempt that asked, and your change of it follows as your own message", async () => {
+  const at = '2026-10-28T10:13:00.000Z',
+    later = '2026-10-28T10:25:00.000Z',
+    auto = { attemptId: 'attempt-1', option: 1, label: 'Remove it', by: { type: 'auto-mode', at }, at };
+  answeredStory([auto]);
+  const panel = await storyActivity(),
+    line = within(exchangeOf(panel)).getByText(/^Chose Remove it · /);
+  expect(line.closest('.sd-event')?.textContent).toMatch(/^Auto modeChose Remove it · /);
+  expect(within(exchangeOf(panel)).queryByText(/^You ·/)).toBeNull();
+  inOrder(panel, ['Asking first.', question.ask, 'Chose Remove it', 'Removing the old route now.']);
+  // The director changes auto mode's answer: both show, auto mode's first, then theirs, marked as changing it.
+  edit({
+    answers: [
+      auto,
+      {
+        attemptId: 'attempt-1',
+        option: 0,
+        label: 'Keep it',
+        text: 'One more release.',
+        replaces: 'auto-mode',
+        by: { type: 'director', at: later },
+        at: later,
+      },
+    ],
+  });
+  change(2, [{ seq: 2, type: 'task', id: 'T-1', projectId: 'project-x' }]);
+  const changed = await screen.findByText("Changed auto mode's answer: Keep it", {}, { timeout: 5000 }),
+    shown = screen.getByRole('tabpanel');
+  expect(changed.closest('.sd-bubble--mine')?.textContent).toMatch(/One more release\.You · /);
+  inOrder(shown, [
+    'Asking first.',
+    question.ask,
+    'Chose Remove it',
+    "Changed auto mode's answer: Keep it",
+    'One more release.',
+    'Removing the old route now.',
+  ]);
+});
+
+test('a question still waiting shows in Activity with no answer yet', async () => {
+  askingStory();
+  controller.attempts = [asked()];
+  said('attempt-1', 'blocked', '2026-10-28T10:05:00.000Z', 'Asking first.');
+  const panel = await storyActivity(),
+    shown = within(exchangeOf(panel));
+  expect(shown.getByText(question.ask)).toBeTruthy();
+  expect(shown.getByText(question.why)).toBeTruthy();
+  expect(shown.getByText('No answer yet.')).toBeTruthy();
+  expect(shown.queryByText(/^You ·/)).toBeNull();
+  expect(shown.queryByText(/^Chose /)).toBeNull();
+  inOrder(panel, ['Asking first.', question.ask, 'No answer yet.']);
+});
+
+test('an attempt whose question could not be read shows no exchange in Activity', async () => {
+  askingStory();
+  controller.attempts = [asked({ question: { problem: 'question.json must be readable JSON of at most 32 KiB.' } })];
+  said('attempt-1', 'blocked', '2026-10-28T10:05:00.000Z', 'Asking first.');
+  const panel = await storyActivity();
+  expect(within(panel).queryByRole('region', { name: /question and its answers$/ })).toBeNull();
+  expect(within(panel).queryByText('No answer yet.')).toBeNull();
+});

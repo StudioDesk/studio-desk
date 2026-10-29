@@ -32,7 +32,7 @@ import { cleanExecution, ExecutionFields } from './execution-fields';
 import { workerName } from './names';
 import { CommandRequest, TaskAutoMode } from './permissions';
 import { AnswerBox, QuestionCard } from './question-card';
-import { changeableAnswer, waitingQuestion, type Answer } from './questions';
+import { changeableAnswer, exchange, waitingQuestion, type Answer, type Exchange } from './questions';
 import { queryKeys, useStudio } from './records';
 import { StoryReleaseChip } from './release-chip';
 import { SourceDiff } from './source-story';
@@ -1380,10 +1380,107 @@ function PartLine({ projectId, part }: { projectId: string; part: Part }) {
   );
 }
 
+// What an answer set the work's Auto mode to, when it set it: on, off, or back to following Settings.
+const autoModeSet = (answer: Answer) =>
+  answer.autoMode === true
+    ? 'Set Auto mode on'
+    : answer.autoMode === false
+      ? 'Set Auto mode off'
+      : answer.autoMode === null
+        ? 'Set Auto mode to follow Settings'
+        : '';
+
+// The exchange an asking attempt started (questions.ts exchange), right after its conversation: what the agent asked
+// and why, its options with the recommended one marked, then each answer as the controller recorded it. Auto mode's
+// is a quiet line; yours is your own message, marked when it changed auto mode's. A question still waiting has no
+// answer yet.
+function QuestionExchange({
+  task,
+  studio,
+  attempt,
+  looks,
+  asked,
+  waiting,
+}: {
+  task: Task;
+  studio: StudioState;
+  attempt: AttemptSummary;
+  looks: Map<string, AgentLook>;
+  asked: Exchange;
+  waiting: boolean;
+}) {
+  const { question, answers } = asked,
+    workerId = attempt.workerId ?? task.workerId,
+    name = workerName(studio, workerId),
+    look = looks.get(workerId ?? ''),
+    options = question.options ?? [];
+  return (
+    <section aria-label={`${name}'s question and its answers`} style={{ display: 'grid', gap: '12px' }}>
+      <div className="sd-say">
+        {look && <AgentAvatar look={look} size={34} state="idle" ring={false} />}
+        <div className="sd-bubble">
+          <span className="sd-meta">{name} asked you</span>
+          <span className="sd-bubble__lead">{question.ask}</span>
+          {question.why && <span className="sd-bubble__words">{question.why}</span>}
+          {options.length > 0 && (
+            <ul aria-label={`${name}'s options`} style={{ margin: 'var(--space-8) 0 0', paddingLeft: '20px' }}>
+              {options.map((option, index) => (
+                <li key={index}>
+                  <b>{option.label}</b>
+                  {option.detail && ` ${option.detail}`}
+                  {question.recommended === index && (
+                    <>
+                      {' '}
+                      <span className="sd-chip sd-chip--brand sd-chip--inline">Recommended</span>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="sd-meta" style={{ marginTop: '2px' }}>
+            {clockOf(attempt.finishedAt)}
+          </div>
+        </div>
+      </div>
+      {answers.map((answer, index) => {
+        const set = autoModeSet(answer),
+          at = clockOf(answer.at ?? answer.by?.at);
+        if (answer.by?.type === 'auto-mode')
+          return (
+            <div key={index} className="sd-event sd-event--center">
+              <span className="sd-chip sd-chip--brand sd-chip--inline">Auto mode</span>
+              <span>
+                Chose {[answer.label, answer.text].filter(Boolean).join(' — ')}
+                {set && ` · ${set}`} · {at}
+              </span>
+            </div>
+          );
+        return (
+          <div key={index} className="sd-say sd-say--mine">
+            <div className="sd-bubble sd-bubble--mine">
+              <span className="sd-bubble__lead">
+                {answer.replaces === 'auto-mode' ? "Changed auto mode's answer" : 'Answered'}
+                {answer.label && `: ${answer.label}`}
+              </span>
+              {answer.text && <span className="sd-bubble__words">{answer.text}</span>}
+              <div className="sd-meta">
+                You · {at}
+                {set && ` · ${set}`}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      {waiting && !answers.length && <div className="sd-event sd-event--center">No answer yet.</div>}
+    </section>
+  );
+}
+
 // A story's Activity: everything that happened to it, in order. Each attempt's conversation under who worked on
-// which step (Eli's build, then Morgan's review), your part between them (build plan area 16), and for a source
-// story where its integration stands and where its fix went from there (1.1). The director (October 24): it showed
-// one step at a time and felt like it was missing a lot.
+// which step (Eli's build, then Morgan's review), the question an attempt asked with its answers right after it, your
+// part between them (build plan area 16), and for a source story where its integration stands and where its fix
+// went from there (1.1). The director (October 24): it showed one step at a time and felt like it was missing a lot.
 function StoryActivity({
   projectId,
   task,
@@ -1424,6 +1521,7 @@ function StoryActivity({
       (isSourceStory(task) && (stage?.phase === 'integration' || stage?.current === 'integrated'));
   // Your part goes before the first attempt that started after it, or before the attempt it started.
   const between = parts.filter(part => !part.integration),
+    waiting = waitingQuestion(task, attempts),
     blocks: ReactNode[] = [];
   let next = 0;
   for (const attempt of ordered) {
@@ -1445,6 +1543,19 @@ function StoryActivity({
         looks={looks}
       />,
     );
+    const asked = exchange(task, attempt);
+    if (asked)
+      blocks.push(
+        <QuestionExchange
+          key={`${attempt.id} exchange`}
+          task={task}
+          studio={studio}
+          attempt={attempt}
+          looks={looks}
+          asked={asked}
+          waiting={waiting?.id === attempt.id}
+        />,
+      );
   }
   for (const part of between.slice(next)) blocks.push(<PartLine key={part.key} projectId={projectId} part={part} />);
   return (
