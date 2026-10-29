@@ -131,6 +131,7 @@ test('Settings links the records it keeps elsewhere and changes where candidate 
   ).toEqual([
     'General',
     'Repository',
+    'Visual check',
     'House rules',
     'Workflows',
     'Records',

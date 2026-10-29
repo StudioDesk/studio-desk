@@ -1,7 +1,7 @@
 // Settings, as the canvas draws it (v1.0 item 23): a section nav beside the sections. This project: its name, goal
-// and direction, its repository, its house rules, its workflows and its records. Every project: running work, the
-// command-line tools, the projects on this computer and the appearance, which belong to this computer, so a change
-// there reaches every project. Every change applies to work that starts after it.
+// and direction, its repository, its visual check, its house rules, its workflows and its records. Every project:
+// running work, the command-line tools, the projects on this computer and the appearance, which belong to this
+// computer, so a change there reaches every project. Every change applies to work that starts after it.
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useId, useState, type ReactNode } from 'react';
@@ -31,6 +31,7 @@ import { queryKeys, useStudio } from './records';
 import { usageHolds, type StudioState } from './studio-runs';
 import { useToast } from './toast';
 import { tryKeys, useTryView } from './try-it';
+import { VisualCheckSettings } from './visual-check-settings';
 
 // A settings page's trail: Home, then Settings.
 export function settingsTrail(projectId: string) {
@@ -47,6 +48,7 @@ export function settingsTrail(projectId: string) {
 const sections = [
   { id: 'general', label: 'General', group: 'This project' },
   { id: 'repository', label: 'Repository' },
+  { id: 'visual-check', label: 'Visual check' },
   { id: 'rules', label: 'House rules' },
   { id: 'workflows', label: 'Workflows' },
   { id: 'records', label: 'Records' },
@@ -1408,6 +1410,9 @@ export function SettingsPage({ projectId }: { projectId: string }) {
         <div className="sd-settings__sections">
           <General key={`general-${state.project.revision}`} projectId={projectId} state={state} index={index} />
           <Repository projectId={projectId} state={state} />
+          <Section id="visual-check" title="Visual check">
+            <VisualCheckSettings projectId={projectId} state={state} />
+          </Section>
           <HouseRules key={`rules-${state.autonomy?.policy?.revision}`} projectId={projectId} state={state} />
           <Workflows projectId={projectId} state={state} />
           <Records projectId={projectId} />
