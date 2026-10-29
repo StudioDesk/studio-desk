@@ -117,6 +117,12 @@ test('an agent that asks stops with its question recorded, uses none of its atte
   const { schemaVersion, ...recorded } = asking;
   assert.equal(schemaVersion, 'question-v1');
   assert.deepEqual(attempt.question, recorded);
+  // A choice the director kept in their own words is theirs, which auto mode never answers (October 29: a tone the
+  // director called "my call" was marked inside the story and answered by auto mode).
+  assert.match(
+    attempt.instructions.text,
+    /always "director" when the director's own words say the choice is theirs or ask to be asked, such as "my call" or "ask me"/,
+  );
   assert.equal(c.store.task(id).reason, `Asks: ${asking.ask}`);
   assert.equal(countsTowardLimit(attempt), false, 'asking uses none of the attempts');
   assert.equal(c.app.runner.registries.workflows.stageAttempts(c.store, c.store.task(id)).length, 0);
