@@ -135,6 +135,8 @@ import {
   reassignProjectDraft,
 } from './core/project-organization.mjs';
 import { developmentOrganization } from './organizations/studio-development/project.mjs';
+import { toldView } from './core/instructions.mjs';
+import { formatRules } from './core/rules.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const publicRoot = path.join(root, 'public');
@@ -617,6 +619,22 @@ export function createStudio({
         });
         res.end(tryOutput(store, parts[2]));
         return;
+      }
+      // What one agent of the project is told, as rules, with its drafts (1.2 step 1).
+      if (
+        parts[0] === 'api' &&
+        parts[1] === 'projects' &&
+        parts[3] === 'agents' &&
+        parts[5] === 'told' &&
+        parts.length === 6 &&
+        req.method === 'GET'
+      ) {
+        store.project(parts[2]);
+        try {
+          return json(res, toldView(projectOrganization(store, parts[2]), parts[4]));
+        } catch (error) {
+          fail(error.message, error.status);
+        }
       }
       if (parts[0] === 'api' && parts[1] === 'projects' && parts.length === 4 && req.method === 'GET') {
         const projectId = parts[2];
@@ -2314,13 +2332,22 @@ export function createStudio({
           )
             fail('Instruction scope is not in this project.');
           if (data.baseRevision !== doc.revision) fail('Published instructions changed. Refresh before saving.', 409);
-          if (action === 'draft')
+          if (action === 'draft') {
+            // A draft is its whole text, or its rules (1.2 step 1), which the controller writes as that text.
+            if (data.rules !== undefined && data.text !== undefined) fail('Send a draft as its text or as its rules.');
+            let draft = data.text;
+            if (data.rules !== undefined)
+              try {
+                draft = formatRules(data.rules);
+              } catch (error) {
+                fail(error.message);
+              }
             doc.draft = {
-              text: text(data.text, 'Instruction draft', 48000, true),
+              text: text(draft, 'Instruction draft', 48000, true),
               baseRevision: doc.revision,
               savedAt: new Date().toISOString(),
             };
-          else if (action === 'discard') doc.draft = null;
+          } else if (action === 'discard') doc.draft = null;
           else if (action === 'publish') {
             if (!doc.draft || doc.draft.baseRevision !== doc.revision) fail('Save a current draft before publishing.');
             if (data.text !== doc.draft.text)

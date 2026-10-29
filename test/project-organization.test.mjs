@@ -381,3 +381,92 @@ test('explicit project configuration corrects a legacy pending software proposal
   assert.match(c.app.store.task(after.id).reason, /no longer matches its accepted proposal/);
   assert.equal(c.app.store.attempts(after.id).length, 0);
 });
+
+test('what an agent is told reads its documents as rules in the order its attempts read them, and a draft sent as rules is the text its next attempt reads', async t => {
+  const c = await setup(t),
+    { project } = await c.development(),
+    told = async workerId => {
+      const response = await fetch(`${c.origin}/api/projects/${project.id}/agents/${workerId}/told`);
+      return { status: response.status, data: await response.json() };
+    };
+  const before = (await told('W-02')).data;
+  assert.deepEqual(
+    before.layers.map(layer => [layer.layer, layer.scope, layer.id, layer.editable]),
+    [
+      ['every-project', 'company', 'company', false],
+      ['project', 'company', 'company', true],
+      ['team', 'team', 'engineering', true],
+      ['own', 'employee', 'W-02', true],
+    ],
+  );
+  assert.deepEqual(before.agent, {
+    id: 'W-02',
+    name: before.agent.name,
+    teamId: 'engineering',
+    team: 'Engineering',
+    role: 'Software engineer',
+  });
+  const organization = projectOrganization(c.app.store, project.id),
+    everyone = organization.workers.map(worker => worker.id);
+  assert.equal(before.layers[0].readers, null);
+  assert.deepEqual(before.layers[1].readers, everyone);
+  assert.deepEqual(
+    before.layers[2].readers,
+    organization.workers.filter(worker => worker.team === 'Engineering').map(worker => worker.id),
+  );
+  assert.deepEqual(before.layers[3].readers, ['W-02']);
+  // A document written before rules had names reads as one rule without a name per paragraph.
+  const own = organization.instructions.employees['W-02'];
+  assert.deepEqual(
+    before.layers[3].rules,
+    own.text.split(/\n\s*\n/).map(text => ({ title: null, text: text.trim() })),
+  );
+  assert.equal(before.receives.drafts, 0);
+
+  const draft = (body, scope = 'employee', id = 'W-02') =>
+    c.request(`/api/instructions/${scope}/${id}/draft`, { projectId: project.id, baseRevision: 1, ...body });
+  const rules = [
+    { title: 'Stay inside the story', text: 'Change only the files the story may change.' },
+    { title: null, text: 'Hand off what changed.' },
+  ];
+  const refused = await draft({ rules: [{ title: 'Two paragraphs', text: 'One.\n\nTwo.' }] });
+  assert.equal(refused.status, 400);
+  assert.match(refused.data.error, /Rule 1 is one paragraph/);
+  assert.equal((await draft({ rules, text: 'Both.' })).status, 400);
+  const saved = await draft({ rules });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal(
+    saved.data.draft.text,
+    '**Stay inside the story.** Change only the files the story may change.\n\nHand off what changed.',
+  );
+  const drafted = (await told('W-02')).data;
+  assert.deepEqual(drafted.layers[3].draft.rules, rules);
+  assert.equal(drafted.layers[3].draft.current, true);
+  assert.equal(drafted.layers[3].revision, 1);
+  assert.equal(drafted.receives.drafts, 1);
+  assert.match(drafted.receives.text, /# Project employee: W-02 \(revision 2\)\n\n\*\*Stay inside the story\.\*\*/);
+  // Another agent on the team reads the same team rules, and none of this draft.
+  const teammate = organization.workers.find(worker => worker.id !== 'W-02');
+  assert.equal((await told(teammate.id)).data.receives.drafts, 0);
+  assert.equal((await told('W-404')).status, 404);
+
+  // Published, the draft is exactly what the agent's next attempt reads first.
+  assert.equal(
+    (
+      await c.request('/api/instructions/employee/W-02/publish', {
+        projectId: project.id,
+        baseRevision: 1,
+        text: saved.data.draft.text,
+      })
+    ).status,
+    200,
+  );
+  const published = (await told('W-02')).data;
+  assert.equal(published.receives.text, drafted.receives.text);
+  assert.deepEqual(published.layers[3].rules, rules);
+  assert.equal(published.layers[3].draft, null);
+  const task = await c.create(project.id);
+  assert.equal((await c.request(`/api/tasks/${task.id}/start`, { projectId: project.id })).status, 202);
+  const attempt = await c.wait(task.id);
+  assert.ok(attempt.instructions.text.startsWith(published.receives.text + '\n\n# '));
+});

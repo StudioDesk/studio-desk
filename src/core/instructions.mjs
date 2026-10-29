@@ -1,18 +1,30 @@
 import { hash } from './contracts.mjs';
 import { keptTopics, questionFile, questionKind, questionSchema } from './questions.mjs';
+import { parseRules } from './rules.mjs';
 
-// Domain context and adapter delivery details are resolved before compilation.
-// This compiler has no task-kind or provider-specific dispatch branches.
-export function compileInstructions(org, worker, task, attemptId, workspace, inputs, context) {
+// The instruction documents an agent reads, in the order it reads them: every project's shared company document
+// when the project has its own, the project's (or the shared) company document, its team's and its own.
+export function instructionDocuments(org, worker) {
   const team = org.teams.find(t => t.name === worker.team);
-  const docs = [
+  return [
     ...(org.sharedCompanyInstructions ? [org.sharedCompanyInstructions] : []),
     org.instructions.company,
     org.instructions.teams[team.id],
     org.instructions.employees[worker.id],
   ];
+}
+// A document's heading in the compiled instructions.
+export const documentTitle = d => `${d.projectId ? 'Project ' : ''}${d.scope}: ${d.id} (revision ${d.revision})`;
+// A layer as the compiled instructions write it.
+export const layerText = layer => `# ${layer.title}\n\n${layer.text}`;
+
+// Domain context and adapter delivery details are resolved before compilation.
+// This compiler has no task-kind or provider-specific dispatch branches.
+export function compileInstructions(org, worker, task, attemptId, workspace, inputs, context) {
+  const team = org.teams.find(t => t.name === worker.team);
+  const docs = instructionDocuments(org, worker);
   const layers = docs.map(d => ({
-    title: `${d.projectId ? 'Project ' : ''}${d.scope}: ${d.id} (revision ${d.revision})`,
+    title: documentTitle(d),
     text: d.text,
     revision: d.revision,
     scope: d.scope,
@@ -100,6 +112,74 @@ export function compileInstructions(org, worker, task, attemptId, workspace, inp
       2,
     ),
   });
-  const text = layers.map(l => `# ${l.title}\n\n${l.text}`).join('\n\n');
+  const text = layers.map(layerText).join('\n\n');
   return { version: 'studio-instructions-v1', compiledAt: new Date().toISOString(), layers, text, hash: hash(text) };
+}
+
+// What one agent is told (1.2 step 1): its instruction documents in the order it reads them, each as rules with who
+// else reads it and its draft, and the exact text they put at the start of its next attempt's instructions with each
+// current draft published in place. A draft saved on an earlier revision is shown but left out of that text, since
+// it can no longer be published.
+export function toldView(org, workerId) {
+  const worker = org.workers.find(item => item.id === workerId && !item.deletedAt);
+  if (!worker) throw Object.assign(new Error('This agent is not in this project.'), { status: 404 });
+  const team = org.teams.find(item => item.name === worker.team),
+    readers = doc =>
+      doc.scope === 'company'
+        ? org.workers.filter(item => !item.deletedAt).map(item => item.id)
+        : doc.scope === 'team'
+          ? org.workers.filter(item => !item.deletedAt && item.team === team.name).map(item => item.id)
+          : [worker.id];
+  const docs = instructionDocuments(org, worker),
+    layers = docs.map(doc => {
+      const everyProject = doc === org.sharedCompanyInstructions,
+        current = !!doc.draft && doc.draft.baseRevision === doc.revision;
+      return {
+        layer: everyProject
+          ? 'every-project'
+          : doc.scope === 'company'
+            ? 'project'
+            : doc.scope === 'team'
+              ? 'team'
+              : 'own',
+        scope: doc.scope,
+        id: doc.id,
+        projectId: doc.projectId ?? null,
+        // Every project's shared document is edited where the shared organization is, never from one project.
+        editable: !everyProject,
+        revision: doc.revision,
+        publishedAt: doc.publishedAt ?? null,
+        // Who reads it: everyone in the project for its company document (every project, for the shared one).
+        readers: everyProject ? null : readers(doc),
+        text: doc.text,
+        rules: parseRules(doc.text),
+        draft: doc.draft
+          ? {
+              baseRevision: doc.draft.baseRevision,
+              savedAt: doc.draft.savedAt ?? null,
+              current,
+              text: doc.draft.text,
+              rules: parseRules(doc.draft.text),
+            }
+          : null,
+      };
+    });
+  const text = docs
+    .map((doc, index) =>
+      layers[index].draft?.current
+        ? layerText({ title: documentTitle({ ...doc, revision: doc.revision + 1 }), text: doc.draft.text })
+        : layerText({ title: documentTitle(doc), text: doc.text }),
+    )
+    .join('\n\n');
+  return {
+    agent: {
+      id: worker.id,
+      name: worker.displayName ?? worker.name ?? worker.id,
+      teamId: team.id,
+      team: team.name,
+      role: worker.role ?? worker.jobTitle ?? null,
+    },
+    layers,
+    receives: { text, drafts: layers.filter(layer => layer.draft?.current).length },
+  };
 }
