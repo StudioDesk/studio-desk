@@ -509,3 +509,41 @@ test("the director's accept of a review that asks for changes and fails a check 
     ],
   );
 });
+
+test('an idea sent with library files left out does without them from its first step, and records what it left out', async t => {
+  const c = await setup(t),
+    projectId = await c.project('Library guide', shapes.bench),
+    add = async (name, text) =>
+      (
+        await c.request(`/api/projects/${projectId}/library`, {
+          projectId,
+          name,
+          purpose: `The ${name.toLowerCase()}.`,
+          file: { name: 'file.md', data: Buffer.from(text).toString('base64') },
+        })
+      ).data;
+  const style = await add('Style', '# Style\n'),
+    old = await add('Old style', '# Old\n');
+  const intake = await c.request('/api/intake', {
+    projectId,
+    idea: 'Write a short welcome page.',
+    libraryLeftOut: [old.id],
+  });
+  assert.equal(intake.status, 201, JSON.stringify(intake.data));
+  assert.deepEqual(c.store.run(intake.data.runId).libraryLeftOut, [old.id]);
+  const planId = intake.data.taskIds[0];
+  await c.until(() => c.store.task(planId).lastAttemptId, 'the planner starts');
+  const attempt = c.store.attempt(c.store.task(planId).lastAttemptId);
+  assert.deepEqual(
+    attempt.libraryReferences.map(item => item.entryId),
+    [style.id],
+  );
+  assert.deepEqual(attempt.libraryLeftOut, [{ entryId: old.id, name: 'Old style' }]);
+  const unknown = await c.request('/api/intake', {
+    projectId,
+    idea: 'Another page.',
+    libraryLeftOut: ['lib-00000000-0000-4000-8000-000000000000'],
+  });
+  assert.equal(unknown.status, 400);
+  assert.match(unknown.data.error, /Leave out only entries of this project's library/);
+});

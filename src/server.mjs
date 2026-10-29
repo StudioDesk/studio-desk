@@ -907,11 +907,11 @@ export function createStudio({
             !Object.hasOwn(data, 'projectId') ||
             !Object.hasOwn(data, 'idea') ||
             Object.keys(data).some(
-              key => !['projectId', 'idea', 'files', 'autoMode', 'line', 'milestone'].includes(key),
+              key => !['projectId', 'idea', 'files', 'autoMode', 'line', 'milestone', 'libraryLeftOut'].includes(key),
             )
           )
             fail(
-              'Idea intake accepts projectId, idea, optional files, optional autoMode and an optional line or milestone.',
+              'Idea intake accepts projectId, idea, optional files, optional autoMode, an optional line or milestone and optional library entries to leave out.',
             );
           const projectId = data.projectId;
           store.project(projectId);
@@ -929,6 +929,7 @@ export function createStudio({
                 general: url.pathname === '/api/intake',
                 line: data.line,
                 milestone: data.milestone,
+                libraryLeftOut: data.libraryLeftOut,
               },
               sampleIdeaFiles,
             );

@@ -8,6 +8,7 @@ import { materializeWorkflow } from './workflows.mjs';
 import { intakeSteps } from '../packs/studio-development/index.mjs';
 import { generalIntakeSteps } from '../packs/general-work/index.mjs';
 import { ideaRelease, restoreWaitingIdea, takeWaitingIdea } from '../connectors/source-milestones.mjs';
+import { libraryOf } from './library.mjs';
 
 // `general` is true on the general intake route, which also takes a source project's ideas; the Studio desk route
 // only checks and breaks down. `sampleFiles` reads a sample's waiting files as wire files when the idea takes them. A
@@ -17,7 +18,7 @@ export function startIdeaIntake(
   store,
   registries,
   runner,
-  { projectId, idea, files, autoMode, general, line, milestone, waiting },
+  { projectId, idea, files, autoMode, general, line, milestone, waiting, libraryLeftOut },
   sampleFiles,
 ) {
   store.project(projectId);
@@ -26,6 +27,16 @@ export function startIdeaIntake(
   // Auto mode for every task of the idea's run, including the stories planned from it (the redesign's idea
   // box, v1.0 item 23); null or absent follows the Settings.
   if (autoMode !== undefined) taskAutoMode(autoMode);
+  // Library entries the director leaves out of this idea's work from its first step (1.2 step 6).
+  if (libraryLeftOut !== undefined) {
+    const entries = libraryOf(store, projectId).entries;
+    if (
+      !Array.isArray(libraryLeftOut) ||
+      new Set(libraryLeftOut).size !== libraryLeftOut.length ||
+      libraryLeftOut.some(id => !entries.some(entry => entry.id === id))
+    )
+      throw Object.assign(new Error("Leave out only entries of this project's library, each once."), { status: 400 });
+  }
   const org = projectOrganization(store, projectId),
     planned =
       general && !org.taskKinds?.includes('studio-development:breakdown') && org.taskKinds?.includes('general:plan');
@@ -56,6 +67,7 @@ export function startIdeaIntake(
   const { line: branch, release } = planned ? {} : ideaRelease(store, projectId, runner, { milestone, line });
   if (branch !== undefined) run.line = branch;
   if (release) run.release = { ...release, ...(waiting ? { waiting } : {}) };
+  if (libraryLeftOut?.length) run.libraryLeftOut = [...libraryLeftOut];
   if (typeof autoMode === 'boolean') {
     run.autoMode = autoMode;
     for (const task of tasks) task.autoMode = autoMode;

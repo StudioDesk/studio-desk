@@ -13,6 +13,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { acceptedReference, artifactPath } from './artifacts.mjs';
 import { projectIdentity } from './projects.mjs';
+import { runIdOf } from './graph.mjs';
 import { checkContent, safeName } from './idea-inputs.mjs';
 
 export const libraryLimits = Object.freeze({
@@ -370,7 +371,8 @@ export function libraryFor(store, task, inputs = []) {
           leftOut: structuredClone(reviewed.libraryLeftOut || []),
         };
     }
-  const run = task.runReference?.runId ? store.run(task.runReference.runId) : null,
+  const runId = runIdOf(task),
+    run = runId ? store.run(runId) : null,
     leftOutIds = new Set(run?.libraryLeftOut || []),
     entries = currentEntries(libraryOf(store, projectId));
   let delivered = 0;
