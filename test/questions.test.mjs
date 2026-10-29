@@ -124,6 +124,10 @@ test('an agent that asks stops with its question recorded, uses none of its atte
     /always "director" when the director's own words say the choice is theirs or ask to be asked, such as "my call" or "ask me"/,
   );
   assert.equal(c.store.task(id).reason, `Asks: ${asking.ask}`);
+  // Recorded as a question, never as a stop.
+  const asked = c.store.events().filter(event => event.attemptId === attempt.id || event.attempt_id === attempt.id);
+  assert.ok(asked.some(event => event.kind === 'question_asked' && event.message === `Asks: ${asking.ask}`));
+  assert.ok(!asked.some(event => event.kind === 'blocked'));
   assert.equal(countsTowardLimit(attempt), false, 'asking uses none of the attempts');
   assert.equal(c.app.runner.registries.workflows.stageAttempts(c.store, c.store.task(id)).length, 0);
   // Without auto mode, nothing answers for the director.

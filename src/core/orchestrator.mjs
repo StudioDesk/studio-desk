@@ -1198,8 +1198,10 @@ export class Runner {
     for (const phase of [...(entry.phases || [])].reverse()) {
       this.store.finishPhase(phase, phaseOutcome, phaseEvidence.get(phase) || {});
     }
+    // An attempt that asked the director records its question as one, not as a stop (October 29: the activity log
+    // showed it as a red "blocked" line).
     this.store.event(
-      a.status,
+      a.status === 'blocked' && a.question?.ask ? 'question_asked' : a.status,
       a.taskId,
       a.id,
       resumes ? `${a.error} ${task.reason}` : task.reason || result?.summary || 'Attempt stopped.',
