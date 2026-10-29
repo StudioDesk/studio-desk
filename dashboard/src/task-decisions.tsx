@@ -14,6 +14,7 @@ import { attemptsUsed, storyPeople } from './story';
 import { useToast } from './toast';
 import { integrationAction, statusLabels, type StudioState } from './studio-runs';
 import { WholeTestRecord } from './test-record';
+import { TryButtons, TryNotes, useTry } from './try-actions';
 
 const busyJournal = ['verifying', 'preparing', 'prepared', 'applying', 'committing', 'needs-reconciliation'];
 
@@ -83,7 +84,9 @@ export function TaskDecisions({
   onRevised?: () => void;
 }) {
   const request = useRequest(projectId),
-    [asking, setAsking] = useState<Asking | null>(null);
+    [asking, setAsking] = useState<Asking | null>(null),
+    // Trying the story yourself, once its tests passed (try-actions.tsx).
+    tryIt = useTry(projectId, task, studio);
   const id = encodeURIComponent(task.id),
     act = (step: string, body?: Record<string, unknown>, done?: Request['done']) =>
       request.mutate({ path: `/api/tasks/${id}/${step}`, body, done }),
@@ -450,6 +453,31 @@ export function TaskDecisions({
       },
     });
   const sorted = [...actions].sort((a, b) => order[a.emphasis] - order[b.emphasis]);
+  // Try it sits beside Send back, or without one before the quiet decisions, the others keeping their order.
+  const sentBack = sorted.findIndex(action => action.key === 'send-back' || action.key === 'send-back-passed'),
+    quiet = sorted.findIndex(action => action.emphasis === 'quiet'),
+    tryAt = sentBack >= 0 ? sentBack + 1 : quiet >= 0 ? quiet : sorted.length;
+  const decision = (action: Action) =>
+    action.taskId ? (
+      <Link
+        key={action.key}
+        className={buttonClass(action.emphasis)}
+        to="/p/$projectId/tasks/$taskId"
+        params={{ projectId, taskId: action.taskId }}
+      >
+        {action.label}
+      </Link>
+    ) : (
+      <button
+        key={action.key}
+        type="button"
+        className={buttonClass(action.emphasis)}
+        disabled={busy}
+        onClick={action.onClick}
+      >
+        {action.label}
+      </button>
+    );
   // What landed after the change was tested, as the controller names it (landedText): each story that landed, then
   // any commits made by hand.
   const byHand = landed ? landed.commits - landed.stories.length : 0,
@@ -467,30 +495,11 @@ export function TaskDecisions({
       : [];
   return (
     <>
-      {sorted.length > 0 && (
+      {(sorted.length > 0 || tryIt) && (
         <div className="sd-stands__actions">
-          {sorted.map(action =>
-            action.taskId ? (
-              <Link
-                key={action.key}
-                className={buttonClass(action.emphasis)}
-                to="/p/$projectId/tasks/$taskId"
-                params={{ projectId, taskId: action.taskId }}
-              >
-                {action.label}
-              </Link>
-            ) : (
-              <button
-                key={action.key}
-                type="button"
-                className={buttonClass(action.emphasis)}
-                disabled={busy}
-                onClick={action.onClick}
-              >
-                {action.label}
-              </button>
-            ),
-          )}
+          {sorted.slice(0, tryAt).map(decision)}
+          {tryIt && <TryButtons state={tryIt} />}
+          {sorted.slice(tryAt).map(decision)}
         </div>
       )}
       {mergeable && landed && (
@@ -506,6 +515,7 @@ export function TaskDecisions({
           .
         </p>
       )}
+      {tryIt && <TryNotes state={tryIt} />}
       {backable && (
         <BringBack
           projectId={projectId}

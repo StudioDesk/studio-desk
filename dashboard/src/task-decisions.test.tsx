@@ -342,8 +342,9 @@ test('a story whose review passed may still be sent back; with nothing noted, th
   const user = userEvent.setup();
   open(passedStory());
   const region = await decisions();
-  // As the canvas's Story board draws it: Integrate, then Send back, then Close without integrating.
-  expect(names(region)).toEqual(['Integrate', 'Send back to Eli', 'Close without integrating']);
+  // As the canvas's Story board draws it: Integrate, then Send back with Try it beside it, its tests having passed,
+  // then Close without integrating.
+  expect(names(region)).toEqual(['Integrate', 'Send back to Eli', 'Try it', 'Close without integrating']);
   await user.click(region.getByRole('button', { name: 'Send back to Eli' }));
   const back = within(await screen.findByRole('dialog', { name: 'Send it back to Eli?' }));
   // A pass has no blocking findings, and this one noted nothing, so the note is required.
@@ -451,6 +452,7 @@ test('a story stopped by a conflict offers to merge its change onto the current 
     'Merge onto the current source',
     'Integrate again',
     'Send back to Eli',
+    'Try it',
     'Close without integrating',
   ]);
   await user.click(region.getByRole('button', { name: 'Merge onto the current source' }));
@@ -467,6 +469,7 @@ test('a story that fails only with what landed since says so, links what landed 
     'Merge onto the current source',
     'Integrate again',
     'Send back to Eli',
+    'Try it',
     'Close without integrating',
   ]);
   expect(region.getByRole('button', { name: 'Merge onto the current source' }).className).toMatch(/sd-btn--primary/);
@@ -499,7 +502,7 @@ test('an integration that failed with nothing landed and no conflict offers Inte
   open(stoppedStory({ conflicts: [] }));
   const region = await decisions();
   // Nothing landed and nothing conflicted: Integrate again stays the main action, and nothing offers a merge.
-  expect(names(region)).toEqual(['Integrate again', 'Send back to Eli', 'Close without integrating']);
+  expect(names(region)).toEqual(['Integrate again', 'Send back to Eli', 'Try it', 'Close without integrating']);
   expect(region.getByRole('button', { name: 'Integrate again' }).className).toMatch(/sd-btn--primary/);
   expect(region.queryByText(/landed after it was tested/)).toBeNull();
 });
@@ -661,7 +664,7 @@ test('a project with one line offers no Bring back, and a story that has not lan
   controller.requests = [];
   controller.bringBack['T-1'] = targets;
   open(passedStory());
-  expect(names(await decisions())).toEqual(['Integrate', 'Send back to Eli', 'Close without integrating']);
+  expect(names(await decisions())).toEqual(['Integrate', 'Send back to Eli', 'Try it', 'Close without integrating']);
   cleanup();
   open(
     landedStory({ carryOf: { storyId: 'T-0', line: 'release/1.1', reviewAttemptId: 'attempt-0', carryId: 'carry-0' } }),
