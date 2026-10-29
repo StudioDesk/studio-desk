@@ -33,6 +33,12 @@ const open = (task: Task) => {
   );
 };
 const recordReads = () => controller.reads().filter(url => url.includes('/test-record'));
+// The attempt's record page, opened from the story's Details card.
+const recordPage = async (user: ReturnType<typeof userEvent.setup>) => {
+  const card = await screen.findByRole('region', { name: 'Details' }, { timeout: 5000 });
+  await user.click(within(card).getByRole('link', { name: 'Everything recorded about this attempt' }));
+  return screen.findByRole('region', { name: 'The record' }, { timeout: 5000 });
+};
 const changes = () => controller.requests.filter(request => request.method !== 'GET');
 const testLog = { path: 'test-output.txt', hash: 'h-tests', kind: 'test-log' };
 const output = 'TAP version 13\nnot ok 1 - the door opens\n# tests 12\n# pass 11\n# fail 1\n';
@@ -112,8 +118,7 @@ test("a candidate's record opens its tests' whole record only when asked, failed
   controller.attempts = [candidate()];
   controller.testRecords['attempt-edit/attempt'] = { summary: measured('attempt'), text: output };
   open(story());
-  await user.click(await screen.findByRole('tab', { name: 'Record' }));
-  const record = within(screen.getByRole('tabpanel'));
+  const record = within(await recordPage(user));
   await user.click(record.getByText("The attempt's whole record"));
   const details = await disclosure("The tests' whole record");
   // Closed, it has read nothing.
@@ -164,8 +169,7 @@ test('the checks before a breakdown open their own run, and an attempt without a
       acceptedAttemptId: 'attempt-checks',
     }),
   );
-  await user.click(await screen.findByRole('tab', { name: 'Record' }));
-  await user.click(within(screen.getByRole('tabpanel')).getByText("The attempt's whole record"));
+  await user.click(within(await recordPage(user)).getByText("The attempt's whole record"));
   const details = await disclosure("The tests' whole record");
   expect(recordReads()).toEqual([]);
   const { failed } = await opened(user, details, "The tests' whole record");
@@ -195,7 +199,7 @@ test('the checks before a breakdown open their own run, and an attempt without a
       acceptedAttemptId: 'attempt-breakdown',
     }),
   );
-  await user.click(await screen.findByRole('tab', { name: 'Record' }));
+  await recordPage(user);
   // Its full record has loaded, and offers no whole test record.
   expect(await screen.findByText('How its time went')).toBeTruthy();
   expect(screen.queryByText("The tests' whole record")).toBeNull();
@@ -250,7 +254,7 @@ test("the story's integration journal opens the merge's whole test record for it
       },
     }),
   );
-  await user.click(await screen.findByRole('tab', { name: 'Record' }));
+  await recordPage(user);
   const details = await disclosure("The merge's whole test record");
   // It sits beside the recorded integration, and has read nothing.
   expect(details.previousElementSibling?.querySelector('summary')?.textContent).toBe('Recorded source integration');

@@ -126,9 +126,14 @@ test('the change reads one file at a time from its checked evidence, which is re
   expect(panel.getByRole('link', { name: 'Download change.diff' }).getAttribute('href')).toBe(
     '/api/attempts/attempt-edit/artifact?projectId=project-x&path=change.diff',
   );
-  // The build attempt the change rests on is in the record.
-  await user.click(screen.getByRole('tab', { name: 'Record' }));
-  expect(within(screen.getByRole('tabpanel')).getByText('attempt-edit')).toBeTruthy();
+  // The build attempt the change rests on is in the record, which Details links to.
+  await user.click(
+    within(screen.getByRole('region', { name: 'Details' })).getByRole('link', {
+      name: 'Everything recorded about this attempt',
+    }),
+  );
+  const record = await screen.findByRole('region', { name: 'The record' }, { timeout: 5000 });
+  expect(within(record).getByText('attempt-edit')).toBeTruthy();
 });
 
 // A story whose editor stopped to ask for a test file the story does not have.
@@ -205,7 +210,7 @@ for (const phone of [false, true])
       askingForFiles();
       const notice = await screen.findByRole('region', { name: 'Where it stands' }, { timeout: 5000 });
       if (!phone) {
-        await user.click(await screen.findByRole('tab', { name: 'Record' }));
+        await user.click(await screen.findByRole('tab', { name: 'Checks' }));
         // The director had closed the form.
         const form = within(screen.getByRole('region', { name: 'The brief' }))
           .getByText("Edit this story's files")
@@ -213,7 +218,7 @@ for (const phone of [false, true])
         form.open = false;
       }
       await user.click(within(notice).getByRole('button', { name: 'Edit the file list' }));
-      expect(screen.getByRole('tab', { selected: true }).textContent).toBe(phone ? 'Details' : 'Record');
+      expect(screen.getByRole('tab', { selected: true }).textContent).toBe(phone ? 'Details' : 'Checks');
       const card = screen.getByRole('region', { name: 'The brief' }),
         edit = document.getElementById('brief-edit')!;
       expect(card.contains(edit)).toBe(true);

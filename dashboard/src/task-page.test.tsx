@@ -169,7 +169,8 @@ test("a running step's Overview names who is working on it now, and Open Activit
     change(3, [{ seq: 3, type: 'task', id: 'T-1' }]);
     await screen.findByRole('heading', { name: 'Refreshed with the activity open' });
     expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
-    await user.click(screen.getByRole('tab', { name: 'Record' }));
+    // Leaving Activity stops its lines.
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
     await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
     // The running chapter the director folded opens again from the Overview.
     await user.click(screen.getByRole('tab', { name: 'Activity' }));
@@ -972,7 +973,7 @@ test("a code story's brief is a card beside its tabs, which have no Overview, an
   const card = await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }),
     brief = within(card);
   const tabs = within(screen.getByRole('tablist', { name: 'Story details' })).getAllByRole('tab');
-  expect(tabs.map(tab => tab.firstChild?.textContent)).toEqual(['Changes', 'Checks', 'Activity', 'Record']);
+  expect(tabs.map(tab => tab.firstChild?.textContent)).toEqual(['Changes', 'Checks', 'Activity']);
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
   // Beside the tabs, not in them, above who works on it and the details.
   expect(screen.getByRole('tabpanel').contains(card)).toBe(false);
@@ -1019,10 +1020,11 @@ test('other work has the brief card too, with its brief and what it was handed; 
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
 });
 
-// Other work's Overview is where its Result tab was, on a wide screen and on a phone, and no story has an Attempts tab:
-// its attempts are the strip above the tabs (a code story's wide tabs are above).
+// Other work's Overview is where its Result tab was, on a wide screen and on a phone, and no story has an Attempts or a
+// Record tab: its attempts are the strip above the tabs and each one's record a page that Details links to (a code
+// story's wide tabs are above).
 for (const [source, phone, labels, opens] of [
-  [false, false, ['Overview', 'Activity', 'Record'], 'Overview'],
+  [false, false, ['Overview', 'Activity'], 'Overview'],
   [false, true, ['Activity', 'Overview', 'Details'], 'Overview'],
   [true, true, ['Activity', 'Changes', 'Checks', 'Details'], 'Activity'],
 ] as const)

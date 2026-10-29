@@ -138,7 +138,7 @@ test('a drawing with active content is not shown', async () => {
   expect(screen.queryByRole('img', { name: 'drawing.svg' })).toBeNull();
 });
 
-test("a step's Overview shows what it handed on and how its time went; its Record, what it received and ran with", async () => {
+test("a step's Overview shows what it handed on and how its time went; its record page, what it received and ran with", async () => {
   const user = userEvent.setup();
   open('/p/project-x/tasks/T-1');
   expect(await screen.findByText('Fix the hinge next.')).toBeTruthy();
@@ -149,8 +149,13 @@ test("a step's Overview shows what it handed on and how its time went; its Recor
   expect(screen.getByText('4.2s')).toBeTruthy();
   // Nothing on the Overview is raw JSON or folded away.
   expect(screen.getByRole('tabpanel').querySelector('details')).toBeNull();
-  await user.click(screen.getByRole('tab', { name: 'Record' }));
-  const record = within(screen.getByRole('tabpanel'));
+  expect(screen.queryByRole('tab', { name: 'Record' })).toBeNull();
+  await user.click(
+    within(screen.getByRole('region', { name: 'Details' })).getByRole('link', {
+      name: 'Everything recorded about this attempt',
+    }),
+  );
+  const record = within(await screen.findByRole('region', { name: 'The record' }, { timeout: 5000 }));
   await user.click(record.getByText("The attempt's whole record"));
   expect(await record.findByText('session-9')).toBeTruthy();
   const received = within(record.getByText('Received from previous steps').closest('section')!);

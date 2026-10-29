@@ -64,7 +64,6 @@ import {
   keepInRow,
   proposer,
   ranOn,
-  RecordPanel,
   ResultPanel,
   ReviewVerdict,
   stagedWork,
@@ -86,7 +85,7 @@ const running = (status: string) => status === 'running' || status === 'stopping
 const projectQuery = (projectId: string) => `projectId=${encodeURIComponent(projectId)}`;
 
 // The project's records with this page's task and attempts, which are the newest the page holds.
-function withPage(state: StudioState, page: TaskPage): StudioState {
+export function withPage(state: StudioState, page: TaskPage): StudioState {
   const ids = new Set(page.attempts.map(attempt => attempt.id));
   return {
     ...state,
@@ -123,15 +122,18 @@ export function TaskView({ projectId, taskId }: { projectId: string; taskId: str
   return <Story projectId={projectId} task={data.task} attempts={data.attempts} studio={studio} live={state} />;
 }
 
-// "Ideas / “the idea” / Story 3 of 4", or "Ideas / T-1" for work outside any idea.
-function Crumbs({
+// "Ideas / “the idea” / Story 3 of 4", or "Ideas / T-1" for work outside any idea; with `story`, a page under the
+// story's: "Ideas / “the idea” / Story 3 / Record of attempt 2".
+export function Crumbs({
   projectId,
   here,
   idea,
+  story,
 }: {
   projectId: string;
   here: string;
   idea?: { runId: string; brief: string } | null;
+  story?: { taskId: string; label: string };
 }) {
   return (
     <nav className="sd-crumbs" aria-label="You are here">
@@ -147,12 +149,20 @@ function Crumbs({
           <span aria-hidden="true">/</span>
         </>
       )}
+      {story && (
+        <>
+          <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: story.taskId }}>
+            {story.label}
+          </Link>
+          <span aria-hidden="true">/</span>
+        </>
+      )}
       <span aria-current="page">{here}</span>
     </nav>
   );
 }
 
-type TabId = 'changes' | 'checks' | 'activity' | 'record' | 'overview' | 'details';
+type TabId = 'changes' | 'checks' | 'activity' | 'overview' | 'details';
 interface Tab {
   id: TabId;
   label: string;
@@ -237,7 +247,8 @@ function Story({
         ? 'Reviewing'
         : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^A/, 'a')}` : ''}`
       : null;
-  // The attempts are the strip above the tabs, not a tab of their own.
+  // The attempts are the strip above the tabs, not a tab of their own, and everything recorded about the one shown is
+  // its own page, linked from Details.
   const tabs: Tab[] = narrow
     ? [
         { id: 'activity', label: 'Activity' },
@@ -253,7 +264,6 @@ function Story({
             ]
           : [{ id: 'overview' as const, label: 'Overview' }]),
         { id: 'activity', label: 'Activity' },
-        { id: 'record', label: 'Record' },
       ];
   // A story with a candidate opens on its change, other work with an attempt on its Overview of what that attempt
   // returned; the rest on what happened to it. What was asked is the brief beside the tabs.
@@ -284,6 +294,7 @@ function Story({
         task={task}
         studio={studio}
         attempts={attempts}
+        shown={shown}
         stories={liveSummary(liveState).stories}
       />
     </>
@@ -296,9 +307,9 @@ function Story({
     setOpened(current => ({ ...current, [attemptId]: true }));
     setRevealing(current => ({ attemptId, count: (current?.count ?? 0) + 1 }));
   };
-  // Choosing an attempt in the strip shows it in every view: its change, its checks, its record, and its chapter in
-  // Activity, opened and brought into view there. Choosing the latest, or Back to the latest, clears the choice, and
-  // the chapter the choice opened folds or opens as it would.
+  // Choosing an attempt in the strip shows it in every view: its change, its checks, the link to its record in
+  // Details, and its chapter in Activity, opened and brought into view there. Choosing the latest, or Back to the
+  // latest, clears the choice, and the chapter the choice opened folds or opens as it would.
   const chooseAttempt = (attemptId: string) => {
     setOpened(current => {
       const next = { ...current, [attemptId]: true };
@@ -332,16 +343,6 @@ function Story({
         onToggle={(id, open) => setOpened(current => ({ ...current, [id]: open }))}
       />
     ),
-    record: () => (
-      <RecordPanel
-        projectId={projectId}
-        task={task}
-        studio={studio}
-        shown={shown}
-        full={full}
-        latest={shown?.id === latest?.id}
-      />
-    ),
     // Other work's Overview: what the latest attempt, or the one chosen, returned, under where it stands in full. A
     // staged task shows its own work first, then the later step's attempt. While the attempt runs, who is working on
     // it now; its live conversation is its chapter in Activity, and what it returns shows here when it hands back.
@@ -368,21 +369,9 @@ function Story({
       </>
     ),
     details: () => (
-      <>
-        <div
-          style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)', paddingTop: 'var(--space-14)' }}
-        >
-          {sideCards}
-        </div>
-        <RecordPanel
-          projectId={projectId}
-          task={task}
-          studio={studio}
-          shown={shown}
-          full={full}
-          latest={shown?.id === latest?.id}
-        />
-      </>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)', paddingTop: 'var(--space-14)' }}>
+        {sideCards}
+      </div>
     ),
   };
   // The chosen tab stays in view in the phone's scrolling row of tabs; only the row scrolls, never the page.
@@ -953,19 +942,22 @@ function People({ task, studio, looks }: { task: Task; studio: StudioState; look
 
 // How the next attempt runs, the limits, what the task waits for and the house rules.
 // How the next attempt runs, its limits, what it waits for and the house rules, as the canvas's side card has
-// them. Change opens what changes the next attempt: its CLI and model, its auto mode and a preview of what it will
-// be told.
+// them, and the link to everything recorded about the attempt shown (the one chosen in the strip, or else the
+// latest), once one has run. Change opens what changes the next attempt: its CLI and model, its auto mode and a
+// preview of what it will be told.
 function Details({
   projectId,
   task,
   studio,
   attempts,
+  shown,
   stories,
 }: {
   projectId: string;
   task: Task;
   studio: StudioState;
   attempts: AttemptSummary[];
+  shown?: AttemptSummary;
   stories: RunStory[];
 }) {
   const [changing, setChanging] = useState(false),
@@ -1072,6 +1064,16 @@ function Details({
         <span className="sd-eyebrow">House rules here</span>
         <span style={{ color: 'var(--ink-2)', fontSize: '14px' }}>{houseRules(task, studio)}</span>
       </div>
+      {shown && (
+        <Link
+          className="sd-link"
+          style={{ alignSelf: 'flex-start' }}
+          to="/p/$projectId/tasks/$taskId/attempts/$attemptId/record"
+          params={{ projectId, taskId: task.id, attemptId: shown.id }}
+        >
+          Everything recorded about this attempt
+        </Link>
+      )}
       <OwnerForm projectId={projectId} task={task} studio={studio} />
     </section>
   );

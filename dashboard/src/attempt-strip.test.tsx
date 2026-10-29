@@ -1,7 +1,8 @@
 // A story's attempts as a strip of chips above its tabs, where its Attempts tab was: each build or work attempt and
 // then each review, named and with how it ended, after how many of the allowed attempts are used. Choosing one shows
-// it in every view (its change, its checks, its chapter in Activity and its record) and a line under the strip names
-// it; Back to the latest returns every view to the latest. On a phone the chips scroll sideways in their own row.
+// it in every view (its change, its checks, its chapter in Activity and the Details link to its record) and a line
+// under the strip names it; Back to the latest returns every view to the latest. On a phone the chips scroll sideways
+// in their own row.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -158,6 +159,11 @@ const story = () => {
   ];
 };
 const stripOf = () => screen.findByRole('region', { name: 'Attempts' }, { timeout: 5000 });
+// The Details card's link to everything recorded about the attempt shown.
+const recordLink = () =>
+  within(screen.getByRole('region', { name: 'Details' })).getByRole('link', {
+    name: 'Everything recorded about this attempt',
+  });
 
 test('a code story with two builds and a review has three chips, the builds then the review, each named with how it ended, after the build attempts used of those allowed', async () => {
   story();
@@ -185,7 +191,7 @@ test('a code story with two builds and a review has three chips, the builds then
     within(tablist)
       .getAllByRole('tab')
       .map(tab => tab.firstChild?.textContent),
-  ).toEqual(['Changes', 'Checks', 'Activity', 'Record']);
+  ).toEqual(['Changes', 'Checks', 'Activity']);
   expect(strip.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
@@ -220,15 +226,13 @@ test('choosing the first build shows its change, its tests, its chapter and its 
     expect(lineOf(chapter).getAttribute('aria-expanded')).toBe('true');
     expect(await within(chapter).findByText('First try.')).toBeTruthy();
     await waitFor(() => expect(scrolled.mock.contexts).toContain(chapter));
-    // The record: it is the attempt shown.
-    await user.click(screen.getByRole('tab', { name: 'Record' }));
-    const shown = within(screen.getByRole('tabpanel')).getByText('Attempt shown');
-    expect(shown.nextElementSibling?.textContent).toBe('attempt-1');
+    // The record: Details links to the attempt shown's.
+    expect(recordLink().getAttribute('href')).toBe('/p/project-x/tasks/T-1/attempts/attempt-1/record');
     // Back to the latest: the line goes, and every view shows the latest again.
     await user.click(line.getByRole('button', { name: 'Back to the latest' }));
     expect(screen.queryByRole('region', { name: 'The attempt shown' })).toBeNull();
     expect(pressed(strip.getAllByRole('button'))).toEqual(['false', 'false', 'true']);
-    expect(within(screen.getByRole('tabpanel')).queryByText('Attempt shown')).toBeNull();
+    expect(recordLink().getAttribute('href')).toBe('/p/project-x/tasks/T-1/attempts/attempt-review/record');
     await user.click(screen.getByRole('tab', { name: 'Activity' }));
     const review = screen.getByRole('region', { name: 'Review' });
     expect(lineOf(review).getAttribute('aria-expanded')).toBe('true');

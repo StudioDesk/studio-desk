@@ -50,7 +50,6 @@ import {
 import { active, liveSummary, type StudioState } from './studio-runs';
 import { IntegrationJournal, type Journal } from './task-decisions';
 import { TaskRow } from './task-row';
-import { useNarrow } from './use-narrow';
 import { when } from './today';
 
 const kindOf = (attempt?: AttemptSummary) => (attempt?.assignment as { kind?: string } | undefined)?.kind;
@@ -799,7 +798,8 @@ export function AttemptStrip({
 }
 
 // Everything the controller recorded about the attempt shown, for checking provenance: its identities and
-// hashes, its instructions and delivery, what it received, its files, and the whole record.
+// hashes, its instructions and delivery, what it received, its files, and the whole record. It is the attempt's own
+// record page, which the story's Details card links to.
 export function RecordPanel({
   projectId,
   task,
@@ -1121,7 +1121,7 @@ export const proposer = (task: Task, attempts: AttemptSummary[]) =>
 
 // Work other than a source story, on its Overview: what the attempt shown returned, under who ran it and how it
 // ended, its summary, the files it returned and what it raised first, then the rest of what it handed back. What it
-// was told and received, and the whole record, are under Record.
+// was told and received, and the whole record, are on its own page, which the Details card links to.
 export function ResultPanel({
   projectId,
   task,
@@ -1134,8 +1134,7 @@ export function ResultPanel({
   shown?: AttemptSummary;
 }) {
   const detail = useAttemptDetail(projectId, shown?.id ?? '', !!shown),
-    full = shown && detail.data?.id === shown.id ? detail.data : undefined,
-    narrow = useNarrow();
+    full = shown && detail.data?.id === shown.id ? detail.data : undefined;
   if (!shown)
     return (
       <div className="sd-tabpanel">
@@ -1168,8 +1167,8 @@ export function ResultPanel({
       </div>
       <HandedBack projectId={projectId} task={task} studio={studio} attempt={shown} full={full} raisedFirst />
       <p className="sd-meta" style={{ margin: 0 }}>
-        What {name} was told, what it received and everything recorded about this attempt are under{' '}
-        {narrow ? 'Details' : 'Record'}.
+        What {name} was told, what it received and the rest of its record open from Everything recorded about this
+        attempt, in Details.
       </p>
     </div>
   );

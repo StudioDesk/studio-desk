@@ -22,6 +22,7 @@ import { TracePage } from './trace-page';
 
 // A task's page, the runs and Settings load when first opened, so Home's first load stays small.
 const TaskView = lazyRouteComponent(() => import('./task-page'), 'TaskView'),
+  RecordPage = lazyRouteComponent(() => import('./record-page'), 'RecordPage'),
   RunsPage = lazyRouteComponent(() => import('./runs-page'), 'RunsPage'),
   SettingsPage = lazyRouteComponent(() => import('./settings-page'), 'SettingsPage'),
   TeamsPage = lazyRouteComponent(() => import('./teams-page'), 'TeamsPage'),
@@ -327,6 +328,16 @@ const traceRoute = createRoute({
   },
 });
 
+// Everything recorded about one of the story's attempts, which the story's Details card links to.
+const recordRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: '/tasks/$taskId/attempts/$attemptId/record',
+  component: function AttemptRecordPage() {
+    const { projectId, taskId, attemptId } = recordRoute.useParams();
+    return <RecordPage key={attemptId} projectId={projectId} taskId={taskId} attemptId={attemptId} />;
+  },
+});
+
 export const routeTree = rootRoute.addChildren([
   homeRoute,
   projectRoute.addChildren([
@@ -348,6 +359,7 @@ export const routeTree = rootRoute.addChildren([
     activityRoute,
     taskRoute,
     traceRoute,
+    recordRoute,
   ]),
 ]);
 
