@@ -57,6 +57,40 @@ test('ready work starts, and the controller says when it queued it instead', asy
   );
 });
 
+// The page's Answer box sends the answer to an agent's question (1.2 step 2); Start runs the work again without one.
+test('while a question waits, Start assignment stays but is not the primary action', async () => {
+  const stopped = (fields: Partial<AttemptSummary> = {}): AttemptSummary => ({
+    id: 'attempt-1',
+    taskId: 'T-1',
+    status: 'blocked',
+    workerId: 'W-1',
+    result: { outcome: 'blocked', summary: 'I need a call on the old route.' },
+    ...fields,
+  });
+  controller.attempts = [
+    stopped({
+      question: {
+        ask: 'Keep the old route for one release?',
+        why: 'Two pages still call it.',
+        options: [{ label: 'Keep it' }, { label: 'Remove it' }],
+        recommended: 0,
+        choice: 'director',
+        topics: [],
+      },
+    }),
+  ];
+  open(taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' }));
+  let region = await decisions();
+  expect(region.getByRole('button', { name: 'Start assignment' }).className).not.toMatch(/sd-btn--primary/);
+  expect(region.getAllByRole('button').filter(button => button.className.includes('sd-btn--primary'))).toEqual([]);
+  cleanup();
+  // The same stop without a question has Start as its primary action.
+  controller.attempts = [stopped()];
+  open(taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' }));
+  region = await decisions();
+  expect(region.getByRole('button', { name: 'Start assignment' }).className).toMatch(/sd-btn--primary/);
+});
+
 // A result in review, with the direction its task recorded.
 const inReview = () => {
   controller.attempts = [

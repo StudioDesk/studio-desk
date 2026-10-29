@@ -31,6 +31,8 @@ import { diffStatOf, effortWords, plural, sandboxed, spoken, testTime, totalsOf 
 import { cleanExecution, ExecutionFields } from './execution-fields';
 import { workerName } from './names';
 import { CommandRequest, TaskAutoMode } from './permissions';
+import { AnswerBox, QuestionCard } from './question-card';
+import { changeableAnswer, waitingQuestion, type Answer } from './questions';
 import { queryKeys, useStudio } from './records';
 import { StoryReleaseChip } from './release-chip';
 import { SourceDiff } from './source-story';
@@ -173,8 +175,12 @@ function Story({
     looks = useMemo(
       () => agentLooks(projectId, [...studio.workers, ...(studio.employeeDirectory ?? [])]),
       [projectId, studio.workers, studio.employeeDirectory],
-    );
+    ),
+    toast = useToast();
   const latest = attempts.find(attempt => attempt.id === task.lastAttemptId) ?? attempts.at(-1),
+    // An agent's question waiting for an answer, and auto mode's answer the director may still change.
+    asking = waitingQuestion(task, attempts),
+    autoAnswer = changeableAnswer(task),
     shown = attempts.find(attempt => attempt.id === chosen) ?? latest,
     detail = useAttemptDetail(projectId, shown?.id ?? '', !!shown),
     full = detail.data?.id === shown?.id ? detail.data : undefined,
@@ -460,6 +466,30 @@ function Story({
         <h1 className="sd-storyhead__title">{task.title}</h1>
         <Steps steps={storySteps(task, studio, phase)} />
       </header>
+      {/* The question an agent stopped to ask comes first, with the box that answers it. */}
+      {asking && (
+        <QuestionCard key={asking.id} projectId={projectId} state={studio} task={task} attempt={asking}>
+          <AnswerBox
+            projectId={projectId}
+            state={studio}
+            task={task}
+            attempt={asking}
+            onSent={() =>
+              toast(`Answered. ${workerName(studio, asking.workerId ?? task.workerId)} continues from its saved work.`)
+            }
+          />
+        </QuestionCard>
+      )}
+      {autoAnswer && (
+        <AutoAnswer
+          key={`${autoAnswer.attemptId} ${autoAnswer.at ?? ''}`}
+          projectId={projectId}
+          task={task}
+          studio={studio}
+          attempts={attempts}
+          answer={autoAnswer}
+        />
+      )}
       <Stands
         projectId={projectId}
         task={task}
@@ -675,6 +705,64 @@ function AskedFiles({ task, studio }: { task: Task; studio: StudioState }) {
         </span>
       ))}
     </div>
+  );
+}
+
+// Auto mode's answer the director may still change (questions.ts changeableAnswer): what the agent asked and what
+// auto mode chose, with Change the answer, which opens the Answer box in change mode.
+function AutoAnswer({
+  projectId,
+  task,
+  studio,
+  attempts,
+  answer,
+}: {
+  projectId: string;
+  task: Task;
+  studio: StudioState;
+  attempts: AttemptSummary[];
+  answer: Answer;
+}) {
+  const toast = useToast(),
+    [changing, setChanging] = useState(false),
+    asking = attempts.find(attempt => attempt.id === answer.attemptId);
+  if (!asking?.question?.ask) return null;
+  const name = workerName(studio, asking.workerId ?? task.workerId),
+    chose = [answer.label, answer.text].filter(Boolean).join(' — ');
+  return (
+    <section className="sd-card sd-decision" aria-label="Auto mode's answer">
+      <div className="sd-decision__head">
+        <span className="sd-chip">
+          <span className="sd-chip__dot"></span>
+          Auto mode answered
+        </span>
+        <span className="sd-meta sd-decision__time">{when(answer.at ?? answer.by?.at)}</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+        <span className="sd-meta">{name} asked</span>
+        <div style={{ fontWeight: 700, textWrap: 'pretty' }}>{asking.question.ask}</div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+        <span className="sd-meta">Auto mode chose</span>
+        <div style={{ textWrap: 'pretty' }}>{chose}</div>
+      </div>
+      {changing ? (
+        <AnswerBox
+          projectId={projectId}
+          state={studio}
+          task={task}
+          attempt={asking}
+          change
+          onSent={() => toast(`Changed the answer. ${name} reworks from its saved work.`)}
+        />
+      ) : (
+        <div className="sd-decision__actions">
+          <button type="button" className="sd-btn sd-btn--sm" onClick={() => setChanging(true)}>
+            Change the answer
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
 

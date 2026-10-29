@@ -9,6 +9,7 @@ import { send, type Task } from './api';
 import { BringBack } from './bring-back';
 import { decisionState, fileRequest } from './decisions';
 import { NoteDialog, overReview } from './note-dialog';
+import { waitingQuestion } from './questions';
 import { attemptsUsed, storyPeople } from './story';
 import { useToast } from './toast';
 import { integrationAction, statusLabels, type StudioState } from './studio-runs';
@@ -111,6 +112,8 @@ export function TaskDecisions({
     } = decisionState(task, studio),
     { editor, reviewer } = storyPeople(task, studio),
     filesAsked = fileRequest(task, studio),
+    // An agent's question waiting for an answer, which the page's Answer box sends; Start runs the work without one.
+    asked = !!waitingQuestion(task, studio.attempts),
     // Counted as the page's attempt counter counts them; the controller sets no limit for a task without one.
     { used, allowed } = attemptsUsed(
       task,
@@ -179,7 +182,7 @@ export function TaskDecisions({
     actions.push({
       key: 'start',
       label: 'Start assignment',
-      emphasis: approval?.status === 'pending' || filesAsked.request ? 'default' : 'primary',
+      emphasis: approval?.status === 'pending' || filesAsked.request || asked ? 'default' : 'primary',
       // Past its attempt limit, the director's Start runs it again and may point the next attempt at the fix.
       onClick: () =>
         pastLimit

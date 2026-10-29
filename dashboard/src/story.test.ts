@@ -412,6 +412,149 @@ test('other work its review sent back is the director’s call until its rework 
   ).toEqual({ used: 1, allowed: 3, left: 2 });
 });
 
+// An agent's question to the director (1.2 step 2), as the controller records it on the attempt that stopped to ask.
+const question = {
+    ask: 'Keep the old route for one release?',
+    why: 'Two pages still call it.',
+    options: [{ label: 'Keep it' }, { label: 'Remove it', detail: 'and update both pages' }],
+    recommended: 1,
+    choice: 'inside-story',
+    topics: [],
+  },
+  asked = (fields: Partial<AttemptSummary> = {}) =>
+    build({
+      status: 'blocked',
+      testEvidence: undefined,
+      sourceCandidate: undefined,
+      artifacts: [],
+      result: { outcome: 'blocked', summary: 'I need a call on the old route.' },
+      question,
+      ...fields,
+    }),
+  askingStory = (fields: Partial<Task> = {}) =>
+    story({
+      status: 'blocked',
+      lastAttemptId: 'attempt-build',
+      sourceStage: stage({ phase: 'implementing', current: 'blocked' }),
+      ...fields,
+    });
+
+test("an agent's waiting question is the director's step until it is answered", () => {
+  expect(labels(askingStory(), [asked()])).toEqual([
+    'Approved:done',
+    'Build · asked you a question:you',
+    'Test:todo',
+    'Review:todo',
+    'Integrate:todo',
+  ]);
+  // Answered, the work is ready again and continues from its saved work: nothing is the director's.
+  const answered = askingStory({
+    status: 'ready',
+    queued: true,
+    answers: [{ attemptId: 'attempt-build', option: 1, label: 'Remove it', by: { type: 'director' } }],
+    sourceStage: stage({ phase: 'implementing', current: 'implementing' }),
+  });
+  expect(labels(answered, [asked()])).toEqual([
+    'Approved:done',
+    'Build:todo',
+    'Test:todo',
+    'Review:todo',
+    'Integrate:todo',
+  ]);
+  // Other work's own step asks the same way.
+  const work: Task = {
+      id: 'T-2',
+      title: 'Write the notes',
+      kind: 'general',
+      status: 'blocked',
+      workerId: 'W-1',
+      lastAttemptId: 'a-2',
+    },
+    asking: AttemptSummary = {
+      id: 'a-2',
+      taskId: 'T-2',
+      status: 'blocked',
+      workerId: 'W-1',
+      result: { outcome: 'blocked', summary: 'Which notes?' },
+      question,
+    };
+  expect(storySteps(work, studio([work], [asking]))).toEqual([
+    { label: 'Asked you a question', state: 'you' },
+    { label: 'Accept', state: 'todo' },
+  ]);
+  const ready = { ...work, status: 'ready', answers: [{ attemptId: 'a-2', text: 'The release notes.' }] };
+  expect(storySteps(ready, studio([ready], [asking]))).toEqual([
+    { label: 'Work', state: 'todo' },
+    { label: 'Accept', state: 'todo' },
+  ]);
+});
+
+test("a reviewer's waiting question is its review step's, not the build's", () => {
+  const review = asked({
+      id: 'attempt-review',
+      workerId: 'W-2',
+      assignment: { kind: 'studio-development:change-review' },
+    }),
+    task = askingStory({
+      lastAttemptId: 'attempt-review',
+      sourceStage: stage({ phase: 'candidate-review', current: 'blocked', candidate: pin }),
+    });
+  expect(labels(task, [build(), review])).toEqual([
+    'Approved:done',
+    'Built · 13 min:done',
+    'Tested · 534 of 534:done',
+    'Review · asked you a question:you',
+    'Integrate:todo',
+  ]);
+  expect(standing(task, studio([task], [build(), review])).title).toBe('Morgan asked you a question.');
+});
+
+test("a waiting question is the director's call, worded with the agent's name and the ask", () => {
+  const task = askingStory(),
+    stand = standing(task, studio([task], [asked()]));
+  expect(stand).toMatchObject({
+    tone: 'you',
+    chip: 'Asked you a question',
+    title: 'Eli asked you a question.',
+    detail: question.ask,
+    shortened: false,
+  });
+  // The call is the director's, so the notice shows no agent's face; the card above it does.
+  expect(stand.workerId).toBeUndefined();
+  expect(stand.full).toEqual({ title: 'Eli asked you a question.', lines: [question.ask, question.why] });
+  // Once answered, the notice no longer asks the director.
+  const answered = askingStory({ status: 'ready', answers: [{ attemptId: 'attempt-build', option: 0 }] });
+  expect(standing(answered, studio([answered], [asked()])).title).not.toMatch(/asked you a question/);
+});
+
+test("a question the work's own auto mode answers is neither the director's call nor a stop", () => {
+  const task = askingStory({ autoMode: true }),
+    state = studio([task], [asked()]);
+  expect(explain(task, state).kind).toBe('question-auto');
+  expect(labels(task, [asked()])[1]).toBe('Build:todo');
+  expect(standing(task, state)).toMatchObject({ tone: 'wait', title: 'Eli asked a question that auto mode answers.' });
+});
+
+test("a question that could not be read stays the agent's stop, and its notice says why", () => {
+  const problem = 'question.json must be readable JSON of at most 32 KiB.',
+    unread = asked({ question: { problem } }),
+    task = askingStory(),
+    state = studio([task], [unread]),
+    { kind, reason, next } = explain(task, state),
+    stand = standing(task, state);
+  expect(kind).toBe('blocked-result');
+  expect(labels(task, [unread])[1]).toBe('Build · your call:you');
+  expect(stand.title).toBe(reason);
+  expect(stand.chip).toBeUndefined();
+  expect(stand.detail).toContain(problem);
+  expect(stand.detail).toBe(`The agent's question could not be read: ${problem} ${next}`);
+  expect(stand.full.lines).toContain(`The agent's question could not be read: ${problem}`);
+  // Another stop says only what to do, as before.
+  const other = asked({ question: undefined }),
+    plain = standing(task, studio([task], [other]));
+  expect(plain.detail).toBe(explain(task, studio([task], [other])).next);
+});
+
 test('the house rules say what the director approves and what is done for them', () => {
   const task = story({}),
     rules = (kinds: object, enabled = true) =>

@@ -974,3 +974,169 @@ test("a refused Approve work leaves the page's status and decisions as they were
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(decisions()).toEqual(proposedWork);
 });
+
+// An agent's question to the director (1.2 step 2), as the controller records it on the attempt that stopped to ask.
+const question = {
+  ask: 'Keep the old route for one release?',
+  why: 'Two pages still call it.',
+  options: [{ label: 'Keep it' }, { label: 'Remove it', detail: 'and update both pages' }],
+  recommended: 1,
+  choice: 'inside-story',
+  topics: [],
+};
+const asked = (fields: Partial<AttemptSummary> = {}): AttemptSummary => ({
+  id: 'attempt-1',
+  taskId: 'T-1',
+  status: 'blocked',
+  workerId: 'W-1',
+  startedAt: '2026-10-28T10:00:00.000Z',
+  finishedAt: '2026-10-28T10:12:00.000Z',
+  assignment: { kind: 'studio-development:change' },
+  result: { outcome: 'blocked', summary: 'I need a call on the old route.' },
+  question,
+  ...fields,
+});
+// A code story whose editor stopped to ask the director.
+const askingStory = (fields: object = {}) =>
+  edit({
+    kind: 'studio-development:change',
+    status: 'blocked',
+    lastAttemptId: 'attempt-1',
+    sourceStage: { version: 'source-story-stages-v1', phase: 'implementing', current: 'blocked', history: [] },
+    ...fields,
+  });
+const posts = () => controller.requests.filter(request => request.method === 'POST');
+const toastText = () => document.querySelector('.sd-toast')?.textContent;
+
+test('a waiting question shows its card and Answer box at the top, above where the story stands, and sends the answer', async () => {
+  const user = userEvent.setup();
+  askingStory();
+  controller.attempts = [asked()];
+  open();
+  const card = await screen.findByRole('article', { name: "Eli's question" }, { timeout: 5000 }),
+    stands = screen.getByRole('region', { name: 'Where it stands' });
+  expect(card.compareDocumentPosition(stands) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(card).getByText(question.ask)).toBeTruthy();
+  // The build step and the notice are the director's: the agent asked them.
+  expect(
+    within(screen.getByRole('list', { name: 'Where the story is' })).getByText('Build · asked you a question'),
+  ).toBeTruthy();
+  expect(within(stands).getByText('Eli asked you a question.')).toBeTruthy();
+  expect(within(stands).getByText(question.ask)).toBeTruthy();
+  // Start stays, but answering is the main action.
+  expect(within(stands).getByRole('button', { name: 'Start assignment' }).className).not.toMatch(/sd-btn--primary/);
+  const box = within(within(card).getByRole('form', { name: 'Answer Eli' }));
+  await user.click(box.getByRole('button', { name: /^Remove it/ }));
+  await user.click(box.getByRole('button', { name: 'Send to Eli' }));
+  await waitFor(() =>
+    expect(posts()).toEqual([
+      {
+        url: '/api/tasks/T-1/answer',
+        method: 'POST',
+        body: { projectId: 'project-x', attemptId: 'attempt-1', option: 1 },
+      },
+    ]),
+  );
+  await waitFor(() => expect(toastText()).toBe('Answered. Eli continues from its saved work.'));
+});
+
+// Auto mode answered the question with the agent's recommendation, and the work goes on with it.
+for (const status of ['running', 'review'])
+  test(`auto mode's answer on ${status} work shows what it chose, Change the answer sends the director's, and it goes once the work is accepted`, async () => {
+    const user = userEvent.setup(),
+      at = '2026-10-28T10:13:00.000Z';
+    edit({
+      status,
+      lastAttemptId: 'attempt-2',
+      answers: [{ attemptId: 'attempt-1', option: 1, label: 'Remove it', by: { type: 'auto-mode', at }, at }],
+    });
+    controller.attempts = [
+      asked({ assignment: { kind: 'general' } }),
+      {
+        id: 'attempt-2',
+        taskId: 'T-1',
+        status,
+        workerId: 'W-1',
+        startedAt: '2026-10-28T10:14:00.000Z',
+        result: { outcome: 'completed', summary: 'Removed the old route.' },
+      },
+    ];
+    open();
+    const answer = await screen.findByRole('region', { name: "Auto mode's answer" }, { timeout: 5000 }),
+      shown = within(answer);
+    expect(shown.getByText('Eli asked')).toBeTruthy();
+    expect(shown.getByText(question.ask)).toBeTruthy();
+    expect(shown.getByText('Auto mode chose')).toBeTruthy();
+    expect(shown.getByText('Remove it')).toBeTruthy();
+    // No question waits, so no card asks; the box opens only to change the answer.
+    expect(screen.queryByRole('article', { name: "Eli's question" })).toBeNull();
+    expect(screen.queryByRole('form', { name: 'Answer Eli' })).toBeNull();
+    await user.click(shown.getByRole('button', { name: 'Change the answer' }));
+    const box = within(shown.getByRole('form', { name: 'Answer Eli' }));
+    expect(box.getByText("Your answer replaces auto mode's, and Eli reworks from its saved work.")).toBeTruthy();
+    await user.click(box.getByRole('button', { name: /^Keep it/ }));
+    await user.click(box.getByRole('button', { name: 'Change the answer' }));
+    await waitFor(() =>
+      expect(posts()).toEqual([
+        {
+          url: '/api/tasks/T-1/change-answer',
+          method: 'POST',
+          body: { projectId: 'project-x', attemptId: 'attempt-1', option: 0 },
+        },
+      ]),
+    );
+    await waitFor(() => expect(toastText()).toBe('Changed the answer. Eli reworks from its saved work.'));
+    // Accepted work keeps auto mode's answer for good.
+    edit({ status: 'done', acceptedAttemptId: 'attempt-2' });
+    controller.attempts = [controller.attempts[0]!, { ...controller.attempts[1]!, status: 'accepted' }];
+    change(2, [{ seq: 2, type: 'task', id: 'T-1', projectId: 'project-x' }]);
+    await waitFor(() => expect(screen.queryByRole('region', { name: "Auto mode's answer" })).toBeNull());
+    expect(screen.getByRole('heading', { level: 1, name: 'Show finished results' })).toBeTruthy();
+  });
+
+test("a question that could not be read shows the agent's stop with why, and no Answer box", async () => {
+  const problem = 'question.json must be readable JSON of at most 32 KiB.';
+  askingStory();
+  controller.attempts = [asked({ question: { problem } })];
+  open();
+  const stands = await screen.findByRole('region', { name: 'Where it stands' }, { timeout: 5000 });
+  expect(
+    await within(stands).findByText(
+      'The employee could not complete the assignment with the available inputs or access.',
+    ),
+  ).toBeTruthy();
+  expect(stands.textContent).toContain(`The agent's question could not be read: ${problem}`);
+  expect(within(stands).getByRole('button', { name: 'Start assignment' }).className).toMatch(/sd-btn--primary/);
+  expect(screen.queryByRole('article', { name: "Eli's question" })).toBeNull();
+  expect(screen.queryByRole('form', { name: 'Answer Eli' })).toBeNull();
+  expect(screen.queryByText('Build · asked you a question')).toBeNull();
+});
+
+test("the story's Attempts names the attempt that asked as not counted, and the next one is attempt 1", async () => {
+  const user = userEvent.setup();
+  askingStory({
+    status: 'running',
+    lastAttemptId: 'attempt-2',
+    sourceStage: { version: 'source-story-stages-v1', phase: 'implementing', current: 'implementing', history: [] },
+    answers: [{ attemptId: 'attempt-1', option: 1, label: 'Remove it', by: { type: 'director' } }],
+  });
+  controller.attempts = [
+    asked(),
+    {
+      id: 'attempt-2',
+      taskId: 'T-1',
+      status: 'running',
+      workerId: 'W-1',
+      startedAt: '2026-10-28T10:20:00.000Z',
+      assignment: { kind: 'studio-development:change' },
+    },
+  ];
+  open();
+  const tab = await screen.findByRole('tab', { name: /^Attempts/ }, { timeout: 5000 });
+  await user.click(tab);
+  const panel = await screen.findByRole('tabpanel'),
+    rows = [...panel.querySelectorAll('.sd-eyebrow, button')].map(item =>
+      item.tagName === 'BUTTON' ? item.querySelector('b')?.textContent : item.textContent,
+    );
+  expect(rows).toEqual(['Build · 1 of 3 attempts used', 'Asked you a question, not counted', 'Attempt 1 of 3']);
+});

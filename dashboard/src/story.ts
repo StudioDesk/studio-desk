@@ -5,7 +5,8 @@ import type { AttemptSummary, Task } from './api';
 import { askedPaths, decisionState, fileRequest } from './decisions';
 import { openPhaseOf, plural, sandboxed, testingPhases, took, totalsOf } from './evidence';
 import { workerName } from './names';
-import { active, type RunStory, type StudioState } from './studio-runs';
+import { waitingQuestion } from './questions';
+import { active, explain, type Explanation, type RunStory, type StudioState } from './studio-runs';
 import { placeIn, quoted } from './today';
 import { clip } from './your-part';
 
@@ -64,6 +65,14 @@ export function storyPeople(task: Task, studio: StudioState) {
 
 export { testingPhases } from './evidence';
 
+// The question an agent stopped to ask while it waits for an answer (questions.ts waitingQuestion), and whether it
+// is the director's to answer, as the shared rules explain it. One they leave to the work's own auto mode
+// (question-auto) is neither the director's call nor a stop.
+function questionWaiting(task: Task, studio: StudioState, explanation?: Explanation) {
+  const asking = waitingQuestion(task, studio.attempts);
+  return { asking, yours: !!asking && (explanation ?? explain(task, studio)).kind === 'question' };
+}
+
 // The source phase the task's running attempt is in, as the compact record carries it; the story page reads the
 // same from the full record.
 export const phaseOf = (task: Task, studio: StudioState) =>
@@ -85,14 +94,16 @@ export function storySteps(task: Task, studio: StudioState, phase: string | null
 function sourceSteps(task: Task, studio: StudioState, phase: string | null): Step[] {
   const { stage, build, candidate, review, reviewer } = storyPeople(task, studio),
     decision = decisionState(task, studio),
+    question = questionWaiting(task, studio, decision.explanation),
     live = active(task),
     implementing = !stage.phase || stage.phase === 'implementing',
     testing = live && implementing && testingPhases.includes(phase ?? ''),
     // The controller's own waits ("source stories run one at a time") are blocked too, but nothing stopped; one that
-    // needs the director is still theirs to answer.
+    // needs the director is still theirs to answer. An agent's waiting question is no stop either.
     stopped =
-      stage.current === 'failed' ||
-      (stage.current === 'blocked' && (!task.controllerWait || decision.explanation.requiresDirector)),
+      !question.asking &&
+      (stage.current === 'failed' ||
+        (stage.current === 'blocked' && (!task.controllerWait || decision.explanation.requiresDirector))),
     tried = implementing ? totalsOf(build) : null,
     measured = totalsOf(candidate),
     minutes = took(candidate);
@@ -103,13 +114,15 @@ function sourceSteps(task: Task, studio: StudioState, phase: string | null): Ste
         : { label: 'Building', state: 'live' }
       : candidate
         ? { label: minutes ? `Built · ${minutes} min` : 'Built', state: 'done' }
-        : implementing && stopped && decision.explanation.requiresDirector
-          ? { label: 'Build · your call', state: 'you' }
-          : tried?.tests
-            ? { label: 'Built', state: 'done' }
-            : implementing && stopped
-              ? { label: 'Build stopped', state: 'bad' }
-              : { label: 'Build', state: 'todo' };
+        : implementing && question.yours
+          ? { label: 'Build · asked you a question', state: 'you' }
+          : implementing && stopped && decision.explanation.requiresDirector
+            ? { label: 'Build · your call', state: 'you' }
+            : tried?.tests
+              ? { label: 'Built', state: 'done' }
+              : implementing && stopped
+                ? { label: 'Build stopped', state: 'bad' }
+                : { label: 'Build', state: 'todo' };
   const tested: Step = testing
     ? { label: 'Testing', state: 'live' }
     : candidate
@@ -125,9 +138,11 @@ function sourceSteps(task: Task, studio: StudioState, phase: string | null): Ste
           ? { label: `${reviewer} asked for changes`, state: decision.returnable ? 'you' : 'bad' }
           : stage.phase === 'candidate-review' && live
             ? { label: `${reviewer} reviewing`, state: 'live' }
-            : stage.phase === 'candidate-review' && stopped
-              ? { label: 'Review stopped', state: 'bad' }
-              : { label: 'Review', state: 'todo' };
+            : stage.phase === 'candidate-review' && question.yours
+              ? { label: 'Review · asked you a question', state: 'you' }
+              : stage.phase === 'candidate-review' && stopped
+                ? { label: 'Review stopped', state: 'bad' }
+                : { label: 'Review', state: 'todo' };
   const integrated: Step =
     stage.current === 'integrated'
       ? { label: 'Integrated', state: 'done' }
@@ -150,19 +165,22 @@ function workSteps(task: Task, studio: StudioState): Step[] {
     sentBack = task.status === 'blocked' && history[history.length - 1]?.outcome === 'sent-back',
     // Work sent back waits for the director's Start, unless the house rules already queued its rework and the
     // controller holds it (its agent busy, say): decided as the source story's build step decides.
-    yours = sentBack && (!task.controllerWait || decisionState(task, studio).explanation.requiresDirector);
+    yours = sentBack && (!task.controllerWait || decisionState(task, studio).explanation.requiresDirector),
+    question = questionWaiting(task, studio);
   const worked: Step = active(task)
     ? { label: 'Working', state: 'live' }
     : ['review', 'done'].includes(task.status)
       ? { label: minutes ? `Done · ${minutes} min` : 'Done', state: 'done' }
-      : sentBack
-        ? yours
-          ? { label: 'Sent back', state: 'you' }
-          : { label: 'Rework queued', state: 'todo' }
-        : ['failed', 'cancelled'].includes(task.status) ||
-            (task.status === 'blocked' && task.lastAttemptId && !task.controllerWait)
-          ? { label: 'Stopped', state: 'bad' }
-          : { label: 'Work', state: 'todo' };
+      : question.yours
+        ? { label: 'Asked you a question', state: 'you' }
+        : sentBack
+          ? yours
+            ? { label: 'Sent back', state: 'you' }
+            : { label: 'Rework queued', state: 'todo' }
+          : ['failed', 'cancelled'].includes(task.status) ||
+              (task.status === 'blocked' && task.lastAttemptId && !task.controllerWait && !question.asking)
+            ? { label: 'Stopped', state: 'bad' }
+            : { label: 'Work', state: 'todo' };
   const accepted: Step =
     task.status === 'done'
       ? { label: by === 'policy' ? 'Accepted by house rules' : 'Accepted', state: 'done' }
@@ -255,6 +273,19 @@ function stands(task: Task, studio: StudioState, phase: string | null): Told {
   }
   if (source && decision.progress?.busy)
     return { tone: 'live', title: 'Integrating. Nothing needed from you.', detail: explanation.reason };
+  // An agent's question waiting for the director, who answers it in the card above the notice. One the shared rules
+  // leave to the work's own auto mode reads as they explain it, below.
+  const question = questionWaiting(task, studio, explanation);
+  if (question.asking && question.yours) {
+    const { ask = '', why = '' } = question.asking.question ?? {};
+    return {
+      tone: 'you',
+      chip: 'Asked you a question',
+      title: `${workerName(studio, question.asking.workerId ?? task.workerId)} asked you a question.`,
+      detail: ask,
+      lines: [ask, why].filter(Boolean),
+    };
+  }
   const asking = fileRequest(task, studio);
   if (asking.request && asking.requested) {
     const asked = askedPaths(task, asking.request).length;
@@ -319,7 +350,11 @@ function stands(task: Task, studio: StudioState, phase: string | null): Told {
     stopped =
       ['failed', 'cancelled', 'blocked'].includes(task.status) &&
       (!task.controllerWait || explanation.requiresDirector),
-    tried = !stage.phase || stage.phase === 'implementing' ? totalsOf(build) : null;
+    tried = !stage.phase || stage.phase === 'implementing' ? totalsOf(build) : null,
+    // A question the agent returned that could not be read is no question: its stop (the shared rules'
+    // blocked-result) says why in the notice as well as in full.
+    problem = studio.attempts.find(attempt => attempt.id === task.lastAttemptId)?.question?.problem,
+    unread = problem ? explanation.details.find(line => line.includes(problem)) : undefined;
   return {
     tone: explanation.requiresDirector
       ? 'you'
@@ -338,7 +373,7 @@ function stands(task: Task, studio: StudioState, phase: string | null): Told {
         stopped && tried?.tests && tried.fail
           ? `The attempt's tests did not pass: ${tried.pass ?? 0} of ${tried.tests}.`
           : undefined,
-      detail: explanation.next,
+      detail: [unread, explanation.next].filter(Boolean).join(' '),
     },
   };
 }
