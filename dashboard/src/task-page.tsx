@@ -29,7 +29,9 @@ import type { AgentLook } from './design/agent-kit.js';
 import { Clapper, Icon } from './design/icons';
 import { diffStatOf, effortWords, plural, reviewOf, sandboxed, spoken, testTime, totalsOf } from './evidence';
 import { cleanExecution, ExecutionFields } from './execution-fields';
+import { isCodeProject } from './frame';
 import { workerName } from './names';
+import { PagesPanel } from './pages-panel';
 import { CommandRequest, TaskAutoMode } from './permissions';
 import { AnswerBox, QuestionCard } from './question-card';
 import { changeableAnswer, exchange, waitingQuestion, type Answer, type Exchange } from './questions';
@@ -81,6 +83,7 @@ import { tryOffered } from './try-it';
 import { TriedTile, TryPanel } from './try-panel';
 import { useNarrow } from './use-narrow';
 import { useNow } from './use-now';
+import { pagesTabShown, useStoryPages, useVisualRecord, useVisualView } from './visual-check';
 import { clip, yourPart, type Part } from './your-part';
 
 const running = (status: string) => status === 'running' || status === 'stopping';
@@ -164,7 +167,7 @@ export function Crumbs({
   );
 }
 
-type TabId = 'changes' | 'checks' | 'try' | 'activity' | 'overview' | 'details';
+type TabId = 'changes' | 'checks' | 'pages' | 'try' | 'activity' | 'overview' | 'details';
 interface Tab {
   id: TabId;
   label: string;
@@ -225,6 +228,13 @@ function Story({
     // Checks reads the build attempt chosen, with its full record, or else the candidate.
     checked = choice && !isReview(choice) ? choice : built,
     checkedFull = checked?.id === shown?.id ? full : builtFull,
+    // A code story in a code project has a Pages tab (1.2 step 8) once it names pages, its candidate recorded a visual
+    // check, or the project's check is on and its pages may still change; other work reads neither view.
+    code = source && isCodeProject(studio),
+    pagesView = useStoryPages(projectId, task.id, code).data,
+    visualView = useVisualView(projectId, code).data,
+    visualRecord = useVisualRecord(projectId, code ? built : undefined).data,
+    pagesShown = code && pagesTabShown({ pagesView, visualView, record: visualRecord }),
     // The open phase from the full record when it is the one shown, otherwise as the compact record carries it.
     phase = active(task) ? (latest?.id === shown?.id && full ? openPhase(full) : phaseOf(task, studio)) : null,
     status = statusOf(studio, task),
@@ -252,13 +262,16 @@ function Story({
         : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^A/, 'a')}` : ''}`
       : null;
   // The attempts are the strip above the tabs, not a tab of their own, and everything recorded about the one shown is
-  // its own page, linked from Details. Try it follows Checks once the story's tests passed.
+  // its own page, linked from Details. Pages follows Checks when it shows, and Try it follows them once the story's
+  // tests passed.
+  const pagesTab: Tab[] = pagesShown ? [{ id: 'pages', label: 'Pages' }] : [];
   const tryTab: Tab[] = tryable ? [{ id: 'try', label: 'Try it' }] : [];
   const tabs: Tab[] = narrow
     ? [
         { id: 'activity', label: 'Activity' },
         source ? { id: 'changes', label: 'Changes', count: stat?.files } : { id: 'overview', label: 'Overview' },
         ...(source ? [{ id: 'checks' as const, label: 'Checks' }] : []),
+        ...pagesTab,
         ...tryTab,
         { id: 'details', label: 'Details' },
       ]
@@ -267,6 +280,7 @@ function Story({
           ? [
               { id: 'changes' as const, label: 'Changes', count: stat?.files },
               { id: 'checks' as const, label: 'Checks' },
+              ...pagesTab,
               ...tryTab,
             ]
           : [{ id: 'overview' as const, label: 'Overview' }]),
@@ -339,6 +353,7 @@ function Story({
         <ChecksPanel projectId={projectId} task={task} studio={studio} attempt={checked} full={checkedFull} />
       </>
     ),
+    pages: () => <PagesPanel projectId={projectId} task={task} studio={studio} />,
     try: () => <TryPanel projectId={projectId} task={task} studio={studio} />,
     activity: () => (
       <StoryActivity
