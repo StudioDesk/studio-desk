@@ -27,7 +27,7 @@ import { AgentAvatar } from './design/avatar';
 import { agentState, attemptState } from './faces';
 import type { AgentLook } from './design/agent-kit.js';
 import { Clapper, Icon } from './design/icons';
-import { diffStatOf, effortWords, plural, sandboxed, spoken, testTime, totalsOf } from './evidence';
+import { diffStatOf, effortWords, plural, reviewOf, sandboxed, spoken, testTime, totalsOf } from './evidence';
 import { cleanExecution, ExecutionFields } from './execution-fields';
 import { workerName } from './names';
 import { CommandRequest, TaskAutoMode } from './permissions';
@@ -53,15 +53,19 @@ import {
   type Step,
 } from './story';
 import {
+  attemptChip,
   attemptName,
   AttemptsPanel,
   BriefCard,
   briefEditId,
   ChecksPanel,
+  HandedBack,
   isReview,
+  proposer,
+  ranOn,
   RecordPanel,
   ResultPanel,
-  ReviewPanel,
+  ReviewVerdict,
   stagedWork,
   StandsInFull,
   standsInFullId,
@@ -147,7 +151,7 @@ function Crumbs({
   );
 }
 
-type TabId = 'changes' | 'checks' | 'review' | 'activity' | 'attempts' | 'record' | 'result' | 'details';
+type TabId = 'changes' | 'checks' | 'activity' | 'attempts' | 'record' | 'result' | 'details';
 interface Tab {
   id: TabId;
   label: string;
@@ -175,6 +179,10 @@ function Story({
     [reading, setReading] = useState(0),
     // Each use of the notice's Edit the file list, which brings the brief's file form into view.
     [editing, setEditing] = useState(0),
+    // The chapters in Activity the director opened or folded, by attempt; the rest open as StoryActivity opens them.
+    [opened, setOpened] = useState<Record<string, boolean>>({}),
+    // Each use of the review tile, which brings the review's chapter into view once Activity shows.
+    [revealing, setRevealing] = useState<{ attemptId: string; count: number } | null>(null),
     looks = useMemo(
       () => agentLooks(projectId, [...studio.workers, ...(studio.employeeDirectory ?? [])]),
       [projectId, studio.workers, studio.employeeDirectory],
@@ -237,7 +245,6 @@ function Story({
           ? [
               { id: 'changes' as const, label: 'Changes', count: stat?.files },
               { id: 'checks' as const, label: 'Checks' },
-              { id: 'review' as const, label: 'Review' },
             ]
           : [{ id: 'result' as const, label: 'Result' }]),
         { id: 'activity', label: 'Activity' },
@@ -277,23 +284,26 @@ function Story({
       />
     </>
   );
-  // The notice's whole account heads a story's Checks, and other work's Result.
+  // The notice's whole account heads a story's Checks, and other work's Result. The review is its own chapter in
+  // Activity.
   const panels: Record<TabId, () => ReactNode> = {
     changes: () => <SourceDiff task={task} studio={studio} selectedAttemptId={chosen ?? undefined} />,
     checks: () => (
       <>
         <StandsInFull task={task} stand={stand} />
         <ChecksPanel projectId={projectId} task={task} studio={studio} attempt={built} full={builtFull} />
-        {narrow && (
-          <ReviewPanel projectId={projectId} task={task} studio={studio} review={people.review} looks={looks} />
-        )}
       </>
     ),
-    review: () => (
-      <ReviewPanel projectId={projectId} task={task} studio={studio} review={people.review} looks={looks} />
-    ),
     activity: () => (
-      <StoryActivity projectId={projectId} task={task} studio={studio} attempts={attempts} looks={looks} />
+      <StoryActivity
+        projectId={projectId}
+        task={task}
+        studio={studio}
+        attempts={attempts}
+        looks={looks}
+        opened={opened}
+        onToggle={(id, open) => setOpened(current => ({ ...current, [id]: open }))}
+      />
     ),
     attempts: () => (
       <>
@@ -399,6 +409,17 @@ function Story({
   const readInFull = () => {
     setPicked(source ? 'checks' : 'result');
     setReading(count => count + 1);
+  };
+  // The review tile opens Activity with the review's chapter open and brings that chapter into view.
+  useEffect(() => {
+    if (revealing) document.getElementById(chapterId(revealing.attemptId))?.scrollIntoView?.({ block: 'start' });
+  }, [revealing]);
+  const showReview = () => {
+    setPicked('activity');
+    const review = people.review;
+    if (!review) return;
+    setOpened(current => ({ ...current, [review.id]: true }));
+    setRevealing(current => ({ attemptId: review.id, count: (current?.count ?? 0) + 1 }));
   };
   // The brief's file form, opened and brought into view where the brief shows: beside the tabs, which stay as they
   // are, or under Details on a phone.
@@ -532,7 +553,7 @@ function Story({
         <DecisionNotes projectId={projectId} task={task} studio={studio} />
       </Stands>
       {source && people.candidate && (
-        <Tiles task={task} studio={studio} looks={looks} onShow={setPicked} narrow={narrow} />
+        <Tiles task={task} studio={studio} looks={looks} onShow={setPicked} onReview={showReview} />
       )}
       <div className="sd-story">
         <section className="sd-card sd-story__main">
@@ -778,19 +799,19 @@ function AutoAnswer({
   );
 }
 
-// The change, its tests and its review, each opening its tab.
+// The change and its tests, each opening its tab, and its review, which opens the review's chapter in Activity.
 function Tiles({
   task,
   studio,
   looks,
   onShow,
-  narrow,
+  onReview,
 }: {
   task: Task;
   studio: StudioState;
   looks: Map<string, AgentLook>;
   onShow: (tab: TabId) => void;
-  narrow: boolean;
+  onReview: () => void;
 }) {
   const { candidate, build, review, reviewer, reviewerId } = storyPeople(task, studio),
     built = candidate ?? build,
@@ -864,7 +885,7 @@ function Tiles({
         type="button"
         className="sd-tile sd-tile--raised"
         style={{ flexDirection: 'row', alignItems: 'center', gap: '14px' }}
-        onClick={() => onShow(narrow ? 'checks' : 'review')}
+        onClick={onReview}
       >
         {look && <AgentAvatar look={look} size={46} state={review ? attemptState(review) : 'idle'} />}
         <span style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
@@ -1295,8 +1316,61 @@ function Activity({
   );
 }
 
-// One attempt in the story's Activity. One with no recorded trace shows its raw log.
-function Chapter(props: {
+// The id of an attempt's chapter in the story's Activity, which the review tile brings into view.
+const chapterId = (attemptId: string) => `chapter-${attemptId}`;
+
+// One attempt in the story's Activity, under a line naming the attempt, who ran it and how it ended, which opens and
+// folds it. A folded chapter is that line alone and reads nothing.
+function Chapter({
+  open,
+  onToggle,
+  ...props
+}: {
+  projectId: string;
+  task: Task;
+  studio: StudioState;
+  attempts: AttemptSummary[];
+  attempt: AttemptSummary;
+  looks: Map<string, AgentLook>;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const { task, studio, attempts, attempt, looks } = props,
+    name = attemptName(task, attempts, attempt),
+    look = looks.get(attempt.workerId ?? ''),
+    [tone, label] = attemptChip(attempt);
+  return (
+    <section id={chapterId(attempt.id)} className="sd-attemptfold" aria-label={name}>
+      <button type="button" className="sd-attemptfold__line" aria-expanded={open} onClick={onToggle}>
+        <span className="sd-attemptfold__mark" aria-hidden="true">
+          <Icon name="down" size={16} weight={2.6} />
+        </span>
+        {look && <AgentAvatar look={look} size={28} state={attemptState(attempt)} ring={false} />}
+        <span className="sd-attemptfold__name">
+          <b>{name}</b> · {workerName(studio, attempt.workerId)}
+        </span>
+        <span className={`sd-chip${tone ? ` sd-chip--${tone}` : ''}`}>
+          <span className="sd-chip__dot"></span>
+          {label}
+        </span>
+      </button>
+      {open && <ChapterBody {...props} />}
+    </section>
+  );
+}
+
+// An open chapter: what the attempt ran on, when and for how long, as its Attempts row says, then what the agent did
+// and said (its raw log when no trace was recorded), ending with what it handed back, or a review with its verdict.
+// A running attempt's chapter is its live activity under the line that the agent is working on it now. The attempt's
+// full record is read only here.
+function ChapterBody({
+  projectId,
+  task,
+  studio,
+  attempts,
+  attempt,
+  looks,
+}: {
   projectId: string;
   task: Task;
   studio: StudioState;
@@ -1304,27 +1378,85 @@ function Chapter(props: {
   attempt: AttemptSummary;
   looks: Map<string, AgentLook>;
 }) {
-  const { projectId, task, studio, attempt, looks } = props,
-    trace = useTrace(projectId, attempt.id, running(attempt.status)),
-    [raw, setRaw] = useState(false);
-  const recorded = !trace.error && trace.data?.source !== 'none';
-  if (raw || !recorded)
-    return (
-      <>
-        <RawActivity projectId={projectId} task={task} studio={studio} attempt={attempt} looks={looks} embedded />
-        {raw && (
-          <button
-            type="button"
-            className="sd-btn sd-btn--sm"
-            style={{ alignSelf: 'flex-start' }}
-            onClick={() => setRaw(false)}
-          >
-            Back to the conversation
-          </button>
-        )}
-      </>
-    );
-  return <Conversation {...props} trace={trace.data} onRaw={() => setRaw(true)} />;
+  const live = running(attempt.status),
+    verdict = isReview(attempt) && !!attempt.finishedAt && !!reviewOf(attempt).verdict,
+    trace = useTrace(projectId, attempt.id, live),
+    detail = useAttemptDetail(projectId, attempt.id, !live && !verdict),
+    full = detail.data?.id === attempt.id ? detail.data : undefined,
+    [raw, setRaw] = useState(false),
+    recorded = !trace.error && trace.data?.source !== 'none',
+    // What it handed back ends the chapter, so its conversation leaves out the hand-off it would repeat.
+    handedBack = !live && !!attempt.result?.summary,
+    ran = ranOn(studio, attempt);
+  return (
+    <div className="sd-attemptfold__body">
+      {ran.length > 0 && <span className="sd-meta">{ran.join(' · ')}</span>}
+      {live && (
+        <>
+          <p style={{ margin: 0 }}>
+            {workerName(studio, attempt.workerId)} is working on it now. What it returns shows here when it hands it
+            back.
+          </p>
+          {carriedOf(attempt) && (
+            <p className="sd-meta" style={{ margin: 0 }}>
+              {continuation(carriedOf(attempt)!)}
+            </p>
+          )}
+        </>
+      )}
+      {raw || !recorded ? (
+        <>
+          <RawActivity
+            projectId={projectId}
+            task={task}
+            studio={studio}
+            attempt={attempt}
+            looks={looks}
+            embedded
+            handoff={!handedBack}
+          />
+          {raw && (
+            <button
+              type="button"
+              className="sd-btn sd-btn--sm"
+              style={{ alignSelf: 'flex-start' }}
+              onClick={() => setRaw(false)}
+            >
+              Back to the conversation
+            </button>
+          )}
+        </>
+      ) : (
+        <Conversation
+          projectId={projectId}
+          task={task}
+          studio={studio}
+          attempts={attempts}
+          attempt={attempt}
+          trace={trace.data && handedBack ? { ...trace.data, handoff: null } : trace.data}
+          looks={looks}
+          onRaw={() => setRaw(true)}
+        />
+      )}
+      {!live && (
+        <>
+          <div className="sd-divider">{verdict ? 'Its verdict' : 'What it handed back'}</div>
+          {verdict ? (
+            <ReviewVerdict projectId={projectId} studio={studio} review={attempt} looks={looks} />
+          ) : (
+            <HandedBack
+              projectId={projectId}
+              task={task}
+              studio={studio}
+              attempt={attempt}
+              full={full}
+              proposals={proposer(task, attempts)?.id === attempt.id}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
 }
 
 // Something you did, as your own message on the right, or something a house rule did for you, as a quiet line.
@@ -1489,22 +1621,28 @@ function QuestionExchange({
   );
 }
 
-// A story's Activity: everything that happened to it, in order. Each attempt's conversation under who worked on
-// which step (Eli's build, then Morgan's review), the question an attempt asked with its answers right after it, your
-// part between them (build plan area 16), and for a source story where its integration stands and where its fix
+// A story's Activity: everything that happened to it, in order. Each attempt's chapter, which folds, under who worked
+// on which step (Eli's build, then Morgan's review), the question an attempt asked with its answers right after it,
+// your part between them (build plan area 16), and for a source story where its integration stands and where its fix
 // went from there (1.1). The director (October 24): it showed one step at a time and felt like it was missing a lot.
+// The latest attempt's chapter and a running one's open, the earlier ones folded, until the director opens or folds
+// one (`opened`, the page's own state, so a refresh keeps it).
 function StoryActivity({
   projectId,
   task,
   studio,
   attempts,
   looks,
+  opened,
+  onToggle,
 }: {
   projectId: string;
   task: Task;
   studio: StudioState;
   attempts: AttemptSummary[];
   looks: Map<string, AgentLook>;
+  opened: Record<string, boolean>;
+  onToggle: (attemptId: string, open: boolean) => void;
 }) {
   const startOf = (attempt: AttemptSummary) => Date.parse(String(attempt.startedAt ?? '')) || Infinity,
     ordered = [...attempts].sort((a, b) => startOf(a) - startOf(b)),
@@ -1537,6 +1675,7 @@ function StoryActivity({
     blocks: ReactNode[] = [];
   let next = 0;
   for (const attempt of ordered) {
+    const open = opened[attempt.id] ?? (attempt === ordered.at(-1) || running(attempt.status));
     for (
       ;
       next < between.length &&
@@ -1553,6 +1692,8 @@ function StoryActivity({
         attempts={attempts}
         attempt={attempt}
         looks={looks}
+        open={open}
+        onToggle={() => onToggle(attempt.id, !open)}
       />,
     );
     const asked = exchange(task, attempt);
@@ -1625,6 +1766,7 @@ function RawActivity({
   attempt,
   looks,
   embedded = false,
+  handoff = true,
 }: {
   projectId: string;
   task: Task;
@@ -1633,6 +1775,8 @@ function RawActivity({
   looks: Map<string, AgentLook>;
   // Inside the story's Activity, among the other attempts, rather than a panel of its own.
   embedded?: boolean;
+  // Whether it shows the summary the attempt handed off, which a chapter ending with what it handed back leaves out.
+  handoff?: boolean;
 }) {
   const stream = useLiveStream(),
     [lines, setLines] = useState<LogEvent[] | null>(null),
@@ -1758,7 +1902,7 @@ function RawActivity({
           {lines.map(line => `${line.time} ${line.message}`).join('\n')}
         </pre>
       )}
-      {attempt.result?.summary && (
+      {handoff && attempt.result?.summary && (
         <div
           style={{
             marginLeft: look ? '44px' : 0,

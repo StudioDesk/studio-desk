@@ -515,45 +515,27 @@ export function ChecksPanel({
   );
 }
 
-// The independent review: its verdict, what the reviewer said, its findings and notes, and what it did not check.
-export function ReviewPanel({
+// A review's verdict, as its chapter in the story's Activity ends: what the reviewer decided, what they said, their
+// findings and notes, and what they did not check.
+export function ReviewVerdict({
   projectId,
-  task,
   studio,
   review,
   looks,
 }: {
   projectId: string;
-  task: Task;
   studio: StudioState;
-  review?: AttemptSummary;
+  review: AttemptSummary;
   looks: Map<string, AgentLook>;
 }) {
-  const { reviewer, reviewerId } = storyPeople(task, studio),
-    report = useRecordedJson<{ unperformedChecks?: string[] }>(
-      projectId,
-      review,
-      'source-change-review.json',
-      !!review?.finishedAt,
-    ),
-    look = looks.get(reviewerId ?? '');
-  if (!review || !review.finishedAt)
-    return (
-      <div className="sd-tabpanel">
-        <p style={{ margin: 0, color: 'var(--ink-2)' }}>
-          {review
-            ? `${reviewer} is reviewing the candidate now.`
-            : `No review yet. ${reviewer === 'the reviewer' ? 'The reviewer' : reviewer} reviews the candidate after its tests pass.`}
-        </p>
-      </div>
-    );
-  const verdict = review.candidateReviewVerdict,
-    findings = (review.candidateReviewFindings as string[] | undefined) ?? [],
-    notes = (review.candidateReviewNotes as string[] | undefined) ?? [],
+  const reviewer = workerName(studio, review.workerId),
+    report = useRecordedJson<{ unperformedChecks?: string[] }>(projectId, review, 'source-change-review.json', true),
+    look = looks.get(review.workerId ?? ''),
+    { verdict, findings, notes } = reviewOf(review),
     model = modelOf(review),
     minutes = took(review);
   return (
-    <div className="sd-tabpanel" style={{ gap: 'var(--space-16)' }}>
+    <>
       <div style={{ display: 'flex', gap: 'var(--space-14)', alignItems: 'center', flexWrap: 'wrap' }}>
         {look && <AgentAvatar look={look} size={46} state={attemptState(review)} />}
         <div style={{ flex: '1 1 240px' }}>
@@ -605,7 +587,7 @@ export function ReviewPanel({
         </Section>
       )}
       <Unchecked title={`${reviewer} did not check`} names={report.data?.unperformedChecks ?? []} />
-    </div>
+    </>
   );
 }
 
@@ -664,6 +646,24 @@ export function attemptChip(attempt: AttemptSummary) {
       : ['ok', 'Accepted'];
   }
   return statusChips[attempt.status] ?? ['', attempt.status];
+}
+
+// What an attempt ran on, when and for how long, after who ran it on its Attempts row and in its chapter: its CLI,
+// model and effort, its mode, when it started and finished, and its minutes.
+export function ranOn(studio: StudioState, attempt: AttemptSummary) {
+  const minutes = took(attempt);
+  return [
+    [
+      cliName(studio, attempt),
+      modelOf(attempt),
+      attempt.requestedEffort ? `${effortWords(String(attempt.requestedEffort))} effort` : '',
+    ]
+      .filter(Boolean)
+      .join(', '),
+    (attempt.configuration as { mode?: string } | undefined)?.mode,
+    attempt.startedAt ? `${when(attempt.startedAt)}${attempt.finishedAt ? ` to ${when(attempt.finishedAt)}` : ''}` : '',
+    minutes ? `${minutes} min` : '',
+  ].filter((part): part is string => !!part);
 }
 
 // The files git set aside for the editor when the attempt was prepared, each with why (October 27): on a merge onto
@@ -732,9 +732,7 @@ export function AttemptsPanel({
         ),
         ...group.items.map((attempt, index) => {
           const [tone, label] = attemptChip(attempt),
-            look = looks.get(attempt.workerId ?? ''),
-            minutes = took(attempt),
-            model = modelOf(attempt);
+            look = looks.get(attempt.workerId ?? '');
           return (
             <button
               key={attempt.id}
@@ -751,23 +749,7 @@ export function AttemptsPanel({
                   {attemptName(task, attempts, attempt, true)}
                 </b>
                 <span className="sd-meta">
-                  {[
-                    workerName(studio, attempt.workerId),
-                    [
-                      cliName(studio, attempt),
-                      model,
-                      attempt.requestedEffort ? `${effortWords(String(attempt.requestedEffort))} effort` : '',
-                    ]
-                      .filter(Boolean)
-                      .join(', '),
-                    (attempt.configuration as { mode?: string } | undefined)?.mode,
-                    attempt.startedAt
-                      ? `${when(attempt.startedAt)}${attempt.finishedAt ? ` to ${when(attempt.finishedAt)}` : ''}`
-                      : '',
-                    minutes ? `${minutes} min` : '',
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
+                  {[workerName(studio, attempt.workerId), ...ranOn(studio, attempt)].join(' · ')}
                 </span>
               </span>
               <span className={`sd-chip${tone ? ` sd-chip--${tone}` : ''}`}>
@@ -995,9 +977,120 @@ export function RecordPanel({
   );
 }
 
-// Work other than a source story: what the attempt returned, read in place (item 14): its picture, what it said
-// it did, the checks it reported, the text it wrote, its files, what it handed on and how its time went. What it
-// was told and received, and the whole record, are under Record.
+// What an attempt handed back, read in place (item 14): why it stopped, its picture, what it said it did, the files
+// it returned, the checks it reported, what it raised, what it handed on, the work it proposed or its plan, its own
+// test runs, how its time went, the work it continued and what git set aside. Other work's Result shows it for the
+// attempt shown, and each attempt's chapter in the story's Activity ends with it. `full` is the attempt's full
+// record once read; `proposals` adds the work the task proposed, which its chapters show under the attempt that
+// proposed it.
+export function HandedBack({
+  projectId,
+  task,
+  studio,
+  attempt: shown,
+  full,
+  proposals = true,
+}: {
+  projectId: string;
+  task: Task;
+  studio: StudioState;
+  attempt: AttemptSummary;
+  full?: FullAttempt;
+  proposals?: boolean;
+}) {
+  const attempt: FullAttempt = full ?? shown,
+    name = workerName(studio, attempt.workerId),
+    entries = attemptEntries(attempt),
+    picture = pictureOf(attempt, task.kind),
+    { verdict } = reviewOf(attempt),
+    result = attempt.result as { summary?: string; issues?: string[]; handoff?: string; checks?: unknown } | undefined,
+    checks = Array.isArray(result?.checks) ? (result.checks as Check[]) : [],
+    carried = carriedOf(attempt) ?? carriedOf(shown),
+    stories = liveSummary(studio).stories,
+    proposed = proposals
+      ? ((task.materializedTaskIds ?? task.proposedTaskIds) as string[] | undefined)
+          ?.map(id => studio.tasks.find(item => item.id === id))
+          .filter(item => !!item)
+      : undefined;
+  const part = (title: string, body: ReactNode) => (
+    <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)', minWidth: 0 }}>
+      <span className="sd-eyebrow">{title}</span>
+      {body}
+    </section>
+  );
+  return (
+    <>
+      {attempt.error && (
+        <p style={{ margin: 0, color: 'var(--bad)' }}>
+          <b>It stopped:</b> {attempt.error}
+        </p>
+      )}
+      {picture && <Deliverable projectId={projectId} attempt={attempt} item={picture} />}
+      {result?.summary &&
+        part(`What ${name} returned`, <p style={{ margin: 0, fontSize: '16px' }}>{result.summary}</p>)}
+      {verdict && (
+        <span className="sd-chip" style={{ alignSelf: 'flex-start' }}>
+          Review verdict · {verdict}
+        </span>
+      )}
+      {entries.length > 0 && part('Files it returned', <FileViewer projectId={projectId} entries={entries} />)}
+      {checks.length > 0 &&
+        part(
+          'The checks it reported',
+          <div>
+            {checks.map((check, index) => (
+              <CheckRow key={index} check={check} />
+            ))}
+          </div>,
+        )}
+      {result?.issues?.length
+        ? part(
+            'What it raised',
+            <ul className="sd-reader__text" style={{ margin: 0 }}>
+              {result.issues.map((issue, index) => (
+                <li key={index}>{issue}</li>
+              ))}
+            </ul>,
+          )
+        : null}
+      {full ? (
+        result?.handoff && part('What it handed on to the next step', <p style={{ margin: 0 }}>{result.handoff}</p>)
+      ) : (
+        <p className="sd-meta" role="status" style={{ margin: 0 }}>
+          Loading what it handed on…
+        </p>
+      )}
+      {proposed?.length
+        ? part(
+            'The work it proposed',
+            <div>
+              {proposed.map(item => (
+                <TaskRow key={item.id} projectId={projectId} task={item} stories={stories} />
+              ))}
+            </div>,
+          )
+        : null}
+      {full?.plan && <PlanReview projectId={projectId} attempt={full} task={task} />}
+      {full && <AgentTestRuns attempt={full} name={name} />}
+      {full && recordedPhases(full) && part('How its time went', <PhaseTimeline attempt={full} />)}
+      {carried && (
+        <p className="sd-meta" style={{ margin: 0 }}>
+          {continuation(carried)}
+        </p>
+      )}
+      <SetAside attempt={shown} />
+    </>
+  );
+}
+
+// The attempt whose chapter shows the work the task proposed: the accepted attempt, whose proposal was recorded when
+// it was accepted, or else the latest of the task's own work, whose proposal waits for a decision.
+export const proposer = (task: Task, attempts: AttemptSummary[]) =>
+  attempts.find(attempt => attempt.id === task.acceptedAttemptId) ??
+  [...attempts].reverse().find(attempt => !isReview(attempt));
+
+// Work other than a source story: what the attempt shown returned, under who ran it and how it ended. What it was
+// told and received, and the whole record, are under Record.
 export function ResultPanel({
   projectId,
   task,
@@ -1020,23 +1113,7 @@ export function ResultPanel({
     );
   const attempt: FullAttempt = full ?? shown,
     name = workerName(studio, attempt.workerId),
-    entries = attemptEntries(attempt),
-    picture = pictureOf(attempt, task.kind),
-    { verdict } = reviewOf(attempt),
-    result = attempt.result as { summary?: string; issues?: string[]; handoff?: string; checks?: unknown } | undefined,
-    checks = Array.isArray(result?.checks) ? (result.checks as Check[]) : [],
-    carried = carriedOf(attempt) ?? carriedOf(shown),
-    stories = liveSummary(studio).stories,
-    proposed = ((task.materializedTaskIds ?? task.proposedTaskIds) as string[] | undefined)
-      ?.map(id => studio.tasks.find(item => item.id === id))
-      .filter(item => !!item),
     [tone, label] = attemptChip(attempt);
-  const part = (title: string, body: ReactNode) => (
-    <section style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)', minWidth: 0 }}>
-      <span className="sd-eyebrow">{title}</span>
-      {body}
-    </section>
-  );
   return (
     <div className="sd-tabpanel" style={{ gap: 'var(--space-20)' }}>
       <div
@@ -1058,65 +1135,7 @@ export function ResultPanel({
           {label}
         </span>
       </div>
-      {carried && (
-        <p className="sd-meta" style={{ margin: 0 }}>
-          {continuation(carried)}
-        </p>
-      )}
-      <SetAside attempt={shown} />
-      {attempt.error && (
-        <p style={{ margin: 0, color: 'var(--bad)' }}>
-          <b>It stopped:</b> {attempt.error}
-        </p>
-      )}
-      {picture && <Deliverable projectId={projectId} attempt={attempt} item={picture} />}
-      {result?.summary &&
-        part(`What ${name} returned`, <p style={{ margin: 0, fontSize: '16px' }}>{result.summary}</p>)}
-      {verdict && (
-        <span className="sd-chip" style={{ alignSelf: 'flex-start' }}>
-          Review verdict · {verdict}
-        </span>
-      )}
-      {checks.length > 0 &&
-        part(
-          'The checks it reported',
-          <div>
-            {checks.map((check, index) => (
-              <CheckRow key={index} check={check} />
-            ))}
-          </div>,
-        )}
-      {result?.issues?.length
-        ? part(
-            'What it raised',
-            <ul className="sd-reader__text" style={{ margin: 0 }}>
-              {result.issues.map((issue, index) => (
-                <li key={index}>{issue}</li>
-              ))}
-            </ul>,
-          )
-        : null}
-      {entries.length > 0 && part('Files it returned', <FileViewer projectId={projectId} entries={entries} />)}
-      {full ? (
-        result?.handoff && part('What it handed on to the next step', <p style={{ margin: 0 }}>{result.handoff}</p>)
-      ) : (
-        <p className="sd-meta" role="status" style={{ margin: 0 }}>
-          Loading what it handed on…
-        </p>
-      )}
-      {proposed?.length
-        ? part(
-            'The work it proposed',
-            <div>
-              {proposed.map(item => (
-                <TaskRow key={item.id} projectId={projectId} task={item} stories={stories} />
-              ))}
-            </div>,
-          )
-        : null}
-      {full?.plan && <PlanReview projectId={projectId} attempt={full} task={task} />}
-      {full && <AgentTestRuns attempt={full} name={name} />}
-      {full && recordedPhases(full) && part('How its time went', <PhaseTimeline attempt={full} />)}
+      <HandedBack projectId={projectId} task={task} studio={studio} attempt={shown} full={full} />
       <p className="sd-meta" style={{ margin: 0 }}>
         What {name} was told, what it received and everything recorded about this attempt are under{' '}
         {narrow ? 'Details' : 'Record'}.

@@ -1259,6 +1259,53 @@ button.sd-row[aria-pressed='true'] {
   border: 1.5px solid var(--brand);
   background: var(--brand-soft);
 }
+/* An attempt's chapter in a story's Activity: a line naming it, who ran it and how it ended, which opens and folds
+   what it did and said and what it handed back */
+.sd-attemptfold {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.sd-attemptfold__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-10);
+  width: 100%;
+  min-height: var(--control-height);
+  margin: 0;
+  padding: 6px 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sd-attemptfold__line:hover {
+  border-color: var(--line-2);
+}
+.sd-attemptfold__mark {
+  display: flex;
+  color: var(--ink-3);
+  transition: transform 0.15s;
+}
+.sd-attemptfold__line[aria-expanded='false'] .sd-attemptfold__mark {
+  transform: rotate(-90deg);
+}
+.sd-attemptfold__name {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sd-attemptfold__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
 .sd-say {
   display: flex;
   gap: var(--space-10);

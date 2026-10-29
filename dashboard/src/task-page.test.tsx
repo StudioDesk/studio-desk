@@ -55,6 +55,8 @@ const open = (path = '/p/project-x/tasks/T-1') =>
   );
 const detailUrl = '/api/attempts/attempt-1?projectId=project-x';
 const change = (version: number, changes: object[]) => latest().emit('change', { version, start: 'start-a', changes });
+// The line that opens and folds an attempt's chapter in Activity.
+const lineOf = (chapter: HTMLElement) => within(chapter).getAllByRole('button')[0]!;
 const edit = (fields: object) => (controller.tasks = [{ ...controller.tasks[0]!, ...fields }]);
 
 test("the page loads its task with the project's shared records, and a change fetches only the task it names", async () => {
@@ -343,8 +345,9 @@ test("a code story's attempts say what earlier work they continued, or why they 
       'Git set src/gone.mjs aside for the editor, because one side deleted it and the other changed it. The current source deleted src/gone.mjs since.',
     ),
   ).toBeTruthy();
-  // The attempt chosen is the one the other tabs show: its activity ends with what it handed off.
+  // Its chapter in Activity, opened, ends with what it handed back.
   await user.click(screen.getByRole('tab', { name: 'Activity' }));
+  await user.click(lineOf(await screen.findByRole('region', { name: 'Build, attempt 1 of 3' })));
   expect(await screen.findByText('First try.')).toBeTruthy();
 });
 
@@ -446,6 +449,10 @@ test("a story's Activity has your part beside the agents': what you sent and dec
   await user.click(await screen.findByRole('tab', { name: 'Activity' }));
   const panel = await screen.findByRole('tabpanel');
   expect(await within(panel).findByText('The change holds up.')).toBeTruthy();
+  // The build's chapter is folded under the latest, the review's, until it is opened.
+  expect(within(panel).queryByText('I changed the path rule.')).toBeNull();
+  await user.click(lineOf(within(panel).getByRole('region', { name: 'Build, attempt 1 of 3' })));
+  expect(await within(panel).findByText('I changed the path rule.')).toBeTruthy();
   expect(await within(panel).findByText('Let story paths hold parentheses.')).toBeTruthy();
   // In time order: your idea and approval, Eli's build, the house rule's acceptance and your instructions, the
   // review, then the integration the house rule approved.
@@ -930,14 +937,7 @@ test("a code story's brief is a card beside its tabs, which have no Overview, an
   const card = await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }),
     brief = within(card);
   const tabs = within(screen.getByRole('tablist', { name: 'Story details' })).getAllByRole('tab');
-  expect(tabs.map(tab => tab.firstChild?.textContent)).toEqual([
-    'Changes',
-    'Checks',
-    'Review',
-    'Activity',
-    'Attempts',
-    'Record',
-  ]);
+  expect(tabs.map(tab => tab.firstChild?.textContent)).toEqual(['Changes', 'Checks', 'Activity', 'Attempts', 'Record']);
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
   // Beside the tabs, not in them, above who works on it and the details.
   expect(screen.getByRole('tabpanel').contains(card)).toBe(false);
@@ -1295,12 +1295,14 @@ const answeredStory = (answers: object[]) => {
   said('attempt-1', 'blocked', '2026-10-28T10:05:00.000Z', 'Asking first.');
   said('attempt-2', 'running', '2026-10-28T10:21:00.000Z', 'Removing the old route now.');
 };
-// The story's Activity once the asking attempt's conversation shows.
+// The story's Activity once the asking attempt's conversation shows, its chapter opened when a later one folds it.
 const storyActivity = async () => {
   const user = userEvent.setup();
   open();
   await user.click(await screen.findByRole('tab', { name: 'Activity' }, { timeout: 5000 }));
-  const panel = await screen.findByRole('tabpanel');
+  const panel = await screen.findByRole('tabpanel'),
+    line = lineOf((await within(panel).findAllByRole('region', { name: /^Build, / }))[0]!);
+  if (line.getAttribute('aria-expanded') === 'false') await user.click(line);
   await within(panel).findByText('Asking first.', {}, { timeout: 5000 });
   return panel;
 };
