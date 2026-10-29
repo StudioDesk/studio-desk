@@ -17,6 +17,7 @@ import {
 } from '../src/connectors/source-changes.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { setup } from './source-story-setup.mjs';
+import { waitFor } from './wait-for.mjs';
 
 test("the director edits a blocked story's files; its next attempt continues from the staged work", async t => {
   const c = await setup(t, 'pass', ['src/core/workflows.mjs', 'src/core/projects.mjs']),
@@ -517,6 +518,112 @@ test('a requested deletion stays with the director even when file requests are a
   );
   assert.equal(store.task(ids[0]).scopeEdits, undefined);
   assert.equal(store.task(ids[0]).status, 'blocked');
+});
+
+// The measured source a story was planned from never had a file an earlier story in its chain created, so the policy
+// lists it as a file the story creates, as the director would (MP-014 slice 4); other unmeasured files stay refused.
+test('with file requests automatic, a requested file an earlier story in the chain created is approved as one the story creates', async t => {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),
+    store = c.app.store,
+    { runner } = c.app,
+    created = 'test/created.test.mjs',
+    elsewhere = 'test/elsewhere.test.mjs',
+    byHand = 'test/by-hand.test.mjs',
+    { ids } = await c.breakdown([
+      { files: ['src/core/workflows.mjs'], newFiles: [created], dependencies: [] },
+      { files: ['src/core/projects.mjs'], dependencies: ['workflow'] },
+    ]),
+    id = ids[1];
+  // The earlier story in the chain creates the test file and is integrated.
+  approveWork(store, runner.registries, store.task(ids[0]));
+  runner.start(ids[0]);
+  const first = await c.toReview(ids[0]);
+  c.integrated(ids[0], first.review, created, '// Created by the earlier story in the chain\n');
+  // A story outside the chain creates another, and a hand commit adds a third.
+  runner.start(c.taskId);
+  const outside = await c.toReview(c.taskId);
+  c.integrated(c.taskId, outside.review, elsewhere, '// Created by a story outside the chain\n');
+  fs.writeFileSync(path.join(c.root, byHand), '// Added by hand\n');
+  git(c.root, ['add', byHand]);
+  git(c.root, ['commit', '--quiet', '-m', 'Add a test by hand']);
+  const automatic = saveAutonomyPolicy(store, runner.registries, 'project-legacy', {
+    expectedRevision: autonomyPolicy(store, 'project-legacy').revision,
+    enabled: true,
+    retries: 0,
+    kinds: { 'studio-development:change': { approve: 'director', accept: 'director', scope: 'auto' } },
+    cycle: { enabled: false, workflowId: null, maxPerDay: 3 },
+  });
+  approveWork(store, runner.registries, store.task(id));
+  store.putTask({ ...store.task(id), maxAttempts: 5 });
+  // Each request is the editor's own, recorded by the controller against the source it read.
+  // The policy may answer before a poll sees the story blocked, so this waits for the attempt to stop as blocked.
+  const ask = async (file, reason) => {
+    store.putTask({ ...store.task(id), direction: `block-request ${JSON.stringify({ files: [file], reason })}` });
+    runner.start(id);
+    const attemptId = store.task(id).lastAttemptId,
+      asked = await waitFor(() => {
+        const attempt = store.attempt(attemptId);
+        return attempt.status === 'blocked' && attempt;
+      }, `${attemptId} to stop as blocked`);
+    assert.deepEqual([asked.scopeRequest.files, asked.scopeRequest.newFiles], [[file], []]);
+    return asked;
+  };
+  for (const file of [elsewhere, byHand]) {
+    await ask(file, `${file} pins the old wording.`);
+    const note = await waitFor(
+      () => store.task(id).autonomyNote?.includes(file) && store.task(id).autonomyNote,
+      `the policy to leave the request for ${file} to the director`,
+    );
+    assert.equal(
+      note,
+      `The requested files could not be approved automatically: The story lists unsupported or unrecorded source file ${file}; choose an allowed existing path from the measured manifest.`,
+    );
+    assert.equal(store.task(id).scopeEdits, undefined);
+    assert.equal(store.task(id).status, 'blocked');
+  }
+  const reason = 'The test the earlier story created pins the old wording.',
+    asked = await ask(created, reason);
+  const story = await waitFor(() => {
+    const task = store.task(id);
+    return (task.scopeEdits || task.autonomyNote?.includes(created)) && task;
+  }, 'the policy to answer the request');
+  assert.equal(story.autonomyNote, undefined);
+  assert.deepEqual(
+    story.scopeEdits.map(({ at, ...edit }) => edit),
+    [
+      {
+        files: ['src/core/projects.mjs'],
+        newFiles: [created],
+        deleteFiles: [],
+        reason,
+        by: {
+          type: 'policy',
+          revision: automatic.revision,
+          reason: 'File requests from a blocked editor: approved automatically.',
+        },
+        previous: { files: ['src/core/projects.mjs'], newFiles: [], deleteFiles: [] },
+        keepWork: true,
+        request: { attemptId: asked.id, workerId: asked.workerId },
+      },
+    ],
+  );
+  assert.ok(
+    story.direction.startsWith(
+      `The autonomy policy approved the file request of ${asked.id} for the director, adding the paths it named: ${reason}\n\nNew files added: ${created}.\n\n`,
+    ),
+    story.direction,
+  );
+  // The story runs on: its next attempt may edit the file the earlier story created.
+  const next = await c.wait(id);
+  assert.deepEqual(
+    [next.sourceChange.allowedFiles, next.sourceChange.newFiles, next.sourceChange.continueFrom.attemptId],
+    [['src/core/projects.mjs', created], [], asked.id],
+  );
+  const scope = JSON.parse(fs.readFileSync(path.join(next.outputFolder, 'source-scope.json')));
+  assert.deepEqual(
+    [scope.directorEdits[0].requestedIn, scope.directorEdits[0].added, scope.directorEdits[0].approvedBy],
+    [asked.id, [created], 'autonomy policy'],
+  );
 });
 
 test('a file request is recorded only when it names new, allowed paths, and only with a blocked outcome', () => {

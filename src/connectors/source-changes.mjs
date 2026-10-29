@@ -400,6 +400,12 @@ export function breakdownEvidence(
 
 const staleBreakdown = { since: 'the breakdown', action: 'Request fresh measured evidence and a new breakdown.' };
 const named = files => files.slice(0, 5).join(', ') + (files.length > 5 ? ` and ${files.length - 5} more` : '');
+// Whether the story's integrated prerequisite stories created file (created, from integratedChanges) and the current
+// source still holds what they left (MP-014 slice 4).
+const createdByChain = (file, current, created) => {
+  const item = current.files.find(item => item.path === file);
+  return !!item && !!created.get(file)?.has(item.hash);
+};
 // Checks a story's paths against the current source and returns the scope to dispatch. A file may
 // differ from the measured bytes by a change an integrated story committed (MP-016 slice 4), whose
 // hash an integration into this source left, or by any change committed on the development copy's
@@ -425,7 +431,7 @@ function verifyStoryScope(
   validateStoryPaths(paths, original, undefined, profileOf(current));
   const { files, newFiles, deleteFiles } = scopePaths(paths),
     now = file => current.files.find(item => item.path === file),
-    created = newFiles.filter(file => now(file) && prerequisites.get(file)?.has(now(file).hash)),
+    created = newFiles.filter(file => createdByChain(file, current, prerequisites)),
     absent = newFiles.filter(file => !created.includes(file));
   const absentNow = [...files, ...deleteFiles].filter(file => !now(file)),
     gone = earlier && absentNow.length ? line.gone(absentNow) : [],
@@ -1013,8 +1019,9 @@ export function editSourceStory(store, task, edit, root, { by = { type: 'directo
 // director's amendment of October 20): the story's paths plus the requested files to edit and
 // create, with the editor's reason and its staged work kept, under every rule of the director's
 // edit. The independent candidate review is told which paths were added. Requested deletions stay
-// with the director, since approving a story is what approves its deletions. Returns nothing when
-// an edit already followed the request.
+// with the director, since approving a story is what approves its deletions. A requested file to
+// edit that an earlier story in the chain created is listed as a file the story creates, as the
+// director would list it (createdInChain). Returns nothing when an edit already followed the request.
 export function approveScopeRequest(store, task, attempt, root, by) {
   const request = attempt.scopeRequest;
   if (task.scopeEdits?.some(edit => edit.at >= attempt.finishedAt)) return null;
@@ -1024,22 +1031,47 @@ export function approveScopeRequest(store, task, attempt, root, by) {
     );
   const current = storyPaths(task, proposedPaths(store, task));
   try {
-    return editSourceStory(
-      store,
-      task,
-      {
-        files: [...current.files, ...request.files],
-        newFiles: [...current.newFiles, ...request.newFiles],
-        deleteFiles: current.deleteFiles,
-        reason: request.reason,
-        request: attempt.id,
-      },
-      root,
-      { by },
-    );
+    // One measurement of the source for the files the chain created and the edit's checks.
+    return measuringPass(() => {
+      const created = createdInChain(store, task, root, request.files);
+      return editSourceStory(
+        store,
+        task,
+        {
+          files: [...current.files, ...request.files.filter(file => !created.includes(file))],
+          newFiles: [...current.newFiles, ...request.newFiles, ...created],
+          deleteFiles: current.deleteFiles,
+          reason: request.reason,
+          request: attempt.id,
+        },
+        root,
+        { by },
+      );
+    });
   } catch (error) {
     throw new Error(`The requested files could not be approved automatically: ${error.message}`);
   }
+}
+// Of files, those the measured source a breakdown story was planned from never had, but that an integrated prerequisite
+// story in its chain created and the current source holds as that story left them: the new files verifyStoryScope accepts
+// as created. The story's dependencies besides its breakdown and checks are its sibling stories (breakdownChangeScope).
+// A review proposal's story has no chain.
+function createdInChain(store, task, root, files) {
+  const evidence =
+      task.proposalReference.path === 'source-breakdown.json' &&
+      store.attempt(task.proposalReference.attemptId)?.sourceBreakdown,
+    unmeasured = evidence ? files.filter(file => !evidence.files.some(item => item.path === file)) : [];
+  if (!unmeasured.length) return [];
+  const { current } = storySource(
+      store,
+      recordProject(task),
+      root,
+      store.attempt(evidence.attemptId).sourceCheck,
+      profileOf(evidence),
+      task,
+    ),
+    created = integratedChanges(store, task.dependencies);
+  return unmeasured.filter(file => createdByChain(file, current, created));
 }
 // The scope a story's next implementation attempt receives. A dry run checks it without fixing
 // the base commit, which needs a clean development copy only when the attempt starts.
