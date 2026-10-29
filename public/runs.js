@@ -1224,19 +1224,10 @@
             'Start assignment',
           );
     }
-    const resources = new Set([
-        'employee:' + view.workerId,
-        ...(view.resources || []),
-        ...(state.taskKinds?.[view.kind]?.requiredResources || []),
-      ]),
+    // The work's own resources: an agent at work elsewhere is no reason to wait, since it runs several attempts at
+    // once (MP-033).
+    const resources = new Set([...(view.resources || []), ...(state.taskKinds?.[view.kind]?.requiredResources || [])]),
       lease = (state.leases || []).find(l => resources.has(l.resource)),
-      busyEmployee = all.find(
-        a =>
-          a.workerId === view.workerId &&
-          a.taskId !== task.id &&
-          (['running', 'stopping', 'quarantined'].includes(a.status) ||
-            (a.status === 'interrupted' && !a.reconciledAt)),
-      ),
       slot =
         /studio execution slot/i.test(blocker) ||
         (Number.isInteger(state.maxParallel) &&
@@ -1245,25 +1236,14 @@
               ['running', 'stopping', 'quarantined'].includes(a.status) ||
               (a.status === 'interrupted' && !a.reconciledAt),
           ).length >= state.maxParallel),
-      wait = lease || busyEmployee || slot || /^Waiting for /i.test(blocker);
+      wait = lease || slot || /^Waiting for /i.test(blocker);
     if (wait) {
-      const kind =
-          lease?.resource.startsWith('employee:') || busyEmployee
-            ? 'employee-wait'
-            : slot && !lease
-              ? 'slot-wait'
-              : 'resource-wait',
-        // An agent held elsewhere is named, not its reservation (found in the README-only fresh install).
-        agent = lease?.resource.startsWith('employee:') && lease.resource.slice('employee:'.length),
-        why = agent
-          ? `This assignment waits for ${(state.workers || []).find(worker => worker.id === agent)?.displayName || agent}, who is working on other work.`
-          : lease
-            ? `This assignment waits for ${lease.resource} to be released.`
-            : busyEmployee
-              ? 'The assigned employee is working on another assignment.'
-              : slot
-                ? 'This assignment waits for a studio execution slot.'
-                : blocker,
+      const kind = slot && !lease ? 'slot-wait' : 'resource-wait',
+        why = lease
+          ? `This assignment waits for ${lease.resource} to be released.`
+          : slot
+            ? 'This assignment waits for a studio execution slot.'
+            : blocker,
         provenance = lease ? [`${lease.resource} is held by ${lease.attemptId}.`] : [];
       return task.queued
         ? passive(

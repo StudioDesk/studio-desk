@@ -25,6 +25,7 @@ import { buildAttemptHistory, stageAttemptHistory } from './attempt-history.mjs'
 import { questionFile, questionReason, readQuestion } from './questions.mjs';
 import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
 import { endTryRuns, recoverTryRuns } from '../connectors/try-copy.mjs';
+import { attemptResource } from './store.mjs';
 
 // Reasons that clear by themselves as other work finishes.
 const waiting = reason => /^Waiting for /.test(reason || '');
@@ -552,15 +553,11 @@ export class Runner {
         // The live attempts only, through the status index: this runs for every waiting task on every pass.
         const count = this.store.liveAttempts().length;
         if (count >= this.store.organization().maxParallel) reason = 'Waiting for a studio execution slot.';
+        // An agent is not reserved (MP-033): it runs as many attempts at once as the limits allow, so only the
+        // work's own resources can make it wait.
         const execution = this.workflows.stageView(t),
-          w = this.store.organization().workers.find(w => w.id === execution.workerId);
-        const held = this.store
-          .leases()
-          .find(l =>
-            ['employee:' + w?.id, ...this.workflows.requirements(execution, { store: this.store }).resources].includes(
-              l.resource,
-            ),
-          );
+          resources = this.workflows.requirements(execution, { store: this.store }).resources;
+        const held = this.store.leases().find(l => resources.includes(l.resource));
         if (held) {
           conflict = this.store.resourceConflict(held.resource, held.attemptId);
           reason = conflict.reason;
@@ -659,11 +656,9 @@ export class Runner {
       throw new Error('Director work approval is required before starting this assignment.');
     if (!['ready', 'failed', 'cancelled', 'blocked'].includes(task.status))
       throw new Error('Only ready or stopped assignments can start.');
-    if (
-      store
-        .attempts(task.id)
-        .some(a => ['interrupted', 'quarantined'].includes(a.status) && store.leases().some(l => l.attemptId === a.id))
-    )
+    // An interrupted attempt is uncertain until it is reconciled, whether or not it holds a resource: an agent is not
+    // reserved (MP-033), so a lease no longer marks every attempt whose process may still run.
+    if (store.attempts(task.id).some(a => ['interrupted', 'quarantined'].includes(a.status) && !a.reconciledAt))
       throw new Error('Reconcile the interrupted attempt before starting another.');
     // Measuring the work's scope (these checks and the attempt's prepared fields below) runs before the attempt
     // exists; its time is recorded as the attempt's setup.scope phase once it does.
@@ -830,9 +825,11 @@ export class Runner {
         if (store.liveAttempts().length >= org.maxParallel)
           throw Object.assign(new Error('Studio concurrency limit reached.'), { wait: true });
         try {
-          store.claim(['employee:' + worker.id, ...resources], id);
+          // The attempt's own reservation and the work's resources: an agent is not reserved, so it runs several
+          // attempts at once (MP-033), each its own record.
+          store.claim([attemptResource(id), ...resources], id);
         } catch (error) {
-          // A busy employee or resource frees itself; the controller can wait for it.
+          // A busy resource frees itself; the controller can wait for it.
           throw Object.assign(error, { wait: true });
         }
         store.insertAttempt(a, snapshot);

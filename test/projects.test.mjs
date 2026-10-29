@@ -840,7 +840,7 @@ test('source checks hold no source reservation across projects; cancellation wai
     })
   ).data;
   // Checks measure a commit in their own worktree and write no source (MP-016 slice 4), so two
-  // projects' checks run side by side, each holding only its employee.
+  // projects' checks run side by side, each holding only its own reservation: an agent is not reserved either (MP-033).
   c.app.runner.start(first.id);
   c.app.runner.start(other.id);
   assert.deepEqual(
@@ -848,7 +848,7 @@ test('source checks hold no source reservation across projects; cancellation wai
       .leases()
       .map(lease => lease.resource)
       .sort(),
-    ['employee:W-06', 'employee:W-07'],
+    [first.id, other.id].map(id => `attempt:${c.app.store.task(id).lastAttemptId}`).sort(),
   );
   for (const id of [first.id, other.id]) {
     assert.equal(c.app.store.task(id).status, 'running');

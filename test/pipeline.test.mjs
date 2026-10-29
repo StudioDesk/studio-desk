@@ -141,24 +141,30 @@ test('BOM review JSON stops queued work; explicit bounded retry preserves failed
 test('queued dispatch respects pause, atomic slots/resources, and cancellation without replay', async t => {
   const c = await setup(t);
   const resource = await c.create('Waiting for shared layout resource', 'W-04', { resources: ['layout:prototype'] });
-  const employee = await c.create('Waiting for Rowan', 'W-03');
-  const independent = await c.create('Independent work', 'W-02');
+  const employee = await c.create("Rowan's second work", 'W-03');
+  const independent = await c.create('Waiting for a studio slot', 'W-02');
   await c.request('/api/pipeline', { action: 'queue', taskIds: ['D-001', resource.id, employee.id, independent.id] });
   await c.until(() => c.app.runner.active.size === 2);
+  // Rowan's second work runs beside the first, since an agent is not reserved (MP-033); the shared layout waits for
+  // its holder, and the studio's two slots are full.
   assert.equal(c.app.store.attempts(resource.id).length, 0);
-  assert.equal(c.app.store.attempts(employee.id).length, 0);
+  assert.equal(c.app.store.attempts(employee.id).length, 1);
+  assert.equal(c.app.store.attempts(independent.id).length, 0);
   assert.equal(c.app.store.leases().filter(lease => lease.resource === 'layout:prototype').length, 1);
   await c.request('/api/control', { paused: true });
   await c.request('/api/tasks/D-001/cancel');
   await c.wait('D-001', 'cancelled');
-  await c.wait(independent.id, 'review');
+  await c.wait(employee.id, 'review');
   assert.equal(c.app.store.task('D-001').queued, false);
   assert.equal(c.app.store.attempts(resource.id).length, 0);
+  assert.equal(c.app.store.attempts(independent.id).length, 0);
   assert.equal(c.app.store.leases().length, 0);
   await c.request('/api/control', { paused: false });
-  await c.until(() => c.app.store.attempts(resource.id).length === 1 && c.app.store.attempts(employee.id).length === 1);
+  await c.until(
+    () => c.app.store.attempts(resource.id).length === 1 && c.app.store.attempts(independent.id).length === 1,
+  );
   await c.wait(resource.id, 'review');
-  await c.wait(employee.id, 'review');
+  await c.wait(independent.id, 'review');
   assert.equal(c.app.store.attempts('D-001').length, 1, 'Cancellation does not authorize another attempt.');
   assert.equal(c.app.store.leases().length, 0);
   await c.request('/api/pipeline', { action: 'pause' });

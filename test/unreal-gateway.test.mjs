@@ -7,6 +7,7 @@ import { createStudio } from './model-free-studio.mjs';
 import { waitFor } from './wait-for.mjs';
 import { hash } from '../src/contracts.mjs';
 import { validateBlockoutManifest, validateEditorPin } from '../src/unreal-gateway.mjs';
+import { attemptResource } from '../src/core/store.mjs';
 
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9f8AAAAASUVORK5CYII=';
 const manifest = (namespace = 'Blockout_0123456789abcdef') => ({
@@ -66,7 +67,8 @@ async function setup(t, { timeoutMs = 500, disabled = false } = {}) {
           op = a.integration.operations.at(-1);
         assert.equal(op.id, params.operationId);
         assert.equal(op.status, 'intent', 'Intent must be committed before the driver call.');
-        assert.ok(c.app.store.leases().some(l => l.resource === 'employee:' + a.workerId && l.attemptId === a.id));
+        // The attempt's own reservation beside the editor's; its agent is not reserved (MP-033).
+        assert.ok(c.app.store.leases().some(l => l.resource === attemptResource(a.id) && l.attemptId === a.id));
         if (['create-map', 'spawn-actor', 'save-map', 'reload-map'].includes(kind)) {
           assert.ok(a.integration.checkpoint);
           assert.equal(
@@ -325,7 +327,7 @@ test('unknown identity, dirty state, existing targets and missing checkpoints fa
   }
 });
 
-test('timeout retains editor and employee ownership through late completion and read-only reconciliation', async t => {
+test('timeout retains editor and attempt ownership through late completion and read-only reconciliation', async t => {
   const c = await setup(t, { timeoutMs: 60 }),
     task = await c.integration();
   let release;

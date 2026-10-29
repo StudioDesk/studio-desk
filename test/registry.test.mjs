@@ -202,7 +202,7 @@ test('unknown kinds/adapters and unsupported capabilities block before claiming 
   );
 });
 
-test('declared pack resources cannot be omitted and failed claims leave no employee reservation', async t => {
+test('declared pack resources cannot be omitted and failed claims leave no reservation', async t => {
   const c = await setup(t),
     work = await c.create('Required resource', { resources: [] });
   c.app.store.tx(() => c.app.store.claim(reportTask.requiredResources, 'fixture-resource-owner'));
@@ -218,7 +218,7 @@ test('declared pack resources cannot be omitted and failed claims leave no emplo
   assert.equal(c.app.store.attempts(work.id).length, 0);
   c.app.store.release('fixture-resource-owner');
   // Freeing the resource is a change (MP-026), so the queued task starts by itself with the
-  // declared resource and its employee, without a second Start.
+  // declared resource and its own reservation, without a second Start; its agent is not reserved (MP-033).
   await waitFor(() => c.app.store.attempts(work.id).length, `an attempt of task ${work.id}`, { interval: 5 });
   assert.deepEqual(
     c.app.store.attempts(work.id).map(attempt => attempt.status),
@@ -226,7 +226,7 @@ test('declared pack resources cannot be omitted and failed claims leave no emplo
   );
   assert.deepEqual(
     c.app.store.leases().map(lease => lease.resource),
-    ['document:registry-proof', 'employee:W-03'],
+    [`attempt:${c.app.store.attempts(work.id)[0].id}`, 'document:registry-proof'],
   );
   await c.wait(work.id, 'review');
   assert.deepEqual(c.app.store.leases(), []);

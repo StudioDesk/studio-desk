@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createStudio } from './model-free-studio.mjs';
-import { waitFor, waitForTask } from './wait-for.mjs';
+import { waitForTask } from './wait-for.mjs';
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
 import { studioDevelopmentPack } from '../src/packs/studio-development/index.mjs';
 import { projectOrganization } from '../src/core/project-organization.mjs';
@@ -239,7 +239,7 @@ test('project team and role drafts publish independently, and recorded organizat
   assert.match(preview.data.text, /Future platform owner/);
 });
 
-test('project membership cannot create a second employee slot or rewrite active ownership; excluded pending owners require explicit reassignment', async t => {
+test('a shared agent works in two projects at once, membership edits never rewrite active ownership, and excluded pending owners require explicit reassignment', async t => {
   const c = await setup(t),
     { project } = await c.development(),
     task = await c.create(project.id),
@@ -247,27 +247,22 @@ test('project membership cannot create a second employee slot or rewrite active 
   assert.equal((await c.request(`/api/tasks/${task.id}/start`, { projectId: project.id })).status, 202);
   const attempt = c.app.store.attempt(c.app.store.task(task.id).lastAttemptId);
   const other = await c.create('project-legacy');
-  // The shared employee is busy, which is a wait (MP-012): Start queues the other project's task.
-  const queued = await c.request(`/api/tasks/${other.id}/start`);
-  assert.equal(queued.status, 202);
-  assert.equal(queued.data.queued, true);
-  const employee = c.app.store.organization().workers.find(worker => worker.id === attempt.workerId);
-  assert.equal(
-    c.app.store.task(other.id).reason,
-    `Waiting for ${employee.displayName}'s work on ${task.id} (${task.title}) to finish.`,
-  );
-  assert.ok(!c.app.store.task(other.id).reason.includes(attempt.id));
-  assert.equal(c.app.store.attempts(other.id).length, 0);
+  // The same shared agent starts the other project's work beside the first: an agent is not reserved (MP-033), and
+  // each attempt records its own project and organization.
+  const started = await c.request(`/api/tasks/${other.id}/start`);
+  assert.equal(started.status, 202);
+  assert.notEqual(started.data.queued, true);
+  const beside = c.app.store.attempt(c.app.store.task(other.id).lastAttemptId);
+  assert.equal(beside.workerId, attempt.workerId);
+  assert.equal(c.app.store.attempt(attempt.id).status, 'running');
+  assert.notEqual(beside.outputFolder, attempt.outputFolder);
   const config = c.config(await c.state(project.id));
   config.members = config.members.filter(member => member.workerId !== 'W-02');
   config.teams = config.teams.filter(team => team.id !== 'engineering');
   config.kindOwners['studio-development:change'] = 'W-01';
   assert.equal((await c.save(project.id, config)).status, 200);
   assert.equal(c.app.store.attempt(attempt.id).organization.team, 'Engineering');
-  assert.equal(
-    c.app.store.leases().some(lease => lease.resource === 'employee:W-02'),
-    true,
-  );
+  assert.equal(c.app.store.attempt(attempt.id).workerId, 'W-02');
   assert.equal((await c.request(`/api/tasks/${pending.id}/approve-work`, { projectId: project.id })).status, 400);
   assert.equal(
     (await c.request(`/api/tasks/${pending.id}/project-owner`, { projectId: project.id, workerId: 'W-03' })).status,
@@ -282,8 +277,6 @@ test('project membership cannot create a second employee slot or rewrite active 
   assert.equal(moved.approval.status, 'pending');
   assert.equal(moved.ownerHistory[0].workerId, 'W-02');
   await c.wait(task.id);
-  // Only after the employee's one attempt ends does the queued task start.
-  await waitFor(() => c.app.store.attempts(other.id).length, `an attempt of task ${other.id}`);
   assert.equal(c.app.store.attempts(other.id).length, 1);
   assert.equal((await c.request(`/api/tasks/${task.id}/accept`, { projectId: project.id })).status, 200);
   assert.equal((await c.request(`/api/tasks/${pending.id}/approve-work`, { projectId: project.id })).status, 200);

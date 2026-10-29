@@ -736,16 +736,18 @@ test('task explanations distinguish director decisions from passive stops and wa
       /free/i,
     ],
     [
-      'employee lease',
+      // An agent at work elsewhere, or a lease on it left from before, is no wait (MP-033).
+      'agent at work elsewhere',
       { queued: true },
       null,
       {
         leases: [{ resource: 'employee:W-02', attemptId: 'owner' }],
+        attempts: [{ id: 'owner', taskId: 'T-other', workerId: 'W-02', status: 'running' }],
       },
-      'employee-wait',
+      'queued',
       null,
-      /waits for (Eli|W-02), who is working on other work./,
-      /free/i,
+      /queued/i,
+      /controller starts/i,
     ],
     [
       'unqueued lease',

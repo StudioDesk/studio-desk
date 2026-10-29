@@ -299,7 +299,9 @@ test('cancellation retains the reference and reservations until the employee clo
   c.app.runner.stop(a.id);
   assert.equal(c.app.store.attempt(a.id).status, 'stopping');
   assert.equal(fs.existsSync(c.reference(a)), true);
+  // A stopping attempt keeps its own reservation and its slot; the agent itself is not reserved (MP-033).
   assert.ok(c.app.store.leases().some(lease => lease.attemptId === a.id));
+  assert.ok(c.app.store.liveAttempts().some(live => live.id === a.id));
   c.app.runner.fixtureProcessTermination = terminate;
   terminate(entry, true);
   assert.equal((await c.wait('breakdown')).status, 'cancelled');

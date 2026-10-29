@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hash } from './core/contracts.mjs';
 import { jobDirectory } from './core/projects.mjs';
+import { attemptResource } from './core/store.mjs';
 import { unrealEndpoint } from './unreal-discovery.mjs';
 
 export const editorResource = 'unreal:editor';
@@ -186,12 +187,14 @@ export class UnrealGateway {
     if (this.closed || !this.driver || this.pending.size)
       throw new Error('Gateway is closed or an editor call may still be running.');
     const lease = this.store.leases().find(l => l.resource === editorResource && l.attemptId === a.id);
+    // The editor's lease, with the token the attempt recorded, and the attempt's own reservation (MP-033) are its
+    // ownership; an interrupted attempt keeps both until it is reconciled.
     const owns = () =>
       this.store
         .leases()
         .some(l => l.resource === editorResource && l.attemptId === a.id && l.token === a.integration.leaseToken) &&
-      this.store.leases().some(l => l.resource === 'employee:' + a.workerId && l.attemptId === a.id);
-    if (!lease || !owns()) throw new Error('Editor or employee lease ownership changed.');
+      this.store.leases().some(l => l.resource === attemptResource(a.id) && l.attemptId === a.id);
+    if (!lease || !owns()) throw new Error('Editor or attempt lease ownership changed.');
     const intent = {
       id: randomUUID(),
       kind,

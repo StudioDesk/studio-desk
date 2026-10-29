@@ -247,9 +247,10 @@ test('different workflows share one atomic connector resource and cancellation s
     game = await c.create('game'),
     architecture = await c.create('architecture');
   const { attemptId } = c.app.runner.start(game.id);
+  // The attempt's own reservation and the connector's resource; its agent is not reserved (MP-033).
   assert.deepEqual(
     c.app.store.leases().map(lease => lease.resource),
-    ['employee:W-03', 'local:record-processing'],
+    [`attempt:${attemptId}`, 'local:record-processing'],
   );
   const holder = c.app.store.organization().workers.find(worker => worker.id === game.workerId);
   assert.throws(() => c.app.runner.start(architecture.id), {

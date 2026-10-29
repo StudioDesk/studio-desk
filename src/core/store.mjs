@@ -55,6 +55,12 @@ const phaseNames = {
 // event, which one pass over the phase index reads faster than as many lookups.
 const phaseIdsPerQuery = 200;
 
+// An attempt's own reservation (MP-033), held from its start until it ends or is reconciled, as its agent's was before
+// an agent could run several attempts at once. Its name is the attempt's alone, so it never makes other work wait; it
+// keeps marking the attempt whose process may still run, which deleting an agent or a project, archiving a run, a
+// restart's reconciliation and the idle checks read.
+export const attemptResource = attemptId => 'attempt:' + attemptId;
+
 export class Store {
   constructor(directory, profile) {
     this.directory = path.resolve(directory);

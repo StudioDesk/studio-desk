@@ -216,7 +216,7 @@ test('director assignments use complexity policy limits and preserve legacy crea
     assert.equal(c.app.store.tasks().length, count);
   }
 });
-test('atomic employee/resource ownership, pause behavior, cancellation, and unsupported editor access', async t => {
+test('atomic resource ownership, an agent at work twice, pause behavior, cancellation, and unsupported editor access', async t => {
   const c = await setup(t);
   const create = (workerId, resource = 'layout:prototype') =>
     c.request('/api/tasks', {
@@ -247,11 +247,11 @@ test('atomic employee/resource ownership, pause behavior, cancellation, and unsu
   await c.request('/api/control', { paused: false });
   await c.until(() => c.app.store.attempts(other.id).length === 1, 'queued work starts after resume');
   const sameEmployee = (await create('W-04', 'layout:alternative')).data;
-  // A busy employee also queues; it starts when that employee's attempt ends.
+  // The same agent on other resources starts at once, beside its running attempt (MP-033).
   assert.equal((await c.request(`/api/tasks/${sameEmployee.id}/start`)).status, 202);
-  assert.equal(c.app.store.attempts(sameEmployee.id).length, 0);
+  assert.equal(c.app.store.attempts(sameEmployee.id).length, 1);
+  assert.equal(c.app.store.attempt(c.app.store.task(other.id).lastAttemptId).status, 'running');
   await c.wait(other.id);
-  await c.until(() => c.app.store.attempts(sameEmployee.id).length === 1, 'busy employee frees up');
   await c.wait(sameEmployee.id);
   const editor = (await create('W-06', 'unreal:integration-session')).data;
   assert.equal((await c.request(`/api/tasks/${editor.id}/start`)).status, 400);
@@ -711,7 +711,7 @@ test('Claude adapter rejects non-subscription login, unsafe deliveries and tooli
   await c.request('/api/control', { clearQuota: 'claude' });
   const hang = await create('Hang for cancellation');
   await c.request(`/api/tasks/${hang.id}/start`);
-  assert.ok(c.app.store.leases().some(l => l.resource === 'employee:W-03'));
+  assert.ok(c.app.store.liveAttempts().some(attempt => attempt.taskId === hang.id && attempt.workerId === 'W-03'));
   await c.request(`/api/tasks/${hang.id}/cancel`);
   const stopped = await c.wait(hang.id);
   assert.equal(stopped.task.status, 'cancelled');
@@ -902,8 +902,9 @@ test('a queued director Start keeps its attempt-limit override until it runs', a
   await c.request(`/api/tasks/${once.id}/start`);
   assert.equal((await c.wait(once.id)).task.status, 'review');
   assert.equal((await c.request(`/api/tasks/${once.id}/revise`, { direction: 'Once more.' })).status, 200);
-  // The employee is busy (a fixture reservation, not a running process).
-  store.tx(() => store.claim(['employee:W-02'], 'fixture-owner'));
+  // The work's resource is busy (a fixture reservation, not a running process).
+  store.putTask({ ...store.task(once.id), resources: ['layout:fixture'] });
+  store.tx(() => store.claim(['layout:fixture'], 'fixture-owner'));
   const queued = await c.request(`/api/tasks/${once.id}/start`);
   assert.equal(queued.status, 202, JSON.stringify(queued.data));
   assert.equal(queued.data.queued, true);

@@ -18,12 +18,12 @@ Work on source files. Avoid reading or modifying real runtime records under `dat
 
 ## Preserve these boundaries
 
-- The controller owns task state, dependencies, employee slots, and resource reservations. Agents propose and return bounded results.
+- The controller owns task state, dependencies, concurrency limits, and resource reservations. Agents propose and return bounded results.
 - Organization presets, workflow definitions and reusable tool operations remain separate concerns. A preset may supply defaults or narrow scope; it cannot grant permissions, bypass controller state or reseed/restructure an existing organization. Future organization/direction changes must preserve recorded identities, instructions, configuration and input provenance.
 - All organizational views use the same task records. Do not create separate task databases per team.
 - Ready → Working → Review → Accepted is the normal success path. Acceptance requires a completed, validated result from a recorded attempt; accepting a prerequisite only makes dependents eligible to start.
 - Company, team, and role documents have separate drafts and published revisions. Each attempt records immutable composed instructions, configuration, direction, and accepted input references. Changes affect future attempts.
-- One active attempt per employee, separate writable job folders, bounded execution, and transactionally acquired resources. Do not release reservations while an operation may still be running.
+- One recorded agent per attempt, separate writable job folders, bounded execution, and transactionally acquired resources. An agent may run several attempts at once, in any project, within the studio's limits (Decision MP-033); limits follow resources, not agents. Do not release reservations while an operation may still be running.
 - Uncertain work after restart must be reconciled. Never replay an editor mutation blindly.
 - Production engine/asset tools are not connected yet; the existing Unreal gateway is fixture-only. Real Unreal writes will need one controller-owned gateway and integration queue. Do not grant raw editor mutation tools to every employee.
 - Label simulations and unperformed checks accurately. Logical graph validation is not an engine traversal test or a playtest.

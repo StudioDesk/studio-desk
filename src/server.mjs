@@ -138,6 +138,9 @@ import { developmentOrganization } from './organizations/studio-development/proj
 import { toldView } from './core/instructions.mjs';
 import { formatRules } from './core/rules.mjs';
 
+// The most attempts the studio-wide limit allows at once (MP-033).
+const mostAttemptsAtOnce = 16;
+
 const root = fileURLToPath(new URL('../', import.meta.url));
 const publicRoot = path.join(root, 'public');
 // The version Settings shows is the app's own, from its package.json.
@@ -2403,13 +2406,12 @@ export function createStudio({
             if (typeof data.paused !== 'boolean') fail('Pause must be true or false.');
             org.paused = data.paused;
           }
-          // How many attempts run at once across every project. Each employee runs one attempt at a time, so a
-          // limit above the number of employees would never be reached. Running attempts are never stopped by a
-          // lower limit; new ones wait for a slot under it.
+          // How many attempts run at once across every project. An agent runs several at once (MP-033), so the
+          // limit no longer follows the number of agents; it stays the studio's safety limit until each kind of
+          // resource has its own. Running attempts are never stopped by a lower limit; new ones wait for a slot.
           if (data.maxParallel !== undefined) {
-            const agents = org.workers.filter(worker => !worker.deletedAt).length;
-            if (!Number.isInteger(data.maxParallel) || data.maxParallel < 1 || data.maxParallel > agents)
-              fail(`Choose from 1 to ${agents} attempts at the same time.`);
+            if (!Number.isInteger(data.maxParallel) || data.maxParallel < 1 || data.maxParallel > mostAttemptsAtOnce)
+              fail(`Choose from 1 to ${mostAttemptsAtOnce} attempts at the same time.`);
             org.maxParallel = data.maxParallel;
           }
           if (data.clearQuota !== undefined) {

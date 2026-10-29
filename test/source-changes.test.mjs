@@ -3319,13 +3319,20 @@ test('accepted source stories explicitly block missing independent reviewers and
   }
 });
 
-test('a queued review retains employee ownership and restart pause without duplicate dispatch', async t => {
+test('a queued review keeps waiting for a studio slot through a restart pause without duplicate dispatch', async t => {
   const c = await setup(t, 'pass', undefined, {}, true),
-    { store, runner } = c.app;
+    { store, runner } = c.app,
+    slots = (app, maxParallel) => {
+      const org = app.store.organization();
+      org.maxParallel = maxParallel;
+      app.store.setOrganization(org);
+    };
   runner.start(c.taskId);
   const implementation = await c.wait(c.taskId);
   c.measuredFixture(implementation);
-  store.claim(['employee:W-07'], 'fixture-owner');
+  // No studio slot is free (a fixture limit). A review has no resource of its own, and its agent is not reserved
+  // (MP-033), so the slots are what it waits for.
+  slots(c.app, 0);
   const org = store.organization();
   org.paused = true;
   store.setOrganization(org);
@@ -3335,7 +3342,7 @@ test('a queued review retains employee ownership and restart pause without dupli
   store.setOrganization(resumed);
   runner.refreshReadiness();
   assert.equal(store.task(c.taskId).sourceStage.current, 'blocked');
-  assert.equal(store.task(c.taskId).sourceStage.reason, 'Waiting for resource employee:W-07 to become available.');
+  assert.equal(store.task(c.taskId).sourceStage.reason, 'Waiting for a studio execution slot.');
   assert.equal(store.attempts(c.taskId).length, 1);
   await c.app.close();
   c.app = createStudio(c.options);
@@ -3343,7 +3350,7 @@ test('a queued review retains employee ownership and restart pause without dupli
   assert.equal(c.app.store.project('project-legacy').dispatchPaused, true);
   c.app.runner.autonomy.accepted(c.taskId);
   assert.equal(c.app.store.attempts(c.taskId).length, 1);
-  c.app.store.release('fixture-owner');
+  slots(c.app, 2);
   c.app.runner.pipeline('resume');
   const review = await c.wait(c.taskId);
   assert.equal(review.assignment.kind, 'studio-development:change-review');

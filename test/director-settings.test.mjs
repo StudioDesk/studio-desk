@@ -18,12 +18,14 @@ test('the director sets how many attempts run at the same time, and the schedule
     else process.env.STUDIO_MOCK_DELAY_MS = delay;
   });
   const c = await setup(t),
-    store = c.app.store,
-    employees = store.organization().workers.length;
-  for (const value of [0, 1.5, '2', null, employees + 1]) {
+    store = c.app.store;
+  // An agent runs several attempts at once (MP-033), so the limit is the studio's own, up to 16, whatever the
+  // number of agents.
+  assert.ok(store.organization().workers.length < 16);
+  for (const value of [0, 1.5, '2', null, 17]) {
     const refused = await c.request('/api/control', { maxParallel: value });
     assert.equal(refused.status, 400, String(value));
-    assert.equal(refused.data.error, `Choose from 1 to ${employees} attempts at the same time.`);
+    assert.equal(refused.data.error, 'Choose from 1 to 16 attempts at the same time.');
   }
   assert.equal(store.organization().maxParallel, 2);
   const create = async workerId =>

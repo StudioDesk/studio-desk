@@ -228,11 +228,9 @@ test('deleting a project’s own agent waits for its work, keeps its record and 
     (await c.request(`/api/projects/${id}/organization`, { projectId: id, ...back })).data.error,
     'Each project member must be one existing employee in one selected team.',
   );
+  // The studio's limit no longer follows the number of agents (MP-033): one more than remain is allowed.
   const remaining = c.app.store.organization().workers.filter(worker => !worker.deletedAt).length;
-  assert.equal(
-    (await c.request('/api/control', { maxParallel: remaining + 1 })).data.error,
-    `Choose from 1 to ${remaining} attempts at the same time.`,
-  );
+  assert.equal((await c.request('/api/control', { maxParallel: remaining + 1 })).status, 200);
 });
 
 test('a project’s last agent stays, a team it led loses its lead, and deleting the project takes its agents', async t => {
