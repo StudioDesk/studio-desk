@@ -1,12 +1,14 @@
 // Artifacts (1.2 step 6): every file the project's accepted work handed back, newest first, each with its kind, the
 // agent who made it, the idea it came from, when it was accepted and Open, which opens the file in a new tab. Filters
-// for idea, agent and kind narrow the list. The project's library sits at the top, above the files.
+// for idea, agent and kind narrow the list, and each file can be added to the project's library, which sits at the top,
+// above the files.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { artifactsUrl, getJSON, type ProjectArtifact } from './api';
 import { artifactRows, choices, facets, matching, type ArtifactFilter, type Facet } from './artifacts';
 import { artifactUrl } from './files';
 import { Heading } from './layout';
+import { AddToLibrary, Library } from './library';
 import { useStudio } from './records';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { when } from './today';
@@ -22,7 +24,8 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
   const { state, error: recordsError } = useStudio(projectId),
     stream = useLiveStream(),
     client = useQueryClient(),
-    [filter, setFilter] = useState<ArtifactFilter>({});
+    [filter, setFilter] = useState<ArtifactFilter>({}),
+    [adding, setAdding] = useState<ProjectArtifact | null>(null);
   // Read on each visit, since work accepted while the page was away adds files.
   const { data, error } = useQuery({
     enabled: useStreamReady(),
@@ -41,13 +44,17 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
       }),
     [stream, client, projectId],
   );
-  const heading = (
-    <Heading title="Artifacts" lead="Every file the project's accepted work handed back, newest first." />
+  // The library stays pinned at the top whatever the listing's state, and names its accepted files' stories from it.
+  const top = (
+    <>
+      <Heading title="Artifacts" lead="Every file the project's accepted work handed back, newest first." />
+      <Library projectId={projectId} names={{ files: data, records: state }} />
+    </>
   );
   if (error)
     return (
       <>
-        {heading}
+        {top}
         <p role="alert">The accepted files could not be loaded: {error.message}</p>
       </>
     );
@@ -55,7 +62,7 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
   if (!data || (!state && !recordsError))
     return (
       <>
-        {heading}
+        {top}
         <p role="status" className="sd-meta">
           Loading the accepted files…
         </p>
@@ -66,8 +73,7 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
     filtered = facets.some(facet => filter[facet]);
   return (
     <>
-      {heading}
-      {/* The project's library goes here, pinned above the accepted files (the next story of 1.2 step 6). */}
+      {top}
       <section aria-labelledby="accepted-files" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 'var(--space-10)' }}>
           <h2 id="accepted-files" className="sd-section-title sd-section-title--sm">
@@ -137,15 +143,25 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
                         )}
                       </span>
                     </span>
-                    <a
-                      className="sd-btn sd-btn--sm"
-                      href={artifactUrl(projectId, row.file.attemptId, row.file.path)}
-                      target="_blank"
-                      rel="noreferrer"
-                      aria-label={`Open ${row.file.path}`}
-                    >
-                      Open
-                    </a>
+                    <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-6)' }}>
+                      <button
+                        type="button"
+                        className="sd-btn sd-btn--sm"
+                        aria-label={`Add ${row.file.path} to the library`}
+                        onClick={() => setAdding(row.file)}
+                      >
+                        Add to the library
+                      </button>
+                      <a
+                        className="sd-btn sd-btn--sm"
+                        href={artifactUrl(projectId, row.file.attemptId, row.file.path)}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={`Open ${row.file.path}`}
+                      >
+                        Open
+                      </a>
+                    </span>
                   </div>
                 ))}
               </div>
@@ -155,6 +171,7 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
           </>
         )}
       </section>
+      <AddToLibrary projectId={projectId} file={adding} onClose={() => setAdding(null)} />
     </>
   );
 }
