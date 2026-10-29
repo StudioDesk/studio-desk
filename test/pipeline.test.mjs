@@ -302,6 +302,22 @@ test('reconciliation preserves retained general work before releasing ownership 
   assert.equal(store.attempt(owner).instructions.text, 'Fixture instructions');
 });
 
+// October 29: a story waiting on the project's source read "Waiting for Eli's work on …", as if Eli were busy.
+test('a held project source is explained as the story building on it holding it, never as its agent busy', t => {
+  const { store, owner } = conflictFixture(t);
+  store.tx(() => store.claim(['source:fixture-integration'], owner));
+  assert.equal(
+    store.resourceConflict('source:fixture-integration', owner).reason,
+    "Waiting for Eli's work on T-holder (Preserve idea drafts), which holds the project's source while it is built and tested.",
+  );
+  // Any other resource keeps its plain wording.
+  store.tx(() => store.claim(['layout:fixture'], owner));
+  assert.equal(
+    store.resourceConflict('layout:fixture', owner).reason,
+    "Waiting for Eli's work on T-holder (Preserve idea drafts) to finish.",
+  );
+});
+
 test('employee and resource waits name the holder in readiness, starts and transactional claims', async t => {
   for (const resource of ['employee:W-02', 'layout:prototype']) {
     await t.test(resource, t => {

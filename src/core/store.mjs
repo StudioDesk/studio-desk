@@ -425,6 +425,13 @@ export class Store {
             attempt.workerId && this.organization().workers?.find(worker => worker?.id === attempt.workerId);
           if (typeof worker?.displayName === 'string' && worker.displayName.trim())
             reason = `Waiting for ${worker.displayName}'s work on ${task.id} (${task.title}) to finish.`;
+          // A project's source is held by the story building on it, never by its agent, which is free to work
+          // elsewhere (MP-033).
+          if (resource.startsWith('source:'))
+            reason = reason.replace(
+              / to finish\.$/,
+              ", which holds the project's source while it is built and tested.",
+            );
         }
       }
     } catch {
