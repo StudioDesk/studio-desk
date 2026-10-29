@@ -235,6 +235,81 @@ test("with a trace, the activity is the attempt's conversation, follows its log 
   expect(await screen.findByLabelText('Raw log')).toBeTruthy();
 });
 
+// A running attempt's trace as the controller answers it, with the steps it has so far; none reads as no trace yet.
+const runningTrace = (steps: object[]) => ({
+  schemaVersion: 'attempt-trace-v1',
+  attemptId: 'attempt-1',
+  taskId: 'T-1',
+  provider: 'claude',
+  status: 'running',
+  source: steps.length ? 'activity-file' : 'none',
+  lines: steps.length,
+  counts: {},
+  steps,
+  phases: [],
+  handoff: null,
+});
+const wholeTrace = '/api/attempts/attempt-1/trace?projectId=project-x';
+const traceReads = () => controller.reads().filter(url => url.startsWith('/api/attempts/attempt-1/trace'));
+const logLine = (seq: number) =>
+  latest().emit('log', { seq, time: '2026-10-21T20:04:00Z', kind: 'log', message: 'x', attempt_id: 'attempt-1' });
+
+test("a running attempt's activity turns from the raw log to its conversation when its first steps arrive, and keeps following its log", async () => {
+  const user = userEvent.setup();
+  controller.traces['attempt-1'] = runningTrace([]);
+  open();
+  await screen.findByRole('heading', { name: 'Show finished results' });
+  await user.click(screen.getByRole('tab', { name: 'Activity' }));
+  const panel = within(await screen.findByRole('tabpanel'));
+  // Nothing in its trace yet: the chapter is the raw log.
+  expect((await panel.findByLabelText('Raw log')).textContent).toContain('stdout: line 3');
+  await waitFor(() => expect(latest().url).toContain('log=attempt-1'));
+  const watching = latest();
+  // Its first steps: the next line reads the trace whole, since there is no step to read after.
+  controller.traces['attempt-1'] = runningTrace([
+    { seq: 0, at: '2026-10-21T20:03:00Z', kind: 'say', text: 'Starting with the result reader.' },
+  ]);
+  logLine(4);
+  expect(await panel.findByText('Starting with the result reader.', {}, { timeout: 5000 })).toBeTruthy();
+  expect(panel.queryByLabelText('Raw log')).toBeNull();
+  expect(traceReads()).toEqual([wholeTrace, wholeTrace]);
+  // The raw log stopped its lines as it went, and the conversation watches the log again.
+  await waitFor(() => expect(FakeSource.all.at(-1)).not.toBe(watching));
+  expect(latest().url).toContain('log=attempt-1');
+  // From then on it reads only the steps after the last one shown.
+  controller.traces['attempt-1'] = runningTrace([
+    { seq: 1, at: '2026-10-21T20:05:00Z', kind: 'say', text: 'Now the tests.' },
+  ]);
+  change(5, [{ seq: 5, type: 'attempt', id: 'attempt-1', taskId: 'T-1', projectId: 'project-x' }]);
+  expect(await panel.findByText('Now the tests.')).toBeTruthy();
+  expect(panel.getByText('Starting with the result reader.')).toBeTruthy();
+  expect(traceReads()).toEqual([wholeTrace, wholeTrace, `${wholeTrace}&after=0`]);
+  expect(controller.reads().filter(url => url.includes('after=-1'))).toEqual([]);
+});
+
+test('a running attempt whose first step is still pending reads its trace whole for the next line, and the step settles', async () => {
+  const user = userEvent.setup();
+  controller.traces['attempt-1'] = runningTrace([
+    { seq: 0, at: '2026-10-21T20:03:00Z', kind: 'shell', command: 'npm test', pending: true },
+  ]);
+  open();
+  await screen.findByRole('heading', { name: 'Show finished results' });
+  await user.click(screen.getByRole('tab', { name: 'Activity' }));
+  const panel = within(await screen.findByRole('tabpanel'));
+  expect(await panel.findByText('npm test')).toBeTruthy();
+  expect(panel.getByText('running')).toBeTruthy();
+  await waitFor(() => expect(latest().url).toContain('log=attempt-1'));
+  controller.traces['attempt-1'] = runningTrace([
+    { seq: 0, at: '2026-10-21T20:03:00Z', kind: 'shell', command: 'npm test', exitCode: 0 },
+    { seq: 1, at: '2026-10-21T20:04:00Z', kind: 'say', text: 'The tests pass.' },
+  ]);
+  logLine(4);
+  expect(await panel.findByText('The tests pass.', {}, { timeout: 5000 })).toBeTruthy();
+  expect(panel.getByText(/^ran · /)).toBeTruthy();
+  expect(panel.queryByText('running')).toBeNull();
+  expect(traceReads()).toEqual([wholeTrace, wholeTrace]);
+});
+
 test('an attempt says what earlier work it continued, or why it started fresh', async () => {
   controller.attempts = [
     {

@@ -442,8 +442,13 @@ export function fakeController(projectId = 'project-x'): Controller {
       }
       const trace = path.match(/^\/api\/attempts\/([^/]+)\/trace$/)?.[1];
       if (trace) {
-        const record = controller.traces[decodeURIComponent(trace)];
-        return record ? respond(record) : respond({ error: 'Unknown controller route.' }, false);
+        const record = controller.traces[decodeURIComponent(trace)],
+          after = new URLSearchParams(url.split('?')[1] ?? '').getAll('after');
+        if (!record) return respond({ error: 'Unknown controller route.' }, false);
+        // As the controller's route does, a read names at most one after, and it is a nonnegative integer.
+        if (after.length > 1 || (after.length === 1 && !/^(0|[1-9][0-9]*)$/.test(after[0]!)))
+          return respond({ error: 'after must be a single nonnegative integer.' }, false);
+        return respond(record);
       }
       // A measured run's whole record: its summary, or with /text the text, when the run kept one.
       const [, measured, plain] = path.match(/^\/api\/attempts\/([^/]+)\/test-record(\/text)?$/) ?? [];

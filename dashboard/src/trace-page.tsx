@@ -1,7 +1,8 @@
 // How an agent worked on one attempt (the canvas's "How Eli worked", v1.0 items 21 and 23): what it cost in time,
 // tool calls, thinking, blocked commands and usage, every step in chapters with the agent's own words, and beside
 // them the story's attempts, how the attempt was set up, what it touched and its usage. A running attempt's trace
-// follows its log: each line it writes asks the controller for the steps after the last one shown.
+// follows its log: each line it writes asks the controller for the steps after the last one shown, or for the whole
+// trace while it has no step to read after.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -45,7 +46,10 @@ const traceUrl = (projectId: string, attemptId: string, after?: number) =>
 export const traceKey = (projectId: string, attemptId: string) => [projectId, 'trace', attemptId] as const;
 
 // An attempt's trace, kept current while it runs: each log line it writes, at most every three seconds, reads the
-// steps after the one before its earliest pending step, which may still change, and the counts and usage whole.
+// steps after the one before its earliest pending step, which may still change, and the counts and usage whole. A
+// trace with no step to read after, none yet or its first still pending, is read whole: the controller refuses a
+// negative after. A chapter that showed the raw log until the first steps came stops its lines as it turns to the
+// conversation, so a change of source watches the log again.
 export function useTrace(projectId: string, attemptId: string, live: boolean) {
   const client = useQueryClient(),
     stream = useLiveStream();
@@ -57,7 +61,8 @@ export function useTrace(projectId: string, attemptId: string, live: boolean) {
   });
   const reading = useRef(false),
     again = useRef(false),
-    loaded = !!trace.data;
+    loaded = !!trace.data,
+    source = trace.data?.source;
   useEffect(() => {
     if (!live || !loaded) return;
     const key = traceKey(projectId, attemptId);
@@ -74,11 +79,12 @@ export function useTrace(projectId: string, attemptId: string, live: boolean) {
         if (!known) return;
         const pending = known.steps.find(step => step.pending),
           after = pending ? pending.seq - 1 : (known.steps.at(-1)?.seq ?? -1),
-          next = await getJSON<AttemptTrace>(traceUrl(projectId, attemptId, after));
-        client.setQueryData<AttemptTrace>(key, {
-          ...next,
-          steps: [...known.steps.filter(step => step.seq <= after), ...next.steps],
-        });
+          whole = after < 0,
+          next = await getJSON<AttemptTrace>(traceUrl(projectId, attemptId, whole ? undefined : after));
+        client.setQueryData<AttemptTrace>(
+          key,
+          whole ? next : { ...next, steps: [...known.steps.filter(step => step.seq <= after), ...next.steps] },
+        );
       } catch {
         // The next line tries again; the page keeps what it has.
       } finally {
@@ -106,7 +112,7 @@ export function useTrace(projectId: string, attemptId: string, live: boolean) {
       stream.watchLog(null);
       if (timer) clearTimeout(timer);
     };
-  }, [live, loaded, stream, client, projectId, attemptId]);
+  }, [live, loaded, source, stream, client, projectId, attemptId]);
   return trace;
 }
 
