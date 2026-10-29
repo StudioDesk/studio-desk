@@ -1,19 +1,115 @@
 // Today's New idea box (the canvas's idea box on Today, v1.0 item 23): the idea and up to ten reference files,
 // checked here as the controller checks them, then sent as one request to the project's intake, with Auto mode
-// only when the director changed it from the Settings. On a phone the box rises as a sheet from New idea. The
-// draft stays in memory for its project, so leaving Today and coming back keeps it; nothing is stored in the
-// browser.
-import { useMutation } from '@tanstack/react-query';
+// only when the director changed it from the Settings and with the library entries the director left out. On a phone
+// the box rises as a sheet from New idea. The draft stays in memory for its project, so leaving Today and coming back
+// keeps it; nothing is stored in the browser.
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
-import { useEffect, useRef, useState } from 'react';
-import { send, type Shell } from './api';
+import { useEffect, useId, useRef, useState } from 'react';
+import { getJSON, libraryUrl, send, type LibraryEntry, type LibraryIndex, type Shell } from './api';
+import { Icon } from './design/icons';
 import { IdeaBox, type IdeaBoxFile } from './design/idea-box';
 import { added, drafts, encoded, fileSize, wording, type Draft, type IdeaIntake } from './idea-composer';
 import { newIdeaHandled, onNewIdea } from './new-idea';
 import { nextRelease, ReleaseChip, releaseChoices, useReleases, type ReleaseChoice } from './release-chip';
+import { useLiveStream, useStreamReady } from './stream-context';
 import { useToast } from './toast';
 
 const narrow = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 860px)').matches;
+
+// Today's draft also holds the library entries the director leaves out of this idea's work (1.2 step 6).
+type TodayDraft = Draft & { leftOut?: string[] };
+const emptyDraft = (): TodayDraft => ({ idea: '', files: [], error: '' });
+
+// The project's library entries that later work follows (1.2 step 6): every current one goes with a new idea's work
+// unless the director leaves it out here. Read on each visit to Today, and again when the controller records a library
+// event, since an entry added, revised or removed while Today is open changes what goes.
+function useLibrary(projectId: string) {
+  const stream = useLiveStream(),
+    client = useQueryClient(),
+    { data } = useQuery({
+      enabled: useStreamReady(),
+      queryKey: [projectId, 'library'],
+      queryFn: ({ signal }) => getJSON<LibraryIndex>(libraryUrl(projectId), signal),
+      refetchOnMount: 'always',
+    });
+  useEffect(
+    () =>
+      stream.subscribe({
+        changes: message => {
+          if (message.changes?.some(change => change.type === 'event' && change.kind?.startsWith('library_')))
+            void client.invalidateQueries({ queryKey: [projectId, 'library'] });
+        },
+      }),
+    [stream, client, projectId],
+  );
+  return (data?.entries ?? []).filter(entry => !entry.removedAt);
+}
+
+const going = (count: number) =>
+  count === 0
+    ? 'No library files go with this work'
+    : count === 1
+      ? '1 library file goes with this work'
+      : `${count} library files go with this work`;
+
+// The line in the box: how many of the library's current entries go with this idea's work, and Leave some out, which
+// lists them by name and purpose with a checkbox each. An entry the director clears stays out of the idea's work from
+// its first step.
+function LibraryLine({
+  entries,
+  leftOut,
+  onLeftOut,
+  busy,
+}: {
+  entries: LibraryEntry[];
+  leftOut: string[];
+  onLeftOut: (leftOut: string[]) => void;
+  busy: boolean;
+}) {
+  const [open, setOpen] = useState(false),
+    id = useId(),
+    row = { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 'var(--space-8)' } as const;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+      <div style={{ ...row, alignItems: 'center' }}>
+        <Icon name="folder" size={16} />
+        <span className="sd-meta">{going(entries.filter(entry => !leftOut.includes(entry.id)).length)}</span>
+        <button type="button" className="sd-link" aria-expanded={open} disabled={busy} onClick={() => setOpen(!open)}>
+          Leave some out
+        </button>
+      </div>
+      {open && (
+        <fieldset
+          disabled={busy}
+          style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)', margin: 0, padding: 0, border: 0 }}
+        >
+          <legend className="sd-meta" style={{ padding: 0, marginBottom: 'var(--space-8)' }}>
+            Checked files go with this idea&apos;s work. Clear one to leave it out.
+          </legend>
+          {entries.map(entry => (
+            <span key={entry.id} style={row}>
+              <label style={{ ...row, fontWeight: 600 }}>
+                <input
+                  type="checkbox"
+                  checked={!leftOut.includes(entry.id)}
+                  aria-describedby={`${id}-${entry.id}`}
+                  onChange={event =>
+                    onLeftOut(event.target.checked ? leftOut.filter(item => item !== entry.id) : [...leftOut, entry.id])
+                  }
+                />
+                {entry.name}
+              </label>
+              <span id={`${id}-${entry.id}`} className="sd-meta">
+                {entry.purpose}
+              </span>
+            </span>
+          ))}
+        </fieldset>
+      )}
+    </div>
+  );
+}
 
 // Where a new idea lands (1.1 step 6): the director's pick, otherwise the current working release, the lowest open
 // milestone on the newest line. Neither its words nor the planner pick one (MP-032). Only the pick is sent; the
@@ -79,7 +175,7 @@ export function TodayIdea({
   // A sample project's suggested first ideas, until it has one (first-run-guide.tsx).
   suggestions?: string[];
 }) {
-  const [draft, setDraft] = useState<Draft>(() => drafts.get(projectId) ?? { idea: '', files: [], error: '' }),
+  const [draft, setDraft] = useState<TodayDraft>(() => drafts.get(projectId) ?? emptyDraft()),
     [auto, setAuto] = useState<boolean | undefined>(),
     [sheet, setSheet] = useState(false),
     dialog = useRef<HTMLDialogElement>(null),
@@ -119,7 +215,10 @@ export function TodayIdea({
       else element.removeAttribute('open');
     }
   }, [sheet]);
-  const lands = useLandsIn(projectId, intake === 'source');
+  const lands = useLandsIn(projectId, intake === 'source'),
+    library = useLibrary(projectId),
+    // Only entries still in the library are left out, so the line and the request agree.
+    leftOut = (draft.leftOut ?? []).filter(id => library.some(entry => entry.id === id));
   const submit = useMutation({
     mutationFn: async () => {
       const idea = draft.idea.trim();
@@ -133,13 +232,15 @@ export function TodayIdea({
         ...(auto !== undefined && auto !== autoDefault ? { autoMode: auto } : {}),
         // Only the director's pick is sent; otherwise the controller reads the words or takes the next release.
         ...(lands.picked ? { milestone: lands.picked.id } : {}),
+        // Only the entries the director left out are sent; otherwise every current entry goes with the work.
+        ...(leftOut.length ? { libraryLeftOut: leftOut } : {}),
       });
       if (!result.runId) throw new Error('Intake did not confirm a run. Your draft and files are retained.');
       return result.runId;
     },
     onSuccess: runId => {
       draft.files.forEach(item => item.url && URL.revokeObjectURL(item.url));
-      const empty = { idea: '', files: [], error: '' };
+      const empty = emptyDraft();
       drafts.set(projectId, empty);
       setDraft(empty);
       setAuto(undefined);
@@ -186,6 +287,16 @@ export function TodayIdea({
         setDraft({ ...draft, files: draft.files.filter(file => file !== item), error: '' });
       }}
       error={draft.error}
+      library={
+        library.length > 0 && (
+          <LibraryLine
+            entries={library}
+            leftOut={leftOut}
+            onLeftOut={ids => setDraft(current => ({ ...current, leftOut: ids, error: '' }))}
+            busy={busy}
+          />
+        )
+      }
       suggestions={suggestions}
       settings={[
         {

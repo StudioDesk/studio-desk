@@ -1,7 +1,8 @@
 // The one box for everything the director writes to the studio (the design system's IdeaBox, v1.0 item 23): the
-// label with the project's dot, optional recipients and a help line, the text, the attached files, optional
-// suggestions, then a bar with Files, the settings and the send button. It holds no draft of its own: the page
-// that uses it owns the text, files and settings, checks the files and sends.
+// label with the project's dot, optional recipients and a help line, the text, the attached files, an optional line
+// for the library files that go with the work, optional suggestions, then a bar with Files, the settings and the send
+// button. It holds no draft of its own: the page that uses it owns the text, files and settings, checks the files and
+// sends.
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode } from 'react';
 import { Icon } from './icons';
 
@@ -31,6 +32,7 @@ export function IdeaBox({
   onFiles,
   onRemove,
   error,
+  library,
   recipients = [],
   to,
   onTo,
@@ -59,6 +61,8 @@ export function IdeaBox({
   onFiles?: (files: File[], pasted: boolean) => void;
   onRemove?: (key: IdeaBoxFile['key']) => void;
   error?: string;
+  // The project's library files that go with the work, a line the page supplies (1.2 step 6).
+  library?: ReactNode;
   recipients?: string[];
   to?: string;
   onTo?: (name: string) => void;
@@ -184,6 +188,7 @@ export function IdeaBox({
           ))}
         </ul>
       )}
+      {library && <div className="sd-ideabox__library">{library}</div>}
       {error && (
         <p className="sd-ideabox__error" role="alert">
           {error}
