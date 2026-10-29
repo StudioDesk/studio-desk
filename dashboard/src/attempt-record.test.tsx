@@ -138,13 +138,16 @@ test('a drawing with active content is not shown', async () => {
   expect(screen.queryByRole('img', { name: 'drawing.svg' })).toBeNull();
 });
 
-test("a step's Result shows what it handed on and how its time went; its Record, what it received and ran with", async () => {
+test("a step's Overview shows what it handed on and how its time went; its Record, what it received and ran with", async () => {
   const user = userEvent.setup();
   open('/p/project-x/tasks/T-1');
   expect(await screen.findByText('Fix the hinge next.')).toBeTruthy();
+  // The step opens on its Overview, which has taken the Result tab's place.
+  expect(screen.getByRole('tab', { name: 'Overview' }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.queryByRole('tab', { name: 'Result' })).toBeNull();
   expect(screen.getByText('Tests: 12 passed, 0 failed, 0 cancelled of 12.')).toBeTruthy();
   expect(screen.getByText('4.2s')).toBeTruthy();
-  // Nothing on the Result is raw JSON or folded away.
+  // Nothing on the Overview is raw JSON or folded away.
   expect(screen.getByRole('tabpanel').querySelector('details')).toBeNull();
   await user.click(screen.getByRole('tab', { name: 'Record' }));
   const record = within(screen.getByRole('tabpanel'));

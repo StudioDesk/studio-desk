@@ -198,7 +198,7 @@ export interface Standing {
   detail: string;
   // The agent whose face the banner shows; none when the call is the director's.
   workerId?: string;
-  // The whole account, unshortened, as the story's Checks or Result tab tells it: the title, then each part of the
+  // The whole account, unshortened, as the story's Checks or Overview tab tells it: the title, then each part of the
   // detail on a line of its own (each failing check with its evidence, each failed test, the error, the editor's
   // issues and the next step), or the detail as one line.
   full: { title: string; lines: string[] };
@@ -367,7 +367,7 @@ function stands(task: Task, studio: StudioState, phase: string | null): Told {
     detail: lines.join(' '),
     lines,
     // The notice says what failed in plain words and what the director can do; the checks' evidence, the failed
-    // tests, the error and the issues are told in full under Checks or Result.
+    // tests, the error and the issues are told in full under Checks or Overview.
     short: {
       title:
         stopped && tried?.tests && tried.fail

@@ -60,7 +60,7 @@ const lineOf = (chapter: HTMLElement) => within(chapter).getAllByRole('button')[
 const edit = (fields: object) => (controller.tasks = [{ ...controller.tasks[0]!, ...fields }]);
 
 test("the page loads its task with the project's shared records, and a change fetches only the task it names", async () => {
-  // A finished attempt, whose Result is what it returned; a running one's is its live activity.
+  // A finished attempt, whose Overview is what it returned; a running one's says who is working on it.
   controller.attempts = [{ ...controller.attempts[0]!, status: 'succeeded' }];
   open();
   expect(await screen.findByRole('heading', { level: 1, name: 'Show finished results' })).toBeTruthy();
@@ -133,34 +133,59 @@ test('a draft direction keeps its text and cursor through a refresh, and saving 
   });
 });
 
-test("a running step's Result is its activity; the Activity tab streams only that attempt's lines while open, and stops when closed", async () => {
-  const user = userEvent.setup();
-  open();
-  await screen.findByRole('heading', { name: 'Show finished results' });
-  // A running step opens on its Result, which is what its agent is doing until it hands back.
-  expect(await screen.findByText(/is working on it now/)).toBeTruthy();
-  await user.click(screen.getByRole('tab', { name: /^Attempts/ }));
-  await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
-  const tab = screen.getByRole('tab', { name: 'Activity' });
-  await user.click(tab);
-  expect(await screen.findByLabelText('Raw log')).toBeTruthy();
-  expect(screen.getByLabelText('Raw log').textContent).toContain('stdout: line 3');
-  await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x&log=attempt-1&after=3'));
-  const line = controller.logs['attempt-1']![2]!;
-  latest().emit('log', { ...line, seq: 4, message: 'stdout: line 4' });
-  latest().emit('log', { ...line, seq: 5, attempt_id: 'attempt-other', message: 'stdout: elsewhere' });
-  latest().emit('log', { ...line, seq: 4, message: 'stdout: line 4' });
-  const text = screen.getByLabelText('Raw log').textContent!;
-  expect(text.split('\n')).toHaveLength(4);
-  expect(text).toContain('stdout: line 4');
-  expect(text).not.toContain('elsewhere');
-  // A refresh of the task leaves the tab open.
-  edit({ title: 'Refreshed with the activity open' });
-  change(3, [{ seq: 3, type: 'task', id: 'T-1' }]);
-  await screen.findByRole('heading', { name: 'Refreshed with the activity open' });
-  expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
-  await user.click(screen.getByRole('tab', { name: /^Attempts/ }));
-  await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
+test("a running step's Overview names who is working on it now, and Open Activity opens its running chapter, which streams only that attempt's lines while open", async () => {
+  const user = userEvent.setup(),
+    scrolled = vi.fn();
+  Element.prototype.scrollIntoView = scrolled;
+  try {
+    open();
+    await screen.findByRole('heading', { name: 'Show finished results' });
+    // A running step opens on its Overview, which says who is working on it until it hands back, and streams nothing.
+    expect(screen.queryByRole('tab', { name: 'Result' })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Overview' }).getAttribute('aria-selected')).toBe('true');
+    const overview = within(screen.getByRole('tabpanel'));
+    expect(await overview.findByText(/^Eli is working on it now\./)).toBeTruthy();
+    expect(overview.queryByLabelText('Raw log')).toBeNull();
+    await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
+    // Open Activity: the running chapter, open and in view, with its live lines.
+    await user.click(overview.getByRole('button', { name: 'Open Activity' }));
+    expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+    const chapter = await screen.findByRole('region', { name: /^Attempt 1 of / });
+    expect(lineOf(chapter).getAttribute('aria-expanded')).toBe('true');
+    await waitFor(() => expect(scrolled.mock.contexts).toContain(chapter));
+    expect(await within(chapter).findByLabelText('Raw log')).toBeTruthy();
+    expect(screen.getByLabelText('Raw log').textContent).toContain('stdout: line 3');
+    await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x&log=attempt-1&after=3'));
+    const line = controller.logs['attempt-1']![2]!;
+    latest().emit('log', { ...line, seq: 4, message: 'stdout: line 4' });
+    latest().emit('log', { ...line, seq: 5, attempt_id: 'attempt-other', message: 'stdout: elsewhere' });
+    latest().emit('log', { ...line, seq: 4, message: 'stdout: line 4' });
+    const text = screen.getByLabelText('Raw log').textContent!;
+    expect(text.split('\n')).toHaveLength(4);
+    expect(text).toContain('stdout: line 4');
+    expect(text).not.toContain('elsewhere');
+    // A refresh of the task leaves the tab open.
+    edit({ title: 'Refreshed with the activity open' });
+    change(3, [{ seq: 3, type: 'task', id: 'T-1' }]);
+    await screen.findByRole('heading', { name: 'Refreshed with the activity open' });
+    expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+    await user.click(screen.getByRole('tab', { name: /^Attempts/ }));
+    await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
+    // The running chapter the director folded opens again from the Overview.
+    await user.click(screen.getByRole('tab', { name: 'Activity' }));
+    const folded = await screen.findByRole('region', { name: /^Attempt 1 of / });
+    await user.click(lineOf(folded));
+    expect(lineOf(folded).getAttribute('aria-expanded')).toBe('false');
+    expect(within(folded).queryByLabelText('Raw log')).toBeNull();
+    await user.click(screen.getByRole('tab', { name: 'Overview' }));
+    await user.click(within(screen.getByRole('tabpanel')).getByRole('button', { name: 'Open Activity' }));
+    const reopened = await screen.findByRole('region', { name: /^Attempt 1 of / });
+    expect(lineOf(reopened).getAttribute('aria-expanded')).toBe('true');
+    expect(await within(reopened).findByLabelText('Raw log')).toBeTruthy();
+    await waitFor(() => expect(latest().url).toContain('log=attempt-1'));
+  } finally {
+    delete (Element.prototype as Partial<Element>).scrollIntoView;
+  }
 });
 
 test("with a trace, the activity is the attempt's conversation, follows its log for new steps and opens the full trace", async () => {
@@ -260,7 +285,7 @@ test('an attempt says when git merged the work it continued onto the current sou
   ).toBeTruthy();
   expect(screen.queryByText('Continued from attempt-0: src/a.mjs')).toBeNull();
   cleanup();
-  // A finished attempt's Result tab names each file set aside with why, with or without a continuation.
+  // A finished attempt's Overview names each file set aside with why, with or without a continuation.
   const reason =
     'The current source deleted src/b.mjs since; your change to it is under merge-set-aside/src/b.mjs for reference.';
   controller.attempts = [
@@ -647,7 +672,7 @@ test('a reconnecting stream asks for what it missed, and reloads after a restart
   meta.remove();
 });
 
-test("a reviewed step's Result shows its work first, then the review, unless another attempt is chosen", async () => {
+test("a reviewed step's Overview shows its work first, then the review, unless another attempt is chosen", async () => {
   const user = userEvent.setup();
   controller.shell.workers = [
     { id: 'W-1', displayName: 'Eli', team: 'Engineering' },
@@ -687,6 +712,7 @@ test("a reviewed step's Result shows its work first, then the review, unless ano
   ];
   open();
   const panel = await screen.findByRole('tabpanel');
+  expect(screen.getByRole('tab', { name: 'Overview' }).getAttribute('aria-selected')).toBe('true');
   expect(await within(panel).findByText('Wrote the welcome guide.')).toBeTruthy();
   const text = panel.textContent ?? '',
     at = ['Wrote the welcome guide.', 'Morgan · Independent work review', 'The guide covers every station.'].map(
@@ -698,7 +724,7 @@ test("a reviewed step's Result shows its work first, then the review, unless ano
   await user.click(screen.getByRole('tab', { name: /^Attempts/ }));
   const [work] = within(await screen.findByRole('tabpanel')).getAllByRole('button');
   await user.click(work!);
-  await user.click(screen.getByRole('tab', { name: 'Result' }));
+  await user.click(screen.getByRole('tab', { name: 'Overview' }));
   const chosen = await screen.findByRole('tabpanel');
   expect(await within(chosen).findByText('Wrote the welcome guide.')).toBeTruthy();
   expect(within(chosen).queryByText('The guide covers every station.')).toBeNull();
@@ -812,10 +838,10 @@ const inFull = { name: 'Where it stands, in full' };
 // test outran its own time limit once the whole suite ran beside it.
 for (const [source, tab] of [
   [true, 'Checks'],
-  [false, 'Result'],
+  [false, 'Overview'],
 ] as const)
   for (const phone of [false, true])
-    test(`a stopped ${source ? "story's Checks" : "work's Result"} starts with where it stands in full${phone ? ', on a phone too' : ''}`, async () => {
+    test(`a stopped ${source ? "story's Checks" : "work's Overview"} starts with where it stands in full${phone ? ', on a phone too' : ''}`, async () => {
       const user = userEvent.setup();
       width(phone);
       stopped(source);
@@ -839,7 +865,7 @@ for (const [source, tab] of [
 // The notice at the top reads in a line or two, and links to its full account.
 for (const [source, tab] of [
   [true, 'Checks'],
-  [false, 'Result'],
+  [false, 'Overview'],
 ] as const)
   test(`a stopped ${source ? 'story' : 'work'}'s notice says its tests did not pass and what to do, and Read why opens ${tab} at the full account`, async () => {
     const user = userEvent.setup(),
@@ -876,7 +902,7 @@ for (const [source, tab] of [
 
 for (const [source, tab, shows] of [
   [true, 'Checks', 'The candidate has not been tested yet.'],
-  [false, 'Result', /is working on it now/],
+  [false, 'Overview', /is working on it now/],
 ] as const)
   test(`while the work runs, its ${tab} does not tell where it stands in full`, async () => {
     const user = userEvent.setup();
@@ -963,12 +989,12 @@ test("a code story's brief is a card beside its tabs, which have no Overview, an
   expect(brief.getByLabelText('Direction for the next attempt')).toBeTruthy();
 });
 
-test('other work has the brief card too, with its brief and what it was handed; it opens on Result, or Activity before any attempt', async () => {
+test('other work has the brief card too, with its brief and what it was handed; it opens on Overview, or Activity before any attempt', async () => {
   handed(false);
   open();
   const brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
-  expect(screen.getByRole('tab', { name: 'Result' }).getAttribute('aria-selected')).toBe('true');
-  expect(screen.queryByRole('tab', { name: 'Overview' })).toBeNull();
+  expect(screen.getByRole('tab', { name: 'Overview' }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.queryByRole('tab', { name: 'Result' })).toBeNull();
   // Other work's brief keeps every line it was written with; it has no files to change.
   expect(brief.getByText('outcome()').tagName).toBe('CODE');
   expect(brief.getByText(/^Files: src\/result\.mjs/)).toBeTruthy();
@@ -982,6 +1008,134 @@ test('other work has the brief card too, with its brief and what it was handed; 
   open();
   expect(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 })).toBeTruthy();
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+});
+
+// Other work's Overview is where its Result tab was, on a wide screen and on a phone; a code story's tabs are as they
+// were (its wide ones are above).
+for (const [source, phone, labels, opens] of [
+  [false, false, ['Overview', 'Activity', 'Attempts', 'Record'], 'Overview'],
+  [false, true, ['Activity', 'Overview', 'Attempts', 'Details'], 'Overview'],
+  [true, true, ['Activity', 'Changes', 'Checks', 'Attempts', 'Details'], 'Activity'],
+] as const)
+  test(`${source ? "a code story's" : "other work's"} tabs${phone ? ' on a phone' : ''} are ${labels.join(', ')}, and it opens on ${opens}`, async () => {
+    width(phone);
+    handed(source);
+    open();
+    const tablist = await screen.findByRole('tablist', { name: 'Story details' }, { timeout: 5000 });
+    expect(
+      within(tablist)
+        .getAllByRole('tab')
+        .map(tab => tab.firstChild?.textContent),
+    ).toEqual(labels);
+    expect(within(tablist).getByRole('tab', { name: opens }).getAttribute('aria-selected')).toBe('true');
+  });
+
+test("other work's Overview leads with what its latest attempt returned, its files and what it raised, then the rest it handed back", async () => {
+  const result = {
+    outcome: 'completed',
+    summary: 'Wrote the welcome guide.',
+    issues: ['I could not check the screenshots.'],
+    checks: [{ name: 'Read it through', status: 'pass', evidence: 'Every step works.' }],
+  };
+  controller.tasks = [
+    taskFixture('T-1', {
+      title: 'Write the welcome guide',
+      status: 'review',
+      lastAttemptId: 'attempt-2',
+      proposedTaskIds: ['T-2'],
+    }),
+    taskFixture('T-2', { title: 'Translate the guide', status: 'backlog' }),
+  ];
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'failed',
+      workerId: 'W-1',
+      startedAt: '2026-10-28T09:00:00Z',
+      finishedAt: '2026-10-28T09:20:00Z',
+      result: { outcome: 'failed', summary: 'A first draft.' },
+    },
+    {
+      id: 'attempt-2',
+      taskId: 'T-1',
+      status: 'review',
+      workerId: 'W-1',
+      startedAt: '2026-10-28T10:00:00Z',
+      finishedAt: '2026-10-28T10:20:00Z',
+      artifacts: [{ path: 'guide.md', hash: 'h-guide', kind: 'work-file' }],
+      // The checks it reported, which the compact record's type leaves out.
+      result: result as AttemptSummary['result'],
+    },
+  ];
+  controller.artifacts['attempt-2/guide.md'] = '# Welcome\n\nStart here.';
+  controller.details['attempt-2'] = {
+    result: { ...result, handoff: 'Translate it next.' },
+    employeeTestRuns: [
+      { startedAt: '2026-10-28T10:10:00Z', files: [], exitCode: 0, totals: { pass: 3, fail: 0, tests: 3 } },
+    ],
+    phaseEvents: [
+      {
+        attempt_id: 'attempt-2',
+        task_id: 'T-1',
+        payload: {
+          schemaVersion: 'source-phase-v1',
+          attemptId: 'attempt-2',
+          taskId: 'T-1',
+          occurrenceId: 'o-1',
+          phaseId: 'test',
+          boundary: 'start',
+          timestamp: '2026-10-28T10:11:00Z',
+        },
+      },
+      {
+        attempt_id: 'attempt-2',
+        task_id: 'T-1',
+        payload: {
+          schemaVersion: 'source-phase-v1',
+          attemptId: 'attempt-2',
+          taskId: 'T-1',
+          occurrenceId: 'o-1',
+          phaseId: 'test',
+          boundary: 'finish',
+          durationMs: 4200,
+          outcome: 'succeeded',
+          totals: { pass: 3, fail: 0, cancelled: 0, tests: 3 },
+        },
+      },
+    ],
+  };
+  open();
+  const panel = await screen.findByRole('tabpanel', {}, { timeout: 5000 });
+  expect(screen.queryByRole('tab', { name: 'Result' })).toBeNull();
+  expect(screen.getByRole('tab', { name: 'Overview' }).getAttribute('aria-selected')).toBe('true');
+  expect(await within(panel).findByText('Translate it next.', {}, { timeout: 5000 })).toBeTruthy();
+  // The latest attempt's summary, the files it returned and what it raised, then the checks it reported, its
+  // hand-off, the work it proposed, its own test runs and how its time went.
+  const text = (panel.textContent ?? '').slice((panel.textContent ?? '').indexOf('What Eli returned')),
+    parts = [
+      'What Eli returned',
+      'Wrote the welcome guide.',
+      'Files it returned',
+      'What it raised',
+      'I could not check the screenshots.',
+      'The checks it reported',
+      'Read it through',
+      'What it handed on to the next step',
+      'Translate it next.',
+      'The work it proposed',
+      'Translate the guide',
+      "Eli's own test runs",
+      'How its time went',
+    ],
+    at = parts.map(words => text.indexOf(words));
+  expect(parts.filter((_, index) => at[index]! < 0)).toEqual([]);
+  expect(at).toEqual([...at].sort((a, b) => a - b));
+  // The files it returned are in the file viewer, the first one open.
+  expect(within(panel).getByRole('list', { name: 'Files' })).toBeTruthy();
+  expect(await within(panel).findByRole('heading', { name: 'Welcome' })).toBeTruthy();
+  // The attempt before it is not shown.
+  expect(within(panel).queryByText('A first draft.')).toBeNull();
 });
 
 test('on a phone the brief card is under Details with the other side cards, shown once', async () => {

@@ -296,7 +296,7 @@ const phaseColors: Record<string, string> = {
   test: 'var(--ok-dot)',
 };
 
-// Where it stands, in full: the notice's whole account at the top of the Checks tab, or the Result tab for other
+// Where it stands, in full: the notice's whole account at the top of the Checks tab, or the Overview tab for other
 // work, its title and then each part on a row of its own (a failed test with its file). The notice links to it by
 // its id. Nothing shows while the work runs, or when the notice has nothing more to tell.
 export const standsInFullId = 'stands-in-full';
@@ -767,7 +767,7 @@ export function AttemptsPanel({
           left > 0 &&
           ` ${left} build ${plural(left, 'attempt is', 'attempts are')} left.`}
       </p>
-      {/* A story has no Result tab: the attempt chosen says here which files git set aside for its editor. */}
+      {/* A story has no Overview tab: the attempt chosen says here which files git set aside for its editor. */}
       <SetAside attempt={shown} top="12px" />
     </div>
   );
@@ -979,10 +979,11 @@ export function RecordPanel({
 
 // What an attempt handed back, read in place (item 14): why it stopped, its picture, what it said it did, the files
 // it returned, the checks it reported, what it raised, what it handed on, the work it proposed or its plan, its own
-// test runs, how its time went, the work it continued and what git set aside. Other work's Result shows it for the
+// test runs, how its time went, the work it continued and what git set aside. Other work's Overview shows it for the
 // attempt shown, and each attempt's chapter in the story's Activity ends with it. `full` is the attempt's full
 // record once read; `proposals` adds the work the task proposed, which its chapters show under the attempt that
-// proposed it.
+// proposed it; `raisedFirst` puts what it raised right after the files it returned, before the checks it reported,
+// as the Overview leads with what the attempt returned.
 export function HandedBack({
   projectId,
   task,
@@ -990,6 +991,7 @@ export function HandedBack({
   attempt: shown,
   full,
   proposals = true,
+  raisedFirst = false,
 }: {
   projectId: string;
   task: Task;
@@ -997,6 +999,7 @@ export function HandedBack({
   attempt: AttemptSummary;
   full?: FullAttempt;
   proposals?: boolean;
+  raisedFirst?: boolean;
 }) {
   const attempt: FullAttempt = full ?? shown,
     name = workerName(studio, attempt.workerId),
@@ -1018,6 +1021,16 @@ export function HandedBack({
       {body}
     </section>
   );
+  const raised = result?.issues?.length
+    ? part(
+        'What it raised',
+        <ul className="sd-reader__text" style={{ margin: 0 }}>
+          {result.issues.map((issue, index) => (
+            <li key={index}>{issue}</li>
+          ))}
+        </ul>,
+      )
+    : null;
   return (
     <>
       {attempt.error && (
@@ -1034,6 +1047,7 @@ export function HandedBack({
         </span>
       )}
       {entries.length > 0 && part('Files it returned', <FileViewer projectId={projectId} entries={entries} />)}
+      {raisedFirst && raised}
       {checks.length > 0 &&
         part(
           'The checks it reported',
@@ -1043,16 +1057,7 @@ export function HandedBack({
             ))}
           </div>,
         )}
-      {result?.issues?.length
-        ? part(
-            'What it raised',
-            <ul className="sd-reader__text" style={{ margin: 0 }}>
-              {result.issues.map((issue, index) => (
-                <li key={index}>{issue}</li>
-              ))}
-            </ul>,
-          )
-        : null}
+      {!raisedFirst && raised}
       {full ? (
         result?.handoff && part('What it handed on to the next step', <p style={{ margin: 0 }}>{result.handoff}</p>)
       ) : (
@@ -1089,8 +1094,9 @@ export const proposer = (task: Task, attempts: AttemptSummary[]) =>
   attempts.find(attempt => attempt.id === task.acceptedAttemptId) ??
   [...attempts].reverse().find(attempt => !isReview(attempt));
 
-// Work other than a source story: what the attempt shown returned, under who ran it and how it ended. What it was
-// told and received, and the whole record, are under Record.
+// Work other than a source story, on its Overview: what the attempt shown returned, under who ran it and how it
+// ended, its summary, the files it returned and what it raised first, then the rest of what it handed back. What it
+// was told and received, and the whole record, are under Record.
 export function ResultPanel({
   projectId,
   task,
@@ -1135,7 +1141,7 @@ export function ResultPanel({
           {label}
         </span>
       </div>
-      <HandedBack projectId={projectId} task={task} studio={studio} attempt={shown} full={full} />
+      <HandedBack projectId={projectId} task={task} studio={studio} attempt={shown} full={full} raisedFirst />
       <p className="sd-meta" style={{ margin: 0 }}>
         What {name} was told, what it received and everything recorded about this attempt are under{' '}
         {narrow ? 'Details' : 'Record'}.

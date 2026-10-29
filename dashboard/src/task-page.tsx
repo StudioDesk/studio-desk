@@ -20,7 +20,7 @@ import {
   type TaskPage,
 } from './api';
 import { carriedOf, continuation, openPhase, useAttemptDetail } from './attempt-record';
-import { beforeThis, TraceActivity } from './activity';
+import { TraceActivity } from './activity';
 import { carryWords, type CarryRecord } from './carries';
 import { askedPaths, fileRequest } from './decisions';
 import { AgentAvatar } from './design/avatar';
@@ -151,7 +151,7 @@ function Crumbs({
   );
 }
 
-type TabId = 'changes' | 'checks' | 'activity' | 'attempts' | 'record' | 'result' | 'details';
+type TabId = 'changes' | 'checks' | 'activity' | 'attempts' | 'record' | 'overview' | 'details';
 interface Tab {
   id: TabId;
   label: string;
@@ -235,7 +235,7 @@ function Story({
   const tabs: Tab[] = narrow
     ? [
         { id: 'activity', label: 'Activity' },
-        source ? { id: 'changes', label: 'Changes', count: stat?.files } : { id: 'result', label: 'Result' },
+        source ? { id: 'changes', label: 'Changes', count: stat?.files } : { id: 'overview', label: 'Overview' },
         ...(source ? [{ id: 'checks' as const, label: 'Checks' }] : []),
         { id: 'attempts', label: 'Attempts', count: tries || undefined },
         { id: 'details', label: 'Details' },
@@ -246,14 +246,14 @@ function Story({
               { id: 'changes' as const, label: 'Changes', count: stat?.files },
               { id: 'checks' as const, label: 'Checks' },
             ]
-          : [{ id: 'result' as const, label: 'Result' }]),
+          : [{ id: 'overview' as const, label: 'Overview' }]),
         { id: 'activity', label: 'Activity' },
         { id: 'attempts', label: 'Attempts', count: tries || undefined },
         { id: 'record', label: 'Record' },
       ];
-  // A story with a candidate opens on its change, other work with an attempt on its result; the rest on what
-  // happened to it. What was asked is the brief beside the tabs.
-  const fallback: TabId = source ? (people.candidate ? 'changes' : 'activity') : shown ? 'result' : 'activity',
+  // A story with a candidate opens on its change, other work with an attempt on its Overview of what that attempt
+  // returned; the rest on what happened to it. What was asked is the brief beside the tabs.
+  const fallback: TabId = source ? (people.candidate ? 'changes' : 'activity') : shown ? 'overview' : 'activity',
     tab = tabs.some(item => item.id === picked) ? picked! : fallback;
   // The brief, then who works on it and under which rules: beside the tabs, or under Details on a phone.
   const sideCards = (
@@ -284,7 +284,15 @@ function Story({
       />
     </>
   );
-  // The notice's whole account heads a story's Checks, and other work's Result. The review is its own chapter in
+  // The review tile, and Open Activity on other work's Overview while its attempt runs, open Activity with that
+  // attempt's chapter open and bring the chapter into view.
+  const showChapter = (attemptId?: string) => {
+    setPicked('activity');
+    if (!attemptId) return;
+    setOpened(current => ({ ...current, [attemptId]: true }));
+    setRevealing(current => ({ attemptId, count: (current?.count ?? 0) + 1 }));
+  };
+  // The notice's whole account heads a story's Checks, and other work's Overview. The review is its own chapter in
   // Activity.
   const panels: Record<TabId, () => ReactNode> = {
     changes: () => <SourceDiff task={task} studio={studio} selectedAttemptId={chosen ?? undefined} />,
@@ -332,8 +340,10 @@ function Story({
         latest={shown?.id === latest?.id}
       />
     ),
-    // While the attempt runs, its result is what it is doing; what it returns replaces that when it hands back.
-    result: () => (
+    // Other work's Overview: what the latest attempt, or the one chosen, returned, under where it stands in full. A
+    // staged task shows its own work first, then the later step's attempt. While the attempt runs, who is working on
+    // it now; its live conversation is its chapter in Activity, and what it returns shows here when it hands back.
+    overview: () => (
       <>
         <StandsInFull task={task} stand={stand} />
         {work && (
@@ -349,28 +359,7 @@ function Story({
           </>
         )}
         {shown && running(shown.status) ? (
-          <Activity
-            key={shown.id}
-            projectId={projectId}
-            task={task}
-            studio={studio}
-            attempt={shown}
-            looks={looks}
-            onAttempts={() => setPicked('attempts')}
-            lead={
-              <>
-                <p style={{ margin: 0 }}>
-                  {workerName(studio, shown.workerId)} is working on it now. What it returns shows here when it hands it
-                  back.
-                </p>
-                {carriedOf(shown) && (
-                  <p className="sd-meta" style={{ margin: 0 }}>
-                    {continuation(carriedOf(shown)!)}
-                  </p>
-                )}
-              </>
-            }
-          />
+          <WorkingNow studio={studio} attempt={shown} onOpen={() => showChapter(shown.id)} />
         ) : (
           <ResultPanel projectId={projectId} task={task} studio={studio} shown={shown} />
         )}
@@ -407,20 +396,13 @@ function Story({
     if (reading) document.getElementById(standsInFullId)?.scrollIntoView?.({ block: 'start' });
   }, [reading]);
   const readInFull = () => {
-    setPicked(source ? 'checks' : 'result');
+    setPicked(source ? 'checks' : 'overview');
     setReading(count => count + 1);
   };
-  // The review tile opens Activity with the review's chapter open and brings that chapter into view.
+  // The chapter showChapter opened comes into view once Activity shows.
   useEffect(() => {
     if (revealing) document.getElementById(chapterId(revealing.attemptId))?.scrollIntoView?.({ block: 'start' });
   }, [revealing]);
-  const showReview = () => {
-    setPicked('activity');
-    const review = people.review;
-    if (!review) return;
-    setOpened(current => ({ ...current, [review.id]: true }));
-    setRevealing(current => ({ attemptId: review.id, count: (current?.count ?? 0) + 1 }));
-  };
   // The brief's file form, opened and brought into view where the brief shows: beside the tabs, which stay as they
   // are, or under Details on a phone.
   useEffect(() => {
@@ -553,7 +535,13 @@ function Story({
         <DecisionNotes projectId={projectId} task={task} studio={studio} />
       </Stands>
       {source && people.candidate && (
-        <Tiles task={task} studio={studio} looks={looks} onShow={setPicked} onReview={showReview} />
+        <Tiles
+          task={task}
+          studio={studio}
+          looks={looks}
+          onShow={setPicked}
+          onReview={() => showChapter(people.review?.id)}
+        />
       )}
       <div className="sd-story">
         <section className="sd-card sd-story__main">
@@ -613,7 +601,7 @@ function Steps({ steps }: { steps: Step[] }) {
 }
 
 // Where it stands: the director's call or the work moving, in the agents' words, with the decisions it offers. A
-// shortened notice links to its full account under Checks, or other work's Result.
+// shortened notice links to its full account under Checks, or other work's Overview.
 function Stands({
   projectId,
   task,
@@ -675,7 +663,7 @@ function Stands({
               <>
                 {stand.detail && ' '}
                 <button type="button" className="sd-link" onClick={onReadInFull}>
-                  Read why in {isSourceStory(task) ? 'Checks' : 'Result'}
+                  Read why in {isSourceStory(task) ? 'Checks' : 'Overview'}
                 </button>
               </>
             )}
@@ -1196,8 +1184,6 @@ function Conversation({
   attempt,
   trace,
   looks,
-  before,
-  onBefore,
   onRaw,
 }: {
   projectId: string;
@@ -1207,8 +1193,6 @@ function Conversation({
   attempt: AttemptSummary;
   trace?: AttemptTrace;
   looks: Map<string, AgentLook>;
-  before?: string;
-  onBefore?: () => void;
   onRaw: () => void;
 }) {
   const live = running(attempt.status),
@@ -1241,8 +1225,6 @@ function Conversation({
       face={look && <AgentAvatar look={look} size={34} state={live ? 'working' : 'idle'} ring={false} />}
       heading={heading}
       cli={provider || 'The CLI'}
-      before={before}
-      onBefore={onBefore}
       actions={
         <button type="button" className="sd-btn sd-btn--ghost" style={{ flex: '1 1 160px' }} onClick={onRaw}>
           Raw log
@@ -1252,66 +1234,23 @@ function Conversation({
   );
 }
 
-// The attempt shown as it runs, on the Result tab: its conversation, and how the attempts before it ended. A
-// controller that recorded no trace shows the raw log alone. `lead` is a line above the conversation.
-function Activity({
-  projectId,
-  task,
-  studio,
-  attempt,
-  looks,
-  onAttempts,
-  lead,
-}: {
-  projectId: string;
-  task: Task;
-  studio: StudioState;
-  attempt: AttemptSummary;
-  looks: Map<string, AgentLook>;
-  onAttempts: () => void;
-  lead?: ReactNode;
-}) {
-  const trace = useTrace(projectId, attempt.id, running(attempt.status)),
-    [raw, setRaw] = useState(false),
-    sameKind = studio.attempts.filter(item => item.taskId === task.id && isReview(item) === isReview(attempt));
-  if (trace.error || trace.data?.source === 'none' || raw)
-    return (
-      <>
-        {lead && (
-          <div className="sd-tabpanel" style={{ paddingBottom: 0 }}>
-            {lead}
-          </div>
-        )}
-        <RawActivity projectId={projectId} task={task} studio={studio} attempt={attempt} looks={looks} />
-        {raw && (
-          <div className="sd-tabpanel" style={{ paddingTop: 0 }}>
-            <button
-              type="button"
-              className="sd-btn sd-btn--sm"
-              style={{ alignSelf: 'flex-start' }}
-              onClick={() => setRaw(false)}
-            >
-              Back to the conversation
-            </button>
-          </div>
-        )}
-      </>
-    );
+// The attempt shown as it runs, on other work's Overview: who is working on it now and the work it continued from.
+// Its live conversation is its chapter in Activity, which Open Activity opens.
+function WorkingNow({ studio, attempt, onOpen }: { studio: StudioState; attempt: AttemptSummary; onOpen: () => void }) {
+  const carried = carriedOf(attempt);
   return (
     <div className="sd-tabpanel" style={{ gap: '12px' }}>
-      {lead}
-      <Conversation
-        projectId={projectId}
-        task={task}
-        studio={studio}
-        attempts={sameKind}
-        attempt={attempt}
-        trace={trace.data}
-        looks={looks}
-        before={beforeThis(sameKind, attempt, item => cliName(studio, item))}
-        onBefore={onAttempts}
-        onRaw={() => setRaw(true)}
-      />
+      <p style={{ margin: 0 }}>
+        {workerName(studio, attempt.workerId)} is working on it now. What it returns shows here when it hands it back.
+      </p>
+      {carried && (
+        <p className="sd-meta" style={{ margin: 0 }}>
+          {continuation(carried)}
+        </p>
+      )}
+      <button type="button" className="sd-btn sd-btn--sm" style={{ alignSelf: 'flex-start' }} onClick={onOpen}>
+        Open Activity
+      </button>
     </div>
   );
 }
@@ -1412,7 +1351,6 @@ function ChapterBody({
             studio={studio}
             attempt={attempt}
             looks={looks}
-            embedded
             handoff={!handedBack}
           />
           {raw && (
@@ -1759,13 +1697,13 @@ function Carries({ projectId, carries, studio }: { projectId: string; carries: C
 const clockOf = (value?: string | null) =>
   value ? new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
 
+// An attempt's raw log, inside its chapter in the story's Activity.
 function RawActivity({
   projectId,
   task,
   studio,
   attempt,
   looks,
-  embedded = false,
   handoff = true,
 }: {
   projectId: string;
@@ -1773,8 +1711,6 @@ function RawActivity({
   studio: StudioState;
   attempt: AttemptSummary;
   looks: Map<string, AgentLook>;
-  // Inside the story's Activity, among the other attempts, rather than a panel of its own.
-  embedded?: boolean;
   // Whether it shows the summary the attempt handed off, which a chapter ending with what it handed back leaves out.
   handoff?: boolean;
 }) {
@@ -1854,10 +1790,7 @@ function RawActivity({
     if (element && following.current) element.scrollTop = element.scrollHeight;
   }, [lines]);
   return (
-    <div
-      className={embedded ? undefined : 'sd-tabpanel'}
-      style={embedded ? { display: 'flex', flexDirection: 'column', gap: '12px' } : { gap: '12px' }}
-    >
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
       <div className="sd-divider">
         {[
           `${workerName(studio, attempt.workerId)} · ${attemptName(
