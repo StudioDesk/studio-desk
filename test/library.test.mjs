@@ -389,3 +389,153 @@ test("the director leaves named files out of an idea's work, and each attempt re
   });
   assert.equal(unknown.status, 404);
 });
+
+// Work in review that handed back a file and a proposal for the library, as an agent returns them.
+function proposingWork(store, id, proposals, files = { 'guide.md': '# Guide\n' }) {
+  const attempt = {
+      id: `attempt-${id}`,
+      taskId: `T-${id}`,
+      projectId: project,
+      workerId: 'W-03',
+      status: 'review',
+      result: {
+        taskId: `T-${id}`,
+        outcome: 'completed',
+        summary: 'Done.',
+        artifacts: [],
+        checks: [],
+        issues: [],
+        handoff: '',
+      },
+      contracts: { task: { kind: 'general', version: 'general-v1', acceptFailedChecks: false } },
+    },
+    output = path.join(store.directory, 'jobs', attempt.id, 'output');
+  fs.mkdirSync(output, { recursive: true });
+  const all = {
+    ...files,
+    'library-proposal.json': JSON.stringify({ schemaVersion: 'library-proposal-v1', proposals }),
+  };
+  attempt.outputFolder = output;
+  attempt.artifacts = Object.entries(all).map(([file, text]) => {
+    fs.writeFileSync(path.join(output, file), text);
+    return {
+      path: file,
+      kind: file === 'library-proposal.json' ? 'library-proposal' : 'document',
+      hash: hash(Buffer.from(text)),
+    };
+  });
+  attempt.result.artifacts = attempt.artifacts.map(({ path: file, kind }) => ({ path: file, kind }));
+  store.putTask({
+    id: attempt.taskId,
+    projectId: project,
+    kind: 'general',
+    workerId: 'W-03',
+    title: `Work ${id}`,
+    status: 'review',
+    lastAttemptId: attempt.id,
+    dependencies: [],
+  });
+  store.insertAttempt(attempt, { text: 'Fixture', hash: 'fixture' });
+  return store.task(attempt.taskId);
+}
+
+test('a proposed library file waits for the director, who approves or rejects it, once the work is accepted', async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    { acceptAttempt } = await import('../src/core/acceptance.mjs');
+  const task = proposingWork(store, 'guide', [
+    { name: 'House guide', purpose: 'How pages are written.', path: 'guide.md' },
+  ]);
+  acceptAttempt(store, c.app.runner.registries, task);
+  let [proposal] = libraryOf(store, project).proposals;
+  assert.equal(proposal.state, 'waiting');
+  assert.deepEqual(proposal.from, { taskId: task.id, attemptId: 'attempt-guide', path: 'guide.md' });
+  assert.equal(currentEntries(libraryOf(store, project)).length, 0, 'Nothing joins until it is approved.');
+  const approved = await c.request(`/api/projects/project-legacy/library/proposals/${proposal.id}/approve`, {
+    projectId: project,
+  });
+  assert.equal(approved.status, 200, JSON.stringify(approved.data));
+  assert.equal(approved.data.state, 'approved');
+  const [entry] = currentEntries(libraryOf(store, project));
+  assert.equal(entry.name, 'House guide');
+  assert.equal(entry.revisions[0].source.attemptId, 'attempt-guide');
+  const again = await c.request(`/api/projects/project-legacy/library/proposals/${proposal.id}/reject`, {
+    projectId: project,
+  });
+  assert.equal(again.status, 409);
+  // A rejected proposal adds nothing.
+  const other = proposingWork(store, 'notes', [{ name: 'Notes', purpose: 'Loose notes.', path: 'guide.md' }]);
+  acceptAttempt(store, c.app.runner.registries, other);
+  proposal = libraryOf(store, project).proposals.find(item => item.name === 'Notes');
+  const rejected = await c.request(`/api/projects/project-legacy/library/proposals/${proposal.id}/reject`, {
+    projectId: project,
+  });
+  assert.equal(rejected.data.state, 'rejected');
+  assert.equal(currentEntries(libraryOf(store, project)).length, 1);
+  assert.ok(
+    store.events().some(event => event.kind === 'library_decided' && /The director rejected Notes/.test(event.message)),
+  );
+});
+
+test("with the project's autonomy policy on, the policy approves a proposal at once, and a revision of an existing entry", async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    { acceptAttempt } = await import('../src/core/acceptance.mjs');
+  store.putSetting('project-autonomy:project-legacy', {
+    revision: 4,
+    enabled: true,
+    kinds: {},
+    retries: 0,
+    cycle: { enabled: false, workflowId: null, maxPerDay: 3 },
+  });
+  acceptAttempt(
+    store,
+    c.app.runner.registries,
+    proposingWork(store, 'first', [{ name: 'Guide', purpose: 'The guide.', path: 'guide.md' }]),
+  );
+  const [entry] = currentEntries(libraryOf(store, project));
+  assert.equal(entry.by.type, 'policy');
+  assert.equal(libraryOf(store, project).proposals[0].decidedBy.revision, 4);
+  acceptAttempt(
+    store,
+    c.app.runner.registries,
+    proposingWork(
+      store,
+      'second',
+      [{ name: 'Guide', purpose: 'The guide, revised.', path: 'guide.md', entryId: entry.id }],
+      { 'guide.md': '# Guide, second\n' },
+    ),
+  );
+  assert.deepEqual(
+    currentEntries(libraryOf(store, project))[0].revisions.map(item => item.revision),
+    [1, 2],
+  );
+  // One the library cannot take is recorded as refused, with the reason, and the work stays accepted.
+  const twice = proposingWork(store, 'third', [{ name: 'guide', purpose: 'Again.', path: 'guide.md' }], {
+    'guide.md': '# Third\n',
+  });
+  acceptAttempt(store, c.app.runner.registries, twice);
+  const refused = libraryOf(store, project).proposals.at(-1);
+  assert.equal(refused.state, 'refused');
+  assert.match(refused.problem, /already has an entry named guide/);
+  assert.equal(store.task(twice.id).status, 'done');
+});
+
+test('a proposal must name one of the files the work handed back; one that does not leaves the acceptance standing', async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    { acceptAttempt } = await import('../src/core/acceptance.mjs');
+  const task = proposingWork(store, 'stray', [{ name: 'Elsewhere', purpose: 'x', path: '../secrets.md' }]);
+  assert.equal(acceptAttempt(store, c.app.runner.registries, task).ok, true);
+  assert.equal(store.task(task.id).status, 'done');
+  assert.equal(libraryOf(store, project).proposals, undefined);
+  assert.ok(
+    store
+      .events()
+      .some(
+        event =>
+          event.kind === 'library_proposed' &&
+          /must name one of the files this attempt handed back/.test(event.message),
+      ),
+  );
+});

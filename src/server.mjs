@@ -79,6 +79,7 @@ import { saveVisualSettings, setStoryPages, storyPagesView, visualView } from '.
 import {
   addLibraryEntry,
   copyLibraryEntry,
+  decideLibraryProposal,
   editLibraryEntry,
   libraryLimits,
   libraryOf,
@@ -88,6 +89,7 @@ import {
   removeLibraryEntry,
   reviseLibraryEntry,
 } from './core/library.mjs';
+import { createSnapshot, projectArtifacts, snapshotView, snapshotZip } from './core/snapshots.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
@@ -542,6 +544,26 @@ export function createStudio({
         store.project(parts[2]);
         return json(res, ideaBringBackTargets(store, parts[2], parts[4]));
       }
+      // A snapshot's files as one zip, each checked by hash (1.2 step 6).
+      if (
+        parts[0] === 'api' &&
+        parts[1] === 'projects' &&
+        parts[3] === 'snapshots' &&
+        parts[5] === 'download' &&
+        parts.length === 6 &&
+        req.method === 'GET'
+      ) {
+        store.project(parts[2]);
+        const { name, bytes } = snapshotZip(store, parts[2], parts[4]);
+        res.writeHead(200, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${name}"`,
+          'X-Content-Type-Options': 'nosniff',
+          'Cache-Control': 'no-store',
+        });
+        res.end(bytes);
+        return;
+      }
       // The attempts that read a library entry, newest first (1.2 step 6).
       if (
         parts[0] === 'api' &&
@@ -602,6 +624,9 @@ export function createStudio({
         if (parts[3] === 'live') return json(res, liveRecords(store, projectId));
         // The project's library (1.2 step 6): every entry with its revisions, removed ones marked.
         if (parts[3] === 'library') return json(res, libraryOf(store, projectId));
+        // Every file the project's accepted work handed back, and its snapshots (1.2 step 6).
+        if (parts[3] === 'artifacts') return json(res, projectArtifacts(store, projectId));
+        if (parts[3] === 'snapshots') return json(res, snapshotView(store, projectId));
         // The project's try copy, its settings and where Run runs (1.2 step 7).
         if (parts[3] === 'try') return json(res, tryView(store, projectId, runner));
         // The project's visual check: its settings, the browser found and whether it can run here (1.2 step 8).
@@ -1154,6 +1179,16 @@ export function createStudio({
             fail(error.message, error.status);
           }
         }
+        // A snapshot of the project's accepted files (1.2 step 6).
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'snapshots' && !parts[4] && req.method === 'POST') {
+          if (parts[2] !== projectId) fail('Select this project before naming a snapshot.');
+          const { projectId: selected, ...fields } = data;
+          try {
+            return json(res, createSnapshot(store, projectId, fields), 201);
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+        }
         // Entries the director leaves out of one idea's work (1.2 step 6).
         if (
           parts[1] === 'projects' &&
@@ -1179,6 +1214,11 @@ export function createStudio({
           const { projectId: selected, ...fields } = data;
           try {
             if (!parts[4]) return json(res, addLibraryEntry(store, projectId, fields), 201);
+            // A proposal an agent made, approved or rejected by the director.
+            if (parts[4] === 'proposals' && parts[5] && ['approve', 'reject'].includes(parts[6]) && !parts[7]) {
+              if (Object.keys(fields).length) fail('Deciding a proposal takes nothing else.');
+              return json(res, decideLibraryProposal(store, projectId, parts[5], parts[6] === 'approve'));
+            }
             if (parts[5] === 'revisions' && !parts[6])
               return json(res, reviseLibraryEntry(store, projectId, parts[4], fields), 201);
             if (parts[5] === 'edit' && !parts[6])

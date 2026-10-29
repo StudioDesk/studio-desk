@@ -469,3 +469,117 @@ export function libraryReaders(store, projectId, entryId) {
     })
     .sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
 }
+
+// An agent proposes a library entry (decided October 28): a completed attempt may return library-proposal.json
+// ({ "schemaVersion": "library-proposal-v1", "proposals": [{ "name", "purpose", "path": one of its own files,
+// "entryId"?: an entry to add a revision to }] }, at most five). When the work is accepted, each proposal is recorded;
+// with the project's autonomy policy on, the policy approves it at once, and otherwise it waits for the director.
+export const libraryProposalFile = 'library-proposal.json';
+export function readLibraryProposal(attempt, read) {
+  if (!attempt.artifacts?.some(item => item.path === libraryProposalFile)) return [];
+  let report;
+  try {
+    report = JSON.parse(read(libraryProposalFile));
+  } catch {
+    throw failure(`${libraryProposalFile} is not readable JSON.`);
+  }
+  if (
+    report?.schemaVersion !== 'library-proposal-v1' ||
+    !Array.isArray(report.proposals) ||
+    !report.proposals.length ||
+    report.proposals.length > 5
+  )
+    throw failure(`${libraryProposalFile} must hold one to five proposals in library-proposal-v1.`);
+  return report.proposals.map((item, index) => {
+    const at = `Library proposal ${index + 1}`;
+    if (
+      !item ||
+      typeof item !== 'object' ||
+      Object.keys(item).some(key => !['name', 'purpose', 'path', 'entryId'].includes(key))
+    )
+      throw failure(`${at} takes a name, what it is for, the path of one of your files, and optionally an entry.`);
+    if (!bounded(item.name, 120) || !bounded(item.purpose, 500))
+      throw failure(`${at} needs a name and what it is for.`);
+    if (item.path === libraryProposalFile || !attempt.artifacts.some(artifact => artifact.path === item.path))
+      throw failure(`${at} must name one of the files this attempt handed back.`);
+    if (item.entryId !== undefined && (typeof item.entryId !== 'string' || !entryIdentity.test(item.entryId)))
+      throw failure(`${at} names an entry that is not one of the library's.`);
+    return {
+      name: item.name.trim(),
+      purpose: item.purpose.trim(),
+      path: item.path,
+      ...(item.entryId ? { entryId: item.entryId } : {}),
+    };
+  });
+}
+
+function settleProposal(store, projectId, proposal, by) {
+  const from = proposal.from;
+  try {
+    const entry = proposal.entryId
+      ? reviseLibraryEntry(store, projectId, proposal.entryId, { from }, by)
+      : addLibraryEntry(store, projectId, { name: proposal.name, purpose: proposal.purpose, from }, by);
+    return { state: 'approved', entryId: entry.id, decidedAt: new Date().toISOString(), decidedBy: by };
+  } catch (error) {
+    return { state: 'refused', problem: error.message, decidedAt: new Date().toISOString(), decidedBy: by };
+  }
+}
+
+// Records an accepted attempt's proposals; the policy, when on, approves them at once.
+export function recordLibraryProposals(store, task, attempt, read, policy) {
+  const proposals = readLibraryProposal(attempt, read);
+  if (!proposals.length) return [];
+  const projectId = attempt.projectId,
+    recorded = proposals.map(item => ({
+      id: `libprop-${randomUUID()}`,
+      ...item,
+      from: { taskId: task.id, attemptId: attempt.id, path: item.path },
+      proposedBy: attempt.workerId,
+      at: new Date().toISOString(),
+      state: 'waiting',
+    }));
+  const library = libraryOf(store, projectId);
+  library.proposals = [...(library.proposals || []), ...recorded].slice(-100);
+  saveLibrary(store, projectId, library);
+  for (const proposal of recorded) {
+    store.event(
+      'library_proposed',
+      task.id,
+      attempt.id,
+      `${proposal.proposedBy} proposed ${proposal.name} for the library: ${proposal.purpose}`,
+      projectId,
+    );
+    if (policy?.enabled)
+      decideLibraryProposal(store, projectId, proposal.id, true, { type: 'policy', revision: policy.revision });
+  }
+  return recorded;
+}
+
+// The director, or the policy, approves or rejects a waiting proposal.
+export function decideLibraryProposal(store, projectId, proposalId, approve, by = { type: 'director' }) {
+  const library = libraryOf(store, projectId),
+    proposal = (library.proposals || []).find(item => item.id === proposalId);
+  if (!proposal) throw failure('Library proposal not found.', 404);
+  if (proposal.state !== 'waiting') throw failure(`This proposal was already ${proposal.state}.`, 409);
+  const outcome = approve
+    ? settleProposal(store, projectId, proposal, by)
+    : { state: 'rejected', decidedAt: new Date().toISOString(), decidedBy: by };
+  // The entry was added through the library's own index; read it again before recording the outcome.
+  const current = libraryOf(store, projectId),
+    stored = current.proposals.find(item => item.id === proposalId);
+  Object.assign(stored, outcome);
+  saveLibrary(store, projectId, current);
+  const who = by.type === 'policy' ? `The autonomy policy (revision ${by.revision})` : 'The director';
+  store.event(
+    'library_decided',
+    stored.from.taskId,
+    stored.from.attemptId,
+    outcome.state === 'approved'
+      ? `${who} approved ${stored.name} for the library.`
+      : outcome.state === 'rejected'
+        ? `${who} rejected ${stored.name} for the library.`
+        : `${who} could not add ${stored.name} to the library: ${outcome.problem}`,
+    projectId,
+  );
+  return stored;
+}

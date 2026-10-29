@@ -4,6 +4,8 @@ import { artifactPath } from './artifacts.mjs';
 import { assertProject, recordProject } from './projects.mjs';
 import { prepareProposedWork, recordProposedWork } from './proposals.mjs';
 import { expandMaps } from './fanout.mjs';
+import { autonomyPolicy } from './autonomy.mjs';
+import { recordLibraryProposals } from './library.mjs';
 
 // Accepts a reviewed attempt. Shared by the director's route and the
 // controller's autonomy policy so both apply exactly the same checks.
@@ -61,5 +63,18 @@ export function acceptAttempt(store, registries, task, by = { type: 'director' }
       ? `Accepted by autonomy policy revision ${by.revision}: ${by.reason}`
       : 'Director accepted the recorded result.',
   );
+  // Files the work proposed for the library (1.2 step 6), recorded once it is accepted and approved by the autonomy
+  // policy when it is on. A proposal that cannot be read never undoes the acceptance.
+  try {
+    recordLibraryProposals(
+      store,
+      task,
+      a,
+      name => fs.readFileSync(artifactPath(store, a, name)),
+      autonomyPolicy(store, recordProject(task)),
+    );
+  } catch (error) {
+    store.event('library_proposed', task.id, a.id, `The work's library proposal was not recorded: ${error.message}`);
+  }
   return { ok: true, proposedTaskIds: prepared?.taskIds || [] };
 }
