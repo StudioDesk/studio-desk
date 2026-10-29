@@ -1,9 +1,10 @@
 // A command refused for a request token that is not this start's, as after a controller restart, reads the new
 // token from the page the controller serves and is sent once more (api.ts send() and refreshToken()). Nothing
 // else is sent again, and a command still refused, or without a token to read, asks for a reload. Each command asks
-// for the records it changed, and only a successful answer's records reach the listeners (onRecords).
+// for the records it changed, and only a successful answer's records reach the listeners (onRecords). A refusal keeps
+// the controller's message and carries the fields it answered beside it.
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { onRecords, refreshToken, send, type CommandRecords } from './api';
+import { onRecords, Refusal, refreshToken, send, type CommandRecords } from './api';
 
 interface Sent {
   url: string;
@@ -121,6 +122,41 @@ test.each([
   expect(await refusal(send('/api/tasks', { projectId: 'project-x' }))).toBe(error);
   expect(requests).toHaveLength(1);
   expect(meta.content).toBe('old');
+});
+
+// A refusal a page can act on carries the fields the controller answers beside its message (src/server.mjs fail),
+// such as the files that keep the try copy from moving or the ask to confirm a Run outside the sandbox.
+const refused = (promise: Promise<unknown>) =>
+  promise.then(
+    () => null,
+    (error: unknown) => error as Refusal,
+  );
+test('a 409 with the edits that keep the try copy from moving rejects with its message and fields.edits', async () => {
+  const edits = ['notes.txt', 'lib/greeting.js'],
+    error =
+      'The try copy holds your own edits: notes.txt, lib/greeting.js. Keep them, or discard them and try this story.';
+  answer(() => reply(409, { error, edits }));
+  const rejected = await refused(send('/api/tasks/T-1/try', { projectId: 'project-x' }));
+  expect(rejected).toBeInstanceOf(Refusal);
+  expect(rejected).toBeInstanceOf(Error);
+  expect(rejected?.message).toBe(error);
+  expect(rejected?.fields).toEqual({ edits });
+  expect(requests).toHaveLength(1);
+  expect(meta.content).toBe('old');
+});
+
+test('a Run refused until it is confirmed outside the sandbox carries fields.confirm, and a plain refusal none', async () => {
+  const error =
+    "Run runs the agents' code on this computer, outside the sandbox, with your own access. Confirm once for this project to run it.";
+  answer(() => reply(409, { error, confirm: 'outside' }));
+  const rejected = await refused(send('/api/projects/project-x/try/run', { projectId: 'project-x' }));
+  expect(rejected?.message).toBe(error);
+  expect(rejected?.fields.confirm).toBe('outside');
+  answer(() => reply(400, { error: 'A task needs a title.' }));
+  expect((await refused(send('/api/tasks', {})))?.fields).toEqual({});
+  answer(() => reply(403, {}));
+  const bare = await refused(send('/api/tasks', {}));
+  expect([bare?.message, bare?.fields]).toEqual(['The controller refused the request (403).', {}]);
 });
 
 test('a refusal without a message, and a controller that cannot be reached, fail as before', async () => {

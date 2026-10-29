@@ -506,6 +506,61 @@ export interface CommandRecords {
   reload?: boolean;
 }
 
+// Trying a story yourself (1.2 step 7) as GET /api/projects/:id/try answers it (src/connectors/try-copy.mjs tryView):
+// the project's settings with their defaults, where the next Run runs, and the try copy's record, null before the
+// project's first Try it. Run runs in the built-in sandbox only where it lets a local port through, else on this
+// computer.
+export type TryPlace = 'built-in' | 'computer';
+export interface TrySettings {
+  // A program and its arguments, run without a shell; null until the director names one.
+  start: string[] | null;
+  address: string | null;
+  // `<folder>-try` beside the project's folder unless the settings name another.
+  folder: string | null;
+  runIn: TryPlace;
+  // When the director confirmed, once for the project, that Run may run on this computer outside the sandbox.
+  outsideConfirmedAt: string | null;
+}
+// A Run in the copy: its address is the settings' one, or the first local address the app printed, and null until one
+// is known; `installing` while the packages are installed first. An ended Run says how: its exit code and signal,
+// why it was stopped, or why it could not run.
+export interface TryRun {
+  id: string;
+  state: 'running' | 'ended';
+  place: TryPlace;
+  start: string[];
+  address: string | null;
+  taskId: string;
+  commit: string;
+  startedAt: string;
+  installing?: boolean;
+  endedAt?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  stopped?: string;
+  error?: string;
+}
+// What the copy holds: a story's candidate merged onto its line's tip (`tip` on `branch`), as integrating it would
+// merge it, or the candidate as built when that merge conflicts, with the conflicting files; and its last Run.
+export interface TryCopy {
+  folder: string;
+  taskId: string;
+  title: string;
+  candidateAttemptId: string;
+  branch: string;
+  tip: string;
+  commit: string;
+  merged: boolean;
+  conflicts: string[];
+  at: string;
+  run: TryRun | null;
+}
+export interface TryView {
+  settings: TrySettings;
+  runsIn: TryPlace;
+  copy: TryCopy | null;
+}
+
 const project = (projectId: string) => `projectId=${encodeURIComponent(projectId)}`;
 const projectPath = (projectId: string, page: string) => `/api/projects/${encodeURIComponent(projectId)}/${page}`;
 export const projectsUrl = '/api/projects';
@@ -535,6 +590,9 @@ export const activityUrl = (projectId: string, before: number | null) =>
 export const runUrl = (projectId: string, runId: string) =>
   `${projectPath(projectId, 'runs')}/${encodeURIComponent(runId)}`;
 export const instructionsUrl = (projectId: string) => projectPath(projectId, 'instructions');
+// The try view, and its Run's output as plain text.
+export const tryUrl = (projectId: string) => projectPath(projectId, 'try');
+export const tryOutputUrl = (projectId: string) => projectPath(projectId, 'try/output');
 export const taskUrl = (projectId: string, taskId: string) =>
   `/api/tasks/${encodeURIComponent(taskId)}?${project(projectId)}`;
 export const storyActivityUrl = (projectId: string, taskId: string) =>
@@ -554,6 +612,27 @@ export async function getJSON<T>(url: string, signal?: AbortSignal): Promise<T> 
   const body = await response.json();
   if (!response.ok) throw new Error(body?.error || `The controller refused the request (${response.status}).`);
   return body as T;
+}
+
+// A route that answers plain text, such as a Run's output; a refusal still answers JSON with its message.
+export async function getText(url: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(url, { signal });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error || `The controller refused the request (${response.status}).`);
+  }
+  return response.text();
+}
+
+// A command the controller refused: its message, and the fields it answers beside it that a page can act on
+// (src/server.mjs fail), such as the files that keep the try copy from moving (`edits`) or the ask to confirm a Run
+// outside the sandbox (`confirm`). A refusal without any has none.
+export class Refusal extends Error {
+  readonly fields: Readonly<Record<string, unknown>>;
+  constructor(message: string, fields: Record<string, unknown> = {}) {
+    super(message);
+    this.fields = fields;
+  }
 }
 
 // The page's request token, which the controller fills in for its start each time it serves the page.
@@ -612,7 +691,8 @@ export function onRecords(listener: RecordsListener) {
 // Commands carry this start's request token, as the current dashboard's do. A controller that restarted since the
 // page loaded refuses the old token, so a command refused for its token reads the new one and is sent once more;
 // refused again, or with no token to read, it asks the director to reload the page. Each command asks for the records
-// it changed, and a successful answer's records go to every listener (onRecords); a refused command has none.
+// it changed, and a successful answer's records go to every listener (onRecords); a refused command has none, and
+// rejects with a Refusal carrying the controller's message and the fields it answered beside it.
 export async function send<T>(
   url: string,
   body: Record<string, unknown>,
@@ -637,7 +717,10 @@ export async function send<T>(
     ({ response, result } = await request());
     if (staleToken(response, result)) throw new Error(restarted);
   }
-  if (!response.ok) throw new Error(result?.error || `The controller refused the request (${response.status}).`);
+  if (!response.ok) {
+    const { error, ...fields } = result && typeof result === 'object' && !Array.isArray(result) ? result : {};
+    throw new Refusal(error || `The controller refused the request (${response.status}).`, fields);
+  }
   const records: CommandRecords | undefined = result?.records;
   if (records && typeof records === 'object') for (const listener of [...recordsListeners]) listener(records);
   return result as T;

@@ -20,6 +20,7 @@ import type {
   StoryActivity,
   Task,
   TestRecordSummary,
+  TryView,
 } from './api';
 import type { BringBackTargets } from './bring-back';
 import { settled } from './studio-runs';
@@ -139,9 +140,14 @@ export interface Controller {
   // Where a landed story, by task, and an idea, by run, can be brought back to (1.1); none listed has no older line.
   bringBack: Record<string, BringBackTargets>;
   runBringBack: Record<string, BringBackTargets>;
+  // The project's try copy as its try view reads it (1.2 step 7), and its Run's output as text; the default is a
+  // project not tried yet, with nothing set and Run in the built-in sandbox.
+  tryView: TryView;
+  tryOutput: string;
   // The release an idea's words name, by the words; words not listed name none.
   requests: { url: string; method: string; body?: unknown }[];
-  // Answers a command; the default accepts it, and one that throws refuses it with the error's message. A
+  // Answers a command; the default accepts it, and one that throws refuses it with the error's message, with the
+  // error's `status` (400 without one) and its `fields` beside the message, as src/server.mjs answers a refusal. A
   // promise holds the answer until the test resolves it, or refuses the command when the test rejects it.
   command(url: string, method: string, body: unknown): unknown;
   // What the controller answers a command with when the page asks for its records (src/server.mjs commandRecords):
@@ -152,9 +158,9 @@ export interface Controller {
   reads(): string[];
 }
 
-const respond = (body: unknown, ok = true) => ({
+const respond = (body: unknown, ok = true, status = ok ? 200 : 400) => ({
   ok,
-  status: ok ? 200 : 400,
+  status,
   json: async () => structuredClone(body),
   text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
   arrayBuffer: async () => new TextEncoder().encode(typeof body === 'string' ? body : JSON.stringify(body)).buffer,
@@ -192,6 +198,12 @@ export function fakeController(projectId = 'project-x'): Controller {
     shells: {},
     bringBack: {},
     runBringBack: {},
+    tryView: {
+      settings: { start: null, address: null, folder: null, runIn: 'built-in', outsideConfirmedAt: null },
+      runsIn: 'built-in',
+      copy: null,
+    },
+    tryOutput: '',
     requests: [],
     command: () => ({}),
     records: taskIds => {
@@ -218,7 +230,8 @@ export function fakeController(projectId = 'project-x'): Controller {
         try {
           return respond(await controller.command(url, method, body));
         } catch (error) {
-          return respond({ error: (error as Error).message }, false);
+          const { message, status, fields } = error as Error & { status?: number; fields?: Record<string, unknown> };
+          return respond({ error: message, ...fields }, false, status || 400);
         }
       }
       const path = url.split('?')[0]!;
@@ -287,6 +300,8 @@ export function fakeController(projectId = 'project-x'): Controller {
       }
       if (path === `/api/projects/${projectId}/instructions`) return respond({ instructions: controller.instructions });
       if (path === `/api/projects/${projectId}/people`) return respond(controller.people);
+      if (path === `/api/projects/${projectId}/try`) return respond(controller.tryView);
+      if (path === `/api/projects/${projectId}/try/output`) return respond(controller.tryOutput);
       if (path === `/api/projects/${projectId}/releases`)
         return respond(
           controller.releases ?? { available: false, reason: 'Only a project on the source workflow has releases.' },
