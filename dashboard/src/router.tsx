@@ -29,6 +29,7 @@ const TaskView = lazyRouteComponent(() => import('./task-page'), 'TaskView'),
   TeamPage = lazyRouteComponent(() => import('./teams-page'), 'TeamPage'),
   AgentsPage = lazyRouteComponent(() => import('./agents-page'), 'AgentsPage'),
   InstructionsPage = lazyRouteComponent(() => import('./instructions-page'), 'InstructionsPage'),
+  ToldPage = lazyRouteComponent(() => import('./told-page'), 'ToldPage'),
   ReleasesPage = lazyRouteComponent(() => import('./releases-page'), 'ReleasesPage'),
   ArtifactsPage = lazyRouteComponent(() => import('./artifacts-page'), 'ArtifactsPage'),
   ActivityLogPage = lazyRouteComponent(() => import('./activity-log-page'), 'ActivityLogPage'),
@@ -231,8 +232,8 @@ const releasesRoute = createRoute({
   },
 });
 
-// The agents' pages sit under Agents, as the sidebar has them: the agents, one agent, the teams, one team and the
-// instructions.
+// The agents' pages sit under Agents, as the sidebar has them: the agents, one agent and what it is told, the teams,
+// one team and the instructions.
 const agentsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: '/agents',
@@ -248,6 +249,29 @@ const agentRoute = createRoute({
   component: function Agent() {
     const { projectId, workerId } = agentRoute.useParams();
     return <AgentsPage projectId={projectId} workerId={workerId} />;
+  },
+});
+
+// What an agent is told (1.2 step 1): its Rules, or What it receives, as the address says, so reload and a link keep
+// the view.
+const toldRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: '/agents/$workerId/told',
+  validateSearch: (search: Record<string, unknown>): { view?: 'receives' } =>
+    search.view === 'receives' ? { view: 'receives' } : {},
+  component: function Told() {
+    const { projectId, workerId } = toldRoute.useParams(),
+      { view } = toldRoute.useSearch(),
+      navigate = toldRoute.useNavigate();
+    return (
+      <ToldPage
+        key={workerId}
+        projectId={projectId}
+        workerId={workerId}
+        view={view ?? 'rules'}
+        onView={next => void navigate({ search: next === 'receives' ? { view: next } : {}, replace: true })}
+      />
+    );
   },
 });
 
@@ -362,6 +386,7 @@ export const routeTree = rootRoute.addChildren([
     setupRoute,
     agentsRoute,
     agentRoute,
+    toldRoute,
     teamsRoute,
     teamRoute,
     instructionsRoute,
