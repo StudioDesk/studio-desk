@@ -15,6 +15,8 @@ import { projectColor } from './frame';
 import { CycleWarning } from './home-page';
 import { workerName } from './names';
 import { NoteDialog, overReview } from './note-dialog';
+import { AnswerBox, QuestionCard } from './question-card';
+import { changeableAnswer, type Answer } from './questions';
 import { finishedState, useFinished, useStudio } from './records';
 import {
   active,
@@ -622,6 +624,36 @@ function CommandCall({ projectId, state, stories, looks, task, item }: CallProps
   );
 }
 
+// The toast for a sent answer: what the work does now, or why it did not start.
+function answerToast(sent: Record<string, unknown>, done: string, next: string) {
+  const start = sent.start as { ok?: boolean; reason?: string } | null | undefined;
+  return start?.ok === false ? `${done} It did not start: ${start.reason}` : `${done} ${next}`;
+}
+
+// The agent stopped to ask the director a question: its card, with the Answer box in place of Start assignment. The
+// answer's records take the card off Today with its toast, as Allow and continue does for a file request.
+function QuestionCall({ projectId, state, stories, looks, task, item }: CallProps & { task: Task; item: NeedsItem }) {
+  const toast = useToast(),
+    asking = state.attempts.find(record => record.id === item.attemptId);
+  if (!asking?.question?.ask) return <GenericCall {...{ projectId, state, stories, looks, task, item }} />;
+  const name = workerName(state, asking.workerId ?? task.workerId);
+  return (
+    <QuestionCard projectId={projectId} state={state} task={task} attempt={asking}>
+      <AnswerBox
+        projectId={projectId}
+        state={state}
+        task={task}
+        attempt={asking}
+        onSent={sent =>
+          notifyManager.schedule(() =>
+            toast(answerToast(sent, 'Answer sent.', `${name} continues from its saved work with it.`)),
+          )
+        }
+      />
+    </QuestionCard>
+  );
+}
+
 // Proposed work waiting for the director's approval.
 function ApproveCall({ projectId, state, stories, task, item }: CallProps & { task: Task; item: NeedsItem }) {
   const { act, busy } = useAct(projectId);
@@ -839,6 +871,7 @@ function Call(props: CallProps & { item: HomeItem }) {
   if (decision.returnable && decision.stage?.review) return <ChangesCall {...props} task={task} />;
   if (item.kind === 'scope-request') return <FileRequestCall {...props} task={task} item={item} />;
   if (item.kind === 'command-request') return <CommandCall {...props} task={task} item={item} />;
+  if (item.kind === 'question') return <QuestionCall {...props} task={task} item={item} />;
   if (decision.approval?.status === 'pending' && !decision.awaited)
     return <ApproveCall {...props} task={task} item={item} />;
   if (task.status === 'review' && decision.latest) return <AcceptCall {...props} task={task} />;
@@ -1154,8 +1187,66 @@ function Shipped({
   );
 }
 
+// Auto mode's answer the director may still change, in the fold: the story, what was asked and what auto mode chose,
+// and Change the answer, which opens the Answer box in change mode under it.
+function AutoAnswer({
+  projectId,
+  state,
+  task,
+  answer,
+  asking,
+  ask,
+}: {
+  projectId: string;
+  state: StudioState;
+  task: Task;
+  answer: Answer;
+  asking: AttemptSummary;
+  ask: string;
+}) {
+  const toast = useToast(),
+    [changing, setChanging] = useState(false),
+    name = workerName(state, asking.workerId ?? task.workerId);
+  return (
+    <li>
+      <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: task.id }}>
+        {task.title}
+      </Link>
+      <span className="sd-meta">
+        {name} asked: {ask}
+      </span>
+      <span className="sd-meta">{answer.label ? `Auto mode chose “${answer.label}”.` : 'Auto mode answered.'}</span>
+      <button
+        type="button"
+        className="sd-btn sd-btn--sm"
+        aria-expanded={changing}
+        onClick={() => setChanging(open => !open)}
+      >
+        {changing ? 'Cancel' : 'Change the answer'}
+      </button>
+      {changing && (
+        <div style={{ flexBasis: '100%' }}>
+          <AnswerBox
+            projectId={projectId}
+            state={state}
+            task={task}
+            attempt={asking}
+            change
+            onSent={sent =>
+              notifyManager.schedule(() =>
+                toast(answerToast(sent, 'Answer changed.', `${name} reworks from its saved work with yours.`)),
+              )
+            }
+          />
+        </div>
+      )}
+    </li>
+  );
+}
+
 // What moves without the director: folded under the calls. Work a call already lists (a usage hold's waiting work,
-// a cleanup's steps) waits on that call, so it is not here.
+// a cleanup's steps) waits on that call, so it is not here. Auto mode's answers the director may still change are here
+// too, each in place of its work's own line, even when nothing else moves.
 function Moving({
   projectId,
   state,
@@ -1168,21 +1259,41 @@ function Moving({
   calls: HomeItem[];
 }) {
   const listed = new Set(calls.flatMap(call => (isHold(call) || isCleanup(call) ? call.taskIds : []))),
+    answers = state.tasks.flatMap(task => {
+      const answer = changeableAnswer(task),
+        asking =
+          answer && state.attempts.find(attempt => attempt.id === answer.attemptId && attempt.taskId === task.id);
+      return answer && asking?.question?.ask ? [{ task, answer, asking, ask: asking.question.ask }] : [];
+    }),
+    answered = new Set(answers.map(({ task }) => task.id)),
     waits = items.filter(
-      (item): item is NeedsItem & { run?: RunStory } => !isHold(item) && !isCleanup(item) && !listed.has(item.taskId),
-    );
-  if (!waits.length) return null;
+      (item): item is NeedsItem & { run?: RunStory } =>
+        !isHold(item) && !isCleanup(item) && !listed.has(item.taskId) && !answered.has(item.taskId),
+    ),
+    count = answers.length + waits.length;
+  if (!count) return null;
   return (
     <details className="sd-fold">
       <summary>
         <span className="sd-chip">
           <span className="sd-chip__dot"></span>
-          {waits.length}
+          {count}
         </span>
         <span className="sd-wide-only">Moving on their own, nothing to do</span>
         <span className="sd-narrow-only">Moving on their own</span>
       </summary>
       <ul className="sd-fold__list">
+        {answers.map(({ task, answer, asking, ask }) => (
+          <AutoAnswer
+            key={task.id}
+            projectId={projectId}
+            state={state}
+            task={task}
+            answer={answer}
+            asking={asking}
+            ask={ask}
+          />
+        ))}
         {waits.map(item => (
           <li key={item.taskId}>
             <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: item.taskId }}>

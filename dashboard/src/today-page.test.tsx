@@ -6,10 +6,12 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary, CommandRecords } from './api';
+import type { AttemptSummary, CommandRecords, Task } from './api';
 import { App } from './app';
+import type { Answer, Question } from './questions';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
+import { when } from './today';
 
 let controller: Controller;
 beforeEach(() => {
@@ -684,4 +686,296 @@ test("a refused Approve leaves Today's calls and their count as they were and sh
   expect(callsShown(region)).toEqual({ cards: ['Add the board', 'Add the list'], count: '2 waiting on you' });
   expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
   expect(posted().map(request => request.url)).toEqual(['/api/tasks/T-1/approve-work']);
+});
+
+// An agent's question (1.2 step 2) as the controller records it (src/core/questions.mjs readQuestion): the attempt
+// stopped blocked with it, and its task waits blocked on that attempt.
+const askedAt = '2026-10-28T12:00:00.000Z',
+  question: Question = {
+    ask: 'Keep the old route for one release?',
+    why: 'Two pages still call it.',
+    options: [{ label: 'Keep it' }, { label: 'Remove it', detail: 'and update both pages' }],
+    recommended: 1,
+    choice: 'inside-story',
+    topics: [],
+  };
+const asking = (id: string, taskId: string, asked: Question = question): AttemptSummary => ({
+  id,
+  taskId,
+  status: 'blocked',
+  workerId: 'W-1',
+  startedAt: '2026-10-28T11:40:00.000Z',
+  finishedAt: askedAt,
+  question: asked,
+});
+const askedStory = (asked: Question = question, extra: Partial<Task> = {}) => {
+  controller.attempts = [asking('attempt-asked', 'T-1', asked)];
+  controller.tasks = [
+    taskFixture('T-1', { title: 'Retire the old route', status: 'blocked', lastAttemptId: 'attempt-asked', ...extra }),
+  ];
+};
+const questionCard = async () => within(await within(await calls()).findByRole('article', { name: "Eli's question" }));
+// The fold of work moving on its own, when Today shows one.
+const fold = () => screen.queryByText('Moving on their own, nothing to do')?.closest('details') ?? null;
+
+test('a waiting question is a call with the agent, the story, when it asked, the question and why, and counts', async () => {
+  askedStory();
+  controller.tasks.push(
+    taskFixture('T-2', { title: 'Add the list', status: 'backlog', approval: { status: 'pending' } }),
+  );
+  open();
+  const region = await calls();
+  await waitFor(() =>
+    expect(callsShown(region)).toEqual({ cards: ['Retire the old route', 'Add the list'], count: '2 waiting on you' }),
+  );
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
+  const card = await questionCard();
+  expect(card.getByText('Asked you a question')).toBeTruthy();
+  expect(card.getByRole('heading', { level: 3, name: 'Retire the old route' })).toBeTruthy();
+  expect(card.getByText('Eli asks')).toBeTruthy();
+  expect(when(askedAt)).not.toBe('');
+  expect(card.getByText(when(askedAt))).toBeTruthy();
+  expect(card.getByText('Keep the old route for one release?')).toBeTruthy();
+  expect(card.getByText('Two pages still call it.')).toBeTruthy();
+  // The Answer box with the agent's options, in place of Start assignment and the way to the story.
+  expect(card.getByRole('form', { name: 'Answer Eli' })).toBeTruthy();
+  expect(card.queryByRole('button', { name: 'Start assignment' })).toBeNull();
+  expect(card.queryByRole('link', { name: /Open/ })).toBeNull();
+  expect(within(card.getByRole('button', { name: /^Remove it/ })).getByText('Recommended')).toBeTruthy();
+  // A question waiting for the director is no work moving on its own.
+  expect(fold()).toBeNull();
+});
+
+test('the recommended option sent answers the question, and its records take the card off Today with the toast', async () => {
+  const user = userEvent.setup();
+  askedStory();
+  controller.tasks.push(
+    taskFixture('T-2', { title: 'Add the list', status: 'backlog', approval: { status: 'pending' } }),
+  );
+  let answer: CommandRecords | undefined;
+  controller.command = url => {
+    if (url !== '/api/tasks/T-1/answer') return {};
+    // Answered, and queued as by Start (src/core/questions.mjs answerQuestion, src/server.mjs).
+    const given: Answer = { attemptId: 'attempt-asked', option: 1, label: 'Remove it', by: { type: 'director' } };
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-1' ? { ...task, status: 'ready', queued: true, answers: [given] } : task,
+    );
+    answer = controller.records(['T-1']);
+    return { answer: given, start: { ok: true, queued: true }, records: answer };
+  };
+  open();
+  const region = await calls();
+  await waitFor(() =>
+    expect(callsShown(region)).toEqual({ cards: ['Retire the old route', 'Add the list'], count: '2 waiting on you' }),
+  );
+  const card = await questionCard();
+  await user.click(card.getByRole('button', { name: /^Remove it/ }));
+  const seen = whenShown('Answer sent.', () => callsShown(region));
+  await user.click(card.getByRole('button', { name: 'Send to Eli' }));
+  expect(await seen).toEqual({ cards: ['Add the list'], count: '1 waiting on you' });
+  expect(posted()).toEqual([
+    {
+      url: '/api/tasks/T-1/answer',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'attempt-asked', option: 1 },
+    },
+  ]);
+  expect(screen.getByText('Answer sent. Eli continues from its saved work with it.')).toBeTruthy();
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('One call is yours to make.');
+  // The stream's change for the same command leaves Today as the answer's records did.
+  latest().emit('change', { version: answer!.version, start: answer!.start, changes: answer!.changes });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(callsShown(region)).toEqual({ cards: ['Add the list'], count: '1 waiting on you' });
+});
+
+test("words written without an option go as the answer's text, and Auto mode turned on goes with them", async () => {
+  const user = userEvent.setup();
+  askedStory();
+  open();
+  const card = await questionCard();
+  await user.type(card.getByRole('textbox', { name: 'Answer Eli' }), 'Ask the pages team first.');
+  const auto = card.getByRole('switch', { name: 'Auto mode' });
+  expect(auto.getAttribute('aria-checked')).toBe('false');
+  await user.click(auto);
+  await user.click(card.getByRole('button', { name: 'Send to Eli' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-1/answer',
+        method: 'POST',
+        body: { projectId: 'project-x', attemptId: 'attempt-asked', text: 'Ask the pages team first.', autoMode: true },
+      },
+    ]),
+  );
+  expect(await screen.findByText('Answer sent. Eli continues from its saved work with it.')).toBeTruthy();
+});
+
+test('a question of a kind always kept for the director waits under Your calls and names it, even in auto mode', async () => {
+  askedStory({ ...question, topics: ['package'] }, { autoMode: true });
+  open();
+  const region = await calls(),
+    card = await questionCard();
+  expect(within(region).getByText('1 waiting on you')).toBeTruthy();
+  expect(card.getByText(/^Always your call: a new package\./)).toBeTruthy();
+  expect(fold()).toBeNull();
+});
+
+test('a question auto mode answers is not a call: it moves on its own with the answer auto mode gives', async () => {
+  askedStory(question, { autoMode: true });
+  open();
+  const region = await calls();
+  await waitFor(() => expect(within(region).getByText(/Nothing is waiting on you\./)).toBeTruthy());
+  expect(within(region).queryByRole('article', { name: "Eli's question" })).toBeNull();
+  const moving = fold()!;
+  expect(within(moving).getByRole('link', { name: 'Retire the old route' }).getAttribute('href')).toBe(
+    '/p/project-x/tasks/T-1',
+  );
+  expect(moving.textContent).toContain("Auto mode answers with the agent's recommendation, “Remove it”,");
+  expect(within(moving).queryByRole('button', { name: 'Change the answer' })).toBeNull();
+});
+
+// Work auto mode answered the question of (src/core/questions.mjs answerQuestion by auto mode), in each state the
+// answer can be in: still running, in review, accepted, and closed. The running work waits on the accepted and the
+// closed work, so the live set holds them too.
+const autoAnswer = (attemptId: string): Answer => ({
+  attemptId,
+  option: 1,
+  label: 'Remove it',
+  by: { type: 'auto-mode', at: askedAt },
+});
+const answeredWork = () => {
+  controller.attempts = [
+    asking('attempt-asked', 'T-run'),
+    { id: 'attempt-run', taskId: 'T-run', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+    asking('attempt-asked-2', 'T-review', { ...question, ask: 'Name the setting after the page?' }),
+    {
+      id: 'attempt-reviewed',
+      taskId: 'T-review',
+      status: 'review',
+      workerId: 'W-1',
+      finishedAt: askedAt,
+      result: { outcome: 'completed', summary: 'Renamed the setting.' },
+    },
+    asking('attempt-asked-3', 'T-done'),
+    { id: 'attempt-done', taskId: 'T-done', status: 'accepted', workerId: 'W-1', finishedAt: askedAt },
+    asking('attempt-asked-4', 'T-closed'),
+  ];
+  controller.tasks = [
+    taskFixture('T-run', {
+      title: 'Retire the old route',
+      status: 'running',
+      lastAttemptId: 'attempt-run',
+      answers: [autoAnswer('attempt-asked')],
+      dependencies: ['T-done', 'T-closed'],
+    }),
+    taskFixture('T-review', {
+      title: 'Rename the setting',
+      status: 'review',
+      lastAttemptId: 'attempt-reviewed',
+      answers: [autoAnswer('attempt-asked-2')],
+    }),
+    taskFixture('T-done', {
+      title: 'Accepted work',
+      status: 'done',
+      lastAttemptId: 'attempt-done',
+      acceptedAttemptId: 'attempt-done',
+      answers: [autoAnswer('attempt-asked-3')],
+    }),
+    taskFixture('T-closed', {
+      title: 'Closed work',
+      status: 'blocked',
+      closed: true,
+      lastAttemptId: 'attempt-asked-4',
+      answers: [autoAnswer('attempt-asked-4')],
+    }),
+  ];
+};
+const answerRow = (moving: HTMLElement, title: string) =>
+  within(within(moving).getByRole('link', { name: title }).closest('li')!);
+
+test("auto mode's answers on running and reviewed work show in the fold, with nothing else moving", async () => {
+  answeredWork();
+  open();
+  await calls();
+  await waitFor(() => expect(fold()).toBeTruthy());
+  const moving = fold()!;
+  expect(moving.querySelector('summary .sd-chip')?.textContent).toBe('2');
+  const running = answerRow(moving, 'Retire the old route');
+  expect(running.getByText('Eli asked: Keep the old route for one release?')).toBeTruthy();
+  expect(running.getByText('Auto mode chose “Remove it”.')).toBeTruthy();
+  expect(running.getByRole('button', { name: 'Change the answer' })).toBeTruthy();
+  const reviewed = answerRow(moving, 'Rename the setting');
+  expect(reviewed.getByText('Eli asked: Name the setting after the page?')).toBeTruthy();
+  expect(reviewed.getByText('Auto mode chose “Remove it”.')).toBeTruthy();
+  expect(
+    within(moving)
+      .getAllByRole('link')
+      .map(link => link.getAttribute('href')),
+  ).toEqual(['/p/project-x/tasks/T-run', '/p/project-x/tasks/T-review']);
+  // Accepted and closed work keeps auto mode's answer as it is.
+  expect(within(moving).queryByRole('link', { name: 'Accepted work' })).toBeNull();
+  expect(within(moving).queryByRole('link', { name: 'Closed work' })).toBeNull();
+  expect(within(moving).getAllByRole('button', { name: 'Change the answer' })).toHaveLength(2);
+});
+
+test("Change the answer opens the Answer box in the fold and sends the director's answer in auto mode's place", async () => {
+  const user = userEvent.setup();
+  answeredWork();
+  controller.command = url => {
+    if (url !== '/api/tasks/T-run/change-answer') return {};
+    // The director's answer replaces auto mode's, and the running attempt stops first (changeAnswer).
+    const given: Answer = {
+      attemptId: 'attempt-asked',
+      option: 0,
+      label: 'Keep it',
+      replaces: 'auto-mode',
+      by: { type: 'director' },
+    };
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-run'
+        ? { ...task, answers: [...(task.answers as Answer[]), given], answerChange: { attemptId: 'attempt-run' } }
+        : task,
+    );
+    return { answer: given, start: null, records: controller.records(['T-run']) };
+  };
+  open();
+  await calls();
+  await waitFor(() => expect(fold()).toBeTruthy());
+  const moving = fold()!,
+    running = answerRow(moving, 'Retire the old route');
+  expect(running.queryByRole('form', { name: 'Answer Eli' })).toBeNull();
+  await user.click(running.getByRole('button', { name: 'Change the answer' }));
+  const form = within(running.getByRole('form', { name: 'Answer Eli' }));
+  expect(form.getByText("Your answer replaces auto mode's, and Eli reworks from its saved work.")).toBeTruthy();
+  // One box at a time: the other answer stays as it was.
+  expect(within(moving).getAllByRole('form', { name: 'Answer Eli' })).toHaveLength(1);
+  await user.click(form.getByRole('button', { name: /^Keep it/ }));
+  const seen = whenShown('Answer changed.', () => ({
+    count: moving.querySelector('summary .sd-chip')?.textContent,
+    shown: within(moving).queryByRole('link', { name: 'Retire the old route' }) !== null,
+  }));
+  await user.click(form.getByRole('button', { name: 'Change the answer' }));
+  expect(await seen).toEqual({ count: '1', shown: false });
+  expect(posted()).toEqual([
+    {
+      url: '/api/tasks/T-run/change-answer',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'attempt-asked', option: 0 },
+    },
+  ]);
+  expect(screen.getByText('Answer changed. Eli reworks from its saved work with yours.')).toBeTruthy();
+});
+
+test('Cancel closes the Answer box in the fold without sending anything', async () => {
+  const user = userEvent.setup();
+  answeredWork();
+  open();
+  await calls();
+  await waitFor(() => expect(fold()).toBeTruthy());
+  const running = answerRow(fold()!, 'Retire the old route');
+  await user.click(running.getByRole('button', { name: 'Change the answer' }));
+  expect(running.getByRole('form', { name: 'Answer Eli' })).toBeTruthy();
+  await user.click(running.getByRole('button', { name: 'Cancel' }));
+  expect(running.queryByRole('form', { name: 'Answer Eli' })).toBeNull();
+  expect(posted()).toEqual([]);
 });
