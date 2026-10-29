@@ -173,14 +173,19 @@ test('restart retains live ownership and checkpoints retained source output only
   const { attemptId } = runner.start(task.id),
     entry = runner.active.get(attemptId),
     staged = path.join(entry.output, 'changes/src/core/workflows.mjs');
-  // The setup process stages the file a moment after start returns, and the editor then writes it.
-  for (
-    let i = 0;
-    i < 1000 && !(fs.existsSync(staged) && fs.readFileSync(staged, 'utf8').includes('Retained hang'));
-    i++
-  )
+  // The setup process stages the file a moment after start returns, and the editor then writes it. While it writes,
+  // Windows can refuse the read (EBUSY in the built-in sandbox, October 28): that is not yet, as a missing file is.
+  const written = () => {
+    try {
+      return fs.readFileSync(staged, 'utf8');
+    } catch (error) {
+      if (['ENOENT', 'EBUSY', 'EPERM'].includes(error.code)) return '';
+      throw error;
+    }
+  };
+  for (let i = 0; i < 1000 && !written().includes('Retained hang'); i++)
     await new Promise(resolve => setTimeout(resolve, 10));
-  assert.match(fs.readFileSync(path.join(entry.output, 'changes/src/core/workflows.mjs'), 'utf8'), /Retained hang/);
+  assert.match(written(), /Retained hang/);
   // Simulate the old controller disappearing without its close handler settling work.
   clearTimeout(entry.timer);
   entry.child.removeAllListeners('close');
