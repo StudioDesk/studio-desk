@@ -561,6 +561,73 @@ export interface TryView {
   copy: TryCopy | null;
 }
 
+// The visual check (1.2 step 8; src/connectors/visual-check.mjs and story-pages.mjs). A story's pages, each a name, a
+// path on the app's own address and the steps that reach the state to capture: click a button, link, tab or label by
+// its text, type into a field by its label, or wait for a text.
+export type StoryPageStep = { click: string } | { type: string; into: string } | { wait: string };
+export interface StoryPage {
+  name: string;
+  path: string;
+  steps: StoryPageStep[];
+}
+// A story's pages as GET /api/tasks/:id/pages?projectId= answers them (storyPagesView): the pages its next check
+// captures, whether they are the director's own (`changed`), and whether they may still change, with the reason when
+// not.
+export interface StoryPagesView {
+  pages: StoryPage[];
+  changed: boolean;
+  editable: boolean;
+  reason: string | null;
+}
+export type VisualTheme = 'light' | 'dark';
+// A project's settings: on or off, one to three widths, the themes, and the browser program the director chose.
+export interface VisualSettings {
+  enabled: boolean;
+  widths: number[];
+  themes: VisualTheme[];
+  browser: string | null;
+}
+// GET /api/projects/:id/visual-check (visualView): the settings, the browser found (null with the note about
+// installing one when none is), and why the check would not run here, or null.
+export interface VisualView {
+  settings: VisualSettings;
+  browser: string | null;
+  note: string | null;
+  blocked: string | null;
+}
+// One captured image: a page at one width and theme, with the step or page problem it was taken with, and whether it
+// was cut at the screen's height.
+export interface VisualImage {
+  path: string;
+  page: string;
+  pagePath: string;
+  width: number;
+  theme: VisualTheme;
+  height: number;
+  problem?: string;
+  trimmed?: boolean;
+}
+// The candidate's recorded visual-check.json (visual-check-v1): what was captured, or why nothing was.
+export interface VisualCheckRecord {
+  schemaVersion: 'visual-check-v1';
+  state: 'captured' | 'failed' | 'not-run';
+  reason?: string;
+  note?: string;
+  browser: string | null;
+  widths: number[];
+  themes: VisualTheme[];
+  pages: StoryPage[];
+  address?: string | null;
+  images: VisualImage[];
+}
+// What the review says of one image (its report's `visual` entries, reviewVisualProblems): the image as the candidate
+// or the review's inputs name it, a note and a verdict.
+export interface VisualNote {
+  image: string;
+  note: string;
+  verdict: 'match' | 'problem';
+}
+
 const project = (projectId: string) => `projectId=${encodeURIComponent(projectId)}`;
 const projectPath = (projectId: string, page: string) => `/api/projects/${encodeURIComponent(projectId)}/${page}`;
 export const projectsUrl = '/api/projects';
@@ -593,6 +660,10 @@ export const instructionsUrl = (projectId: string) => projectPath(projectId, 'in
 // The try view, and its Run's output as plain text.
 export const tryUrl = (projectId: string) => projectPath(projectId, 'try');
 export const tryOutputUrl = (projectId: string) => projectPath(projectId, 'try/output');
+// The project's visual check view, and a story's pages to capture.
+export const visualUrl = (projectId: string) => projectPath(projectId, 'visual-check');
+export const storyPagesUrl = (projectId: string, taskId: string) =>
+  `/api/tasks/${encodeURIComponent(taskId)}/pages?${project(projectId)}`;
 export const taskUrl = (projectId: string, taskId: string) =>
   `/api/tasks/${encodeURIComponent(taskId)}?${project(projectId)}`;
 export const storyActivityUrl = (projectId: string, taskId: string) =>

@@ -18,9 +18,11 @@ import type {
   SettledPage,
   Shell,
   StoryActivity,
+  StoryPagesView,
   Task,
   TestRecordSummary,
   TryView,
+  VisualView,
 } from './api';
 import type { BringBackTargets } from './bring-back';
 import { settled } from './studio-runs';
@@ -144,6 +146,11 @@ export interface Controller {
   // project not tried yet, with nothing set and Run in the built-in sandbox.
   tryView: TryView;
   tryOutput: string;
+  // The project's visual check as its view reads it (1.2 step 8); the default is a check that is off, at 1440 and
+  // 390 px in both themes, with Edge found. And each story's pages by task: a story not listed names none, and they
+  // may still change.
+  visualView: VisualView;
+  pages: Record<string, StoryPagesView>;
   // The release an idea's words name, by the words; words not listed name none.
   requests: { url: string; method: string; body?: unknown }[];
   // Answers a command; the default accepts it, and one that throws refuses it with the error's message, with the
@@ -204,6 +211,13 @@ export function fakeController(projectId = 'project-x'): Controller {
       copy: null,
     },
     tryOutput: '',
+    visualView: {
+      settings: { enabled: false, widths: [1440, 390], themes: ['light', 'dark'], browser: null },
+      browser: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      note: null,
+      blocked: null,
+    },
+    pages: {},
     requests: [],
     command: () => ({}),
     records: taskIds => {
@@ -302,6 +316,7 @@ export function fakeController(projectId = 'project-x'): Controller {
       if (path === `/api/projects/${projectId}/people`) return respond(controller.people);
       if (path === `/api/projects/${projectId}/try`) return respond(controller.tryView);
       if (path === `/api/projects/${projectId}/try/output`) return respond(controller.tryOutput);
+      if (path === `/api/projects/${projectId}/visual-check`) return respond(controller.visualView);
       if (path === `/api/projects/${projectId}/releases`)
         return respond(
           controller.releases ?? { available: false, reason: 'Only a project on the source workflow has releases.' },
@@ -320,6 +335,11 @@ export function fakeController(projectId = 'project-x'): Controller {
       }
       const back = path.match(/^\/api\/tasks\/([^/]+)\/bring-back$/)?.[1];
       if (back) return respond(controller.bringBack[decodeURIComponent(back)] ?? { lines: [] });
+      const pages = path.match(/^\/api\/tasks\/([^/]+)\/pages$/)?.[1];
+      if (pages)
+        return respond(
+          controller.pages[decodeURIComponent(pages)] ?? { pages: [], changed: false, editable: true, reason: null },
+        );
       const story = path.match(/^\/api\/tasks\/([^/]+)\/activity$/)?.[1];
       if (story)
         return respond(controller.stories[decodeURIComponent(story)] ?? { events: [], idea: null, instructions: [] });
