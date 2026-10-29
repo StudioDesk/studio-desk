@@ -628,6 +628,101 @@ export interface VisualNote {
   verdict: 'match' | 'problem';
 }
 
+// The library, the Artifacts listing and snapshots (1.2 step 6; src/core/library.mjs and snapshots.mjs). Every file a
+// project's accepted work handed back, newest first (GET /api/projects/:id/artifacts): its story and accepted attempt,
+// the agent who made it, the run of the idea it came from (null outside an idea) and when it was accepted.
+export interface ProjectArtifact {
+  taskId: string;
+  title: string;
+  attemptId: string;
+  workerId?: string;
+  runId: string | null;
+  kind?: string;
+  path: string;
+  hash: string;
+  acceptedAt: string | null;
+}
+// Who recorded a library change or a snapshot: the director, or the autonomy policy at its revision.
+export interface RecordedBy {
+  type: string;
+  revision?: number;
+}
+// Where a library revision's bytes came from: an upload, one file of accepted work (checked by its hash), or another
+// project's entry it was copied from.
+export type LibrarySource =
+  | { type: 'upload' }
+  | { type: 'accepted'; taskId: string; attemptId: string; path: string; hash: string }
+  | { type: 'copy'; projectId: string; entryId: string; revision: number; sha256: string };
+export interface LibraryRevision {
+  revision: number;
+  file: string;
+  mediaType: string;
+  byteLength: number;
+  sha256: string;
+  source: LibrarySource;
+  at: string;
+  by: RecordedBy;
+}
+// An entry later work follows at its newest revision, until it is removed; its record stays.
+export interface LibraryEntry {
+  id: string;
+  name: string;
+  purpose: string;
+  createdAt: string;
+  by: RecordedBy;
+  removedAt?: string;
+  revisions: LibraryRevision[];
+}
+// An agent's proposal for the library, from its accepted work: waiting for the director, approved (with the entry it
+// made or revised), rejected, or refused by the library with its problem.
+export interface LibraryProposal {
+  id: string;
+  name: string;
+  purpose: string;
+  path: string;
+  entryId?: string;
+  from: { taskId: string; attemptId: string; path: string };
+  proposedBy: string;
+  at: string;
+  state: 'waiting' | 'approved' | 'rejected' | 'refused';
+  problem?: string;
+  decidedAt?: string;
+  decidedBy?: RecordedBy;
+}
+// A project's library (GET /api/projects/:id/library).
+export interface LibraryIndex {
+  entries: LibraryEntry[];
+  proposals?: LibraryProposal[];
+}
+// An attempt that read an entry, newest first (…/library/:entryId/readers): the revision it received, and whether
+// its file was delivered beside the work or only named in the index.
+export interface LibraryReader {
+  attemptId: string;
+  taskId: string;
+  status: string;
+  startedAt: string;
+  revision: number;
+  delivered: boolean;
+}
+// A named set of accepted files, oldest first (GET /api/projects/:id/snapshots), each by reference and hash, with what
+// changed since the snapshot before it, by task and path.
+export interface SnapshotFile {
+  taskId: string;
+  title: string;
+  attemptId: string;
+  kind?: string;
+  path: string;
+  hash: string;
+}
+export interface Snapshot {
+  id: string;
+  name: string;
+  at: string;
+  by: RecordedBy;
+  files: SnapshotFile[];
+  changes: Record<'added' | 'changed' | 'removed', { taskId: string; path: string }[]>;
+}
+
 const project = (projectId: string) => `projectId=${encodeURIComponent(projectId)}`;
 const projectPath = (projectId: string, page: string) => `/api/projects/${encodeURIComponent(projectId)}/${page}`;
 export const projectsUrl = '/api/projects';
@@ -664,6 +759,17 @@ export const tryOutputUrl = (projectId: string) => projectPath(projectId, 'try/o
 export const visualUrl = (projectId: string) => projectPath(projectId, 'visual-check');
 export const storyPagesUrl = (projectId: string, taskId: string) =>
   `/api/tasks/${encodeURIComponent(taskId)}/pages?${project(projectId)}`;
+// The project's accepted files, its library with an entry's readers and a revision's bytes, and its snapshots with
+// one's zip.
+export const artifactsUrl = (projectId: string) => projectPath(projectId, 'artifacts');
+export const libraryUrl = (projectId: string) => projectPath(projectId, 'library');
+export const libraryReadersUrl = (projectId: string, entryId: string) =>
+  projectPath(projectId, `library/${encodeURIComponent(entryId)}/readers`);
+export const libraryRevisionUrl = (projectId: string, entryId: string, revision: number) =>
+  projectPath(projectId, `library/${encodeURIComponent(entryId)}/revisions/${revision}`);
+export const snapshotsUrl = (projectId: string) => projectPath(projectId, 'snapshots');
+export const snapshotDownloadUrl = (projectId: string, snapshotId: string) =>
+  projectPath(projectId, `snapshots/${encodeURIComponent(snapshotId)}/download`);
 export const taskUrl = (projectId: string, taskId: string) =>
   `/api/tasks/${encodeURIComponent(taskId)}?${project(projectId)}`;
 export const storyActivityUrl = (projectId: string, taskId: string) =>

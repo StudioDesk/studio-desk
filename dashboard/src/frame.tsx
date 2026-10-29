@@ -122,11 +122,12 @@ export function rulesLine(state: StudioState) {
 // Create a project loads when it is first opened from the rail or Find a project.
 const NewProjectDialog = lazy(() => import('./new-project').then(module => ({ default: module.NewProjectDialog })));
 
-type Page = 'today' | 'ideas' | 'board' | 'releases' | 'agents' | 'settings';
+type Page = 'today' | 'ideas' | 'board' | 'artifacts' | 'releases' | 'agents' | 'settings';
 const pages: { id: Page; label: string; icon: IconName; path: string }[] = [
   { id: 'today', label: 'Today', icon: 'today', path: '' },
   { id: 'ideas', label: 'Ideas', icon: 'ideas', path: '/runs' },
   { id: 'board', label: 'Board', icon: 'board', path: '/board' },
+  { id: 'artifacts', label: 'Artifacts', icon: 'file', path: '/artifacts' },
   { id: 'releases', label: 'Releases', icon: 'tag', path: '/releases' },
   { id: 'agents', label: 'Agents', icon: 'agents', path: '/agents' },
   { id: 'settings', label: 'Project settings', icon: 'settings', path: '/settings' },
@@ -137,6 +138,7 @@ function currentPage(path: string, projectId: string): Page | null {
   if (rest === '') return 'today';
   if (rest.startsWith('/runs') || rest.startsWith('/tasks')) return 'ideas';
   if (rest.startsWith('/board')) return 'board';
+  if (rest.startsWith('/artifacts')) return 'artifacts';
   if (rest.startsWith('/releases')) return 'releases';
   if (rest.startsWith('/agents')) return 'agents';
   if (rest.startsWith('/settings')) return 'settings';
@@ -379,8 +381,8 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
       </main>
       <nav className="sd-tabbar" aria-label="Pages">
         {pages
-          // A phone keeps the design's four tabs; Releases and Settings are in the sidebar's menu.
-          .filter(item => item.id !== 'settings' && item.id !== 'releases')
+          // A phone keeps the design's four tabs; Artifacts, Releases and Settings are in the sidebar's menu.
+          .filter(item => !['artifacts', 'releases', 'settings'].includes(item.id))
           .flatMap(item => [
             ...(item.id === 'board'
               ? [

@@ -52,12 +52,19 @@ test("a project's pages share one frame: the project rail, its pages and the con
     ['Today', '/p/project-x'],
     ['Ideas', '/p/project-x/runs'],
     ['Board', '/p/project-x/board'],
+    ['Artifacts', '/p/project-x/artifacts'],
     ['Releases', '/p/project-x/releases'],
     ['Agents', '/p/project-x/agents'],
     ['Project settings', '/p/project-x/settings'],
   ]);
   expect(links[0]!.getAttribute('aria-current')).toBe('page');
   expect(links.slice(1).every(link => link.getAttribute('aria-current') === null)).toBe(true);
+  // A phone keeps four tabs; Artifacts, Releases and Settings stay in the sidebar's menu.
+  expect(
+    within(screen.getByRole('navigation', { name: 'Pages' }))
+      .getAllByRole('link')
+      .map(link => link.textContent),
+  ).toEqual(['Today', 'Ideas', 'Board', 'Agents']);
   const rail = within(screen.getByRole('navigation', { name: 'Projects' }));
   await waitFor(() =>
     expect(rail.getAllByRole('link').map(link => [link.getAttribute('aria-label'), link.textContent])).toEqual([
@@ -86,6 +93,7 @@ test("a general-work project's pages leave out Releases, which only a code proje
     ['Today', '/p/project-x'],
     ['Ideas', '/p/project-x/runs'],
     ['Board', '/p/project-x/board'],
+    ['Artifacts', '/p/project-x/artifacts'],
     ['Agents', '/p/project-x/agents'],
     ['Project settings', '/p/project-x/settings'],
   ]);

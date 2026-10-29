@@ -20,7 +20,7 @@ import { ProjectLive } from './live-context';
 import { TodayPage } from './today-page';
 import { TracePage } from './trace-page';
 
-// A task's page, the runs and Settings load when first opened, so Home's first load stays small.
+// A task's page, the runs, Artifacts and Settings load when first opened, so Home's first load stays small.
 const TaskView = lazyRouteComponent(() => import('./task-page'), 'TaskView'),
   RecordPage = lazyRouteComponent(() => import('./record-page'), 'RecordPage'),
   RunsPage = lazyRouteComponent(() => import('./runs-page'), 'RunsPage'),
@@ -30,6 +30,7 @@ const TaskView = lazyRouteComponent(() => import('./task-page'), 'TaskView'),
   AgentsPage = lazyRouteComponent(() => import('./agents-page'), 'AgentsPage'),
   InstructionsPage = lazyRouteComponent(() => import('./instructions-page'), 'InstructionsPage'),
   ReleasesPage = lazyRouteComponent(() => import('./releases-page'), 'ReleasesPage'),
+  ArtifactsPage = lazyRouteComponent(() => import('./artifacts-page'), 'ArtifactsPage'),
   ActivityLogPage = lazyRouteComponent(() => import('./activity-log-page'), 'ActivityLogPage'),
   PlatformPage = lazyRouteComponent(() => import('./platform-page'), 'PlatformPage');
 // No projects yet loads only when no project exists.
@@ -164,6 +165,16 @@ const boardRoute = createRoute({
     const { projectId } = projectRoute.useParams(),
       search = boardRoute.useSearch();
     return <BoardPage projectId={projectId} accepted={!!search.accepted} closed={!!search.closed} />;
+  },
+});
+
+// Every file the project's accepted work handed back (1.2 step 6).
+const artifactsRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: '/artifacts',
+  component: function Artifacts() {
+    const { projectId } = projectRoute.useParams();
+    return <ArtifactsPage projectId={projectId} />;
   },
 });
 
@@ -345,6 +356,7 @@ export const routeTree = rootRoute.addChildren([
     runsRoute,
     runRoute,
     boardRoute,
+    artifactsRoute,
     releasesRoute,
     settingsRoute,
     setupRoute,
