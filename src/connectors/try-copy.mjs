@@ -393,7 +393,9 @@ export function runTry(runtime, projectId, { confirmOutside = false } = {}) {
     };
     child.stdout.on('data', read);
     child.stderr.on('data', read);
-    child.on('error', error => end({ error: error.message, exitCode: null }));
+    child.on('error', error =>
+      end(entry.stopping ? { stopped: entry.stopping, exitCode: null } : { error: error.message, exitCode: null }),
+    );
     child.on('close', (code, signal) => onExit(code, signal));
   };
   const startApp = () => {
@@ -430,12 +432,15 @@ export function runTry(runtime, projectId, { confirmOutside = false } = {}) {
 }
 
 // Ends a process and everything it started. On Windows taskkill ends the tree; inside the built-in sandbox the
-// sandbox account's own processes refuse it, and its job ends them with the runner.
+// sandbox account's own processes refuse it, and its job ends them with the runner. The process itself is ended too,
+// for where taskkill cannot end it (a controller that itself runs in a sandbox, as the suite's verification does).
 function endTree(child) {
   if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
-  if (process.platform === 'win32')
+  if (process.platform === 'win32') {
     spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-  else
+    // A process already ended is passed over.
+    child.kill('SIGKILL');
+  } else
     try {
       process.kill(-child.pid, 'SIGKILL');
     } catch {
