@@ -76,6 +76,18 @@ import {
   tryView,
 } from './connectors/try-copy.mjs';
 import { saveVisualSettings, setStoryPages, storyPagesView, visualView } from './connectors/visual-check.mjs';
+import {
+  addLibraryEntry,
+  copyLibraryEntry,
+  editLibraryEntry,
+  libraryLimits,
+  libraryOf,
+  libraryReaders,
+  setIdeaLibraryLeftOut,
+  readLibraryRevision,
+  removeLibraryEntry,
+  reviseLibraryEntry,
+} from './core/library.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
@@ -530,6 +542,41 @@ export function createStudio({
         store.project(parts[2]);
         return json(res, ideaBringBackTargets(store, parts[2], parts[4]));
       }
+      // The attempts that read a library entry, newest first (1.2 step 6).
+      if (
+        parts[0] === 'api' &&
+        parts[1] === 'projects' &&
+        parts[3] === 'library' &&
+        parts[5] === 'readers' &&
+        parts.length === 6 &&
+        req.method === 'GET'
+      ) {
+        store.project(parts[2]);
+        return json(res, libraryReaders(store, parts[2], parts[4]));
+      }
+      // One library revision's bytes, as an inert file: images as themselves, everything else as plain text (1.2 step 6).
+      if (
+        parts[0] === 'api' &&
+        parts[1] === 'projects' &&
+        parts[3] === 'library' &&
+        parts[5] === 'revisions' &&
+        parts.length === 7 &&
+        req.method === 'GET'
+      ) {
+        store.project(parts[2]);
+        const { revision, bytes } = readLibraryRevision(store, parts[2], parts[4], parts[6]);
+        res.writeHead(200, {
+          'Content-Type': /^image\/(png|jpeg|webp|gif)$/.test(revision.mediaType)
+            ? revision.mediaType
+            : 'text/plain; charset=utf-8',
+          'Content-Disposition': `inline; filename="${revision.file.replace(/[^a-zA-Z0-9._-]/g, '_')}"`,
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "sandbox; default-src 'none'",
+          'Cache-Control': 'no-store',
+        });
+        res.end(bytes);
+        return;
+      }
       // A Run's output in the try copy, as inert plain text (1.2 step 7).
       if (
         parts[0] === 'api' &&
@@ -553,6 +600,8 @@ export function createStudio({
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });
         if (parts[3] === 'live') return json(res, liveRecords(store, projectId));
+        // The project's library (1.2 step 6): every entry with its revisions, removed ones marked.
+        if (parts[3] === 'library') return json(res, libraryOf(store, projectId));
         // The project's try copy, its settings and where Run runs (1.2 step 7).
         if (parts[3] === 'try') return json(res, tryView(store, projectId, runner));
         // The project's visual check: its settings, the browser found and whether it can run here (1.2 step 8).
@@ -815,7 +864,13 @@ export function createStudio({
         // a general-work project.
         const intake =
           ['/api/studio-development/intake', '/api/intake'].includes(url.pathname) && req.method === 'POST';
-        const data = await body(req, intake ? ideaInputLimits.wireBytes : undefined);
+        // A file added to the library carries its bytes too (1.2 step 6).
+        const libraryUpload =
+          req.method === 'POST' && /^\/api\/projects\/[^/]+\/library(?:\/[^/]+\/revisions)?$/.test(url.pathname);
+        const data = await body(
+          req,
+          intake ? ideaInputLimits.wireBytes : libraryUpload ? libraryLimits.wireBytes + 64 * 1024 : undefined,
+        );
         // The newest change's seq before the command runs: its answer's records are what was recorded after it.
         if (req.headers['x-studio-records'] === '1' && typeof data?.projectId === 'string')
           commands.set(res, { projectId: data.projectId, after: store.version });
@@ -1098,6 +1153,49 @@ export function createStudio({
           } catch (error) {
             fail(error.message, error.status);
           }
+        }
+        // Entries the director leaves out of one idea's work (1.2 step 6).
+        if (
+          parts[1] === 'projects' &&
+          parts[2] &&
+          parts[3] === 'runs' &&
+          parts[4] &&
+          parts[5] === 'library' &&
+          !parts[6] &&
+          req.method === 'POST'
+        ) {
+          if (parts[2] !== projectId) fail('Select this project before changing its idea.');
+          if (Object.keys(data).some(key => !['projectId', 'leftOut'].includes(key)))
+            fail('Leaving library files out of an idea takes only the entries to leave out.');
+          try {
+            return json(res, setIdeaLibraryLeftOut(store, projectId, parts[4], data.leftOut));
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+        }
+        // The project's library (1.2 step 6): add an entry, a revision, an edit, a removal or a copy to another project.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'library' && req.method === 'POST') {
+          if (parts[2] !== projectId) fail('Select this project before changing its library.');
+          const { projectId: selected, ...fields } = data;
+          try {
+            if (!parts[4]) return json(res, addLibraryEntry(store, projectId, fields), 201);
+            if (parts[5] === 'revisions' && !parts[6])
+              return json(res, reviseLibraryEntry(store, projectId, parts[4], fields), 201);
+            if (parts[5] === 'edit' && !parts[6])
+              return json(res, editLibraryEntry(store, projectId, parts[4], fields));
+            if (parts[5] === 'remove' && !parts[6]) {
+              if (Object.keys(fields).length) fail('Removing an entry takes nothing else.');
+              return json(res, removeLibraryEntry(store, projectId, parts[4]));
+            }
+            if (parts[5] === 'copy' && !parts[6]) {
+              if (Object.keys(fields).some(key => key !== 'to') || typeof fields.to !== 'string')
+                fail('Copying an entry names the project to copy it to.');
+              return json(res, copyLibraryEntry(store, projectId, parts[4], fields.to), 201);
+            }
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+          fail('Unknown library action.', 404);
         }
         // Deleting a project (v1.0 item 24): its name typed back confirms it.
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'delete' && !parts[4] && req.method === 'POST') {

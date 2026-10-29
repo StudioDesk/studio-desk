@@ -6,6 +6,7 @@ import { hash, resultSchema, validateResult } from './contracts.mjs';
 import { compileInstructions } from './instructions.mjs';
 import { artifactPath, validateAcceptedReferences, validateProtectedFiles } from './artifacts.mjs';
 import { directorInputsFor, directorInputReferences, stageDirectorInputs } from './idea-inputs.mjs';
+import { libraryFor, stageLibrary } from './library.mjs';
 import { prepareOperation, validateOperationResult } from './operations.mjs';
 import { LEGACY_PROJECT, recordProject, assertProject, validateTaskProject, jobDirectory } from './projects.mjs';
 import { live } from '../adapters/process.mjs';
@@ -514,10 +515,21 @@ export class Runner {
         : {}),
     };
   }
-  compileInstructions(org, worker, task, attemptId, workspace, inputs, directorReferences = [], history = null) {
+  compileInstructions(
+    org,
+    worker,
+    task,
+    attemptId,
+    workspace,
+    inputs,
+    directorReferences = [],
+    history = null,
+    library = null,
+  ) {
     return compileInstructions(org, worker, task, attemptId, workspace, inputs, {
       ...this.instructionContext(org, worker, task),
       directorInputReferences: directorReferences,
+      ...(library ? { library } : {}),
       ...(history ? { history: { reference: history.reference, attempts: history.attempts } } : {}),
     });
   }
@@ -738,7 +750,19 @@ export class Runner {
       directorReferences = directorInputReferences(directorInputs);
     // Earlier attempts on this work, as bounded unaccepted reference data (never inputs).
     const history = buildAttemptHistory(store, task, { attemptId: id });
-    const snapshot = this.compileInstructions(org, worker, task, id, output, inputs, directorReferences, history);
+    // The project's library (1.2 step 6): its index and the files that fit beside the work, recorded by hash.
+    const library = libraryFor(store, { ...task, projectId }, references);
+    const snapshot = this.compileInstructions(
+      org,
+      worker,
+      task,
+      id,
+      output,
+      inputs,
+      directorReferences,
+      history,
+      library,
+    );
     const configuration = adapter.configuration(this, worker, task);
     if (adapter.id !== worker.provider) configuration.executionAdapter = adapter.id;
     const a = {
@@ -773,6 +797,8 @@ export class Runner {
       inputReferences: inputs,
       directorInputs,
       directorInputReferences: directorReferences,
+      ...(library.references.length ? { libraryReferences: library.references } : {}),
+      ...(library.leftOut.length ? { libraryLeftOut: library.leftOut } : {}),
       ...(join?.missing.length ? { joinMissing: [...join.missing] } : {}),
       ...(transformed ? { inputTransform: transformed.provenance } : {}),
       delivery: adapterText(adapter, 'delivery', worker, this),
@@ -867,6 +893,7 @@ export class Runner {
       fs.mkdirSync(output, { recursive: true });
       fs.mkdirSync(path.join(job, 'inputs'), { recursive: true });
       stageDirectorInputs(store, entry);
+      stageLibrary(store, entry);
       // A reference stages the accepted artifacts it names, which may be some of them (a stage can
       // read only what it needs, such as a candidate's diff rather than its changed files).
       references.forEach((ref, n) => {

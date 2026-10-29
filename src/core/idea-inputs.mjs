@@ -32,7 +32,7 @@ const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 function reject(message, status = 400) {
   throw Object.assign(new Error(message), { status });
 }
-function safeName(name) {
+export function safeName(name) {
   if (
     typeof name !== 'string' ||
     !name ||
@@ -46,7 +46,7 @@ function safeName(name) {
   )
     reject('Input filenames must be bounded safe display names without paths.');
 }
-function checkContent(bytes, mediaType) {
+export function checkContent(bytes, mediaType) {
   const prefix = bytes.subarray(0, 12);
   const valid =
     mediaType === 'image/png'
