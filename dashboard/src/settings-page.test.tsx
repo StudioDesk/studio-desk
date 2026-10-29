@@ -671,7 +671,7 @@ test('Add an agent opens the teams to edit, Cancel leaves them as they were, and
   );
 });
 
-test("an agent's page saves how it runs for future runs and reads only that agent's accepted work", async () => {
+test("an agent's Runs on saves how it runs for the runs after the save, and its page reads only that agent's accepted work", async () => {
   const user = userEvent.setup();
   open('/p/project-x/agents/W-1');
   expect(await screen.findByRole('heading', { level: 2, name: 'Eli' })).toBeTruthy();
@@ -681,12 +681,12 @@ test("an agent's page saves how it runs for future runs and reads only that agen
   expect(team.getByRole('link', { name: /^Eli/ }).getAttribute('aria-current')).toBe('page');
   await waitFor(() => expect(screen.getByText('Delivered lately')).toBeTruthy());
   expect(controller.reads()).toContain('/api/projects/project-x/settled?kind=accepted&limit=12&workerId=W-1');
-  await user.click(screen.getByRole('button', { name: 'Change how Eli runs' }));
+  const runs = within(screen.getByRole('region', { name: 'Runs on' }));
   // Text mode does not ship in 1.0.0, so a CLI that also has it offers no choice of mode (the director, October 25).
-  expect(screen.queryByLabelText('Mode')).toBeNull();
-  await user.type(screen.getByLabelText('Model'), 'gpt-5');
-  await user.selectOptions(screen.getByLabelText('Effort'), 'high');
-  await user.click(screen.getByRole('button', { name: 'Save for future runs' }));
+  expect(runs.queryByLabelText('Mode')).toBeNull();
+  await user.type(runs.getByLabelText('Model'), 'gpt-5');
+  await user.selectOptions(runs.getByLabelText('Effort'), 'high');
+  await user.click(runs.getByRole('button', { name: 'Save' }));
   await waitFor(() =>
     expect(commands()).toEqual([
       {
