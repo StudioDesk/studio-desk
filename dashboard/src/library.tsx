@@ -3,7 +3,7 @@
 // and where it came from, under the library's total against what every attempt receives in full. Upload a file adds
 // one from the director's computer, and Add to the library, on each accepted file, adds one that accepted work handed
 // back; the controller's refusals show in the dialog. Library changes are not task changes on the stream, so each
-// successful command reads the library again. Picking a card opens nothing yet: the page passes onPick when it does.
+// successful command reads the library again. Picking a card opens that file's own view (library-entry.tsx).
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useId, useState } from 'react';
 import {
@@ -16,11 +16,13 @@ import {
   type LibraryReader,
   type LibrarySource,
   type ProjectArtifact,
+  type RunRecord,
   type Shell,
   type Task,
 } from './api';
 import { Modal } from './dialog';
 import { encoded, fileSize } from './idea-composer';
+import { LibraryFile } from './library-entry';
 import { useStreamReady } from './stream-context';
 import { useToast } from './toast';
 
@@ -53,47 +55,42 @@ const types: Record<string, string> = {
   ts: 'text/plain',
   tsx: 'text/plain',
 };
-const accept = Object.keys(types)
+export const libraryAccept = Object.keys(types)
   .map(extension => `.${extension}`)
   .join(',');
-const mediaTypeOf = (file: File) => types[file.name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() ?? ''] ?? file.type;
+export const libraryMediaType = (file: File) =>
+  types[file.name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() ?? ''] ?? file.type;
 
 export const libraryKey = (projectId: string) => [projectId, 'library'] as const;
 // The entries later work follows: those not removed, each at its newest revision, in the library's order.
 export const currentEntries = (library: LibraryIndex) => library.entries.filter(entry => !entry.removedAt);
 const newest = (entry: LibraryEntry) => entry.revisions.at(-1);
 
-// What the page knows to name a source by: the accepted files' stories, the records' tasks and the projects.
+// What the page knows to name a source by: the accepted files' stories, the records' tasks and the projects; and the
+// runs its records hold, for the ideas that left an entry out.
 export interface LibraryNames {
   files?: ProjectArtifact[];
-  records: (Pick<Shell, 'projects'> & { tasks?: Task[] }) | null;
+  records: (Pick<Shell, 'projects'> & { tasks?: Task[]; runs?: RunRecord[] }) | null;
 }
 
-function sourceWords(source: LibrarySource, { files, records }: LibraryNames) {
+export const storyTitle = (taskId: string, { files, records }: LibraryNames) =>
+  files?.find(file => file.taskId === taskId)?.title ??
+  records?.tasks?.find(task => task.id === taskId)?.title ??
+  taskId;
+export const projectName = (projectId: string, { records }: LibraryNames) =>
+  records?.projects.find(item => item.id === projectId)?.name ?? projectId;
+function sourceWords(source: LibrarySource, names: LibraryNames) {
   if (source.type === 'upload') return 'Uploaded';
-  if (source.type === 'accepted') {
-    const story =
-      files?.find(file => file.taskId === source.taskId)?.title ??
-      records?.tasks?.find(task => task.id === source.taskId)?.title ??
-      source.taskId;
-    return `From accepted work: ${story}`;
-  }
-  const project = records?.projects.find(item => item.id === source.projectId)?.name ?? source.projectId;
-  return `Copied from ${project}`;
+  if (source.type === 'accepted') return `From accepted work: ${storyTitle(source.taskId, names)}`;
+  return `Copied from ${projectName(source.projectId, names)}`;
 }
-const readBy = (count: number) => (count === 0 ? 'Not read yet' : `Read by ${count} attempt${count === 1 ? '' : 's'}`);
+export const readBy = (count: number) =>
+  count === 0 ? 'Not read yet' : `Read by ${count} attempt${count === 1 ? '' : 's'}`;
 const counted = (count: number) => `${count} file${count === 1 ? '' : 's'}`;
 
-export function Library({
-  projectId,
-  names,
-  onPick,
-}: {
-  projectId: string;
-  names: LibraryNames;
-  onPick?: (entry: LibraryEntry) => void;
-}) {
+export function Library({ projectId, names }: { projectId: string; names: LibraryNames }) {
   const [uploading, setUploading] = useState(false),
+    [pickedId, setPickedId] = useState<string | null>(null),
     titleId = useId();
   // Read on each visit, since attempts that started while the page was away read it.
   const { data, error } = useQuery({
@@ -103,7 +100,9 @@ export function Library({
     refetchOnMount: 'always',
   });
   const entries = data ? currentEntries(data) : [],
-    total = entries.reduce((sum, entry) => sum + (newest(entry)?.byteLength ?? 0), 0);
+    total = entries.reduce((sum, entry) => sum + (newest(entry)?.byteLength ?? 0), 0),
+    // The picked file as the library reads now: its view closes once the entry is removed.
+    picked = entries.find(entry => entry.id === pickedId) ?? null;
   return (
     <section aria-labelledby={titleId} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 'var(--space-10)' }}>
@@ -158,17 +157,19 @@ export function Library({
             style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexWrap: 'wrap', gap: '12px' }}
           >
             {entries.map(entry => (
-              <Card key={entry.id} projectId={projectId} entry={entry} names={names} onPick={onPick} />
+              <Card key={entry.id} projectId={projectId} entry={entry} names={names} onPick={setPickedId} />
             ))}
           </ul>
         </>
       )}
       <EntryDialog projectId={projectId} open={uploading} onClose={() => setUploading(false)} />
+      <LibraryFile projectId={projectId} entry={picked} names={names} onClose={() => setPickedId(null)} />
     </section>
   );
 }
 
 // One entry's card, named by its name and described by the rest; it reads the attempts that read the entry itself.
+// Picking it opens the entry's own view.
 function Card({
   projectId,
   entry,
@@ -178,7 +179,7 @@ function Card({
   projectId: string;
   entry: LibraryEntry;
   names: LibraryNames;
-  onPick?: (entry: LibraryEntry) => void;
+  onPick: (entryId: string) => void;
 }) {
   const nameId = useId(),
     detailsId = useId(),
@@ -201,7 +202,8 @@ function Card({
         style={{ flex: 1 }}
         aria-labelledby={nameId}
         aria-describedby={detailsId}
-        onClick={() => onPick?.(entry)}
+        aria-haspopup="dialog"
+        onClick={() => onPick(entry.id)}
       >
         <span id={nameId} style={{ fontWeight: 700, overflowWrap: 'anywhere' }}>
           {entry.name}
@@ -265,7 +267,7 @@ function EntryDialog({
         purpose: entry.purpose,
         ...(entry.from
           ? { from: { taskId: entry.from.taskId, attemptId: entry.from.attemptId, path: entry.from.path } }
-          : { file: await encoded({ id: 0, file: entry.file!, mediaType: mediaTypeOf(entry.file!) }) }),
+          : { file: await encoded({ id: 0, file: entry.file!, mediaType: libraryMediaType(entry.file!) }) }),
       }),
     onSuccess: (_, entry) => {
       close();
@@ -308,7 +310,7 @@ function EntryDialog({
             <input
               id={fileId}
               type="file"
-              accept={accept}
+              accept={libraryAccept}
               disabled={busy}
               onChange={event => edit(setPicked)(event.target.files?.[0] ?? null)}
             />
