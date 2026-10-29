@@ -77,6 +77,8 @@ import { agentLooks, placeIn, quoted, when } from './today';
 import { useToast } from './toast';
 import type { AttemptTrace } from './trace';
 import { useTrace } from './trace-page';
+import { tryOffered } from './try-it';
+import { TriedTile, TryPanel } from './try-panel';
 import { useNarrow } from './use-narrow';
 import { useNow } from './use-now';
 import { clip, yourPart, type Part } from './your-part';
@@ -162,7 +164,7 @@ export function Crumbs({
   );
 }
 
-type TabId = 'changes' | 'checks' | 'activity' | 'overview' | 'details';
+type TabId = 'changes' | 'checks' | 'try' | 'activity' | 'overview' | 'details';
 interface Tab {
   id: TabId;
   label: string;
@@ -214,6 +216,8 @@ function Story({
     // Unless an attempt is chosen, a staged task shows its own work first, then the later stage's attempt.
     work = !source && !chosen ? stagedWork(task, attempts, latest) : undefined,
     people = storyPeople(task, studio),
+    // A story whose tests passed may be tried in the project's try copy: its Tried by you tile and Try it tab.
+    tryable = source && tryOffered(task, studio),
     built = people.candidate ?? people.build,
     // The candidate's own record, for where its time went; the attempt shown's when that is the candidate.
     builtDetail = useAttemptDetail(projectId, built?.id ?? '', source && !!built && built.id !== shown?.id),
@@ -248,12 +252,14 @@ function Story({
         : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^A/, 'a')}` : ''}`
       : null;
   // The attempts are the strip above the tabs, not a tab of their own, and everything recorded about the one shown is
-  // its own page, linked from Details.
+  // its own page, linked from Details. Try it follows Checks once the story's tests passed.
+  const tryTab: Tab[] = tryable ? [{ id: 'try', label: 'Try it' }] : [];
   const tabs: Tab[] = narrow
     ? [
         { id: 'activity', label: 'Activity' },
         source ? { id: 'changes', label: 'Changes', count: stat?.files } : { id: 'overview', label: 'Overview' },
         ...(source ? [{ id: 'checks' as const, label: 'Checks' }] : []),
+        ...tryTab,
         { id: 'details', label: 'Details' },
       ]
     : [
@@ -261,6 +267,7 @@ function Story({
           ? [
               { id: 'changes' as const, label: 'Changes', count: stat?.files },
               { id: 'checks' as const, label: 'Checks' },
+              ...tryTab,
             ]
           : [{ id: 'overview' as const, label: 'Overview' }]),
         { id: 'activity', label: 'Activity' },
@@ -332,6 +339,7 @@ function Story({
         <ChecksPanel projectId={projectId} task={task} studio={studio} attempt={checked} full={checkedFull} />
       </>
     ),
+    try: () => <TryPanel projectId={projectId} task={task} studio={studio} />,
     activity: () => (
       <StoryActivity
         projectId={projectId}
@@ -525,9 +533,11 @@ function Story({
       </Stands>
       {source && people.candidate && (
         <Tiles
+          projectId={projectId}
           task={task}
           studio={studio}
           looks={looks}
+          tryable={tryable}
           onShow={setPicked}
           onReview={() => showChapter(people.review?.id)}
         />
@@ -786,17 +796,22 @@ function AutoAnswer({
   );
 }
 
-// The change and its tests, each opening its tab, and its review, which opens the review's chapter in Activity.
+// The change and its tests, each opening its tab, and its review, which opens the review's chapter in Activity; once
+// its tests passed, whether the director tried it, which opens Try it.
 function Tiles({
+  projectId,
   task,
   studio,
   looks,
+  tryable,
   onShow,
   onReview,
 }: {
+  projectId: string;
   task: Task;
   studio: StudioState;
   looks: Map<string, AgentLook>;
+  tryable: boolean;
   onShow: (tab: TabId) => void;
   onReview: () => void;
 }) {
@@ -903,6 +918,7 @@ function Tiles({
           </span>
         </span>
       </button>
+      {tryable && <TriedTile projectId={projectId} taskId={task.id} onShow={() => onShow('try')} />}
     </div>
   );
 }

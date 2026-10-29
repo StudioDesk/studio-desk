@@ -185,13 +185,13 @@ test('a code story with two builds and a review has three chips, the builds then
   // The latest is the one shown, and no line says another is.
   expect(pressed(chips)).toEqual(['false', 'false', 'true']);
   expect(screen.queryByRole('region', { name: 'The attempt shown' })).toBeNull();
-  // Above the tabs, none of which is Attempts.
+  // Above the tabs, none of which is Attempts; its tests passed, so it may be tried.
   const tablist = screen.getByRole('tablist', { name: 'Story details' });
   expect(
     within(tablist)
       .getAllByRole('tab')
       .map(tab => tab.firstChild?.textContent),
-  ).toEqual(['Changes', 'Checks', 'Activity']);
+  ).toEqual(['Changes', 'Checks', 'Try it', 'Activity']);
   expect(strip.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
@@ -289,7 +289,7 @@ test('on a phone the strip is a row of its own that scrolls sideways to keep the
     within(tablist)
       .getAllByRole('tab')
       .map(tab => tab.firstChild?.textContent),
-  ).toEqual(['Activity', 'Changes', 'Checks', 'Details']);
+  ).toEqual(['Activity', 'Changes', 'Checks', 'Try it', 'Details']);
   expect(strip.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 

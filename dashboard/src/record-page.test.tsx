@@ -244,12 +244,12 @@ test('a story with no attempt has no link to a record', async () => {
   expect(screen.queryByRole('link', { name: linkName })).toBeNull();
 });
 
-// No story has a Record tab: a code story's wide tabs are Changes, Checks and Activity, other work's Overview and
-// Activity, and a phone adds Details, whose card links to the record instead of showing it.
+// No story has a Record tab: a code story's wide tabs are Changes, Checks, Try it (its tests passed) and Activity,
+// other work's Overview and Activity, and a phone adds Details, whose card links to the record instead of showing it.
 for (const [source, phone, labels] of [
-  [true, false, ['Changes', 'Checks', 'Activity']],
+  [true, false, ['Changes', 'Checks', 'Try it', 'Activity']],
   [false, false, ['Overview', 'Activity']],
-  [true, true, ['Activity', 'Changes', 'Checks', 'Details']],
+  [true, true, ['Activity', 'Changes', 'Checks', 'Try it', 'Details']],
   [false, true, ['Activity', 'Overview', 'Details']],
 ] as const)
   test(`${source ? "a code story's" : "other work's"} tabs${phone ? ' on a phone' : ''} are ${labels.join(', ')}`, async () => {
