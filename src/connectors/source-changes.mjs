@@ -1214,21 +1214,30 @@ export function stagedChanges(scope, result, read) {
   // one no afterHash. Size is bounded per file here and by the change's diff, not by a total.
   const writable = [...scope.allowedFiles, ...(scope.newFiles || [])],
     changes = [],
-    seen = new Set();
-  for (const artifact of result.artifacts) {
+    seen = new Map(),
+    shown = text => JSON.stringify(text.length > 120 ? text.slice(0, 119) + '…' : text);
+  for (const [index, artifact] of result.artifacts.entries()) {
     const file = artifact.path.slice('changes/'.length);
     if (artifact.path === scopeRequestFile || artifact.path === 'question.json')
       throw new Error(
         `Return ${artifact.path} only with outcome blocked; a completed change stays inside the approved paths.`,
       );
-    if (
-      !artifact.path.startsWith('changes/') ||
-      !writable.includes(file) ||
-      seen.has(file) ||
-      artifact.kind !== 'source-file'
-    )
-      throw new Error('Staged source edits exceed the approved file scope.');
-    seen.add(file);
+    // Name the entry as returned and its position: the adapter appends carried-over work after the
+    // editor's own artifacts, so a duplicate it caused shows as a late entry.
+    const broken = !artifact.path.startsWith('changes/')
+      ? 'is not under changes/, so it is not a staged copy of a source file'
+      : !writable.includes(file)
+        ? `is not one of the story's approved or new files (${named(writable) || 'it has none'})`
+        : seen.has(file)
+          ? `is listed twice, as returned artifacts ${seen.get(file) + 1} and ${index + 1} of ${result.artifacts.length}`
+          : artifact.kind !== 'source-file'
+            ? `was returned with kind ${shown(artifact.kind)} instead of source-file`
+            : '';
+    if (broken)
+      throw new Error(
+        `Staged source edits exceed the approved file scope: the returned artifact ${shown(artifact.path)} ${broken}.`,
+      );
+    seen.set(file, index);
     const contents = read(artifact.path),
       { fileBytes } = profileOf(scope.source).limits;
     if (contents.length > fileBytes || contents.includes(0) || !Buffer.from(contents.toString('utf8')).equals(contents))

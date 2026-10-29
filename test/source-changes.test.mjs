@@ -3053,6 +3053,61 @@ test('a rejected source edit names its reason, and how to report checks the sand
   assert.deepEqual(deletion, [{ path: 'docs/old.md', beforeHash: 'h', afterHash: null, bytes: 0 }]);
 });
 
+test('a staged edit outside the approved file scope names the returned path and the rule it broke', () => {
+  const scope = {
+      allowedFiles: ['src/core/workflows.mjs'],
+      newFiles: ['src/core/created.mjs'],
+      deleteFiles: [],
+      source: { files: [{ path: 'src/core/workflows.mjs', hash: hash('// before\n') }] },
+    },
+    result = { taskId: 'T-1', outcome: 'completed', summary: 'Staged.', checks: [], issues: [], handoff: '' },
+    staged = (artifacts, approved = scope) =>
+      stagedChanges(approved, { ...result, artifacts }, () => Buffer.from('// after\n')),
+    edit = { path: 'changes/src/core/workflows.mjs', kind: 'source-file' },
+    // The phrase the dashboard sorts failures by, then the entry as returned and the rule it broke.
+    prefix = 'Staged source edits exceed the approved file scope: the returned artifact ',
+    rejected = (artifacts, reason, approved) =>
+      assert.throws(
+        () => staged(artifacts, approved),
+        error => error.message.startsWith(prefix) && reason.test(error.message.slice(prefix.length)),
+      );
+  assert.deepEqual(
+    staged([edit]).map(change => change.path),
+    ['src/core/workflows.mjs'],
+  );
+  // (a) A staged file the story neither changes nor creates, named with the approved and new files.
+  rejected(
+    [{ path: 'changes/src/core/projects.mjs', kind: 'source-file' }],
+    /^"changes\/src\/core\/projects\.mjs" is not one of the story's approved or new files \(src\/core\/workflows\.mjs, src\/core\/created\.mjs\)\.$/,
+  );
+  // (b) The same file twice, as carried-over work appended after the editor's own entry would be.
+  rejected(
+    [edit, edit],
+    /^"changes\/src\/core\/workflows\.mjs" is listed twice, as returned artifacts 1 and 2 of 2\.$/,
+  );
+  // (c) An approved file at a path that is not a staged copy.
+  rejected(
+    [{ path: 'src/core/workflows.mjs', kind: 'source-file' }],
+    /^"src\/core\/workflows\.mjs" is not under changes\/, so it is not a staged copy of a source file\.$/,
+  );
+  // (d) An approved file with another kind.
+  rejected(
+    [{ ...edit, kind: 'source-change' }],
+    /^"changes\/src\/core\/workflows\.mjs" was returned with kind "source-change" instead of source-file\.$/,
+  );
+  // A long path or kind is cut short, and the approved list names five files and counts the rest.
+  rejected(
+    [{ path: 'changes/' + 'a'.repeat(500), kind: 'source-file' }],
+    /^"changes\/a{111}…" is not one of the story's approved or new files/,
+  );
+  rejected([{ ...edit, kind: 'k'.repeat(500) }], /with kind "k{119}…" instead of source-file\.$/);
+  rejected(
+    [edit],
+    /files \(src\/core\/file-0\.mjs, src\/core\/file-1\.mjs, src\/core\/file-2\.mjs, src\/core\/file-3\.mjs, src\/core\/file-4\.mjs and 3 more\)\.$/,
+    { ...scope, allowedFiles: Array.from({ length: 8 }, (_, i) => `src/core/file-${i}.mjs`), newFiles: [] },
+  );
+});
+
 test('candidate review errors name each problem so a retry can correct it', () => {
   const candidateReview = {
       taskId: 'T-1',
