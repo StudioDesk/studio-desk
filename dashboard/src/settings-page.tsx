@@ -2,15 +2,25 @@
 // and direction, its repository, its house rules, its workflows and its records. Every project: running work, the
 // command-line tools, the projects on this computer and the appearance, which belong to this computer, so a change
 // there reaches every project. Every change applies to work that starts after it.
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { useEffect, useState, type ReactNode } from 'react';
-import { send, type KindModes, type Mode, type Project, type RepositoryInspection, type TestSandbox } from './api';
+import { useEffect, useId, useState, type ReactNode } from 'react';
+import {
+  send,
+  type KindModes,
+  type Mode,
+  type Project,
+  type RepositoryInspection,
+  type TestSandbox,
+  type TryPlace,
+  type TrySettings,
+} from './api';
 import { BuiltInSandboxSetup } from './built-in-sandbox';
 import { AgentAvatar } from './design/avatar';
+import { Dialog } from './design/dialog';
 import { Clapper, Icon, StudioMark } from './design/icons';
 import { agentLooks } from './today';
-import { projectColor, projectKind, projectPalette } from './frame';
+import { isCodeProject, projectColor, projectKind, projectPalette } from './frame';
 import { DeleteProject } from './delete-project';
 import { CycleWarning } from './home-page';
 import { Toggle } from './layout';
@@ -20,6 +30,7 @@ import { ProfileDialog } from './profile-dialog';
 import { queryKeys, useStudio } from './records';
 import { usageHolds, type StudioState } from './studio-runs';
 import { useToast } from './toast';
+import { tryKeys, useTryView } from './try-it';
 
 // A settings page's trail: Home, then Settings.
 export function settingsTrail(projectId: string) {
@@ -417,7 +428,300 @@ function Repository({ projectId, state }: { projectId: string; state: StudioStat
             : 'This project has no repository: its work is files and findings, not code.'}
         </p>
       )}
+      {isCodeProject(state) && <Trying projectId={projectId} root={source?.root ?? null} />}
     </Section>
+  );
+}
+
+const places: Record<TryPlace, string> = { 'built-in': 'The built-in sandbox', computer: 'This computer' };
+// The most arguments a start command takes after its program, as the controller checks it (maxBuildArguments).
+const maxArguments = 19;
+const sandboxNote =
+  "The next Run runs on this computer: the built-in sandbox here can't let the app's address through.";
+
+// Trying a story yourself (1.2 step 7) on a code project, read from its try view (try-it.ts): the start command Run
+// starts in the try copy, the app's address, the copy's folder and where Run runs. The copy's folder is `<folder>-try`
+// beside the project's folder unless the settings name another; `root` is the project's folder where the dashboard
+// knows it, which a project on the controller's own source does not record. The controller checks and saves what the
+// director edits (src/connectors/try-copy.mjs saveTrySettings), for the next Try it and Run.
+function Trying({ projectId, root }: { projectId: string; root: string | null }) {
+  const view = useTryView(projectId),
+    client = useQueryClient(),
+    toast = useToast(),
+    [editing, setEditing] = useState(false),
+    fallback = root ? `${root}-try` : null;
+  const save = useMutation({
+    mutationFn: (settings: Omit<TrySettings, 'outsideConfirmedAt'>) =>
+      send<TrySettings>(`/api/projects/${encodeURIComponent(projectId)}/try-settings`, { projectId, ...settings }),
+    onSuccess: () => {
+      toast('Saved. The next Try it and Run use them.');
+      setEditing(false);
+      return client.invalidateQueries({ queryKey: tryKeys.view(projectId) });
+    },
+  });
+  const close = () => {
+    save.reset();
+    setEditing(false);
+  };
+  const data = view.data,
+    [program, ...args] = data?.settings.start ?? [],
+    blocked = data?.runsIn === 'computer' && data.settings.runIn === 'built-in';
+  return (
+    <section
+      aria-labelledby="try-settings-title"
+      style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-10)' }}
+    >
+      <h3 id="try-settings-title" style={{ margin: 0, fontSize: '17px' }}>
+        Trying a story yourself
+      </h3>
+      <p className="sd-meta" style={{ margin: 0 }}>
+        Try it puts a story&apos;s candidate in a copy of the repository, and Run starts the app there for you to try.
+      </p>
+      {view.error ? (
+        <p role="alert" style={{ margin: 0 }}>
+          The try settings could not be read: {view.error.message}
+        </p>
+      ) : !data ? (
+        <p role="status" className="sd-meta" style={{ margin: 0 }}>
+          Reading the try settings…
+        </p>
+      ) : (
+        <>
+          <dl className="sd-kv sd-kv--chips">
+            <dt>Start command</dt>
+            <dd>
+              {program ? (
+                <>
+                  <span className="sd-file">{program}</span>
+                  {args.length > 0 && <span className="sd-meta">with</span>}
+                  {args.map((arg, index) => (
+                    <span key={index} className="sd-file">
+                      {arg}
+                    </span>
+                  ))}
+                </>
+              ) : (
+                <span>None yet: Run needs one to start the app.</span>
+              )}
+            </dd>
+            <dt>Address</dt>
+            <dd>
+              {data.settings.address ? (
+                <span className="sd-file">{data.settings.address}</span>
+              ) : (
+                <span>Read from what the app prints</span>
+              )}
+            </dd>
+            <dt>Try copy&apos;s folder</dt>
+            <dd>
+              {data.settings.folder ? (
+                <span className="sd-file sd-file--path">{data.settings.folder}</span>
+              ) : (
+                <span className="sd-meta">None yet</span>
+              )}
+              {fallback && data.settings.folder === fallback && (
+                <span className="sd-meta">beside the project&apos;s folder</span>
+              )}
+            </dd>
+            <dt>Run in</dt>
+            <dd>
+              <span>{places[data.settings.runIn]}</span>
+              {blocked && <span className="sd-meta">{sandboxNote}</span>}
+            </dd>
+          </dl>
+          <div>
+            <button type="button" className="sd-btn sd-btn--sm" onClick={() => setEditing(true)}>
+              Edit how stories are tried
+            </button>
+          </div>
+          <Dialog open={editing} label="Edit how stories are tried" busy={save.isPending} onClose={close}>
+            <TryForm
+              settings={data.settings}
+              fallback={fallback}
+              blocked={blocked}
+              busy={save.isPending}
+              problem={save.error?.message}
+              onSave={settings => save.mutate(settings)}
+              onClose={close}
+            />
+          </Dialog>
+        </>
+      )}
+    </section>
+  );
+}
+
+// Each opening starts from the saved settings. The start command is a program and one field per argument, never
+// joined into a line or split on spaces, as Run starts it without a shell; an empty address or folder is sent as null,
+// which reads the address from the app's output and keeps the copy beside the project's folder. A refusal stays
+// beside the edits, so none are lost.
+function TryForm({
+  settings,
+  fallback,
+  blocked,
+  busy,
+  problem,
+  onSave,
+  onClose,
+}: {
+  settings: TrySettings;
+  fallback: string | null;
+  blocked: boolean;
+  busy: boolean;
+  problem?: string;
+  onSave: (settings: Omit<TrySettings, 'outsideConfirmedAt'>) => void;
+  onClose: () => void;
+}) {
+  const field = useId(),
+    [first, ...rest] = settings.start ?? [],
+    [program, setProgram] = useState(first ?? ''),
+    [args, setArgs] = useState(rest),
+    [address, setAddress] = useState(settings.address ?? ''),
+    // The default folder shows as an empty field, which keeps it.
+    [folder, setFolder] = useState(settings.folder && settings.folder !== fallback ? settings.folder : ''),
+    [runIn, setRunIn] = useState<TryPlace>(settings.runIn);
+  const start = [program.trim(), ...args.map(arg => arg.trim()).filter(Boolean)];
+  return (
+    <form
+      className="sd-dialog__form"
+      onSubmit={event => {
+        event.preventDefault();
+        onSave({
+          // Arguments without a program are sent too, so the controller says what is missing.
+          start: start.some(Boolean) ? start : null,
+          address: address.trim() || null,
+          folder: folder.trim() || null,
+          runIn,
+        });
+      }}
+    >
+      <h2 className="sd-dialog__title">Edit how stories are tried</h2>
+      <p style={{ margin: 0, color: 'var(--ink-2)' }}>
+        For the next Try it and Run. Run starts the command in the try copy, without a shell.
+      </p>
+      <div className="sd-field">
+        <label className="sd-field__label" htmlFor={`${field}-program`}>
+          Start command
+        </label>
+        <input
+          id={`${field}-program`}
+          className="sd-input sd-mono"
+          placeholder="A program, such as npm"
+          value={program}
+          disabled={busy}
+          onChange={event => setProgram(event.target.value)}
+        />
+        {args.map((arg, index) => (
+          <span key={index} style={{ display: 'flex', gap: 'var(--space-6)', alignItems: 'center' }}>
+            <input
+              className="sd-input sd-mono"
+              aria-label={`Argument ${index + 1}`}
+              value={arg}
+              disabled={busy}
+              onChange={event =>
+                setArgs(current => current.map((item, at) => (at === index ? event.target.value : item)))
+              }
+            />
+            <button
+              type="button"
+              className="sd-btn sd-btn--sm sd-btn--ghost"
+              aria-label={`Remove argument ${index + 1}`}
+              disabled={busy}
+              onClick={() => setArgs(current => current.filter((_, at) => at !== index))}
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="sd-btn sd-btn--sm"
+            disabled={busy || args.length >= maxArguments}
+            onClick={() => setArgs(current => [...current, ''])}
+          >
+            Add an argument
+          </button>
+          <span className="sd-meta">
+            Each argument in its own field, such as <span className="sd-file">run</span> and{' '}
+            <span className="sd-file">dev</span> after <span className="sd-file">npm</span>; up to {maxArguments}.
+          </span>
+        </span>
+      </div>
+      <div className="sd-field">
+        <label className="sd-field__label" htmlFor={`${field}-address`}>
+          Address
+        </label>
+        <input
+          id={`${field}-address`}
+          className="sd-input sd-mono"
+          placeholder="Read from what the app prints"
+          value={address}
+          disabled={busy}
+          aria-describedby={`${field}-address-note`}
+          onChange={event => setAddress(event.target.value)}
+        />
+        <span id={`${field}-address-note`} className="sd-meta">
+          Optional: an address on this computer, such as http://localhost:5173. Empty reads the first one the app
+          prints.
+        </span>
+      </div>
+      <div className="sd-field">
+        <label className="sd-field__label" htmlFor={`${field}-folder`}>
+          Try copy&apos;s folder
+        </label>
+        <input
+          id={`${field}-folder`}
+          className="sd-input sd-mono"
+          placeholder={fallback ?? "Beside the project's folder"}
+          value={folder}
+          disabled={busy}
+          aria-describedby={`${field}-folder-note`}
+          onChange={event => setFolder(event.target.value)}
+        />
+        <span id={`${field}-folder-note`} className="sd-meta">
+          {fallback
+            ? `Optional: a folder outside the project's. Empty keeps the default beside the project's folder, ${fallback}.`
+            : "Optional: a folder outside the project's. Empty keeps the default beside the project's folder."}
+        </span>
+      </div>
+      <div className="sd-field">
+        <span className="sd-field__label">Run in</span>
+        <span className="sd-segmented" role="group" aria-label="Run in" style={{ alignSelf: 'flex-start' }}>
+          {(['built-in', 'computer'] as const).map(value => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={runIn === value}
+              disabled={busy}
+              onClick={() => setRunIn(value)}
+            >
+              {places[value]}
+            </button>
+          ))}
+        </span>
+        <span className="sd-meta">
+          {runIn === 'computer'
+            ? 'The app runs with your account’s full access to your files and the network. Run asks you once for this project before it runs here.'
+            : blocked
+              ? sandboxNote
+              : 'Where the built-in sandbox can let the app’s address through; otherwise Run runs on this computer.'}
+        </span>
+      </div>
+      {problem && (
+        <p role="alert" style={{ margin: 0, color: 'var(--bad)', fontWeight: 600 }}>
+          {problem}
+        </p>
+      )}
+      <div className="sd-dialog__actions">
+        <button type="button" className="sd-btn sd-btn--ghost" disabled={busy} onClick={onClose}>
+          Cancel
+        </button>
+        <button type="submit" className="sd-btn sd-btn--primary" disabled={busy}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </form>
   );
 }
 

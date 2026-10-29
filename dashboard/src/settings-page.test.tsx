@@ -5,7 +5,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { BuiltInSandbox } from './api';
+import type { BuiltInSandbox, TrySettings, TryView } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
@@ -819,4 +819,230 @@ test('Settings pauses all new work and clears a usage hold for the whole control
       { url: '/api/control', method: 'POST', body: { projectId: 'project-x', clearQuota: 'codex' } },
     ]),
   );
+});
+
+// Trying a story yourself (1.2 step 7): a code project on its own repository at C:/work/site, whose try copy is
+// C:/work/site-try unless its settings name another folder.
+const codeProject = (settings: Partial<TrySettings> = {}, runsIn: TryView['runsIn'] = 'built-in') => {
+  controller.shell = {
+    ...controller.shell,
+    project: {
+      ...controller.shell.project,
+      source: {
+        root: 'C:/work/site',
+        revision: 1,
+        profile: {
+          id: 'site',
+          directories: ['src'],
+          files: [],
+          extensions: ['mjs'],
+          protectedNames: [],
+          contextFiles: [],
+          tests: { directory: 'src', suffix: '.test.mjs' },
+          formatter: null,
+          limits: { files: 500, fileBytes: 1048576, totalBytes: 16777216 },
+        },
+      },
+    },
+    organizationConfiguration: {
+      ...controller.shell.organizationConfiguration,
+      taskKinds: ['studio-development:breakdown', 'studio-development:change'],
+    },
+  };
+  controller.tryView = {
+    settings: {
+      start: null,
+      address: null,
+      folder: 'C:/work/site-try',
+      runIn: 'built-in',
+      outsideConfirmedAt: null,
+      ...settings,
+    },
+    runsIn,
+    copy: null,
+  };
+};
+// The controller's save: what it was sent becomes the try view, with the default folder for none.
+const saveTrySettings = (url: string, method: string, body: unknown) => {
+  if (url !== '/api/projects/project-x/try-settings' || method !== 'POST') return {};
+  const saved = body as Omit<TrySettings, 'outsideConfirmedAt'>;
+  controller.tryView = {
+    settings: {
+      start: saved.start,
+      address: saved.address,
+      folder: saved.folder ?? 'C:/work/site-try',
+      runIn: saved.runIn,
+      outsideConfirmedAt: null,
+    },
+    runsIn: saved.runIn,
+    copy: null,
+  };
+  return controller.tryView.settings;
+};
+const tryCommands = () => commands().filter(command => command.url.endsWith('/try-settings'));
+
+test('Repository shows how a story is tried yourself, and that the next Run runs on this computer when the sandbox cannot let it through', async () => {
+  codeProject(
+    { start: ['npm', 'run', 'dev'], address: 'http://localhost:5173', folder: 'D:/tries/site', runIn: 'built-in' },
+    'computer',
+  );
+  open('/p/project-x/settings');
+  const trying = within(await screen.findByRole('region', { name: 'Trying a story yourself' }));
+  // The start command as its program and each argument, never one line.
+  const start = (await trying.findByText('Start command')).nextElementSibling!;
+  expect([...start.querySelectorAll('.sd-file')].map(chip => chip.textContent)).toEqual(['npm', 'run', 'dev']);
+  expect(trying.getByText('http://localhost:5173')).toBeTruthy();
+  expect(trying.getByText('D:/tries/site')).toBeTruthy();
+  expect(trying.queryByText("beside the project's folder")).toBeNull();
+  expect(trying.getByText('The built-in sandbox')).toBeTruthy();
+  expect(
+    trying.getByText(
+      "The next Run runs on this computer: the built-in sandbox here can't let the app's address through.",
+    ),
+  ).toBeTruthy();
+  expect(controller.reads()).toContain('/api/projects/project-x/try');
+  expect(commands()).toEqual([]);
+  // Nothing set: no start command yet, the address read from the app's output and the copy beside the project.
+  cleanup();
+  codeProject();
+  open('/p/project-x/settings');
+  const unset = within(await screen.findByRole('region', { name: 'Trying a story yourself' }));
+  expect(await unset.findByText('None yet: Run needs one to start the app.')).toBeTruthy();
+  expect(unset.getByText('Read from what the app prints')).toBeTruthy();
+  expect(unset.getByText('C:/work/site-try')).toBeTruthy();
+  expect(unset.getByText("beside the project's folder")).toBeTruthy();
+  expect(unset.getByText('The built-in sandbox')).toBeTruthy();
+  expect(unset.queryByText(/^The next Run runs on this computer/)).toBeNull();
+});
+
+test('the try settings save the start command as a program and its arguments, the address, the folder and Run in', async () => {
+  const user = userEvent.setup();
+  codeProject();
+  controller.command = saveTrySettings;
+  open('/p/project-x/settings');
+  const trying = within(await screen.findByRole('region', { name: 'Trying a story yourself' }));
+  await user.click(await trying.findByRole('button', { name: 'Edit how stories are tried' }));
+  const dialog = within(await screen.findByRole('dialog', { name: 'Edit how stories are tried' }));
+  // The default folder is an empty field, and the form says where it is.
+  expect((dialog.getByLabelText("Try copy's folder") as HTMLInputElement).value).toBe('');
+  expect(
+    dialog.getByText(
+      "Optional: a folder outside the project's. Empty keeps the default beside the project's folder, C:/work/site-try.",
+    ),
+  ).toBeTruthy();
+  await user.type(dialog.getByLabelText('Start command'), 'npm');
+  // One field per argument, added and taken away.
+  for (const arg of ['run', 'dev', 'extra']) {
+    await user.click(dialog.getByRole('button', { name: 'Add an argument' }));
+    await user.type(dialog.getAllByLabelText(/^Argument \d+$/).at(-1)!, arg);
+  }
+  await user.click(dialog.getByRole('button', { name: 'Remove argument 3' }));
+  expect(dialog.getAllByLabelText(/^Argument \d+$/).map(field => (field as HTMLInputElement).value)).toEqual([
+    'run',
+    'dev',
+  ]);
+  await user.type(dialog.getByLabelText('Address'), 'http://localhost:5173');
+  await user.type(dialog.getByLabelText("Try copy's folder"), 'D:/tries/site');
+  const runIn = within(dialog.getByRole('group', { name: 'Run in' }));
+  expect(runIn.getByRole('button', { name: 'The built-in sandbox' }).getAttribute('aria-pressed')).toBe('true');
+  await user.click(runIn.getByRole('button', { name: 'This computer' }));
+  await user.click(dialog.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit how stories are tried' })).toBeNull());
+  expect(commands()).toEqual([
+    {
+      url: '/api/projects/project-x/try-settings',
+      method: 'POST',
+      body: {
+        projectId: 'project-x',
+        start: ['npm', 'run', 'dev'],
+        address: 'http://localhost:5173',
+        folder: 'D:/tries/site',
+        runIn: 'computer',
+      },
+    },
+  ]);
+  // Saved, the section reads the try view again.
+  expect(await trying.findByText('This computer')).toBeTruthy();
+  expect(trying.getByText('D:/tries/site')).toBeTruthy();
+  expect(controller.reads().filter(url => url === '/api/projects/project-x/try')).toHaveLength(2);
+});
+
+test('an empty address and folder are sent as null, which reads the address from the output and keeps the default folder', async () => {
+  const user = userEvent.setup();
+  codeProject(
+    { start: ['npm', 'start'], address: 'http://localhost:3000', folder: 'D:/tries/site', runIn: 'computer' },
+    'computer',
+  );
+  controller.command = saveTrySettings;
+  open('/p/project-x/settings');
+  const trying = within(await screen.findByRole('region', { name: 'Trying a story yourself' }));
+  await user.click(await trying.findByRole('button', { name: 'Edit how stories are tried' }));
+  const dialog = within(await screen.findByRole('dialog', { name: 'Edit how stories are tried' }));
+  // The form starts from what is saved.
+  expect((dialog.getByLabelText('Start command') as HTMLInputElement).value).toBe('npm');
+  expect((dialog.getByLabelText('Argument 1') as HTMLInputElement).value).toBe('start');
+  expect((dialog.getByLabelText('Address') as HTMLInputElement).value).toBe('http://localhost:3000');
+  expect((dialog.getByLabelText("Try copy's folder") as HTMLInputElement).value).toBe('D:/tries/site');
+  expect(
+    within(dialog.getByRole('group', { name: 'Run in' }))
+      .getByRole('button', { name: 'This computer' })
+      .getAttribute('aria-pressed'),
+  ).toBe('true');
+  await user.clear(dialog.getByLabelText('Address'));
+  await user.clear(dialog.getByLabelText("Try copy's folder"));
+  await user.click(dialog.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(tryCommands()).toHaveLength(1));
+  expect(tryCommands()[0]!.body).toEqual({
+    projectId: 'project-x',
+    start: ['npm', 'start'],
+    address: null,
+    folder: null,
+    runIn: 'computer',
+  });
+  expect(await trying.findByText('Read from what the app prints')).toBeTruthy();
+  expect(trying.getByText('C:/work/site-try')).toBeTruthy();
+});
+
+test("a refused save shows the controller's message and keeps the form open with the edits", async () => {
+  const user = userEvent.setup();
+  codeProject();
+  controller.command = () => {
+    throw new Error("The try copy needs a folder of its own, outside the project's folder.");
+  };
+  open('/p/project-x/settings');
+  const trying = within(await screen.findByRole('region', { name: 'Trying a story yourself' }));
+  await user.click(await trying.findByRole('button', { name: 'Edit how stories are tried' }));
+  const dialog = within(await screen.findByRole('dialog', { name: 'Edit how stories are tried' }));
+  await user.type(dialog.getByLabelText('Start command'), 'npm');
+  await user.type(dialog.getByLabelText("Try copy's folder"), 'C:/work/site/try');
+  await user.click(dialog.getByRole('button', { name: 'Save' }));
+  expect((await dialog.findByRole('alert')).textContent).toBe(
+    "The try copy needs a folder of its own, outside the project's folder.",
+  );
+  expect(screen.getByRole('dialog', { name: 'Edit how stories are tried' })).toBeTruthy();
+  expect((dialog.getByLabelText('Start command') as HTMLInputElement).value).toBe('npm');
+  expect((dialog.getByLabelText("Try copy's folder") as HTMLInputElement).value).toBe('C:/work/site/try');
+  expect(tryCommands()).toEqual([
+    {
+      url: '/api/projects/project-x/try-settings',
+      method: 'POST',
+      body: { projectId: 'project-x', start: ['npm'], address: null, folder: 'C:/work/site/try', runIn: 'built-in' },
+    },
+  ]);
+  // Cancel leaves the settings as they were.
+  await user.click(dialog.getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit how stories are tried' })).toBeNull());
+  expect(trying.getByText('None yet: Run needs one to start the app.')).toBeTruthy();
+  expect(tryCommands()).toHaveLength(1);
+});
+
+test('a project without a repository shows nothing of trying a story yourself', async () => {
+  open('/p/project-x/settings');
+  const repository = within(await screen.findByRole('region', { name: 'Repository' }));
+  expect(
+    repository.getByText('This project has no repository: its work is files and findings, not code.'),
+  ).toBeTruthy();
+  expect(screen.queryByText('Trying a story yourself')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Edit how stories are tried' })).toBeNull();
+  expect(controller.reads().filter(url => url.includes('/try'))).toEqual([]);
 });
