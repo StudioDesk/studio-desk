@@ -33,6 +33,8 @@ const open = (task: Task) => {
 };
 const decisions = async () => within(await screen.findByRole('region', { name: 'Where it stands' }));
 const details = () => within(screen.getByRole('region', { name: 'Details' }));
+// The brief beside the tabs, whose last part is the direction for the next attempt.
+const brief = () => within(screen.getByRole('region', { name: 'The brief' }));
 const posted = () => controller.requests.filter(request => request.method !== 'GET');
 const names = (region: ReturnType<typeof within>) =>
   region.getAllByRole('button').map((button: HTMLElement) => button.textContent);
@@ -113,8 +115,7 @@ test("a result in review is accepted, or sent for revision with a note that star
   expect(names(region)).toEqual(
     expect.arrayContaining(['Accept result', 'Request revision', 'Close without accepting']),
   );
-  await user.click(screen.getByRole('tab', { name: 'Overview' }));
-  const box = screen.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
+  const box = brief().getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
   await user.clear(box);
   await user.type(box, 'Say which test fails.');
   await user.click(region.getByRole('button', { name: 'Request revision' }));
@@ -222,8 +223,7 @@ test("the note past the limit starts from the page's draft, may be left empty, a
   await user.click(dialog.getByRole('button', { name: 'Cancel' }));
   expect(screen.queryByRole('dialog', { name: 'Start it again?' })).toBeNull();
   expect(posted()).toEqual([]);
-  await user.click(screen.getByRole('tab', { name: 'Overview' }));
-  const box = screen.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
+  const box = brief().getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
   await user.clear(box);
   await user.type(box, 'Say which test fails.');
   await user.click(region.getByRole('button', { name: 'Start assignment' }));
@@ -590,8 +590,9 @@ const targets = {
     { line: 'release/0.9', reason: 'release/0.9 already has it.' },
   ],
 };
+// The toast itself: a story without a candidate opens on its Activity, which says while it reads what happened.
 const backReads = () => controller.reads().filter(url => url.includes('/bring-back')),
-  toast = () => screen.getByRole('status', { hidden: true });
+  toast = () => document.querySelector('.sd-toast')!;
 
 test("a landed story offers Bring back to each older line it can go to, and the controller's reason where it can't", async () => {
   controller.bringBack['T-1'] = targets;

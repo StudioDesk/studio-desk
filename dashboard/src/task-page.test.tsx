@@ -96,11 +96,11 @@ test('a brief written in Markdown reads as formatted text, not as its marks', as
   edit({
     brief: 'Files: `src/a.mjs`\n\nIn `outcome()`, add one branch:\n\n1. Keep the label.\n2. Change the text.',
   });
-  const user = userEvent.setup();
   open();
-  await user.click(await screen.findByRole('tab', { name: 'Overview' }));
-  const brief = within(screen.getByRole('tabpanel'));
-  expect(brief.getByRole('heading', { name: 'What Eli was asked to do' })).toBeTruthy();
+  // Other work's brief is the card beside its tabs, as a story's is.
+  const brief = within(await screen.findByRole('region', { name: 'The brief' }));
+  expect(brief.getByRole('heading', { name: 'The brief' })).toBeTruthy();
+  expect(brief.getByText('What Eli was asked to do')).toBeTruthy();
   expect(brief.getByText('src/a.mjs').tagName).toBe('CODE');
   expect(brief.getAllByRole('listitem').map(item => item.textContent)).toEqual(['Keep the label.', 'Change the text.']);
   expect(brief.queryByText(/`/)).toBeNull();
@@ -110,8 +110,9 @@ test('a draft direction keeps its text and cursor through a refresh, and saving 
   const user = userEvent.setup();
   edit({ status: 'failed' });
   open();
-  await user.click(await screen.findByRole('tab', { name: 'Overview' }));
-  const box = (await screen.findByLabelText('Direction for the next attempt')) as HTMLTextAreaElement;
+  // The direction is the brief card's last part.
+  const card = within(await screen.findByRole('region', { name: 'The brief' })),
+    box = card.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
   expect(box.value).toBe('Recorded direction.');
   await user.clear(box);
   await user.type(box, 'Name the failing test.');
@@ -121,7 +122,7 @@ test('a draft direction keeps its text and cursor through a refresh, and saving 
   expect(box.isConnected).toBe(true);
   expect(box.value).toBe('Name the failing test.');
   expect(document.activeElement).toBe(box);
-  await user.click(screen.getByRole('button', { name: 'Save future direction' }));
+  await user.click(card.getByRole('button', { name: 'Save future direction' }));
   await waitFor(() => expect(controller.requests.some(request => request.method === 'PATCH')).toBe(true));
   expect(controller.requests.find(request => request.method === 'PATCH')).toEqual({
     url: '/api/tasks/T-1',
@@ -136,7 +137,7 @@ test("a running step's Result is its activity; the Activity tab streams only tha
   await screen.findByRole('heading', { name: 'Show finished results' });
   // A running step opens on its Result, which is what its agent is doing until it hands back.
   expect(await screen.findByText(/is working on it now/)).toBeTruthy();
-  await user.click(screen.getByRole('tab', { name: 'Overview' }));
+  await user.click(screen.getByRole('tab', { name: /^Attempts/ }));
   await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
   const tab = screen.getByRole('tab', { name: 'Activity' });
   await user.click(tab);
@@ -156,7 +157,7 @@ test("a running step's Result is its activity; the Activity tab streams only tha
   change(3, [{ seq: 3, type: 'task', id: 'T-1' }]);
   await screen.findByRole('heading', { name: 'Refreshed with the activity open' });
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
-  await user.click(screen.getByRole('tab', { name: 'Overview' }));
+  await user.click(screen.getByRole('tab', { name: /^Attempts/ }));
   await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
 });
 
@@ -884,6 +885,122 @@ for (const [source, tab, shows] of [
     expect(within(panel).queryByRole('region', inFull)).toBeNull();
     expect(document.getElementById('stands-in-full')).toBeNull();
   });
+
+// A code story, or other work, whose attempt failed, with a brief in Markdown and the plan an earlier step handed it.
+const handed = (source: boolean) => {
+  controller.tasks = [
+    taskFixture('T-1', {
+      title: 'Show finished results',
+      status: 'failed',
+      lastAttemptId: 'attempt-1',
+      brief: 'Files: src/result.mjs, test/result.test.mjs\n\nIn `outcome()`, add one branch:\n\n- Keep the label.',
+      acceptance: 'Results are readable.',
+      ...(source
+        ? {
+            kind: 'studio-development:change',
+            approval: { status: 'approved' },
+            proposalReference: { taskId: 'T-plan' },
+            sourceStage: { version: 'source-story-stages-v1', phase: 'implementing', current: 'failed', history: [] },
+          }
+        : {}),
+    }),
+    taskFixture('T-plan', { title: 'Plan the stories', status: 'review' }),
+  ];
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'failed',
+      workerId: 'W-1',
+      assignment: { kind: source ? 'studio-development:change' : 'general' },
+      inputReferences: [{ taskId: 'T-plan', attemptId: 'attempt-plan', summary: 'Split the idea into two stories.' }],
+      result: { outcome: 'failed', summary: 'A test failed.' },
+    },
+  ];
+};
+const handedTo = (brief: ReturnType<typeof within>) => {
+  expect(brief.getByText('Handed to Eli by earlier steps')).toBeTruthy();
+  expect(brief.getByText('Split the idea into two stories.')).toBeTruthy();
+  expect(brief.getByRole('link', { name: 'Plan the stories' }).getAttribute('href')).toBe('/p/project-x/tasks/T-plan');
+};
+
+test("a code story's brief is a card beside its tabs, which have no Overview, and without a candidate it opens on Activity", async () => {
+  handed(true);
+  open();
+  const card = await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }),
+    brief = within(card);
+  const tabs = within(screen.getByRole('tablist', { name: 'Story details' })).getAllByRole('tab');
+  expect(tabs.map(tab => tab.firstChild?.textContent)).toEqual([
+    'Changes',
+    'Checks',
+    'Review',
+    'Activity',
+    'Attempts',
+    'Record',
+  ]);
+  expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+  // Beside the tabs, not in them, above who works on it and the details.
+  expect(screen.getByRole('tabpanel').contains(card)).toBe(false);
+  expect([...card.parentElement!.children].map(item => item.getAttribute('aria-label'))).toEqual([
+    'The brief',
+    'People',
+    'Details',
+  ]);
+  expect(card.parentElement!.className).toBe('sd-story__side');
+  // What was asked, as formatted text without its path lines, then what done means and the files it may change.
+  expect(brief.getByText('What Eli was asked to do')).toBeTruthy();
+  expect(brief.getByText('outcome()').tagName).toBe('CODE');
+  expect(brief.getAllByRole('listitem').map(item => item.textContent)).toEqual(['Keep the label.']);
+  expect(brief.queryByText(/Files:|`/)).toBeNull();
+  expect(brief.getByText('Done means')).toBeTruthy();
+  expect(brief.getByText('Results are readable.')).toBeTruthy();
+  expect(brief.getByText('Files it may change')).toBeTruthy();
+  expect(brief.getByText('src/result.mjs').className).toBe('sd-file');
+  expect(brief.getByText('test/result.test.mjs').className).toBe('sd-file');
+  // The story may still change its files, so the form that edits them is here too.
+  expect(brief.getByText("Edit this story's files")).toBeTruthy();
+  handedTo(brief);
+  expect(brief.getByLabelText('Direction for the next attempt')).toBeTruthy();
+});
+
+test('other work has the brief card too, with its brief and what it was handed; it opens on Result, or Activity before any attempt', async () => {
+  handed(false);
+  open();
+  const brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
+  expect(screen.getByRole('tab', { name: 'Result' }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.queryByRole('tab', { name: 'Overview' })).toBeNull();
+  // Other work's brief keeps every line it was written with; it has no files to change.
+  expect(brief.getByText('outcome()').tagName).toBe('CODE');
+  expect(brief.getByText(/^Files: src\/result\.mjs/)).toBeTruthy();
+  expect(brief.queryByText('Files it may change')).toBeNull();
+  expect(brief.queryByText("Edit this story's files")).toBeNull();
+  expect(brief.getByText('Results are readable.')).toBeTruthy();
+  await waitFor(() => handedTo(brief));
+  cleanup();
+  controller.tasks = [{ ...controller.tasks[0]!, status: 'ready', lastAttemptId: undefined }];
+  controller.attempts = [];
+  open();
+  expect(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 })).toBeTruthy();
+  expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+});
+
+test('on a phone the brief card is under Details with the other side cards, shown once', async () => {
+  const user = userEvent.setup();
+  width(true);
+  handed(true);
+  open();
+  const tab = await screen.findByRole('tab', { name: 'Details' }, { timeout: 5000 });
+  expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+  expect(screen.queryByRole('region', { name: 'The brief' })).toBeNull();
+  await user.click(tab);
+  const panel = screen.getByRole('tabpanel'),
+    cards = [...panel.querySelectorAll('section.sd-sidecard')];
+  expect(cards.map(card => card.getAttribute('aria-label'))).toEqual(['The brief', 'People', 'Details']);
+  expect(screen.getAllByRole('region', { name: 'The brief' })).toEqual([cards[0]]);
+  expect(screen.getAllByText('What Eli was asked to do')).toHaveLength(1);
+  expect(document.querySelector('.sd-story__side')).toBeNull();
+  handedTo(within(cards[0] as HTMLElement));
+});
 
 // A command's answer carries the records it changed (records.ts RecordSync.answer), so the page shows the task's new
 // status and decisions without reading it again, before the stream's change event for it, which changes nothing more.

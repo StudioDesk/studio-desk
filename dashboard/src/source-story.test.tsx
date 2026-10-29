@@ -116,7 +116,7 @@ test('the change reads one file at a time from its checked evidence, which is re
   expect(rows.getByText('export const farewell = "bye";')).toBeTruthy();
   expect(rows.getByText('export const greeting = "hello";')).toBeTruthy();
   await user.click(file);
-  await user.click(screen.getByRole('tab', { name: 'Overview' }));
+  await user.click(screen.getByRole('tab', { name: 'Checks' }));
   await user.click(screen.getByRole('tab', { name: 'Changes' }));
   expect(await screen.findByRole('region', { name: 'Diff of src/greeting.mjs' })).toBeTruthy();
   expect(controller.reads().filter(url => url.includes('/artifact?'))).toEqual([
@@ -131,8 +131,8 @@ test('the change reads one file at a time from its checked evidence, which is re
   expect(within(screen.getByRole('tabpanel')).getByText('attempt-edit')).toBeTruthy();
 });
 
-test("a blocked editor's file request is offered for approval and sent back with the attempt that asked", async () => {
-  const user = userEvent.setup();
+// A story whose editor stopped to ask for a test file the story does not have.
+const askingForFiles = () => {
   controller.attempts.push({
     id: 'attempt-blocked',
     taskId: 'T-story',
@@ -160,6 +160,11 @@ test("a blocked editor's file request is offered for approval and sent back with
       sourceStage: { version: 'source-story-stages-v1', phase: 'implementing', current: 'blocked', history: [] },
     }),
   );
+};
+
+test("a blocked editor's file request is offered for approval and sent back with the attempt that asked", async () => {
+  const user = userEvent.setup();
+  askingForFiles();
   expect(await screen.findByText(/stopped because the change needs paths the story does not have/)).toBeTruthy();
   expect((screen.getByLabelText('Files to edit') as HTMLTextAreaElement).value).toBe(
     'src/greeting.mjs\ntest/greeting.test.mjs',
@@ -182,3 +187,41 @@ test("a blocked editor's file request is offered for approval and sent back with
     }),
   );
 });
+
+// The notice's Edit the file list opens the brief's file form and brings it into view: beside the tabs, which stay as
+// they are, or under Details on a phone.
+for (const phone of [false, true])
+  test(`Edit the file list brings the brief's file form into view${phone ? ' under Details on a phone' : ' without changing tab'}`, async () => {
+    const user = userEvent.setup(),
+      scrolled = vi.fn();
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: phone && query === '(max-width: 860px)',
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      askingForFiles();
+      const notice = await screen.findByRole('region', { name: 'Where it stands' }, { timeout: 5000 });
+      if (!phone) {
+        await user.click(await screen.findByRole('tab', { name: 'Record' }));
+        // The director had closed the form.
+        const form = within(screen.getByRole('region', { name: 'The brief' }))
+          .getByText("Edit this story's files")
+          .closest('details')!;
+        form.open = false;
+      }
+      await user.click(within(notice).getByRole('button', { name: 'Edit the file list' }));
+      expect(screen.getByRole('tab', { selected: true }).textContent).toBe(phone ? 'Details' : 'Record');
+      const card = screen.getByRole('region', { name: 'The brief' }),
+        edit = document.getElementById('brief-edit')!;
+      expect(card.contains(edit)).toBe(true);
+      expect(screen.getByRole('tabpanel').contains(card)).toBe(phone);
+      expect(edit.querySelector('details')!.open).toBe(true);
+      expect(within(edit).getByLabelText('Files to edit')).toBeTruthy();
+      await waitFor(() => expect(scrolled.mock.contexts).toContain(edit));
+    } finally {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
+  });

@@ -1,6 +1,7 @@
-// The story page's tabs (the canvas's Story board, v1.0 item 23): what the agent was asked to do, the checks that
-// ran and the ones nobody ran, the independent review, the attempts, and everything the controller recorded. Each
-// tab reads only its own records, and recorded files are read once, when their tab first opens.
+// The story page's tabs (the canvas's Story board, v1.0 item 23) and the brief beside them: what the agent was asked
+// to do, the checks that ran and the ones nobody ran, the independent review, the attempts, and everything the
+// controller recorded. Each tab reads only its own records, and recorded files are read once, when their tab first
+// opens.
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import type { ReactNode } from 'react';
@@ -143,9 +144,11 @@ function useRecordedJson<T>(projectId: string, attempt: AttemptSummary | undefin
   });
 }
 
-// What the agent was asked to do: the brief without its path lines, the files it may change, what done means,
-// and what earlier steps handed it.
-export function OverviewPanel({
+// The brief, a card beside the tabs on every story (under Details on a phone): what the agent was asked to do
+// without its path lines, what done means, the files it may change and the form that edits them, and what earlier
+// steps handed it. The story's Edit the file list brings that form into view by its id.
+export const briefEditId = 'brief-edit';
+export function BriefCard({
   projectId,
   task,
   studio,
@@ -176,9 +179,10 @@ export function OverviewPanel({
       task.directorInputs ??
       []) as IdeaFile[];
   return (
-    <div className="sd-tabpanel">
+    <section className="sd-card sd-sidecard" aria-label="The brief" style={{ gap: 'var(--space-14)' }}>
+      <h2 className="sd-sidecard__title">The brief</h2>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
-        <h2 className="sd-tabpanel__title">What {editor} was asked to do</h2>
+        <span className="sd-eyebrow">What {editor} was asked to do</span>
         {/* Briefs are written by the agent that broke the idea down, often with code and lists in Markdown. */}
         {brief ? (
           <div style={{ color: 'var(--ink-2)', maxWidth: '72ch' }}>
@@ -190,6 +194,12 @@ export function OverviewPanel({
           </p>
         )}
       </div>
+      {task.acceptance && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+          <span className="sd-eyebrow">Done means</span>
+          <p className="sd-quote">{task.acceptance}</p>
+        </div>
+      )}
       {paths && (paths.files.length > 0 || paths.newFiles.length > 0 || paths.deleteFiles.length > 0) && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
           <span className="sd-eyebrow">Files it may change</span>
@@ -213,11 +223,9 @@ export function OverviewPanel({
         </div>
       )}
       {source && <FileChanges task={task} studio={studio} />}
-      {source && filesEditable(task, studio) && <StoryEdit projectId={projectId} task={task} studio={studio} />}
-      {task.acceptance && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
-          <span className="sd-eyebrow">Done means</span>
-          <p className="sd-quote">{task.acceptance}</p>
+      {source && filesEditable(task, studio) && (
+        <div id={briefEditId} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)' }}>
+          <StoryEdit projectId={projectId} task={task} studio={studio} />
         </div>
       )}
       {inputs.length > 0 && (
@@ -271,7 +279,7 @@ export function OverviewPanel({
       )}
       {files.length > 0 && <IdeaFiles projectId={projectId} files={files} />}
       {children}
-    </div>
+    </section>
   );
 }
 

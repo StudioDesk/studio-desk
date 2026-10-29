@@ -1,6 +1,6 @@
 // A task's page, as the canvas's Story board draws it (v1.0 item 23): where the story is in its steps, where it
-// stands with the director's decisions, the evidence it rests on, its tabs, and who works on it under which
-// rules. The task and its attempts refresh when that task, one of its attempts or one of its recorded steps
+// stands with the director's decisions, the evidence it rests on, its tabs, and beside them its brief and who works
+// on it under which rules. The task and its attempts refresh when that task, one of its attempts or one of its recorded steps
 // changes, and for nothing else. What the director is doing on the page (a draft, a chosen attempt or tab, a
 // scroll position) is the page's own state, so a refresh never resets it.
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -55,9 +55,10 @@ import {
 import {
   attemptName,
   AttemptsPanel,
+  BriefCard,
+  briefEditId,
   ChecksPanel,
   isReview,
-  OverviewPanel,
   RecordPanel,
   ResultPanel,
   ReviewPanel,
@@ -146,7 +147,7 @@ function Crumbs({
   );
 }
 
-type TabId = 'overview' | 'changes' | 'checks' | 'review' | 'activity' | 'attempts' | 'record' | 'result' | 'details';
+type TabId = 'changes' | 'checks' | 'review' | 'activity' | 'attempts' | 'record' | 'result' | 'details';
 interface Tab {
   id: TabId;
   label: string;
@@ -172,6 +173,8 @@ function Story({
     [picked, setPicked] = useState<TabId | null>(null),
     // Each use of the notice's link to its full account, which brings that account into view once its tab shows.
     [reading, setReading] = useState(0),
+    // Each use of the notice's Edit the file list, which brings the brief's file form into view.
+    [editing, setEditing] = useState(0),
     looks = useMemo(
       () => agentLooks(projectId, [...studio.workers, ...(studio.employeeDirectory ?? [])]),
       [projectId, studio.workers, studio.employeeDirectory],
@@ -230,7 +233,6 @@ function Story({
         { id: 'details', label: 'Details' },
       ]
     : [
-        { id: 'overview', label: 'Overview' },
         ...(source
           ? [
               { id: 'changes' as const, label: 'Changes', count: stat?.files },
@@ -242,12 +244,29 @@ function Story({
         { id: 'attempts', label: 'Attempts', count: tries || undefined },
         { id: 'record', label: 'Record' },
       ];
-  // A story with a candidate opens on its change, other finished work on its result; the rest on what was asked.
-  const fallback: TabId =
-      source && people.candidate ? 'changes' : !source && shown ? 'result' : narrow ? 'details' : 'overview',
+  // A story with a candidate opens on its change, other work with an attempt on its result; the rest on what
+  // happened to it. What was asked is the brief beside the tabs.
+  const fallback: TabId = source ? (people.candidate ? 'changes' : 'activity') : shown ? 'result' : 'activity',
     tab = tabs.some(item => item.id === picked) ? picked! : fallback;
+  // The brief, then who works on it and under which rules: beside the tabs, or under Details on a phone.
   const sideCards = (
     <>
+      <BriefCard
+        projectId={projectId}
+        task={task}
+        studio={studio}
+        shown={source ? (builtFull ?? built) : (work ?? full ?? shown)}
+        looks={looks}
+      >
+        <Direction
+          projectId={projectId}
+          taskId={task.id}
+          value={direction}
+          dirty={draft !== null}
+          onChange={setDraft}
+          status={task.status}
+        />
+      </BriefCard>
       <People task={task} studio={studio} looks={looks} />
       <Details
         projectId={projectId}
@@ -258,27 +277,8 @@ function Story({
       />
     </>
   );
-  const overview = (
-    <OverviewPanel
-      projectId={projectId}
-      task={task}
-      studio={studio}
-      shown={source ? (builtFull ?? built) : (work ?? full ?? shown)}
-      looks={looks}
-    >
-      <Direction
-        projectId={projectId}
-        taskId={task.id}
-        value={direction}
-        dirty={draft !== null}
-        onChange={setDraft}
-        status={task.status}
-      />
-    </OverviewPanel>
-  );
   // The notice's whole account heads a story's Checks, and other work's Result.
   const panels: Record<TabId, () => ReactNode> = {
-    overview: () => overview,
     changes: () => <SourceDiff task={task} studio={studio} selectedAttemptId={chosen ?? undefined} />,
     checks: () => (
       <>
@@ -368,7 +368,6 @@ function Story({
     ),
     details: () => (
       <>
-        {overview}
         <div
           style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)', paddingTop: 'var(--space-14)' }}
         >
@@ -400,6 +399,19 @@ function Story({
   const readInFull = () => {
     setPicked(source ? 'checks' : 'result');
     setReading(count => count + 1);
+  };
+  // The brief's file form, opened and brought into view where the brief shows: beside the tabs, which stay as they
+  // are, or under Details on a phone.
+  useEffect(() => {
+    const form = editing ? document.getElementById(briefEditId) : null;
+    if (!form) return;
+    const disclosure = form.querySelector('details');
+    if (disclosure) disclosure.open = true;
+    form.scrollIntoView?.({ block: 'start' });
+  }, [editing]);
+  const editFiles = () => {
+    if (narrow) setPicked('details');
+    setEditing(count => count + 1);
   };
   const choose = (event: KeyboardEvent<HTMLDivElement>) => {
     const index = tabs.findIndex(item => item.id === tab),
@@ -499,7 +511,7 @@ function Story({
         looks={looks}
         narrow={narrow}
         direction={direction}
-        onEditFiles={() => setPicked(narrow ? 'details' : 'overview')}
+        onEditFiles={editFiles}
         onRevised={() => setDraft(null)}
         onReadInFull={readInFull}
       >
