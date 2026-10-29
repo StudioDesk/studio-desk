@@ -272,6 +272,8 @@ function runView(run, tasks) {
     // A source idea's release and line (1.1), for its chip on the idea page.
     ...(run.release ? { release: run.release } : {}),
     ...(run.line !== undefined ? { line: run.line } : {}),
+    // The library entries the director left out of this idea's work (1.2 step 6), for a library file's own view.
+    ...(run.libraryLeftOut?.length ? { libraryLeftOut: [...run.libraryLeftOut] } : {}),
     envelope: run.envelope,
     createdAt: run.createdAt,
     revisions: run.revisions.map(({ revision, at, reason, source }) => ({

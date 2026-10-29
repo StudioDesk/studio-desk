@@ -531,6 +531,13 @@ test('an idea sent with library files left out does without them from its first 
   });
   assert.equal(intake.status, 201, JSON.stringify(intake.data));
   assert.deepEqual(c.store.run(intake.data.runId).libraryLeftOut, [old.id]);
+  // The idea as the dashboard reads it carries what it left out: in the live set and on its own.
+  const live = await (await fetch(`${c.origin}/api/projects/${projectId}/live?projectId=${projectId}`)).json(),
+    one = await (
+      await fetch(`${c.origin}/api/projects/${projectId}/runs/${intake.data.runId}?projectId=${projectId}`)
+    ).json();
+  assert.deepEqual(live.runs.find(run => run.id === intake.data.runId).libraryLeftOut, [old.id]);
+  assert.deepEqual((one.run ?? one).libraryLeftOut, [old.id]);
   const planId = intake.data.taskIds[0];
   await c.until(() => c.store.task(planId).lastAttemptId, 'the planner starts');
   const attempt = c.store.attempt(c.store.task(planId).lastAttemptId);
