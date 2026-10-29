@@ -233,13 +233,23 @@ const releasesRoute = createRoute({
 });
 
 // The agents' pages sit under Agents, as the sidebar has them: the agents, one agent and what it is told, the teams,
-// one team and the instructions.
+// one team and the instructions. The team being edited beside the flow is part of the address (`new` for a new one,
+// with `add` when its Add an agent starts open), so reload and Back keep it.
+interface AgentsSearch {
+  team?: string;
+  add?: true;
+}
 const agentsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: '/agents',
+  validateSearch: (search: Record<string, unknown>): AgentsSearch =>
+    typeof search.team === 'string' && search.team
+      ? { team: search.team, ...(search.add === true || search.add === 'true' ? { add: true } : {}) }
+      : {},
   component: function Agents() {
-    const { projectId } = projectRoute.useParams();
-    return <AgentsPage projectId={projectId} />;
+    const { projectId } = projectRoute.useParams(),
+      { team, add } = agentsRoute.useSearch();
+    return <AgentsPage projectId={projectId} team={team} adding={!!add} />;
   },
 });
 
@@ -275,7 +285,7 @@ const toldRoute = createRoute({
   },
 });
 
-// Editing the teams is part of the address, so Add an agent and a team's own page open the teams that way.
+// The teams are edited one at a time beside the flow; the address that opened Edit the teams leads there.
 const teamsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: '/agents/teams',
@@ -283,15 +293,8 @@ const teamsRoute = createRoute({
     search.edit === true || search.edit === 'true' ? { edit: true } : {},
   component: function Teams() {
     const { projectId } = projectRoute.useParams(),
-      { edit } = teamsRoute.useSearch(),
-      navigate = teamsRoute.useNavigate();
-    return (
-      <TeamsPage
-        projectId={projectId}
-        editing={!!edit}
-        onEditing={editing => void navigate({ search: editing ? { edit: true } : {}, replace: true })}
-      />
-    );
+      { edit } = teamsRoute.useSearch();
+    return <TeamsPage projectId={projectId} editing={!!edit} />;
   },
 });
 

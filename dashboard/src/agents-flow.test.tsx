@@ -127,16 +127,18 @@ test('the flow lists You, the teams in their saved order, then You, each team wi
   expect(engineering.getByText('Build the product.')).toBeTruthy();
   expect(engineering.getByText('Led by Ana')).toBeTruthy();
   expect(engineering.getByRole('link', { name: 'Edit the team' }).getAttribute('href')).toBe(
-    '/p/project-x/agents/teams?edit=true',
+    '/p/project-x/agents?team=engineering',
   );
   expect(team('Writing').getByText('Led by Kit')).toBeTruthy();
   // Each team's agents are its own, side by side.
   expect(engineering.getAllByRole('link', { name: /^(Eli|Ana)/ })).toHaveLength(2);
   expect(team('Writing').queryByRole('link', { name: /^(Eli|Ana)/ })).toBeNull();
-  // Adding a team or an agent opens Edit the teams until the team editor exists.
+  // Adding a team opens a new team's editor; adding an agent opens the first team's, with Add an agent open.
   const page = within(screen.getByRole('region', { name: 'Agents' }));
-  for (const name of ['Add a team', 'Add an agent'])
-    expect(page.getByRole('link', { name }).getAttribute('href')).toBe('/p/project-x/agents/teams?edit=true');
+  expect(page.getByRole('link', { name: 'Add a team' }).getAttribute('href')).toBe('/p/project-x/agents?team=new');
+  expect(page.getByRole('link', { name: 'Add an agent' }).getAttribute('href')).toBe(
+    '/p/project-x/agents?team=writing&add=true',
+  );
 });
 
 test('an agent card says what it does by label, what it runs on and whether it is free, paused or running', async () => {
@@ -235,7 +237,7 @@ test('a project without teams shows the two You ends, Add a team and that it has
     within(screen.getByRole('region', { name: 'Agents' }))
       .getByRole('link', { name: 'Add a team' })
       .getAttribute('href'),
-  ).toBe('/p/project-x/agents/teams?edit=true');
+  ).toBe('/p/project-x/agents?team=new');
   // With no agent there is no one's rules to read.
   expect(screen.queryByRole('region', { name: "What they're told" })).toBeNull();
 });

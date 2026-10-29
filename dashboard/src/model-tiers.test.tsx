@@ -1,6 +1,6 @@
 // The project's model tiers in Settings → Command-line tools (model-tiers.tsx): each CLI listed there with the fields
-// it offers and the saved values, saved as the whole organization with only the tiers changed; and Edit the teams,
-// which no longer shows them and leaves them out of its save so the saved ones stay. Model-free, against the stand-in
+// it offers and the saved values, saved as the whole organization with only the tiers changed; and the team editor,
+// which does not show them and leaves them out of its save so the saved ones stay. Model-free, against the stand-in
 // controller.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
@@ -229,17 +229,20 @@ test("a CLI that is not listed keeps its saved tiers, and a refusal shows the co
   });
 });
 
-test('Edit the teams no longer shows the model tiers, and its save leaves them out so the saved ones stay', async () => {
+test('the team editor does not show the model tiers, and Save the team leaves them out so the saved ones stay', async () => {
   const user = userEvent.setup();
-  open('/p/project-x/agents/teams');
-  await user.click(await screen.findByRole('button', { name: 'Edit the teams' }));
-  const form = within(await screen.findByRole('form', { name: 'Edit the teams' }));
-  expect(form.queryByText('Model tiers')).toBeNull();
-  expect(form.queryAllByLabelText(/model|effort|way of working/i)).toEqual([]);
-  await user.click(form.getByRole('button', { name: 'Save the teams' }));
+  open('/p/project-x/agents?team=engineering');
+  const editor = within(await screen.findByRole('region', { name: 'Edit Engineering' }));
+  expect(editor.queryByText('Model tiers')).toBeNull();
+  expect(editor.queryAllByLabelText(/model|effort|way of working/i)).toEqual([]);
+  const purpose = editor.getByLabelText('Purpose');
+  await user.clear(purpose);
+  await user.type(purpose, 'Build it well.');
+  await user.click(editor.getByRole('button', { name: 'Save the team' }));
   await waitFor(() => expect(commands()).toHaveLength(1));
   const [command] = commands();
   expect(command!.url).toBe('/api/projects/project-x/organization');
-  expect(command!.body).toMatchObject({ expectedRevision: 3, taskKinds: ['general', change] });
+  expect(command!.method).toBe('PATCH');
+  expect(command!.body).toStrictEqual({ ...saved, teams: [{ ...saved.teams[0]!, purpose: 'Build it well.' }] });
   expect(command!.body).not.toHaveProperty('tiers');
 });

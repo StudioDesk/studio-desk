@@ -566,19 +566,35 @@ test('teams show their goal from the whole history, their agents and their open 
   expect(controller.reads()).toContain('/api/projects/project-x/settled?kind=accepted&limit=12&team=Engineering');
 });
 
-test('Edit the teams turns the cards into fields and sends only the members placed in a team, with their staffing roles', async () => {
+test('Edit the teams opens the team editor beside the flow and sends only the members in a team, their staffing roles kept', async () => {
   const user = userEvent.setup();
-  open('/p/project-x/agents/teams');
-  await user.click(await screen.findByRole('button', { name: 'Edit the teams' }));
-  // The same page, editing in place: the team's card is its fields, and an agent's part opens from its face.
-  const card = within(await screen.findByRole('region', { name: 'Engineering' }));
-  expect((card.getByLabelText('Team name') as HTMLInputElement).value).toBe('Engineering');
-  expect((card.getByLabelText('Purpose') as HTMLTextAreaElement).value).toBe('Build the product.');
-  await user.click(card.getByRole('button', { name: /^Eli/ }));
-  const part = within(await screen.findByRole('dialog', { name: 'Eli in Engineering' }));
-  await user.type(part.getByLabelText('Staffing roles'), 'reviewer, engineer, reviewer');
-  await user.click(part.getByRole('button', { name: 'Done' }));
-  await user.click(screen.getByRole('button', { name: 'Save the teams' }));
+  controller.shell = {
+    ...controller.shell,
+    organizationConfiguration: {
+      ...controller.shell.organizationConfiguration,
+      members: [
+        {
+          workerId: 'W-1',
+          teamId: 'engineering',
+          role: 'Engineer',
+          responsibility: 'Writes the code.',
+          roles: ['reviewer', 'engineer'],
+        },
+      ],
+    },
+  };
+  const router = open('/p/project-x/agents/teams');
+  await user.click(await screen.findByRole('link', { name: 'Edit the teams' }));
+  // Beside the flow, the team in the address: its fields, and each agent with its role.
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-x/agents'));
+  expect(router.state.location.search).toEqual({ team: 'engineering' });
+  const editor = within(await screen.findByRole('region', { name: 'Edit Engineering' }));
+  expect((editor.getByLabelText('Team name') as HTMLInputElement).value).toBe('Engineering');
+  expect((editor.getByLabelText('Purpose') as HTMLTextAreaElement).value).toBe('Build the product.');
+  const role = editor.getByLabelText("Eli's role");
+  await user.clear(role);
+  await user.type(role, 'Lead engineer');
+  await user.click(editor.getByRole('button', { name: 'Save the team' }));
   await waitFor(() => expect(commands()).toHaveLength(1));
   const [command] = commands();
   expect(command!.url).toBe('/api/projects/project-x/organization');
@@ -590,7 +606,7 @@ test('Edit the teams turns the cards into fields and sends only the members plac
       {
         workerId: 'W-1',
         teamId: 'engineering',
-        role: 'Engineer',
+        role: 'Lead engineer',
         responsibility: 'Writes the code.',
         roles: ['reviewer', 'engineer'],
       },
@@ -598,8 +614,8 @@ test('Edit the teams turns the cards into fields and sends only the members plac
     taskKinds: ['general'],
   });
   expect(command!.body).not.toHaveProperty('tiers');
-  // Saved, the page shows the teams again.
-  expect(await screen.findByRole('button', { name: 'Edit the teams' })).toBeTruthy();
+  // The kinds of work are given from an agent's Does list, not here.
+  expect(screen.queryByRole('switch', { name: 'General task' })).toBeNull();
 });
 
 test('a new team takes an agent the studio already has, and an agent taken out of the project stops owning work', async () => {
@@ -611,34 +627,31 @@ test('a new team takes an agent the studio already has, and an agent taken out o
       kindOwners: { general: 'W-1' },
     },
   };
-  open('/p/project-x/agents/teams');
-  await user.click(await screen.findByRole('button', { name: 'Edit the teams' }));
-  expect(((await screen.findByLabelText('Who does General task')) as HTMLSelectElement).value).toBe('W-1');
-  await user.click(screen.getByRole('button', { name: 'Add a team' }));
-  const fresh = within(screen.getByRole('region', { name: 'New team' }));
+  open('/p/project-x/agents/W-1');
+  await user.click(
+    within(await screen.findByRole('region', { name: 'Agents' })).getByRole('link', { name: 'Add a team' }),
+  );
+  const fresh = within(await screen.findByRole('region', { name: 'A new team' }));
   // The new team's name takes the cursor.
   expect(document.activeElement).toBe(fresh.getByLabelText('Team name'));
   await user.type(fresh.getByLabelText('Team name'), 'Docs');
-  await user.click(screen.getByRole('button', { name: 'Add an agent to Docs' }));
-  const picker = within(await screen.findByRole('dialog', { name: 'Add an agent to Docs' }));
-  expect(picker.getByRole('button', { name: /Eli/ }).textContent).toContain('Moves from Engineering');
-  await user.click(picker.getByRole('button', { name: /Ana/ }));
-  const docs = within(screen.getByRole('region', { name: 'Docs' }));
-  await user.selectOptions(docs.getByLabelText('Lead'), 'W-2');
-  // Eli leaves the project, so General task goes back to being chosen each time.
-  await user.click(screen.getByRole('button', { name: 'Take Eli off Engineering' }));
-  expect((screen.getByLabelText('Who does General task') as HTMLSelectElement).value).toBe('');
-  await user.click(screen.getByRole('button', { name: 'Save the teams' }));
+  await user.click(fresh.getByRole('button', { name: 'Add an agent' }));
+  const studio = within(fresh.getByRole('list', { name: 'Agents the studio has' }));
+  expect(studio.getByRole('button', { name: /Eli/ }).textContent).toContain('Moves from Engineering');
+  expect(studio.getByRole('button', { name: /Ana/ }).textContent).toContain('Not in this project yet');
+  await user.click(studio.getByRole('button', { name: /Ana/ }));
+  await user.selectOptions(fresh.getByLabelText('Who leads'), 'W-2');
+  await user.click(fresh.getByRole('button', { name: 'Save the team' }));
   await waitFor(() => expect(commands()).toHaveLength(1));
-  const [command] = commands(),
-    body = command!.body as { teams: { id: string }[] };
+  let body = commands()[0]!.body as { teams: { id: string }[] };
   expect(body).toMatchObject({
     expectedRevision: 2,
     teams: [
-      { id: 'engineering', name: 'Engineering', leadId: null },
+      { id: 'engineering', name: 'Engineering' },
       { name: 'Docs', mark: '', purpose: '', leadId: 'W-2' },
     ],
     members: [
+      { workerId: 'W-1', teamId: 'engineering' },
       {
         workerId: 'W-2',
         teamId: body.teams[1]!.id,
@@ -648,26 +661,46 @@ test('a new team takes an agent the studio already has, and an agent taken out o
       },
     ],
     taskKinds: ['general'],
-    kindOwners: {},
+    kindOwners: { general: 'W-1' },
   });
+  cleanup();
+
+  // Eli taken off Engineering leaves the project, so General task goes back to being chosen each time.
+  controller.requests = [];
+  open('/p/project-x/agents?team=engineering');
+  const editor = within(await screen.findByRole('region', { name: 'Edit Engineering' }));
+  await user.click(editor.getByRole('button', { name: 'Remove Eli from Engineering' }));
+  await user.click(editor.getByRole('button', { name: 'Add an agent' }));
+  await user.click(
+    within(editor.getByRole('list', { name: 'Agents the studio has' })).getByRole('button', { name: /Ana/ }),
+  );
+  await user.click(editor.getByRole('button', { name: 'Save the team' }));
+  await waitFor(() => expect(commands()).toHaveLength(1));
+  body = commands()[0]!.body as { teams: { id: string }[] };
+  expect(body).toMatchObject({
+    teams: [{ id: 'engineering', leadId: null }],
+    members: [{ workerId: 'W-2', teamId: 'engineering' }],
+  });
+  expect((body as { kindOwners?: unknown }).kindOwners).toEqual({});
 });
 
-test('Add an agent opens the teams to edit, Cancel leaves them as they were, and a team page opens them too', async () => {
+test("Add an agent opens the first team's editor with the studio's agents, and a team page opens its team", async () => {
   const user = userEvent.setup();
   const router = open('/p/project-x/agents/W-1');
   // Add an agent sits at the top of the flow.
   const flow = within(await screen.findByRole('region', { name: 'Agents' }));
   await user.click(flow.getByRole('link', { name: 'Add an agent' }));
-  expect(await screen.findByRole('form', { name: 'Edit the teams' })).toBeTruthy();
-  expect(router.state.location.search).toEqual({ edit: true });
-  await user.click(screen.getByRole('button', { name: 'Cancel' }));
-  expect(await screen.findByRole('button', { name: 'Edit the teams' })).toBeTruthy();
-  expect(router.state.location.search).toEqual({});
+  await waitFor(() => expect(router.state.location.search).toEqual({ team: 'engineering', add: true }));
+  const editor = within(await screen.findByRole('region', { name: 'Edit Engineering' }));
+  expect(
+    within(editor.getByRole('list', { name: 'Agents the studio has' })).getByRole('button', { name: /Ana/ }),
+  ).toBeTruthy();
+  expect(screen.queryByRole('dialog')).toBeNull();
   expect(commands()).toEqual([]);
   cleanup();
   open('/p/project-x/agents/teams/engineering');
   expect((await screen.findByRole('link', { name: 'Edit the teams' })).getAttribute('href')).toBe(
-    '/p/project-x/agents/teams?edit=true',
+    '/p/project-x/agents?team=engineering',
   );
 });
 

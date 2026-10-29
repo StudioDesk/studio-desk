@@ -1,8 +1,9 @@
 // The agents (the canvas's Employees board, v1.0 item 23): how the work flows through the project's teams, from the
-// project's own records, beside the picked agent's editor (agent-editor.tsx). The flow starts with the director sending
-// an idea, goes through each team in its saved order with its agents as cards, and ends with the director integrating
-// what passed review; below it, what the agents are told and the kinds of work the project does not take. An agent is
-// a set of instructions and a CLI; each run is its own process, as the controller reserves it.
+// project's own records, beside the picked agent's editor (agent-editor.tsx) or, with a team in the address, that
+// team's editor (team-editor.tsx). The flow starts with the director sending an idea, goes through each team in its
+// saved order with its agents as cards, and ends with the director integrating what passed review; below it, what the
+// agents are told and the kinds of work the project does not take. An agent is a set of instructions and a CLI; each
+// run is its own process, as the controller reserves it.
 import { Link } from '@tanstack/react-router';
 import { useMemo } from 'react';
 import type { Team, Worker } from './api';
@@ -15,9 +16,16 @@ import { plural } from './evidence';
 import { useStudio } from './records';
 import { useTold } from './rules';
 import type { StudioState } from './studio-runs';
+import { TeamEditor } from './team-editor';
 import { agentLooks } from './today';
 
-export function AgentsPage({ projectId, workerId }: { projectId: string; workerId?: string }) {
+// The team being edited, `new` for a new one, and whether its Add an agent starts open.
+interface Editing {
+  team?: string;
+  adding?: boolean;
+}
+
+export function AgentsPage({ projectId, workerId, team, adding }: { projectId: string; workerId?: string } & Editing) {
   const { state, error } = useStudio(projectId);
   if (error) return <p role="alert">The project could not be loaded: {error.message}</p>;
   if (!state)
@@ -26,23 +34,31 @@ export function AgentsPage({ projectId, workerId }: { projectId: string; workerI
         Loading the agents…
       </p>
     );
-  return <Agents projectId={projectId} state={state} workerId={workerId} />;
+  return <Agents projectId={projectId} state={state} workerId={workerId} team={team} adding={adding} />;
 }
 
-function Agents({ projectId, state, workerId }: { projectId: string; state: StudioState; workerId?: string }) {
+function Agents({
+  projectId,
+  state,
+  workerId,
+  team,
+  adding,
+}: { projectId: string; state: StudioState; workerId?: string } & Editing) {
   const looks = useMemo(
       () => agentLooks(projectId, [...state.workers, ...(state.employeeDirectory ?? [])]),
       [projectId, state.workers, state.employeeDirectory],
     ),
     workers = state.workers,
-    // Without a choice in the address, the page opens on an agent at work, as the canvas does, else the first.
-    chosen =
-      workers.find(worker => worker.id === workerId) ??
-      (workerId
-        ? undefined
-        : (workers.find(worker => agentState(state, worker.id) === 'working') ??
-          workers.find(worker => worker.enabled !== false) ??
-          workers[0]));
+    // Without a choice in the address, the page opens on an agent at work, as the canvas does, else the first; with
+    // a team in it, on that team's editor.
+    chosen = team
+      ? undefined
+      : (workers.find(worker => worker.id === workerId) ??
+        (workerId
+          ? undefined
+          : (workers.find(worker => agentState(state, worker.id) === 'working') ??
+            workers.find(worker => worker.enabled !== false) ??
+            workers[0])));
   // What they're told reads for the agent picked, else the first.
   const told = chosen ?? workers[0];
   return (
@@ -53,7 +69,17 @@ function Agents({ projectId, state, workerId }: { projectId: string; state: Stud
           {told && <FlowTold projectId={projectId} worker={told} />}
           <NotInFlow state={state} />
         </div>
-        {chosen ? (
+        {team ? (
+          <TeamEditor
+            // Another team, or Add an agent from the flow, opens the editor afresh.
+            key={adding ? `${team}:add` : team}
+            projectId={projectId}
+            state={state}
+            teamId={team}
+            looks={looks}
+            adding={!!adding}
+          />
+        ) : chosen ? (
           <AgentEditor
             key={chosen.id}
             projectId={projectId}
@@ -82,14 +108,26 @@ function rowState(state: StudioState, worker: Worker) {
   return { tone: 'wait', text: '' };
 }
 
-// Until the team's own editor exists, adding and editing a team open Edit the teams.
-function EditTeams({ projectId, icon, children }: { projectId: string; icon: 'plus' | 'pencil'; children: string }) {
+// Adding a team, adding an agent and editing a team open the team's editor beside the flow, the team in the address.
+function EditTeam({
+  projectId,
+  team,
+  adding = false,
+  icon,
+  children,
+}: {
+  projectId: string;
+  team: string;
+  adding?: boolean;
+  icon: 'plus' | 'pencil';
+  children: string;
+}) {
   return (
     <Link
       className={`sd-btn sd-btn--sm${icon === 'pencil' ? ' sd-btn--ghost' : ''}`}
-      to="/p/$projectId/agents/teams"
+      to="/p/$projectId/agents"
       params={{ projectId }}
-      search={{ edit: true }}
+      search={adding ? { team, add: true } : { team }}
     >
       <Icon name={icon} size={16} />
       {children}
@@ -155,13 +193,14 @@ function Flow({
           <span className="sd-meta">How the work flows through {state.project.name}&apos;s teams</span>
         </span>
         <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
-          <EditTeams projectId={projectId} icon="plus">
+          <EditTeam projectId={projectId} team="new" icon="plus">
             Add a team
-          </EditTeams>
-          {/* An agent the studio has, or a new one, joins the project in one of its teams. */}
-          <EditTeams projectId={projectId} icon="plus">
+          </EditTeam>
+          {/* An agent the studio has, or a new one, joins the project in one of its teams: the first one's Who's on
+              it opens with Add an agent. */}
+          <EditTeam projectId={projectId} team={teams[0]?.id ?? 'new'} adding icon="plus">
             Add an agent
-          </EditTeams>
+          </EditTeam>
         </span>
       </div>
       <ol
@@ -236,9 +275,9 @@ function FlowTeam({
               {team.name}
             </Link>
           </h2>
-          <EditTeams projectId={projectId} icon="pencil">
+          <EditTeam projectId={projectId} team={team.id} icon="pencil">
             Edit the team
-          </EditTeams>
+          </EditTeam>
         </div>
         {team.purpose && <p style={{ margin: 0, color: 'var(--ink-2)' }}>{team.purpose}</p>}
         <span className="sd-meta">

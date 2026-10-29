@@ -1,5 +1,5 @@
-// A project's own agents in the dashboard (1.0.1): a new agent made from Edit the teams joins the draft and is saved
-// with it, and an agent's page renames any agent and deletes one made in this project.
+// A project's own agents in the dashboard (1.0.1): a new agent made from a team's editor joins the team's draft and is
+// saved with it, and an agent's page renames any agent and deletes one made in this project.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -93,7 +93,7 @@ const open = (path: string) => {
 };
 const commands = () => controller.requests.filter(request => request.method !== 'GET');
 
-test('a new agent made in Edit the teams is saved at once and kept in the draft the teams save', async () => {
+test("a new agent made in the team's editor is saved at once and kept in the draft the team saves", async () => {
   const user = userEvent.setup();
   controller.command = url =>
     url === '/api/projects/project-x/agents'
@@ -110,13 +110,16 @@ test('a new agent made in Edit the teams is saved at once and kept in the draft 
           revision: 3,
         }
       : {};
-  open('/p/project-x/agents/teams?edit=true');
-  await user.click(await screen.findByRole('button', { name: 'Add an agent to Writing' }));
-  const picker = within(await screen.findByRole('dialog', { name: 'Add an agent to Writing' }));
+  open('/p/project-x/agents/W-1');
+  const flow = within(await screen.findByRole('list', { name: 'How the work flows' }));
+  await user.click(within(flow.getByRole('region', { name: 'Writing' })).getByRole('link', { name: 'Edit the team' }));
+  const editor = within(await screen.findByRole('region', { name: 'Edit Writing' }));
+  await user.click(editor.getByRole('button', { name: 'Add an agent' }));
   // A deleted agent is never offered.
-  expect(picker.queryByText('Old')).toBeNull();
-  await user.click(picker.getByRole('button', { name: /New agent/ }));
-  const form = within(await screen.findByRole('dialog', { name: 'A new agent for Writing' }));
+  expect(editor.getByText('Every agent the studio has is already on this team.')).toBeTruthy();
+  expect(editor.queryByText('Old')).toBeNull();
+  await user.click(editor.getByRole('button', { name: 'Make a new one' }));
+  const form = within(editor.getByRole('form', { name: 'A new agent for Writing' }));
   await user.type(form.getByLabelText('Name'), 'Iris');
   await user.type(form.getByLabelText('Job title'), 'Social writer');
   await user.type(form.getByLabelText('What it is responsible for'), 'Writes the threads.');
@@ -146,9 +149,8 @@ test('a new agent made in Edit the teams is saved at once and kept in the draft 
     }),
   );
   // Iris is on the team in the draft before the state lists her, and the teams save at the new revision with her.
-  const team = within(await screen.findByRole('region', { name: 'Writing' }));
-  expect(await team.findByTitle("Iris's part in Writing")).toBeTruthy();
-  await user.click(screen.getByRole('button', { name: 'Save the teams' }));
+  expect(await editor.findByRole('button', { name: 'Remove Iris from Writing' })).toBeTruthy();
+  await user.click(editor.getByRole('button', { name: 'Save the team' }));
   await waitFor(() => expect(commands()).toHaveLength(2));
   const saved = commands()[1]!.body as { expectedRevision: number; members: { workerId: string; roles: string[] }[] };
   expect(saved.expectedRevision).toBe(3);
@@ -156,16 +158,23 @@ test('a new agent made in Edit the teams is saved at once and kept in the draft 
   expect(saved.members[2]!.roles).toEqual(['social-writer']);
 });
 
-test('a team added in this edit is saved before it can have a new agent', async () => {
+test('a team added in the flow is saved before it can have a new agent', async () => {
   const user = userEvent.setup();
-  open('/p/project-x/agents/teams?edit=true');
-  await user.click(await screen.findByRole('button', { name: 'Add a team' }));
-  await user.type(screen.getAllByRole('textbox', { name: 'Team name' }).at(-1)!, 'Social');
-  await user.click(screen.getByRole('button', { name: 'Add an agent to Social' }));
-  const picker = within(await screen.findByRole('dialog', { name: 'Add an agent to Social' }));
-  const make = picker.getByRole('button', { name: /New agent/ }) as HTMLButtonElement;
+  open('/p/project-x/agents/W-1');
+  await user.click(
+    within(await screen.findByRole('region', { name: 'Agents' })).getByRole('link', { name: 'Add a team' }),
+  );
+  const editor = within(await screen.findByRole('region', { name: 'A new team' }));
+  await user.type(editor.getByLabelText('Team name'), 'Social');
+  const make = editor.getByRole('button', { name: 'Make a new one' }) as HTMLButtonElement;
   expect(make.disabled).toBe(true);
-  expect(make.textContent).toContain('Save the teams first');
+  expect(editor.getByText('Save the team first, then make a new agent for it.')).toBeTruthy();
+  // An agent the studio has can still join it before it is saved.
+  await user.click(editor.getByRole('button', { name: 'Add an agent' }));
+  expect(
+    within(editor.getByRole('list', { name: 'Agents the studio has' })).getByRole('button', { name: /Nova/ }),
+  ).toBeTruthy();
+  expect(commands()).toEqual([]);
 });
 
 test('an agent made in this project can be renamed and deleted from its page; a shared agent only renamed', async () => {
