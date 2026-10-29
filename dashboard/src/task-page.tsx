@@ -1,6 +1,6 @@
 // A task's page, as the canvas's Story board draws it (v1.0 item 23): where the story is in its steps, where it
-// stands with the director's decisions, the evidence it rests on, its tabs, and beside them its brief and who works
-// on it under which rules. The task and its attempts refresh when that task, one of its attempts or one of its recorded steps
+// stands with the director's decisions, the evidence it rests on, its attempts and its tabs, and beside them its brief
+// and who works on it under which rules. The task and its attempts refresh when that task, one of its attempts or one of its recorded steps
 // changes, and for nothing else. What the director is doing on the page (a draft, a chosen attempt or tab, a
 // scroll position) is the page's own state, so a refresh never resets it.
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -55,12 +55,13 @@ import {
 import {
   attemptChip,
   attemptName,
-  AttemptsPanel,
+  AttemptStrip,
   BriefCard,
   briefEditId,
   ChecksPanel,
   HandedBack,
   isReview,
+  keepInRow,
   proposer,
   ranOn,
   RecordPanel,
@@ -151,7 +152,7 @@ function Crumbs({
   );
 }
 
-type TabId = 'changes' | 'checks' | 'activity' | 'attempts' | 'record' | 'overview' | 'details';
+type TabId = 'changes' | 'checks' | 'activity' | 'record' | 'overview' | 'details';
 interface Tab {
   id: TabId;
   label: string;
@@ -181,8 +182,10 @@ function Story({
     [editing, setEditing] = useState(0),
     // The chapters in Activity the director opened or folded, by attempt; the rest open as StoryActivity opens them.
     [opened, setOpened] = useState<Record<string, boolean>>({}),
-    // Each use of the review tile, which brings the review's chapter into view once Activity shows.
+    // Each use of the review tile or of the attempt strip, which brings that attempt's chapter into view once
+    // Activity shows, and the last use it brought into view.
     [revealing, setRevealing] = useState<{ attemptId: string; count: number } | null>(null),
+    revealed = useRef(0),
     looks = useMemo(
       () => agentLooks(projectId, [...studio.workers, ...(studio.employeeDirectory ?? [])]),
       [projectId, studio.workers, studio.employeeDirectory],
@@ -192,7 +195,9 @@ function Story({
     // An agent's question waiting for an answer, and auto mode's answer the director may still change.
     asking = waitingQuestion(task, attempts),
     autoAnswer = changeableAnswer(task),
-    shown = attempts.find(attempt => attempt.id === chosen) ?? latest,
+    // The attempt chosen in the strip, which every view shows, or else the latest.
+    choice = attempts.find(attempt => attempt.id === chosen),
+    shown = choice ?? latest,
     detail = useAttemptDetail(projectId, shown?.id ?? '', !!shown),
     full = detail.data?.id === shown?.id ? detail.data : undefined,
     source = isSourceStory(task),
@@ -203,6 +208,9 @@ function Story({
     // The candidate's own record, for where its time went; the attempt shown's when that is the candidate.
     builtDetail = useAttemptDetail(projectId, built?.id ?? '', source && !!built && built.id !== shown?.id),
     builtFull = built?.id === shown?.id ? full : builtDetail.data?.id === built?.id ? builtDetail.data : undefined,
+    // Checks reads the build attempt chosen, with its full record, or else the candidate.
+    checked = choice && !isReview(choice) ? choice : built,
+    checkedFull = checked?.id === shown?.id ? full : builtFull,
     // The open phase from the full record when it is the one shown, otherwise as the compact record carries it.
     phase = active(task) ? (latest?.id === shown?.id && full ? openPhase(full) : phaseOf(task, studio)) : null,
     status = statusOf(studio, task),
@@ -229,15 +237,12 @@ function Story({
         ? 'Reviewing'
         : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^A/, 'a')}` : ''}`
       : null;
-  // The Attempts tab counts the work's own attempts, a story's builds, as its limit does; its reviews are a step of
-  // their own.
-  const tries = attempts.filter(item => !isReview(item)).length;
+  // The attempts are the strip above the tabs, not a tab of their own.
   const tabs: Tab[] = narrow
     ? [
         { id: 'activity', label: 'Activity' },
         source ? { id: 'changes', label: 'Changes', count: stat?.files } : { id: 'overview', label: 'Overview' },
         ...(source ? [{ id: 'checks' as const, label: 'Checks' }] : []),
-        { id: 'attempts', label: 'Attempts', count: tries || undefined },
         { id: 'details', label: 'Details' },
       ]
     : [
@@ -248,7 +253,6 @@ function Story({
             ]
           : [{ id: 'overview' as const, label: 'Overview' }]),
         { id: 'activity', label: 'Activity' },
-        { id: 'attempts', label: 'Attempts', count: tries || undefined },
         { id: 'record', label: 'Record' },
       ];
   // A story with a candidate opens on its change, other work with an attempt on its Overview of what that attempt
@@ -292,6 +296,21 @@ function Story({
     setOpened(current => ({ ...current, [attemptId]: true }));
     setRevealing(current => ({ attemptId, count: (current?.count ?? 0) + 1 }));
   };
+  // Choosing an attempt in the strip shows it in every view: its change, its checks, its record, and its chapter in
+  // Activity, opened and brought into view there. Choosing the latest, or Back to the latest, clears the choice, and
+  // the chapter the choice opened folds or opens as it would.
+  const chooseAttempt = (attemptId: string) => {
+    setOpened(current => {
+      const next = { ...current, [attemptId]: true };
+      if (chosen && chosen !== attemptId) delete next[chosen];
+      return next;
+    });
+    setChosen(attemptId === latest?.id ? null : attemptId);
+    setRevealing(current => ({ attemptId, count: (current?.count ?? 0) + 1 }));
+  };
+  const backToLatest = () => {
+    if (latest) chooseAttempt(latest.id);
+  };
   // The notice's whole account heads a story's Checks, and other work's Overview. The review is its own chapter in
   // Activity.
   const panels: Record<TabId, () => ReactNode> = {
@@ -299,7 +318,7 @@ function Story({
     checks: () => (
       <>
         <StandsInFull task={task} stand={stand} />
-        <ChecksPanel projectId={projectId} task={task} studio={studio} attempt={built} full={builtFull} />
+        <ChecksPanel projectId={projectId} task={task} studio={studio} attempt={checked} full={checkedFull} />
       </>
     ),
     activity: () => (
@@ -312,23 +331,6 @@ function Story({
         opened={opened}
         onToggle={(id, open) => setOpened(current => ({ ...current, [id]: open }))}
       />
-    ),
-    attempts: () => (
-      <>
-        <AttemptsPanel
-          task={task}
-          studio={studio}
-          attempts={attempts}
-          shown={shown}
-          onChoose={setChosen}
-          looks={looks}
-        />
-        {shown && carriedOf(shown) && (
-          <p className="sd-meta" style={{ margin: '0 22px 22px' }}>
-            {continuation(carriedOf(shown)!)}
-          </p>
-        )}
-      </>
     ),
     record: () => (
       <RecordPanel
@@ -384,14 +386,7 @@ function Story({
     ),
   };
   // The chosen tab stays in view in the phone's scrolling row of tabs; only the row scrolls, never the page.
-  useEffect(() => {
-    const button = document.getElementById(`story-tab-${tab}`),
-      row = button?.parentElement;
-    if (!button || !row || row.scrollWidth <= row.clientWidth) return;
-    const at = button.getBoundingClientRect(),
-      within = row.getBoundingClientRect();
-    if (at.left < within.left || at.right > within.right) row.scrollLeft += at.left - within.left - 16;
-  }, [tab]);
+  useEffect(() => keepInRow(document.getElementById(`story-tab-${tab}`)), [tab]);
   useEffect(() => {
     if (reading) document.getElementById(standsInFullId)?.scrollIntoView?.({ block: 'start' });
   }, [reading]);
@@ -399,10 +394,15 @@ function Story({
     setPicked(source ? 'checks' : 'overview');
     setReading(count => count + 1);
   };
-  // The chapter showChapter opened comes into view once Activity shows.
+  // The chapter showChapter or the strip opened comes into view once Activity shows it: at once, or when the director
+  // next opens Activity after choosing an attempt on another tab, and once for each use.
   useEffect(() => {
-    if (revealing) document.getElementById(chapterId(revealing.attemptId))?.scrollIntoView?.({ block: 'start' });
-  }, [revealing]);
+    if (!revealing || revealing.count === revealed.current || tab !== 'activity') return;
+    const chapter = document.getElementById(chapterId(revealing.attemptId));
+    if (!chapter) return;
+    revealed.current = revealing.count;
+    chapter.scrollIntoView?.({ block: 'start' });
+  }, [revealing, tab]);
   // The brief's file form, opened and brought into view where the brief shows: beside the tabs, which stay as they
   // are, or under Details on a phone.
   useEffect(() => {
@@ -543,6 +543,16 @@ function Story({
           onReview={() => showChapter(people.review?.id)}
         />
       )}
+      <AttemptStrip
+        task={task}
+        studio={studio}
+        attempts={attempts}
+        shown={shown}
+        chosen={choice && choice.id !== latest?.id ? choice : undefined}
+        onChoose={chooseAttempt}
+        onLatest={backToLatest}
+        looks={looks}
+      />
       <div className="sd-story">
         <section className="sd-card sd-story__main">
           <div className="sd-tabs" role="tablist" aria-label="Story details" onKeyDown={choose}>
@@ -1298,7 +1308,7 @@ function Chapter({
   );
 }
 
-// An open chapter: what the attempt ran on, when and for how long, as its Attempts row says, then what the agent did
+// An open chapter: what the attempt ran on, when and for how long, as its chip's title says, then what the agent did
 // and said (its raw log when no trace was recorded), ending with what it handed back, or a review with its verdict.
 // A running attempt's chapter is its live activity under the line that the agent is working on it now. The attempt's
 // full record is read only here.

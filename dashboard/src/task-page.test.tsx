@@ -169,7 +169,7 @@ test("a running step's Overview names who is working on it now, and Open Activit
     change(3, [{ seq: 3, type: 'task', id: 'T-1' }]);
     await screen.findByRole('heading', { name: 'Refreshed with the activity open' });
     expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
-    await user.click(screen.getByRole('tab', { name: /^Attempts/ }));
+    await user.click(screen.getByRole('tab', { name: 'Record' }));
     await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
     // The running chapter the director folded opens again from the Overview.
     await user.click(screen.getByRole('tab', { name: 'Activity' }));
@@ -310,7 +310,7 @@ test('an attempt says when git merged the work it continued onto the current sou
   expect(within(panel).queryByText(/Continued from/)).toBeNull();
 });
 
-test("a code story's attempts say what earlier work they continued, or why they started fresh, from their summaries", async () => {
+test("a code story's attempts say in their chapters what earlier work they continued, or why they started fresh, from their summaries, as the strip chooses them", async () => {
   const user = userEvent.setup(),
     story = (id: string, startedAt: string, summary: string, continueFrom?: object) => ({
       id,
@@ -348,32 +348,35 @@ test("a code story's attempts say what earlier work they continued, or why they 
     }),
   ];
   open();
-  await user.click(await screen.findByRole('tab', { name: /^Attempts/ }));
-  expect(await screen.findByText('Continued from attempt-2: src/a.mjs, test/a.test.mjs')).toBeTruthy();
-  expect(screen.queryByText(/Started fresh/)).toBeNull();
-  expect(screen.queryByText(/^Git set /)).toBeNull();
-  const [first, second, third] = within(screen.getByRole('tabpanel')).getAllByRole('button');
+  // Without a candidate the story opens on Activity, its latest attempt chosen in the strip and its chapter open.
+  const [first, second, third] = within(
+    await screen.findByRole('region', { name: 'Attempts' }, { timeout: 5000 }),
+  ).getAllByRole('button');
   expect(third!.getAttribute('aria-pressed')).toBe('true');
   expect(third!.textContent).toMatch(/^Attempt 3 of /);
+  expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+  const chapter = (name: string) => within(screen.getByRole('region', { name }));
+  expect(
+    await chapter('Build, attempt 3 of 3').findByText('Continued from attempt-2: src/a.mjs, test/a.test.mjs'),
+  ).toBeTruthy();
+  expect(chapter('Build, attempt 3 of 3').queryByText(/Started fresh|^Git set /)).toBeNull();
+  // Choosing an earlier attempt opens its chapter, which says how it started.
   await user.click(second!);
   expect(
-    await screen.findByText(
+    await chapter('Build, attempt 2 of 3').findByText(
       'Started fresh instead of the work of attempt-1: the source of files it changed was committed since that attempt (src/a.mjs). Its history still shows that work.',
     ),
   ).toBeTruthy();
-  expect(screen.queryByText(/Continued from/)).toBeNull();
+  expect(chapter('Build, attempt 2 of 3').queryByText(/Continued from/)).toBeNull();
   await user.click(first!);
-  expect(screen.queryByText(/Continued from/)).toBeNull();
-  expect(screen.queryByText(/Started fresh/)).toBeNull();
   expect(
-    await screen.findByText(
+    await chapter('Build, attempt 1 of 3').findByText(
       'Git set src/gone.mjs aside for the editor, because one side deleted it and the other changed it. The current source deleted src/gone.mjs since.',
     ),
   ).toBeTruthy();
-  // Its chapter in Activity, opened, ends with what it handed back.
-  await user.click(screen.getByRole('tab', { name: 'Activity' }));
-  await user.click(lineOf(await screen.findByRole('region', { name: 'Build, attempt 1 of 3' })));
-  expect(await screen.findByText('First try.')).toBeTruthy();
+  expect(chapter('Build, attempt 1 of 3').queryByText(/Continued from|Started fresh/)).toBeNull();
+  // Its chapter ends with what it handed back.
+  expect(await chapter('Build, attempt 1 of 3').findByText('First try.')).toBeTruthy();
 });
 
 test("a story's Activity has your part beside the agents': what you sent and decided, and what a house rule did for you", async () => {
@@ -604,8 +607,10 @@ test('the page sits in the frame with the way back to its ideas and where the ta
   expect(await stands.findByText('This assignment is ready to be queued.')).toBeTruthy();
   // A short notice has nothing more to tell, so no link to it.
   expect(stands.queryByRole('button', { name: /^Read why/ })).toBeNull();
-  await user.click(screen.getByRole('tab', { name: 'Attempts' }));
-  expect(screen.getByText('No attempt has been launched.')).toBeTruthy();
+  // Nothing has run, so there is no attempt to choose.
+  expect(screen.queryByRole('region', { name: 'Attempts' })).toBeNull();
+  await user.click(screen.getByRole('tab', { name: 'Activity' }));
+  expect(within(screen.getByRole('tabpanel')).getByText('Nothing has run yet.')).toBeTruthy();
 });
 
 test('a reconnecting stream asks for what it missed, and reloads after a restart or when the controller cannot say', async () => {
@@ -720,17 +725,23 @@ test("a reviewed step's Overview shows its work first, then the review, unless a
     );
   expect(at.every(index => index >= 0)).toBe(true);
   expect(at).toEqual([...at].sort((a, b) => a - b));
-  // An attempt the director chooses is shown alone.
-  await user.click(screen.getByRole('tab', { name: /^Attempts/ }));
-  const [work] = within(await screen.findByRole('tabpanel')).getAllByRole('button');
+  // An attempt the director chooses in the strip is shown alone, until Back to the latest.
+  const [work] = within(screen.getByRole('region', { name: 'Attempts' })).getAllByRole('button');
   await user.click(work!);
-  await user.click(screen.getByRole('tab', { name: 'Overview' }));
+  expect(screen.getByRole('tab', { name: 'Overview' }).getAttribute('aria-selected')).toBe('true');
   const chosen = await screen.findByRole('tabpanel');
   expect(await within(chosen).findByText('Wrote the welcome guide.')).toBeTruthy();
   expect(within(chosen).queryByText('The guide covers every station.')).toBeNull();
+  await user.click(
+    within(screen.getByRole('region', { name: 'The attempt shown' })).getByRole('button', {
+      name: 'Back to the latest',
+    }),
+  );
+  expect(await within(screen.getByRole('tabpanel')).findByText('The guide covers every station.')).toBeTruthy();
+  expect(within(screen.getByRole('tabpanel')).getByText('Wrote the welcome guide.')).toBeTruthy();
 });
 
-test("a reviewed step's Attempts lists its work and its reviews apart, and counts only the work against its limit", async () => {
+test("a reviewed step's attempt strip lists its work and then its reviews, and counts only the work against its limit, as Details does", async () => {
   const user = userEvent.setup(),
     step = (id: string, kind: string, startedAt: string, extra: object = {}) => ({
       id,
@@ -767,26 +778,24 @@ test("a reviewed step's Attempts lists its work and its reviews apart, and count
     step('attempt-r2', 'general:review', '2026-10-24T11:00:00Z', { status: 'review' }),
   ];
   open();
-  await screen.findByRole('heading', { name: 'Show finished results' });
-  const tab = screen.getByRole('tab', { name: /^Attempts/ });
-  // The tab counts the work's own attempts, as the side panel does; the reviews are a step of their own.
-  expect(tab.querySelector('.sd-tabs__count')?.textContent).toBe('2');
+  const strip = await screen.findByRole('region', { name: 'Attempts' }, { timeout: 5000 }),
+    chips = within(strip).getAllByRole('button');
+  // The strip counts the work's own attempts, as the side panel does; the reviews are a step of their own, after it.
+  expect(strip.querySelector('.sd-eyebrow')?.textContent).toBe('Work · 2 of 2 attempts used');
   expect(within(screen.getByRole('region', { name: 'Details' })).getByText('2 of 2 used')).toBeTruthy();
-  await user.click(tab);
-  const panel = await screen.findByRole('tabpanel'),
-    rows = [...panel.querySelectorAll('.sd-eyebrow, button')].map(item =>
-      item.tagName === 'BUTTON' ? item.querySelector('b')?.textContent : item.textContent,
-    );
-  expect(rows).toEqual([
-    'Work · 2 of 2 attempts used',
+  expect(chips.map(chip => chip.querySelector('b')?.textContent)).toEqual([
     'Attempt 1 of 2',
     'Attempt 2 of 2',
-    'Review',
     'Review 1',
     'Review 2',
   ]);
-  // A review reads as its verdict, as a code story's does.
-  expect(within(panel).getAllByRole('button')[2]!.textContent).toContain('Asked for changes');
+  // A review reads as its verdict, as a code story's does; the latest is the one shown.
+  expect(chips[2]!.textContent).toContain('Asked for changes');
+  expect(chips.map(chip => chip.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false', 'true']);
+  // Other work has no build attempts left to count.
+  expect(within(strip).queryByText(/left\.$/)).toBeNull();
+  await user.click(chips[0]!);
+  expect(chips[0]!.getAttribute('aria-pressed')).toBe('true');
 });
 
 // The window's width as useNarrow reads it: a phone matches the design's break. afterEach puts the window's own back.
@@ -963,7 +972,7 @@ test("a code story's brief is a card beside its tabs, which have no Overview, an
   const card = await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }),
     brief = within(card);
   const tabs = within(screen.getByRole('tablist', { name: 'Story details' })).getAllByRole('tab');
-  expect(tabs.map(tab => tab.firstChild?.textContent)).toEqual(['Changes', 'Checks', 'Activity', 'Attempts', 'Record']);
+  expect(tabs.map(tab => tab.firstChild?.textContent)).toEqual(['Changes', 'Checks', 'Activity', 'Record']);
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
   // Beside the tabs, not in them, above who works on it and the details.
   expect(screen.getByRole('tabpanel').contains(card)).toBe(false);
@@ -1010,12 +1019,12 @@ test('other work has the brief card too, with its brief and what it was handed; 
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
 });
 
-// Other work's Overview is where its Result tab was, on a wide screen and on a phone; a code story's tabs are as they
-// were (its wide ones are above).
+// Other work's Overview is where its Result tab was, on a wide screen and on a phone, and no story has an Attempts tab:
+// its attempts are the strip above the tabs (a code story's wide tabs are above).
 for (const [source, phone, labels, opens] of [
-  [false, false, ['Overview', 'Activity', 'Attempts', 'Record'], 'Overview'],
-  [false, true, ['Activity', 'Overview', 'Attempts', 'Details'], 'Overview'],
-  [true, true, ['Activity', 'Changes', 'Checks', 'Attempts', 'Details'], 'Activity'],
+  [false, false, ['Overview', 'Activity', 'Record'], 'Overview'],
+  [false, true, ['Activity', 'Overview', 'Details'], 'Overview'],
+  [true, true, ['Activity', 'Changes', 'Checks', 'Details'], 'Activity'],
 ] as const)
   test(`${source ? "a code story's" : "other work's"} tabs${phone ? ' on a phone' : ''} are ${labels.join(', ')}, and it opens on ${opens}`, async () => {
     width(phone);
@@ -1028,6 +1037,9 @@ for (const [source, phone, labels, opens] of [
         .map(tab => tab.firstChild?.textContent),
     ).toEqual(labels);
     expect(within(tablist).getByRole('tab', { name: opens }).getAttribute('aria-selected')).toBe('true');
+    // The strip comes before the tabs.
+    const strip = screen.getByRole('region', { name: 'Attempts' });
+    expect(strip.compareDocumentPosition(tablist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
 test("other work's Overview leads with what its latest attempt returned, its files and what it raised, then the rest it handed back", async () => {
@@ -1383,8 +1395,7 @@ test("a question that could not be read shows the agent's stop with why, and no 
   expect(screen.queryByText('Build · asked you a question')).toBeNull();
 });
 
-test("the story's Attempts names the attempt that asked as not counted, and the next one is attempt 1", async () => {
-  const user = userEvent.setup();
+test("the story's attempt strip names the attempt that asked as not counted, and the next one is attempt 1", async () => {
   askingStory({
     status: 'running',
     lastAttemptId: 'attempt-2',
@@ -1403,13 +1414,13 @@ test("the story's Attempts names the attempt that asked as not counted, and the 
     },
   ];
   open();
-  const tab = await screen.findByRole('tab', { name: /^Attempts/ }, { timeout: 5000 });
-  await user.click(tab);
-  const panel = await screen.findByRole('tabpanel'),
-    rows = [...panel.querySelectorAll('.sd-eyebrow, button')].map(item =>
+  const strip = await screen.findByRole('region', { name: 'Attempts' }, { timeout: 5000 }),
+    rows = [...strip.querySelectorAll('.sd-eyebrow, button')].map(item =>
       item.tagName === 'BUTTON' ? item.querySelector('b')?.textContent : item.textContent,
     );
   expect(rows).toEqual(['Build · 1 of 3 attempts used', 'Asked you a question, not counted', 'Attempt 1 of 3']);
+  // While the story runs, the strip does not count what is left.
+  expect(within(strip).queryByText(/left\.$/)).toBeNull();
 });
 
 // What an attempt said, as its trace records it, so its conversation shows in the story's Activity.

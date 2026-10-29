@@ -1,10 +1,10 @@
-// The story page's tabs (the canvas's Story board, v1.0 item 23) and the brief beside them: what the agent was asked
-// to do, the checks that ran and the ones nobody ran, the independent review, the attempts, and everything the
-// controller recorded. Each tab reads only its own records, and recorded files are read once, when their tab first
-// opens.
+// The story page's tabs (the canvas's Story board, v1.0 item 23), the brief beside them and the attempts above them:
+// what the agent was asked to do, the checks that ran and the ones nobody ran, the independent review, the strip
+// that chooses an attempt, and everything the controller recorded. Each tab reads only its own records, and recorded
+// files are read once, when their tab first opens.
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import type { AttemptSummary, Task } from './api';
 import {
   AgentTestRuns,
@@ -595,7 +595,8 @@ export function ReviewVerdict({
 // other work's own attempts, count against its limit; a review is a step of its own, not another attempt at the
 // work. An attempt that uses up none of them (a usage limit stopped it, or the controller's stop interrupted it and
 // it was reconciled) is named for what stopped it, so the next one never reads "attempt 3 of 2" (the recovery
-// drill, October 24). `short` leaves out "Build, ", as under the Attempts tab's Build heading and on Today's floor.
+// drill, October 24). `short` leaves out "Build, ", as on the attempt strip's chips after its Build count and on
+// Today's floor.
 export function attemptName(task: Task, attempts: AttemptSummary[], attempt: AttemptSummary, short = false) {
   const same = attempts.filter(item => isReview(item) === isReview(attempt)),
     counted = same.filter(countsTowardLimit),
@@ -648,8 +649,8 @@ export function attemptChip(attempt: AttemptSummary) {
   return statusChips[attempt.status] ?? ['', attempt.status];
 }
 
-// What an attempt ran on, when and for how long, after who ran it on its Attempts row and in its chapter: its CLI,
-// model and effort, its mode, when it started and finished, and its minutes.
+// What an attempt ran on, when and for how long, after who ran it on its chip's title in the attempt strip and in its
+// chapter: its CLI, model and effort, its mode, when it started and finished, and its minutes.
 export function ranOn(studio: StudioState, attempt: AttemptSummary) {
   const minutes = took(attempt);
   return [
@@ -684,92 +685,116 @@ function SetAside({ attempt, top }: { attempt?: AttemptSummary; top?: string }) 
   ) : null;
 }
 
-// Each attempt: who ran it on what, when and for how long, and how it ended. A story's are grouped by step, its
-// build attempts and then its reviews, so a review never reads as another try at the build (the director, October
-// 24); other work with reviews is grouped the same way, its own attempts counted as the side panel counts them.
-// Choosing one shows its own changes, checks and record.
-export function AttemptsPanel({
+// Keeps a chosen button in view in its row, which scrolls sideways on a phone: only the row scrolls, never the page.
+export function keepInRow(button?: Element | null) {
+  const row = button?.parentElement;
+  if (!button || !row || row.scrollWidth <= row.clientWidth) return;
+  const at = button.getBoundingClientRect(),
+    within = row.getBoundingClientRect();
+  if (at.left < within.left || at.right > within.right)
+    row.scrollLeft = Math.max(0, row.scrollLeft + at.left - within.left - 16);
+}
+
+const attemptChipId = (attemptId: string) => `attempt-chip-${attemptId}`;
+
+// The story's attempts, a strip of chips above its tabs, where its Attempts tab was: each build or work attempt and
+// then each review, so a review never reads as another try at the build (the director, October 24), each named and
+// with how it ended. Before them, how many of the allowed attempts are used, counted as the Details card counts them,
+// and for a code story that is not running how many build attempts are left. Who ran each on what, when and for how
+// long is its chip's title. Choosing one shows it in every view; while one other than the latest is chosen, a line
+// under the strip names it, how it ended and who ran it, with Back to the latest. On a phone the chips scroll sideways
+// in their own row, the chosen one kept in view.
+export function AttemptStrip({
   task,
   studio,
   attempts,
   shown,
+  chosen,
   onChoose,
+  onLatest,
   looks,
 }: {
   task: Task;
   studio: StudioState;
   attempts: AttemptSummary[];
+  // The attempt every view shows, whose chip is pressed, and the one the director chose when it is not the latest.
   shown?: AttemptSummary;
+  chosen?: AttemptSummary;
   onChoose: (id: string) => void;
+  onLatest: () => void;
   looks: Map<string, AgentLook>;
 }) {
-  if (!attempts.length)
-    return (
-      <div className="sd-tabpanel">
-        <p style={{ margin: 0, color: 'var(--ink-2)' }}>No attempt has been launched.</p>
-      </div>
-    );
+  const shownId = shown?.id;
+  useEffect(() => {
+    if (shownId) keepInRow(document.getElementById(attemptChipId(shownId)));
+  }, [shownId]);
+  if (!attempts.length) return null;
   const builds = attempts.filter(attempt => !isReview(attempt)),
     reviews = attempts.filter(isReview),
     source = isSourceStory(task),
     used = source ? builds.filter(countsTowardLimit).length : attemptsUsed(task, attempts).used,
-    left = Math.max(0, (task.maxAttempts ?? 0) - used);
-  const step = source ? 'Build' : 'Work',
-    groups =
-      source || reviews.length
-        ? [
-            { title: `${step} · ${used} of ${task.maxAttempts ?? used} attempts used`, items: builds },
-            { title: 'Review', items: reviews },
-          ].filter(group => group.items.length)
-        : [{ title: '', items: attempts }];
+    left = Math.max(0, (task.maxAttempts ?? 0) - used),
+    count = `${used} of ${task.maxAttempts ?? used} attempts used`,
+    // The step whose attempts count, when there is a review to tell them from: "Build · 2 of 3 attempts used".
+    counted = source || reviews.length ? `${source ? 'Build' : 'Work'} · ${count}` : count,
+    ran = (attempt: AttemptSummary) => [workerName(studio, attempt.workerId), ...ranOn(studio, attempt)].join(' · '),
+    ended = (attempt: AttemptSummary) => {
+      const [tone, label] = attemptChip(attempt);
+      return (
+        <span className={`sd-chip${tone ? ` sd-chip--${tone}` : ''}`}>
+          <span className="sd-chip__dot"></span>
+          {label}
+        </span>
+      );
+    };
   return (
-    <div className="sd-tabpanel" style={{ padding: '12px 22px 22px', gap: 0 }}>
-      {groups.map(group => [
-        group.title && (
-          <span key={group.title} className="sd-eyebrow" style={{ padding: '12px 0 4px' }}>
-            {group.title}
+    <>
+      <section className="sd-attemptstrip" aria-label="Attempts">
+        <span className="sd-attemptstrip__count">
+          <span className="sd-eyebrow">{counted}</span>
+          {source && task.status !== 'running' && left > 0 && (
+            <span className="sd-meta">
+              {left} build {plural(left, 'attempt is', 'attempts are')} left.
+            </span>
+          )}
+        </span>
+        <div className="sd-attemptstrip__chips">
+          {[...builds, ...reviews].map(attempt => {
+            const look = looks.get(attempt.workerId ?? '');
+            return (
+              <button
+                key={attempt.id}
+                id={attemptChipId(attempt.id)}
+                type="button"
+                className="sd-attemptchip"
+                aria-pressed={attempt.id === shownId}
+                title={ran(attempt)}
+                onClick={() => onChoose(attempt.id)}
+              >
+                {look && <AgentAvatar look={look} size={24} state={attemptState(attempt)} ring={false} />}
+                {/* After the Build or Work count an attempt is just its number. */}
+                <b>{attemptName(task, attempts, attempt, true)}</b>
+                {ended(attempt)}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+      {chosen && (
+        <section className="sd-attemptline" aria-label="The attempt shown">
+          <span className="sd-attemptline__text">
+            <span>
+              Showing <b>{attemptName(task, attempts, chosen)}</b>
+            </span>
+            {ended(chosen)}
+            <span className="sd-meta">{ran(chosen)}</span>
           </span>
-        ),
-        ...group.items.map((attempt, index) => {
-          const [tone, label] = attemptChip(attempt),
-            look = looks.get(attempt.workerId ?? '');
-          return (
-            <button
-              key={attempt.id}
-              type="button"
-              className="sd-row"
-              style={index === 0 ? { borderTop: 0 } : undefined}
-              aria-pressed={attempt.id === shown?.id}
-              onClick={() => onChoose(attempt.id)}
-            >
-              {look && <AgentAvatar look={look} size={34} state={attemptState(attempt)} ring={false} />}
-              <span className="sd-row__text">
-                <b>
-                  {/* Under the Build or Work heading an attempt is just its number. */}
-                  {attemptName(task, attempts, attempt, true)}
-                </b>
-                <span className="sd-meta">
-                  {[workerName(studio, attempt.workerId), ...ranOn(studio, attempt)].join(' · ')}
-                </span>
-              </span>
-              <span className={`sd-chip${tone ? ` sd-chip--${tone}` : ''}`}>
-                <span className="sd-chip__dot"></span>
-                {label}
-              </span>
-            </button>
-          );
-        }),
-      ])}
-      <p className="sd-meta" style={{ margin: '12px 0 0' }}>
-        Choosing an attempt shows its own changes, checks and activity.
-        {source &&
-          task.status !== 'running' &&
-          left > 0 &&
-          ` ${left} build ${plural(left, 'attempt is', 'attempts are')} left.`}
-      </p>
-      {/* A story has no Overview tab: the attempt chosen says here which files git set aside for its editor. */}
-      <SetAside attempt={shown} top="12px" />
-    </div>
+          <button type="button" className="sd-btn sd-btn--sm" onClick={onLatest}>
+            Back to the latest
+          </button>
+        </section>
+      )}
+    </>
   );
 }
 
