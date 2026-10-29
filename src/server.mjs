@@ -66,6 +66,15 @@ import { bootstrapFactory } from './core/bootstrap.mjs';
 import { createProject } from './core/project-creation.mjs';
 import { sendWaitingIdea, startIdeaIntake } from './core/idea-intake.mjs';
 import { answerQuestion, changeAnswer } from './core/questions.mjs';
+import {
+  openTryFolder,
+  runTry,
+  saveTrySettings,
+  stopTry,
+  tryOutput,
+  tryStory,
+  tryView,
+} from './connectors/try-copy.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
@@ -127,9 +136,12 @@ const dashboardTypes = {
 // tools read from the main address.
 const dashboardNotBuilt =
   '<!doctype html><meta charset="utf-8"><meta name="studio-token" content="%STUDIO_TOKEN%"><title>Studio desk</title><h1>The dashboard is not built</h1><p>Run <code>npm ci</code> in the controller\'s folder, then restart it: <code>npm start</code> builds the dashboard. A release includes it already built.</p>';
-function fail(message, status = 400) {
+// A refusal the page can act on may carry fields beside its message, such as the files that keep the try copy from
+// moving (1.2 step 7).
+function fail(message, status = 400, fields) {
   const e = new Error(message);
   e.status = status;
+  if (fields) e.fields = fields;
   throw e;
 }
 function text(v, field, max = 24000, required = false) {
@@ -517,10 +529,31 @@ export function createStudio({
         store.project(parts[2]);
         return json(res, ideaBringBackTargets(store, parts[2], parts[4]));
       }
+      // A Run's output in the try copy, as inert plain text (1.2 step 7).
+      if (
+        parts[0] === 'api' &&
+        parts[1] === 'projects' &&
+        parts[3] === 'try' &&
+        parts[4] === 'output' &&
+        parts.length === 5 &&
+        req.method === 'GET'
+      ) {
+        store.project(parts[2]);
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "sandbox; default-src 'none'",
+          'Cache-Control': 'no-store',
+        });
+        res.end(tryOutput(store, parts[2]));
+        return;
+      }
       if (parts[0] === 'api' && parts[1] === 'projects' && parts.length === 4 && req.method === 'GET') {
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });
         if (parts[3] === 'live') return json(res, liveRecords(store, projectId));
+        // The project's try copy, its settings and where Run runs (1.2 step 7).
+        if (parts[3] === 'try') return json(res, tryView(store, projectId, runner));
         // A project's releases (1.1 step 6): its lines, milestones and their work, read from records and git alone.
         if (parts[3] === 'releases')
           try {
@@ -1015,6 +1048,38 @@ export function createStudio({
               return json(res, deleteProjectAgent(store, registries, projectId, parts[4], data));
           } catch (error) {
             fail(error.message, error.status);
+          }
+        }
+        // Trying a story yourself (1.2 step 7): the project's settings, and Run, Stop and Open folder on its copy.
+        // Only the director's click reaches these; the autonomy policy and agents never do.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'try-settings' && !parts[4] && req.method === 'POST') {
+          if (parts[2] !== projectId) fail('Select this project before editing its settings.');
+          const { projectId: selected, ...settings } = data;
+          try {
+            return json(res, saveTrySettings(store, projectId, settings, runner));
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+        }
+        if (
+          parts[1] === 'projects' &&
+          parts[2] &&
+          parts[3] === 'try' &&
+          parts[4] &&
+          !parts[5] &&
+          req.method === 'POST'
+        ) {
+          if (parts[2] !== projectId) fail('Select this project before running its try copy.');
+          const fields = { run: ['projectId', 'confirmOutside'], stop: ['projectId'], open: ['projectId'] }[parts[4]];
+          if (!fields) fail('Unknown try copy action.', 404);
+          if (Object.keys(data).some(key => !fields.includes(key))) fail('Unsupported try copy fields.');
+          try {
+            if (parts[4] === 'run')
+              return json(res, runTry(runner, projectId, { confirmOutside: data.confirmOutside === true }), 202);
+            if (parts[4] === 'stop') return json(res, { run: await stopTry(runner, projectId) });
+            return json(res, openTryFolder(store, projectId));
+          } catch (error) {
+            fail(error.message, error.status, error.confirm ? { confirm: error.confirm } : undefined);
           }
         }
         // Deleting a project (v1.0 item 24): its name typed back confirms it.
@@ -1588,6 +1653,16 @@ export function createStudio({
             if (Object.keys(data).some(key => !['projectId', 'workerId'].includes(key)))
               fail('Unsupported owner fields.');
             return json(res, reassignProjectDraft(store, registries, t, data.workerId));
+          }
+          // Try it (1.2 step 7): the project's try copy moves to this story's candidate, at the director's click.
+          if (action === 'try') {
+            if (Object.keys(data).some(key => !['projectId', 'discard'].includes(key)))
+              fail('Try it takes only whether to discard your edits in the copy.');
+            try {
+              return json(res, await tryStory(runner, t, { discard: data.discard === true }));
+            } catch (error) {
+              fail(error.message, error.status, error.edits ? { edits: error.edits } : undefined);
+            }
           }
           if (action === 'approve-work') {
             const approved = approveWork(store, registries, t);
@@ -2242,7 +2317,8 @@ export function createStudio({
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       return res.end(fs.readFileSync(shell, 'utf8').replace('%STUDIO_TOKEN%', csrf));
     } catch (err) {
-      if (!res.headersSent) json(res, { error: err.message || 'Controller request failed.' }, err.status || 400);
+      if (!res.headersSent)
+        json(res, { error: err.message || 'Controller request failed.', ...(err.fields || {}) }, err.status || 400);
       else res.end();
     }
   });

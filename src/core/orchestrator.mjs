@@ -23,6 +23,7 @@ import { captureContinuation, continuationFile } from './attempt-continuation.mj
 import { buildAttemptHistory, stageAttemptHistory } from './attempt-history.mjs';
 import { questionFile, questionReason, readQuestion } from './questions.mjs';
 import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
+import { endTryRuns, recoverTryRuns } from '../connectors/try-copy.mjs';
 
 // Reasons that clear by themselves as other work finishes.
 const waiting = reason => /^Waiting for /.test(reason || '');
@@ -120,6 +121,8 @@ export class Runner {
     }
     // Likewise an integration no process of this controller runs yet; its resources stay held until reconciled.
     this.integration.recover(this);
+    // An app the director ran in a story's try copy ended with the controller that ran it (1.2 step 7).
+    recoverTryRuns(store);
     this.autonomy = new Autonomy(this, { integrate: options.integrate, restart: options.restart });
     // A reset time that passed while the controller was stopped clears its hold now.
     this.clearPassedHolds();
@@ -1296,6 +1299,7 @@ export class Runner {
     const entries = [...this.active.values()];
     for (const entry of entries) this.stop(entry.attempt.id);
     this.integration.stop(this);
+    endTryRuns(this);
     for (const adapter of this.adapters.list()) adapter.shutdown?.(this);
     const started = Date.now(),
       bound = Math.max(5000, ...this.adapters.list().map(adapter => adapter.shutdownWait?.(this) || 0));

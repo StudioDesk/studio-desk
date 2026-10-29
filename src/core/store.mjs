@@ -190,7 +190,13 @@ export class Store {
       'DELETE FROM settings WHERE id=?',
       this.workflows(projectId).map(workflow => 'workflow:' + workflow.id),
     );
-    for (const prefix of ['project-organization:', 'project-autonomy:', 'project-autonomy-runs:', 'milestones:'])
+    for (const prefix of [
+      'project-organization:',
+      'project-autonomy:',
+      'project-autonomy-runs:',
+      'milestones:',
+      'try:',
+    ])
       this.db.prepare('DELETE FROM settings WHERE id=?').run(prefix + projectId);
     this.db.prepare('DELETE FROM settings WHERE id LIKE ?').run(`run-archive:${projectId}:%`);
     this.db.prepare('DELETE FROM counters WHERE resource LIKE ?').run(`source:${projectId}:%`);
