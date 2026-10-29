@@ -2328,6 +2328,8 @@ export function createStudio({
   // connections to keep.
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
+  // How long a close lets a request still being answered finish before its connection is ended.
+  const connectionGrace = 2000;
   return {
     store,
     runner,
@@ -2347,7 +2349,19 @@ export function createStudio({
         await runner.shutdown();
         clearTimeout(broadcastTimer);
         for (const client of clients) client.res.end();
-        await new Promise(resolve => server.close(resolve));
+        // Node's close ends only the connections idle at that moment and stops timing out headers and requests. A
+        // connection still answering a request then stayed open for its client's keep-alive once answered (63 seconds
+        // measured with fetch), or without end when its request never completed, and held the close as long. Each
+        // is ended once its answer is sent, and any still open after the grace period are ended.
+        await new Promise(resolve => {
+          const idle = setInterval(() => server.closeIdleConnections(), 50),
+            cut = setTimeout(() => server.closeAllConnections(), connectionGrace);
+          server.close(() => {
+            clearInterval(idle);
+            clearTimeout(cut);
+            resolve();
+          });
+        });
         store.db.prepare('DELETE FROM settings WHERE id=? AND data=?').run('controller-owner', JSON.stringify(owner));
         store.close();
       })();

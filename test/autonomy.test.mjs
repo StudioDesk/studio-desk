@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createStudio } from './model-free-studio.mjs';
 import { waitFor } from './wait-for.mjs';
+import { closeAndRemove } from './fixture-cleanup.mjs';
 import { createRegistries } from '../src/registry.mjs';
 import { Autonomy } from '../src/core/autonomy-runtime.mjs';
 import { hash } from '../src/core/contracts.mjs';
@@ -171,10 +172,12 @@ async function setup(t, options = {}) {
   });
   c.app = createStudio(c.options());
   t.after(async () => {
-    await c.app.close();
-    fs.rmSync(directory, { recursive: true, force: true });
-    if (previousDelay === undefined) delete process.env.STUDIO_MOCK_DELAY_MS;
-    else process.env.STUDIO_MOCK_DELAY_MS = previousDelay;
+    try {
+      await closeAndRemove(c.app, directory);
+    } finally {
+      if (previousDelay === undefined) delete process.env.STUDIO_MOCK_DELAY_MS;
+      else process.env.STUDIO_MOCK_DELAY_MS = previousDelay;
+    }
   });
   c.connect = async () => {
     c.origin = await c.app.start();

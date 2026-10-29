@@ -14,6 +14,7 @@ import { acceptAttempt } from '../src/core/acceptance.mjs';
 import { measuredSourceEvidence } from '../src/connectors/source-changes.mjs';
 import { git, commitIntegration } from '../src/connectors/source-integration.mjs';
 import { waitFor, waitForTask } from './wait-for.mjs';
+import { closeAndRemove } from './fixture-cleanup.mjs';
 
 const cli = fileURLToPath(new URL('./fixture-source-edit.mjs', import.meta.url)),
   tests = fileURLToPath(new URL('./fixture-source-check.mjs', import.meta.url)),
@@ -82,9 +83,8 @@ export async function setup(
   for (const worker of org.workers) if (worker.provider === 'mock') worker.provider = 'codex';
   c.app.store.setOrganization(org);
   t.after(async () => {
-    await c.app.close();
     assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep));
-    fs.rmSync(directory, { recursive: true, force: true });
+    await closeAndRemove(c.app, directory);
   });
   c.connect = async () => {
     c.origin = await c.app.start();

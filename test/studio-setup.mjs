@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStudio } from './model-free-studio.mjs';
 import { describeTask, waitFor } from './wait-for.mjs';
+import { closeAndRemove } from './fixture-cleanup.mjs';
 
 export const fixture = fileURLToPath(new URL('./fixture-cli.mjs', import.meta.url));
 export const claudeFixture = fileURLToPath(new URL('./fixture-claude.mjs', import.meta.url));
@@ -18,10 +19,7 @@ export async function setup(t, native = false) {
   const origin = await app.start(),
     html = await (await fetch(origin)).text(),
     token = html.match(/name="studio-token" content="([^"]+)"/)[1];
-  t.after(async () => {
-    await app.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  t.after(() => closeAndRemove(app, dir));
   const request = async (url, body = {}, method = 'POST') => {
     const res = await fetch(origin + url, {
       method,
