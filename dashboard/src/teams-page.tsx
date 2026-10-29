@@ -2,26 +2,18 @@
 // project's teams as cards with their agents' faces, and a team's own page with its goal, its agents and its work.
 // Edit the teams turns the same cards into the project's organization, edited in place: each team's fields, its
 // agents with a + for one the studio already has or a new one that belongs to this project (1.0.1), an Add a team
-// card, and below them the kinds of work the project takes and the model tiers. A team groups agents; it grants no tools. A change reaches work that starts after it
-// is saved, and recorded attempts keep what they ran with.
+// card, and below them the kinds of work the project takes; the model tiers are in Settings, under Command-line tools.
+// A team groups agents; it grants no tools. A change reaches work that starts after it is saved, and recorded attempts
+// keep what they ran with.
 import { useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useMemo, useRef, useState, type ReactNode } from 'react';
-import {
-  send,
-  type Adapter,
-  type Execution,
-  type PeopleSummary,
-  type Task,
-  type Team,
-  type Tiers,
-  type Worker,
-} from './api';
+import { send, type Execution, type PeopleSummary, type Task, type Team, type Worker } from './api';
 import type { AgentLook } from './design/agent-kit.js';
 import { AgentAvatar } from './design/avatar';
 import { Dialog } from './design/dialog';
 import { Icon } from './design/icons';
-import { cleanExecution, ExecutionFields, modeLabels, offeredModes } from './execution-fields';
+import { cleanExecution, ExecutionFields } from './execution-fields';
 import { agentState } from './faces';
 import { Heading } from './layout';
 import { usePeople, useSettled, useStudio } from './records';
@@ -372,10 +364,9 @@ export function TeamPage({ projectId, teamId }: { projectId: string; teamId: str
   );
 }
 
-// Edit the teams: the project's teams, which team each agent is in with its role, the kinds of work the project
-// takes with their default agents, and the model tiers, saved together as the project's next organization revision.
-const tierNames = ['light', 'standard', 'deep'] as const;
-type TierField = 'model' | 'effort' | 'mode';
+// Edit the teams: the project's teams, which team each agent is in with its role, and the kinds of work the project
+// takes with their default agents, saved together as the project's next organization revision. The save leaves the
+// model tiers out, so the saved ones stay; Settings → Command-line tools changes them.
 interface MemberDraft {
   teamId: string;
   role: string;
@@ -388,18 +379,7 @@ interface Draft {
   members: Record<string, MemberDraft>;
   taskKinds: string[];
   kindOwners: Record<string, string>;
-  tiers: Tiers;
 }
-const tierWords: Record<(typeof tierNames)[number], string> = {
-  light: 'Light work',
-  standard: 'Standard work',
-  deep: 'Deep work',
-};
-const tierFields = (adapter: Adapter): TierField[] => [
-  'model',
-  ...(adapter.efforts?.length ? (['effort'] as const) : []),
-  ...(offeredModes(adapter).length > 1 ? (['mode'] as const) : []),
-];
 const agentName = (worker: Worker) => worker.displayName ?? worker.id;
 const teamName = (team: Team) => team.name.trim() || 'New team';
 // Staffing roles as typed, "reviewer, engineer", as the list the controller takes.
@@ -443,7 +423,6 @@ function savedDraft(state: StudioState, directory: Worker[]): Draft {
     ),
     taskKinds: config.taskKinds ?? Object.keys(state.taskKinds),
     kindOwners: config.kindOwners ?? {},
-    tiers: structuredClone(config.tiers ?? {}),
   };
 }
 
@@ -501,30 +480,12 @@ function TeamsEdit({
   });
   const placed = (id: string) => !!draft.members[id]?.teamId,
     busy = save.isPending || defaults.isPending;
-  // The CLIs the project's agents use, each with the fields it offers. Settings for a CLI no agent uses are kept.
-  const providers = new Set(directory.filter(worker => placed(worker.id)).map(worker => worker.provider)),
-    adapters = Object.values(state.adapters ?? {}).filter(
-      adapter => adapter.workerSelectable && adapter.id !== 'mock' && providers.has(adapter.id),
-    );
   // A kind of work goes by default only to an enabled agent in the project; one taken out of it goes back to being
   // chosen each time.
   const owners = directory.filter(worker => placed(worker.id) && worker.enabled),
     ownerOf = (kind: string) =>
       owners.some(worker => worker.id === draft.kindOwners[kind]) ? draft.kindOwners[kind]! : '';
-  const submit = () => {
-    const tiers: Tiers = structuredClone(draft.tiers);
-    for (const tier of tierNames) {
-      for (const adapter of adapters) {
-        const settings = Object.fromEntries(
-          tierFields(adapter)
-            .map(field => [field, draft.tiers[tier]?.[adapter.id]?.[field]?.trim() ?? ''] as const)
-            .filter(([, value]) => value),
-        );
-        if (Object.keys(settings).length) (tiers[tier] ??= {})[adapter.id] = settings;
-        else delete tiers[tier]?.[adapter.id];
-      }
-      if (tiers[tier] && !Object.keys(tiers[tier]).length) delete tiers[tier];
-    }
+  const submit = () =>
     save.mutate({
       expectedRevision: draft.expectedRevision,
       teams: draft.teams.map(team => ({ ...team, leadId: team.leadId || null })),
@@ -540,10 +501,7 @@ function TeamsEdit({
         })),
       taskKinds: draft.taskKinds,
       kindOwners: Object.fromEntries(draft.taskKinds.filter(kind => ownerOf(kind)).map(kind => [kind, ownerOf(kind)])),
-      // An explicit empty object clears saved tiers; with no agent's CLI shown they are left untouched.
-      ...(adapters.length ? { tiers } : {}),
     });
-  };
   const setTeam = (id: string, field: keyof Team, value: string) =>
     setDraft(current => ({
       ...current,
@@ -583,14 +541,6 @@ function TeamsEdit({
           member.teamId === id ? { ...member, teamId: '' } : member,
         ]),
       ),
-    }));
-  const setTier = (tier: string, provider: string, field: TierField, value: string) =>
-    setDraft(current => ({
-      ...current,
-      tiers: {
-        ...current.tiers,
-        [tier]: { ...current.tiers[tier], [provider]: { ...current.tiers[tier]?.[provider], [field]: value } },
-      },
     }));
   const kinds = Object.entries(state.taskKinds),
     kindRow = ([kind, definition]: (typeof kinds)[number]) => {
@@ -844,79 +794,6 @@ function TeamsEdit({
             </details>
           )}
         </section>
-        {adapters.length > 0 && (
-          <section className="sd-card sd-sidecard sd-sidecard--roomy" aria-labelledby="edit-tiers">
-            <h2 id="edit-tiers" className="sd-sidecard__title">
-              Model tiers
-            </h2>
-            <p className="sd-meta" style={{ margin: 0 }}>
-              The model, effort and way of working a kind of work asks for, for each command-line tool. Leave one blank
-              for the agent&apos;s own setting.
-            </p>
-            {tierNames.map(tier => (
-              <details key={tier} className="sd-disclosure">
-                <summary>{tierWords[tier]}</summary>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-12)' }}>
-                  {adapters.map(adapter => {
-                    const settings = draft.tiers[tier]?.[adapter.id] ?? {},
-                      prefix = `tier-${tier}-${adapter.id}`;
-                    return (
-                      <div key={adapter.id} className="sd-editpanel">
-                        <b>{adapter.name}</b>
-                        <div className="sd-fieldgrid">
-                          <div className="sd-field">
-                            <label className="sd-field__label" htmlFor={`${prefix}-model`}>
-                              Model
-                            </label>
-                            <input
-                              id={`${prefix}-model`}
-                              className="sd-input"
-                              value={settings.model ?? ''}
-                              list={`${prefix}-models`}
-                              maxLength={100}
-                              autoComplete="off"
-                              placeholder="The agent's own"
-                              onChange={event => setTier(tier, adapter.id, 'model', event.target.value)}
-                            />
-                            <datalist id={`${prefix}-models`}>
-                              {(adapter.models ?? []).map(model => (
-                                <option key={model.id} value={model.id}>
-                                  {model.label}
-                                </option>
-                              ))}
-                            </datalist>
-                          </div>
-                          {tierFields(adapter)
-                            .filter(field => field !== 'model')
-                            .map(field => (
-                              <div key={field} className="sd-field">
-                                <label className="sd-field__label" htmlFor={`${prefix}-${field}`}>
-                                  {field === 'effort' ? 'Effort' : 'Way of working'}
-                                </label>
-                                <select
-                                  id={`${prefix}-${field}`}
-                                  className="sd-select"
-                                  value={settings[field] ?? ''}
-                                  onChange={event => setTier(tier, adapter.id, field, event.target.value)}
-                                >
-                                  <option value="">The agent&apos;s own</option>
-                                  {(field === 'effort' ? (adapter.efforts ?? []) : offeredModes(adapter)).map(value => (
-                                    <option key={value} value={value}>
-                                      {field === 'mode' ? (modeLabels[value] ?? value) : value}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </details>
-            ))}
-          </section>
-        )}
         <p className="sd-meta" style={{ margin: 0 }}>
           What each team and agent is told is in Instructions, with its own drafts. How each agent runs is on its page:
           an agent made in this project runs only here, and a shared one runs the same way in every project.

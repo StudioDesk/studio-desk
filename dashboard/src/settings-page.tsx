@@ -1,7 +1,8 @@
 // Settings, as the canvas draws it (v1.0 item 23): a section nav beside the sections. This project: its name, goal
 // and direction, its repository, its visual check, its house rules, its workflows and its records. Every project:
 // running work, the command-line tools, the projects on this computer and the appearance, which belong to this
-// computer, so a change there reaches every project. Every change applies to work that starts after it.
+// computer, so a change there reaches every project; only the model tiers under the tools are this project's. Every
+// change applies to work that starts after it.
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useId, useState, type ReactNode } from 'react';
@@ -24,6 +25,7 @@ import { isCodeProject, projectColor, projectKind, projectPalette } from './fram
 import { DeleteProject } from './delete-project';
 import { CycleWarning } from './home-page';
 import { Toggle } from './layout';
+import { ModelTiers } from './model-tiers';
 import { NewProject } from './new-project';
 import { ClaudeCommands } from './permissions';
 import { ProfileDialog } from './profile-dialog';
@@ -1156,9 +1158,9 @@ function RunningWork({ projectId, state }: { projectId: string; state: StudioSta
   );
 }
 
-// The CLIs this computer runs agents with: whether each is found, its usage hold, and what it decides here. Only
-// the CLIs found are listed, all of them when none is, so someone who uses one never reads about the other
-// (v1.0 item 25).
+// The CLIs this computer runs agents with: whether each is found, its usage hold, and what it decides here, then this
+// project's model tiers for them. Only the CLIs found are listed, all of them when none is, so someone who uses one
+// never reads about the other (v1.0 item 25).
 function Tools({ projectId, state }: { projectId: string; state: StudioState }) {
   const toast = useToast(),
     holds = new Map(usageHolds(state).map(hold => [hold.provider, hold])),
@@ -1234,6 +1236,12 @@ function Tools({ projectId, state }: { projectId: string; state: StudioState }) 
           </div>
         );
       })}
+      <ModelTiers
+        key={`tiers-${state.organizationConfiguration?.revision ?? 0}`}
+        projectId={projectId}
+        state={state}
+        adapters={adapters}
+      />
       <div className="sd-field" id="candidate-tests">
         <span className="sd-field__label">Where candidate tests run</span>
         {/* The built-in sandbox, or none by the director's choice, which asks first (1.0.1). */}

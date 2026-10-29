@@ -596,8 +596,8 @@ test('Edit the teams turns the cards into fields and sends only the members plac
       },
     ],
     taskKinds: ['general'],
-    tiers: {},
   });
+  expect(command!.body).not.toHaveProperty('tiers');
   // Saved, the page shows the teams again.
   expect(await screen.findByRole('button', { name: 'Edit the teams' })).toBeTruthy();
 });
