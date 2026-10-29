@@ -1240,12 +1240,16 @@
           ).length >= state.maxParallel),
       wait = lease || slot || /^Waiting for /i.test(blocker);
     if (wait) {
+      // The controller's own words for the wait come first ("Waiting for T-… to be integrated: source stories on
+      // main run two at a time."); a reservation's name only when it gave none.
       const kind = slot && !lease ? 'slot-wait' : 'resource-wait',
-        why = lease
-          ? `This assignment waits for ${lease.resource} to be released.`
-          : slot
-            ? 'This assignment waits for a studio execution slot.'
-            : blocker,
+        why = /^Waiting for /i.test(blocker)
+          ? blocker
+          : lease
+            ? `This assignment waits for ${lease.resource} to be released.`
+            : slot
+              ? 'This assignment waits for a studio execution slot.'
+              : blocker,
         provenance = lease ? [`${lease.resource} is held by ${lease.attemptId}.`] : [];
       return task.queued
         ? passive(

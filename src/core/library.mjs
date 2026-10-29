@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { acceptedReference, artifactPath } from './artifacts.mjs';
-import { projectIdentity } from './projects.mjs';
+import { projectIdentity, recordProject } from './projects.mjs';
 import { runIdOf } from './graph.mjs';
 import { checkContent, safeName } from './idea-inputs.mjs';
 
@@ -47,6 +47,17 @@ const types = new Map([
 ]);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const failure = (message, status = 400) => Object.assign(new Error(message), { status });
+// Whether a task's work is finished, so a file it handed back can join the library: a task with stages, such as a
+// step and its review, is accepted when its last stage is. An unknown task is left to the accepted-file check.
+const workFinished = (store, taskId) => {
+  let task;
+  try {
+    task = store.task(taskId);
+  } catch {
+    return true;
+  }
+  return task?.status !== undefined ? task.status === 'done' : true;
+};
 const bounded = (value, max) => typeof value === 'string' && !!value.trim() && value.length <= max;
 const settingId = projectId => `library:${projectId}`;
 const entryIdentity = /^lib-[0-9a-f-]{36}$/;
@@ -120,11 +131,16 @@ function sourceBytes(store, projectId, data) {
     typeof from.path !== 'string'
   )
     throw failure('An accepted file names its task, optionally its attempt, and its path.');
+  if (!workFinished(store, from.taskId))
+    throw failure(
+      "That work isn't finished yet: its file can join the library once its review passes and the work is accepted.",
+      409,
+    );
   let reference;
   try {
     reference = acceptedReference(store, from.taskId, from.attemptId, projectId);
-  } catch (error) {
-    throw failure(`Only a file from accepted work joins the library: ${error.message}`, 409);
+  } catch {
+    throw failure('Only a file from accepted work joins the library: that attempt is not the one you accepted.', 409);
   }
   const item = reference.artifacts.find(artifact => artifact.path === from.path);
   if (!item) throw failure('That file is not one the accepted work handed back.', 404);
@@ -527,10 +543,14 @@ function settleProposal(store, projectId, proposal, by) {
   }
 }
 
-// Records an accepted attempt's proposals; the policy, when on, approves them at once.
+// Records an accepted attempt's proposals; the policy, when on, approves them once the work is finished, which may be
+// this acceptance (a review's, say, finishing a step whose attempt proposed them).
 export function recordLibraryProposals(store, task, attempt, read, policy) {
   const proposals = readLibraryProposal(attempt, read);
-  if (!proposals.length) return [];
+  if (!proposals.length) {
+    settleTaskProposals(store, store.task(task.id), policy);
+    return [];
+  }
   const projectId = attempt.projectId,
     recorded = proposals.map(item => ({
       id: `libprop-${randomUUID()}`,
@@ -551,10 +571,22 @@ export function recordLibraryProposals(store, task, attempt, read, policy) {
       `${proposal.proposedBy} proposed ${proposal.name} for the library: ${proposal.purpose}`,
       projectId,
     );
-    if (policy?.enabled)
-      decideLibraryProposal(store, projectId, proposal.id, true, { type: 'policy', revision: policy.revision });
   }
+  // Work with stages, such as a step and its review, is finished only when its last stage is accepted; its
+  // proposals wait until then (October 29: the policy refused a glossary while its review was still to come).
+  settleTaskProposals(store, store.task(task.id), policy);
   return recorded;
+}
+
+// Once a task's work is finished, the policy, when on, decides the proposals its attempts made that still wait.
+export function settleTaskProposals(store, task, policy) {
+  if (!policy?.enabled || task.status !== 'done') return;
+  const projectId = recordProject(task),
+    waiting = (libraryOf(store, projectId).proposals || []).filter(
+      item => item.state === 'waiting' && item.from?.taskId === task.id,
+    );
+  for (const proposal of waiting)
+    decideLibraryProposal(store, projectId, proposal.id, true, { type: 'policy', revision: policy.revision });
 }
 
 // The director, or the policy, approves or rejects a waiting proposal.
@@ -563,6 +595,12 @@ export function decideLibraryProposal(store, projectId, proposalId, approve, by 
     proposal = (library.proposals || []).find(item => item.id === proposalId);
   if (!proposal) throw failure('Library proposal not found.', 404);
   if (proposal.state !== 'waiting') throw failure(`This proposal was already ${proposal.state}.`, 409);
+  // Approving work that isn't finished is refused without deciding, so the proposal waits for it.
+  if (approve && !workFinished(store, proposal.from.taskId))
+    throw failure(
+      "That work isn't finished yet: its file can join the library once its review passes and the work is accepted.",
+      409,
+    );
   const outcome = approve
     ? settleProposal(store, projectId, proposal, by)
     : { state: 'rejected', decidedAt: new Date().toISOString(), decidedBy: by };

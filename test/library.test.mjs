@@ -539,3 +539,49 @@ test('a proposal must name one of the files the work handed back; one that does 
       ),
   );
 });
+
+// October 29: a glossary proposed by a step whose review was still to come was refused by the policy at the step's
+// acceptance, since the work was not finished, and nothing decided it again once the review passed.
+test("a proposal made before the work's review passes waits for it, then the policy adds it, and approving it early is refused without deciding", async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    { recordLibraryProposals } = await import('../src/core/library.mjs'),
+    policy = {
+      revision: 4,
+      enabled: true,
+      kinds: {},
+      retries: 0,
+      cycle: { enabled: false, workflowId: null, maxPerDay: 3 },
+    };
+  store.putSetting('project-autonomy:project-legacy', policy);
+  const task = proposingWork(store, 'staged', [
+    { name: 'Glossary', purpose: 'The words the menu uses.', path: 'guide.md' },
+  ]);
+  // The step's attempt is accepted while its review is still to come, as a task with stages leaves it.
+  const attempt = store.attempt('attempt-staged');
+  store.updateAttempt({ ...attempt, status: 'accepted', acceptedAt: new Date().toISOString() });
+  store.putTask({ ...store.task(task.id), status: 'ready', acceptedAttemptId: attempt.id });
+  recordLibraryProposals(
+    store,
+    store.task(task.id),
+    store.attempt(attempt.id),
+    name => fs.readFileSync(path.join(attempt.outputFolder, name)),
+    policy,
+  );
+  let [proposal] = libraryOf(store, project).proposals;
+  assert.equal(proposal.state, 'waiting');
+  assert.equal(currentEntries(libraryOf(store, project)).length, 0);
+  const early = await c.request(`/api/projects/project-legacy/library/proposals/${proposal.id}/approve`, {
+    projectId: project,
+  });
+  assert.equal(early.status, 409);
+  assert.match(early.data.error, /That work isn't finished yet: its file can join the library once its review passes/);
+  assert.equal(libraryOf(store, project).proposals[0].state, 'waiting');
+  // The review is accepted and the work finished: its acceptance, with no proposal of its own, settles the step's.
+  store.putTask({ ...store.task(task.id), status: 'done' });
+  recordLibraryProposals(store, store.task(task.id), { artifacts: [] }, () => '', policy);
+  [proposal] = libraryOf(store, project).proposals;
+  assert.equal(proposal.state, 'approved', JSON.stringify(proposal));
+  assert.equal(proposal.decidedBy.revision, 4);
+  assert.equal(currentEntries(libraryOf(store, project))[0].name, 'Glossary');
+});
