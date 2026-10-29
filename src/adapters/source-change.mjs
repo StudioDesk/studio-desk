@@ -28,7 +28,7 @@ import {
 } from '../connectors/source-worktrees.mjs';
 import { runSourceSetup } from '../connectors/source-setup.mjs';
 import { candidateTestCommand, chosenTestSandbox, sandboxLabel, sandboxRecord } from './source-test-sandbox.mjs';
-import { builtInSandboxReady, noBuiltInSandbox } from './built-in-sandbox.mjs';
+import { builtInSandboxCommand, builtInSandboxReady, noBuiltInSandbox } from './built-in-sandbox.mjs';
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
 import { runInstallStep } from '../connectors/package-installs.mjs';
 import { git, installTimeoutMs, testTimeoutMs } from '../connectors/source-integration.mjs';
@@ -44,6 +44,12 @@ import {
 import { continuationFile, prepareSourceContinuation } from '../core/attempt-continuation.mjs';
 import { closeEmployeeTests, employeeTestsCommand, openEmployeeTests } from '../connectors/employee-tests.mjs';
 import { releaseTestTurn, takeTestTurn } from '../core/test-turn.mjs';
+import { notRunRecord, visualPlan } from '../connectors/visual-check.mjs';
+import { startCommand } from '../connectors/try-copy.mjs';
+import { fileURLToPath } from 'node:url';
+
+// The visual check's capture, as a process of its own (1.2 step 8).
+const visualCaptureRunner = fileURLToPath(new URL('./visual-capture-run.mjs', import.meta.url));
 
 const SCOPE =
   'Edit only the approved files under changes/, and create only the approved new files there. The controller owns source snapshots, candidate tests and integration. Live source, runtime records and editor tools are outside this attempt scope.';
@@ -619,7 +625,7 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
               'Accept this candidate as evidence, then approve its independent review. Integration requires passing measured checks, accepted review and a separate director action.',
           };
         },
-        { cwd: candidate, environment, resultOnFailure: true },
+        { cwd: candidate, environment, resultOnFailure: true, onComplete: result => visualStep(result, environment) },
       );
       // Every byte goes to test-output-full.txt as it arrives; the reports and reviews read the bounded text
       // (testOutput), so a growing suite still reports its totals.
@@ -631,6 +637,68 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
       entry.child.stderr.on('data', chunk => {
         stderr += chunk;
       });
+    };
+    // The visual check (1.2 step 8), once the candidate's build and tests passed and the story names pages its project
+    // checks: the capture runs as the next step's own process, and its images join the candidate's result.
+    const visualStep = (result, environment) => {
+      const plan = visualPlan(runtime.store, runtime.store.task(a.taskId), runtime);
+      if (!plan || result.checks.some(check => check.status === 'fail')) return runtime.finish(entry, result, null);
+      if (plan.notRun) {
+        const record = notRunRecord(plan, plan.notRun);
+        fs.writeFileSync(path.join(entry.output, 'visual-check.json'), JSON.stringify(record, null, 2));
+        return runtime.finish(entry, withVisual(entry, result, record), null);
+      }
+      const phase = runtime.startPhase(entry, 'visual'),
+        planFile = path.join(entry.job, 'visual-plan.json');
+      fs.writeFileSync(
+        planFile,
+        JSON.stringify({
+          root: candidate,
+          start: plan.start,
+          command: builtInSandboxCommand({ root: candidate, command: startCommand(plan.start) }),
+          place: 'built-in',
+          environment,
+          address: plan.address,
+          browser: plan.browser,
+          widths: plan.widths,
+          themes: plan.themes,
+          pages: plan.pages,
+          out: entry.output,
+          startTimeoutMs: runtime.visualStartTimeoutMs ?? 60000,
+          settleMs: runtime.visualSettleMs ?? 600,
+        }),
+      );
+      clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => {
+        entry.timedOut = true;
+        runtime.stop(a.id);
+      }, runtime.visualTimeoutMs ?? visualTimeoutMs);
+      runtime.store.event(
+        'visual_check',
+        a.taskId,
+        a.id,
+        `Capturing ${plan.pages.length} page${plan.pages.length === 1 ? '' : 's'} at ${plan.widths.join(' and ')} px in ${plan.themes.join(' and ')}, with ${plan.browser}.`,
+      );
+      const capture = runtime.visualCaptureCommand || { executable: process.execPath, args: [visualCaptureRunner] };
+      runtime.runNative(
+        entry,
+        capture.executable,
+        [...capture.args, planFile],
+        '',
+        () => readVisualRecord(entry, plan),
+        {
+          cwd: entry.output,
+          environment,
+          resultOnFailure: true,
+          onComplete: record => {
+            runtime.store.finishPhase(phase, record.state === 'captured' ? 'succeeded' : 'failed', {
+              images: record.images.length,
+              reason: record.reason || null,
+            });
+            runtime.finish(entry, withVisual(entry, result, record), null);
+          },
+        },
+      );
     };
     // The build, when the settings name one, as its own phase. A failing build still lets the tests run, so the
     // editor reads both at once; a build that changes the files the settings cover stops the attempt.
@@ -671,5 +739,43 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         });
     };
     runInstallStep(runtime, entry, candidate, installsPackages(profileOf(scope.source)), environment, buildStep);
+  };
+}
+
+// How long the visual check's capture may take: starting the candidate, then each page at each width and theme.
+const visualTimeoutMs = 10 * 60 * 1000;
+// The capture's record: what it wrote, or a failed record when it wrote nothing.
+function readVisualRecord(entry, plan) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(entry.output, 'visual-check.json'), 'utf8'));
+  } catch {
+    const record = { ...notRunRecord(plan, 'the capture ended without its record'), state: 'failed' };
+    fs.writeFileSync(path.join(entry.output, 'visual-check.json'), JSON.stringify(record, null, 2));
+    return record;
+  }
+}
+// The candidate's result with the visual check's record, its images and a check the review and the story read. A check
+// that did not run is not run, never a failure of the candidate: the reviewer judges what the images show.
+function withVisual(entry, result, record) {
+  const images = (record.images || []).filter(image => fs.existsSync(path.join(entry.output, image.path)));
+  const problems = images.filter(image => image.problem).length;
+  return {
+    ...result,
+    artifacts: [
+      ...result.artifacts,
+      { path: 'visual-check.json', kind: 'visual-check' },
+      ...images.map(image => ({ path: image.path, kind: 'visual-capture' })),
+    ],
+    checks: [
+      ...result.checks,
+      {
+        name: 'Visual check',
+        status: record.state === 'captured' && images.length ? 'pass' : 'not-run',
+        evidence:
+          record.state === 'captured' && images.length
+            ? `${images.length} image${images.length === 1 ? '' : 's'} with ${path.basename(record.browser || 'the browser')} at ${record.address}${problems ? `; ${problems} with a step or page problem, named in visual-check.json` : ''}.`
+            : `The visual check did not run: ${record.reason || 'nothing was captured'}.${record.note ? ` ${record.note}` : ''}`,
+      },
+    ],
   };
 }

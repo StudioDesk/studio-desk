@@ -75,6 +75,7 @@ import {
   tryStory,
   tryView,
 } from './connectors/try-copy.mjs';
+import { saveVisualSettings, setStoryPages, visualView } from './connectors/visual-check.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
@@ -554,6 +555,8 @@ export function createStudio({
         if (parts[3] === 'live') return json(res, liveRecords(store, projectId));
         // The project's try copy, its settings and where Run runs (1.2 step 7).
         if (parts[3] === 'try') return json(res, tryView(store, projectId, runner));
+        // The project's visual check: its settings, the browser found and whether it can run here (1.2 step 8).
+        if (parts[3] === 'visual-check') return json(res, visualView(store, projectId, runner));
         // A project's releases (1.1 step 6): its lines, milestones and their work, read from records and git alone.
         if (parts[3] === 'releases')
           try {
@@ -1080,6 +1083,15 @@ export function createStudio({
             return json(res, openTryFolder(store, projectId));
           } catch (error) {
             fail(error.message, error.status, error.confirm ? { confirm: error.confirm } : undefined);
+          }
+        }
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'visual-check' && !parts[4] && req.method === 'POST') {
+          if (parts[2] !== projectId) fail('Select this project before editing its settings.');
+          const { projectId: selected, ...settings } = data;
+          try {
+            return json(res, saveVisualSettings(store, projectId, settings, runner));
+          } catch (error) {
+            fail(error.message, error.status);
           }
         }
         // Deleting a project (v1.0 item 24): its name typed back confirms it.
@@ -1653,6 +1665,16 @@ export function createStudio({
             if (Object.keys(data).some(key => !['projectId', 'workerId'].includes(key)))
               fail('Unsupported owner fields.');
             return json(res, reassignProjectDraft(store, registries, t, data.workerId));
+          }
+          // A story's pages for the visual check (1.2 step 8): the director's change applies to the next check.
+          if (action === 'pages') {
+            if (Object.keys(data).some(key => !['projectId', 'pages'].includes(key)))
+              fail('A story takes only its pages.');
+            try {
+              return json(res, { pages: setStoryPages(store, t, data.pages) });
+            } catch (error) {
+              fail(error.message, error.status);
+            }
           }
           // Try it (1.2 step 7): the project's try copy moves to this story's candidate, at the director's click.
           if (action === 'try') {

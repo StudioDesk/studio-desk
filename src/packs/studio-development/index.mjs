@@ -44,6 +44,7 @@ import { projectMilestones } from '../../connectors/source-milestones.mjs';
 import { noteReleaseSuggestions } from '../../core/release-routing.mjs';
 import { projectSource, sourceResources, sourceRoot } from '../../connectors/source-projects.mjs';
 import { profileOf, recordedProfile, storyPathScope, studioDeskProfile } from '../../connectors/source-profile.mjs';
+import { visualSettings } from '../../connectors/visual-check.mjs';
 
 // How a story's scope and size are bounded, for the planners and editors that choose it (MP-016). The paths
 // follow the source profile the accepted check measured with, which is what the controller validates against.
@@ -167,6 +168,7 @@ const changeReviewContract = ({ legacy, requested }) =>
     'Return only source-change-review.json, kind source-change-review, in this shape. source repeats the candidate exactly as recorded: its taskId and attemptId, path source-change.json (the name of the file in the candidate, not the path of the copy under ../inputs), the SHA-256 of that file and the candidateHash in it. findings and notes are arrays of at most 20 plain strings each, never objects.',
     blockingRule,
     'Assess correctness and whether the edits meet the approved scope.',
+    'When the candidate\'s inputs include visual-check.json and its images (kind visual-capture), the controller started the candidate and captured the story\'s pages in a browser (1.2\'s visual check). Open each image file and compare it with the approved scope and acceptance, then return visual with one entry per image: {"image": the image\'s path as your inputs list it, "note": what it shows against the scope, at most 2000 characters, "verdict": "match" or "problem"}. A pass describes every image; a problem that keeps the change from meeting its scope is also a finding. When visual-check.json says the check did not run, say so in notes and review without images.',
     requested &&
       "When an entry of directorEdits in source-scope.json has requestedIn, the editor stopped and asked for the paths listed in added, giving the entry's reason, and approvedBy says who approved them; the autonomy policy approves such requests without the director. Check that each added path was needed to meet the approved scope and acceptance, and that its changes go no further than that: an added path the scope did not need, or changes in it beyond what the scope required, is a blocking finding.",
     'Failing tests require needs-work with explained findings. Do not claim integration, release or browser verification.',
@@ -229,6 +231,23 @@ function releaseLayers(store, task) {
         (release ? `This idea is for release ${release.version}${how}. ` : 'This idea has no release yet. ') +
         (list ? `The project's open milestones: ${list}. ` : '') +
         `Keep every story on ${release ? 'it' : "this idea's line"} and leave release out: only the director picks a release. If you think a story belongs on another release, you may give release (a version such as 1.1.3) and releaseReason; the controller keeps the story where it is and shows your suggestion to the director.`,
+    },
+  ];
+}
+// What a breakdown is told about the visual check (1.2 step 8) when its project turned it on: each story that changes
+// what a page shows names the pages to capture, with the steps that reach the state it changes.
+function visualLayers(store, task) {
+  let enabled = false;
+  try {
+    enabled = !!store && !!task && visualSettings(store, recordProject(task)).enabled;
+  } catch {
+    // A task type described without its project's records is told nothing new.
+  }
+  if (!enabled) return [];
+  return [
+    {
+      title: 'Pages to capture',
+      text: 'This project checks its pages: once a story\'s tests pass, the controller starts its candidate and captures the pages the story names in a browser, and the reviewer describes each image. Give each story that changes what a page shows pages: up to 10 entries of {"name": a short name, "path": the page\'s path on the app, starting with /, "steps": up to 10 of {"click": a button\'s or link\'s text}, {"type": text, "into": a field\'s label} or {"wait": text the page shows}}, reaching the state the story changes. Leave pages out of a story that changes no page. The director can change them before the check runs.',
     },
   ];
 }
@@ -480,8 +499,9 @@ export const studioDevelopmentPack = {
       // The project's repository's source resources (Studio desk's for a project without its own).
       requiredResources: [],
       resourcesFor: ({ task, store }) => sourceResources(store, task),
-      // Every edited or created file a story lists, plus the controller's six evidence files.
-      maxArtifacts: maxScopePaths + 6,
+      // Every edited or created file a story lists, plus the controller's six evidence files, and the visual check's
+      // record with up to 60 images (ten pages at three widths in two themes, 1.2 step 8).
+      maxArtifacts: maxScopePaths + 6 + 61,
       attemptFields: ['sourceChange'],
       acceptFailedChecks: true,
       standaloneReport: true,
@@ -743,6 +763,7 @@ export const studioDevelopmentPack = {
               ' A story may list under newFiles a file its prerequisite story creates; once that story is integrated, the file is edited like any other. Only studio-development:change is allowed. No extra fields, commands, resources, maxSeconds or maxAttempts. Controller budgets and graph/roster/catalog/source checks apply to the entire breakdown before intake. Stage intent only; never approve or execute it. The controller runs linked stories after their prerequisites are integrated, and up to two source stories on a line at once, merging a conflict between them onto the current source; a story may build on files any integrated story changed. Other overlapping stale scope needs fresh measured evidence.',
           },
           ...releaseLayers(store, task),
+          ...visualLayers(store, task),
         ],
       }),
       // The planner's suggestions on releases (1.1 step 2b), noted for the director; nothing moves.

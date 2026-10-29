@@ -24,14 +24,13 @@ import { installKey, npmCli } from './package-installs.mjs';
 import { installsPackages, maxBuildArguments } from './source-profile.mjs';
 import { projectSource } from './source-projects.mjs';
 import { worktreeRepository } from './source-worktrees.mjs';
+import { addressIn, localAddress } from './page-capture.mjs';
 
+export { addressIn };
 export const tryRunPlaces = ['built-in', 'computer'];
 // How much of a Run's output the copy keeps: enough to read a server's start and its errors.
 export const tryOutputBytes = 1024 * 1024;
 const programName = /^[a-zA-Z0-9_-][a-zA-Z0-9_.-]*$/;
-// A local address the app printed: only this computer's, which Open may offer.
-const localAddress = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(?::\d{1,5})?(?:\/[^\s'"<>`]*)?/i;
-const colors = /\x1b\[[0-9;?]*[A-Za-z]/g;
 
 const failure = (message, status = 400, fields = {}) => Object.assign(new Error(message), { status, ...fields });
 const settingId = projectId => `try:${projectId}`;
@@ -273,12 +272,6 @@ export function startCommand(start) {
   if (program === 'npx')
     return { executable: process.execPath, args: [path.join(path.dirname(npmCli(purpose)), 'npx-cli.js'), ...args] };
   return { executable: program, args };
-}
-
-// The first address on this computer an app printed; 0.0.0.0 opens as localhost.
-export function addressIn(text) {
-  const found = localAddress.exec(String(text).replace(colors, ''))?.[0];
-  return found ? found.replace('0.0.0.0', 'localhost').replace(/[.,;:)\]]+$/, '') : null;
 }
 
 const outputFile = (store, projectId) => path.join(store.directory, 'try', projectId, 'output.txt');

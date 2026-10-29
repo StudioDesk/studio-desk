@@ -10,6 +10,7 @@ import { isRoleId } from '../core/staffing.mjs';
 import { readContinuation } from '../core/attempt-continuation.mjs';
 import { sourcePlan, testsSentence, validateCheckReport } from './source-checks.mjs';
 import { profileOf, recordedProfile, storyPathAllowed, storyPathRule, studioDeskProfile } from './source-profile.mjs';
+import { reviewedImages, reviewVisualProblems, validateStoryPages } from './story-pages.mjs';
 import { sourceResources, sourceRoot, studioDeskSourceResources } from './source-projects.mjs';
 import { sourceDiffFormat, sourceDiffLimit, verifySourceDiff } from './source-diff.mjs';
 import { codexSandboxRecord, sandboxRecord, testSandboxOf } from '../adapters/source-test-sandbox.mjs';
@@ -150,9 +151,12 @@ export function validateBreakdown(plan, source) {
         'deleteFiles',
         'release',
         'releaseReason',
+        'pages',
       ],
       'Breakdown story',
     );
+    // The pages an interface story's visual check captures (1.2 step 8): the planner proposes them from its spec.
+    if (story.pages !== undefined) validateStoryPages(story.pages, `Story ${story.key}: pages`);
     // The release a story belongs on (1.1 step 2b), as a version, with why; the controller decides what it does.
     if (
       story.release !== undefined &&
@@ -842,19 +846,19 @@ export function sourceStoryClosed(task, reason) {
   if (task.kind !== 'studio-development:change' || !task.sourceStage) return;
   Object.assign(task.sourceStage, { current: 'closed', reason });
 }
-// The paths the story's accepted breakdown story or review proposal listed.
-function proposedPaths(store, task) {
+// The story's accepted breakdown story or review proposal, as it was accepted.
+export function proposedStory(store, task) {
   const reference = task.proposalReference,
     attempt = store.attempt(reference.attemptId),
     bytes = fs.readFileSync(artifactPath(store, attempt, reference.path));
   if (hash(bytes) !== reference.hash) throw new Error('The accepted proposal changed after it was accepted.');
   const report = JSON.parse(bytes);
-  return scopePaths(
-    reference.path === 'source-breakdown.json'
-      ? report.stories.find(story => story.key === reference.key)
-      : report.proposal,
-  );
+  return reference.path === 'source-breakdown.json'
+    ? report.stories.find(story => story.key === reference.key)
+    : report.proposal;
 }
+// The paths the story's accepted breakdown story or review proposal listed.
+const proposedPaths = (store, task) => scopePaths(proposedStory(store, task));
 const pathLists = ['files', 'newFiles', 'deleteFiles'],
   pathLabels = { files: 'Files', newFiles: 'New files', deleteFiles: 'Delete' },
   maxScopeEdits = 20;
@@ -1410,6 +1414,22 @@ export function validateSourceChange(attempt, read, result = attempt.result) {
     if (!equal(JSON.parse(read('source-scope.json')), scopeDocument(scope)))
       throw new Error('The approved source scope does not match the recorded proposal.');
   }
+  // The visual check's record and its images (1.2 step 8), when the story's pages were checked: only images the record
+  // names, under visual/.
+  if (attempt.artifacts.some(item => item.path === 'visual-check.json')) {
+    paths.push('visual-check.json');
+    const record = JSON.parse(read('visual-check.json')),
+      captured = attempt.artifacts.filter(item => item.kind === 'visual-capture').map(item => item.path);
+    if (
+      record?.schemaVersion !== 'visual-check-v1' ||
+      !Array.isArray(record.images) ||
+      !captured.every(
+        file => /^visual\/[a-z0-9-]+\.png$/.test(file) && record.images.some(image => image?.path === file),
+      )
+    )
+      throw new Error('The visual check record does not match its images.');
+    paths.push(...captured);
+  }
   if (!equal(attempt.artifacts.map(item => item.path).sort(), paths.sort()))
     throw new Error('Unexpected source change artifacts.');
   return { manifest, report };
@@ -1836,6 +1856,8 @@ export function validateChangeReview(attempt, read) {
     !['Browser layout', 'Engine integration', 'Playtest'].every(name => report.unperformedChecks.includes(name))
   )
     problems.push('unperformedChecks must include Browser layout, Engine integration and Playtest');
+  // The reviewer must look (1.2 step 8): a candidate with captured pages is described image by image.
+  problems.push(...reviewVisualProblems(report, reviewedImages(attempt)));
   if (problems.length)
     throw new Error(
       `Candidate review must assess the exact candidate and label unperformed checks: ${problems.join('; ')}.`,
