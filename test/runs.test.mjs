@@ -736,6 +736,23 @@ test('task explanations distinguish director decisions from passive stops and wa
       /free/i,
     ],
     [
+      // October 29: a story whose tests failed on a file it then asked for, the request approved, queued for its turn
+      // on the line, showed as the director's call with Start assignment.
+      'queued after failed checks',
+      {
+        status: 'blocked',
+        queued: true,
+        controllerWait: true,
+        reason: 'Waiting for T-other to be integrated: source stories on main run two at a time.',
+      },
+      { status: 'blocked', result: { outcome: 'blocked', checks: [{ name: 'Dashboard tests', status: 'fail' }] } },
+      {},
+      'resource-wait',
+      null,
+      /source stories on main run two at a time/,
+      /controller starts/i,
+    ],
+    [
       // An agent at work elsewhere, or a lease on it left from before, is no wait (MP-033).
       'agent at work elsewhere',
       { queued: true },

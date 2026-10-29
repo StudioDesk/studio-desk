@@ -1059,7 +1059,9 @@
       );
     const retryLimit = policy.enabled && (policy.retries || 0) > 0 && retryUsed >= policy.retries,
       retryAllowance = retryLimit ? 'The automatic retry allowance is used. ' : '';
-    if (failed.length && ['review', 'failed', 'blocked'].includes(task.status))
+    // Failed checks are the director's call only while the work is stopped or in review. Work the controller holds in
+    // a queue (a story waiting its turn on its line after an approved file request, say) is a wait, below.
+    if (failed.length && (stopped || task.status === 'review'))
       return result(
         'failed-checks',
         `The attempt did not pass: ${failed.map(c => c.name).join(', ')}.`,
