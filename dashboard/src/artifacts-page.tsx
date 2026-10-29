@@ -1,7 +1,7 @@
 // Artifacts (1.2 step 6): every file the project's accepted work handed back, newest first, each with its kind, the
 // agent who made it, the idea it came from, when it was accepted and Open, which opens the file in a new tab. Filters
 // for idea, agent and kind narrow the list, and each file can be added to the project's library, which sits at the top,
-// above the files.
+// above the files, after the files agents proposed for it.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { artifactsUrl, getJSON, type ProjectArtifact } from './api';
@@ -9,6 +9,7 @@ import { artifactRows, choices, facets, matching, type ArtifactFilter, type Face
 import { artifactUrl } from './files';
 import { Heading } from './layout';
 import { AddToLibrary, Library } from './library';
+import { LibraryProposals } from './library-proposals';
 import { useStudio } from './records';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { when } from './today';
@@ -44,10 +45,12 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
       }),
     [stream, client, projectId],
   );
-  // The library stays pinned at the top whatever the listing's state, and names its accepted files' stories from it.
+  // Agents' proposals and the library stay pinned at the top whatever the listing's state, and name their accepted
+  // files' stories from it.
   const top = (
     <>
       <Heading title="Artifacts" lead="Every file the project's accepted work handed back, newest first." />
+      <LibraryProposals projectId={projectId} names={{ files: data, records: state }} />
       <Library projectId={projectId} names={{ files: data, records: state }} />
     </>
   );

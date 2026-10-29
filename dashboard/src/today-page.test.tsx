@@ -6,7 +6,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary, CommandRecords, Task } from './api';
+import type { AttemptSummary, CommandRecords, LibraryProposal, Task } from './api';
 import { App } from './app';
 import type { Answer, Question } from './questions';
 import { createAppRouter } from './router';
@@ -978,4 +978,91 @@ test('Cancel closes the Answer box in the fold without sending anything', async 
   await user.click(running.getByRole('button', { name: 'Cancel' }));
   expect(running.queryByRole('form', { name: 'Answer Eli' })).toBeNull();
   expect(posted()).toEqual([]);
+});
+
+// Agents' library proposals the autonomy policy decided (1.2 step 6), on the day the clock reads: noon on October 28,
+// local time, so an hour or two before is today and a day before is an earlier day.
+const noon = new Date(2026, 9, 28, 12).getTime(),
+  hoursBefore = (hours: number) => new Date(noon - hours * 60 * minute).toISOString(),
+  byPolicy = { type: 'policy', revision: 3 };
+const libraryProposal = (id: string, name: string, extra: Partial<LibraryProposal> = {}): LibraryProposal => ({
+  id,
+  name,
+  purpose: `What ${name} is for.`,
+  path: 'notes/file.md',
+  from: { taskId: 'T-1', attemptId: 'attempt-1', path: 'notes/file.md' },
+  proposedBy: 'W-1',
+  at: hoursBefore(30),
+  state: 'waiting',
+  ...extra,
+});
+const approved = (id: string, name: string, hours: number, by: { type: string; revision?: number }) =>
+  libraryProposal(id, name, { state: 'approved', entryId: `lib-${id}`, decidedAt: hoursBefore(hours), decidedBy: by });
+const libraryRead = '/api/projects/project-x/library';
+
+test('Today names a file the autonomy policy added to the library today, with the way to the Artifacts page', async () => {
+  fakeClock(noon);
+  controller.library = {
+    entries: [],
+    proposals: [
+      approved('libprop-1', 'Brand guide', 2, byPolicy),
+      approved('libprop-2', 'Launch copy', 1, { type: 'director' }),
+      approved('libprop-3', 'Old palette', 24, byPolicy),
+      libraryProposal('libprop-4', 'Voice notes'),
+      libraryProposal('libprop-5', 'Launch video', {
+        state: 'refused',
+        problem: 'A library file is at most 5 MiB.',
+        decidedAt: hoursBefore(1),
+        decidedBy: byPolicy,
+      }),
+    ],
+  };
+  open();
+  await calls();
+  await waitFor(() => expect(fold()).toBeTruthy());
+  const moving = fold()!;
+  expect(moving.querySelector('summary .sd-chip')?.textContent).toBe('1');
+  expect(
+    within(moving)
+      .getAllByRole('listitem')
+      .map(item => item.textContent),
+  ).toEqual(['The autonomy policy added Brand guide to the library.']);
+  expect(within(moving).getByRole('link', { name: 'Brand guide' }).getAttribute('href')).toBe('/p/project-x/artifacts');
+  // The New idea box and the fold read the same library once.
+  expect(controller.reads().filter(url => url === libraryRead)).toHaveLength(1);
+});
+
+test('Today says nothing of a file the director added or one the policy added on an earlier day', async () => {
+  fakeClock(noon);
+  controller.library = {
+    entries: [],
+    proposals: [
+      approved('libprop-2', 'Launch copy', 1, { type: 'director' }),
+      approved('libprop-3', 'Old palette', 24, byPolicy),
+    ],
+  };
+  open();
+  await calls();
+  await waitFor(() => expect(controller.reads()).toContain(libraryRead));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(fold()).toBeNull();
+  expect(screen.queryByText(/The autonomy policy added/)).toBeNull();
+});
+
+test('a file the autonomy policy adds while Today is open joins the fold when the controller records it', async () => {
+  fakeClock(noon);
+  open();
+  await calls();
+  await waitFor(() => expect(controller.reads()).toContain(libraryRead));
+  expect(fold()).toBeNull();
+  controller.library = { entries: [], proposals: [approved('libprop-1', 'Brand guide', 0, byPolicy)] };
+  latest().emit('change', {
+    version: 2,
+    start: 'start-a',
+    changes: [{ seq: 2, type: 'event', id: 7, kind: 'library_decided', projectId: 'project-x' }],
+  });
+  await waitFor(() => expect(fold()).toBeTruthy());
+  expect(within(fold()!).getByRole('link', { name: 'Brand guide' }).getAttribute('href')).toBe(
+    '/p/project-x/artifacts',
+  );
 });

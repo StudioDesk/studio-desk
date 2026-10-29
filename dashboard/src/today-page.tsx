@@ -13,6 +13,7 @@ import { Icon } from './design/icons';
 import { agentState } from './faces';
 import { projectColor } from './frame';
 import { CycleWarning } from './home-page';
+import { policyAddedToday, useLibraryIndex } from './library-proposals';
 import { workerName } from './names';
 import { NoteDialog, overReview } from './note-dialog';
 import { AnswerBox, QuestionCard } from './question-card';
@@ -1246,7 +1247,8 @@ function AutoAnswer({
 
 // What moves without the director: folded under the calls. Work a call already lists (a usage hold's waiting work,
 // a cleanup's steps) waits on that call, so it is not here. Auto mode's answers the director may still change are here
-// too, each in place of its work's own line, even when nothing else moves.
+// too, each in place of its work's own line, even when nothing else moves, and so is each file the autonomy policy
+// added to the library today from an agent's proposal, with the way to the Artifacts page.
 function Moving({
   projectId,
   state,
@@ -1258,7 +1260,8 @@ function Moving({
   items: HomeItem[];
   calls: HomeItem[];
 }) {
-  const listed = new Set(calls.flatMap(call => (isHold(call) || isCleanup(call) ? call.taskIds : []))),
+  const added = policyAddedToday(useLibraryIndex(projectId).data),
+    listed = new Set(calls.flatMap(call => (isHold(call) || isCleanup(call) ? call.taskIds : []))),
     answers = state.tasks.flatMap(task => {
       const answer = changeableAnswer(task),
         asking =
@@ -1270,7 +1273,7 @@ function Moving({
       (item): item is NeedsItem & { run?: RunStory } =>
         !isHold(item) && !isCleanup(item) && !listed.has(item.taskId) && !answered.has(item.taskId),
     ),
-    count = answers.length + waits.length;
+    count = answers.length + waits.length + added.length;
   if (!count) return null;
   return (
     <details className="sd-fold">
@@ -1300,6 +1303,17 @@ function Moving({
               {state.tasks.find(task => task.id === item.taskId)?.title ?? item.taskId}
             </Link>
             <span className="sd-meta">{item.next.replace(/^Nothing is needed from you\.\s*/, '')}</span>
+          </li>
+        ))}
+        {added.map(proposal => (
+          <li key={proposal.id}>
+            <span>
+              The autonomy policy added{' '}
+              <Link to="/p/$projectId/artifacts" params={{ projectId }}>
+                {proposal.name}
+              </Link>{' '}
+              to the library.
+            </span>
           </li>
         ))}
       </ul>
