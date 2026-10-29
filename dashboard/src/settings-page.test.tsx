@@ -655,7 +655,9 @@ test('a new team takes an agent the studio already has, and an agent taken out o
 test('Add an agent opens the teams to edit, Cancel leaves them as they were, and a team page opens them too', async () => {
   const user = userEvent.setup();
   const router = open('/p/project-x/agents/W-1');
-  await user.click(await screen.findByRole('link', { name: 'Add an agent' }));
+  // Add an agent sits at the top of the flow.
+  const flow = within(await screen.findByRole('region', { name: 'Agents' }));
+  await user.click(flow.getByRole('link', { name: 'Add an agent' }));
   expect(await screen.findByRole('form', { name: 'Edit the teams' })).toBeTruthy();
   expect(router.state.location.search).toEqual({ edit: true });
   await user.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -673,9 +675,10 @@ test("an agent's page saves how it runs for future runs and reads only that agen
   const user = userEvent.setup();
   open('/p/project-x/agents/W-1');
   expect(await screen.findByRole('heading', { level: 2, name: 'Eli' })).toBeTruthy();
-  // The agents are listed beside the one chosen.
-  const list = within(screen.getByRole('navigation', { name: 'Agents' }));
-  expect(list.getByRole('link', { name: /Eli/ }).getAttribute('aria-current')).toBe('page');
+  // The flow of the project's teams and their agents sits beside the one chosen, its card current.
+  const flow = within(screen.getByRole('list', { name: 'How the work flows' }));
+  const team = within(flow.getByRole('region', { name: 'Engineering' }));
+  expect(team.getByRole('link', { name: /^Eli/ }).getAttribute('aria-current')).toBe('page');
   await waitFor(() => expect(screen.getByText('Delivered lately')).toBeTruthy());
   expect(controller.reads()).toContain('/api/projects/project-x/settled?kind=accepted&limit=12&workerId=W-1');
   await user.click(screen.getByRole('button', { name: 'Change how Eli runs' }));
