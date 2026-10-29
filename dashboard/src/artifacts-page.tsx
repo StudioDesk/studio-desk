@@ -1,16 +1,19 @@
 // Artifacts (1.2 step 6): every file the project's accepted work handed back, newest first, each with its kind, the
 // agent who made it, the idea it came from, when it was accepted and Open, which opens the file in a new tab. Filters
 // for idea, agent and kind narrow the list, and each file can be added to the project's library, which sits at the top,
-// above the files, after the files agents proposed for it.
+// above the files, after the files agents proposed for it. A project that is not code names sets of the files as
+// snapshots below them; a code project has Releases instead.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { artifactsUrl, getJSON, type ProjectArtifact } from './api';
 import { artifactRows, choices, facets, matching, type ArtifactFilter, type Facet } from './artifacts';
 import { artifactUrl } from './files';
+import { isCodeProject } from './frame';
 import { Heading } from './layout';
 import { AddToLibrary, Library } from './library';
 import { LibraryProposals } from './library-proposals';
 import { useStudio } from './records';
+import { Snapshots } from './snapshots';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { when } from './today';
 
@@ -22,7 +25,7 @@ const filterWords: Record<Facet, { label: string; every: string }> = {
 const files = (count: number) => `${count} file${count === 1 ? '' : 's'}`;
 
 export function ArtifactsPage({ projectId }: { projectId: string }) {
-  const { state, error: recordsError } = useStudio(projectId),
+  const { state, error: recordsError, shell } = useStudio(projectId),
     stream = useLiveStream(),
     client = useQueryClient(),
     [filter, setFilter] = useState<ArtifactFilter>({}),
@@ -174,6 +177,7 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
           </>
         )}
       </section>
+      {shell && !isCodeProject(shell) && <Snapshots projectId={projectId} files={data} />}
       <AddToLibrary projectId={projectId} file={adding} onClose={() => setAdding(null)} />
     </>
   );
