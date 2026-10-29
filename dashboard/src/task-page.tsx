@@ -31,7 +31,7 @@ import { diffStatOf, effortWords, plural, reviewOf, sandboxed, spoken, testTime,
 import { cleanExecution, ExecutionFields } from './execution-fields';
 import { isCodeProject } from './frame';
 import { workerName } from './names';
-import { PagesPanel } from './pages-panel';
+import { PagesPanel, PagesTile } from './pages-panel';
 import { CommandRequest, TaskAutoMode } from './permissions';
 import { AnswerBox, QuestionCard } from './question-card';
 import { changeableAnswer, exchange, waitingQuestion, type Answer, type Exchange } from './questions';
@@ -553,6 +553,7 @@ function Story({
           studio={studio}
           looks={looks}
           tryable={tryable}
+          pages={pagesShown}
           onShow={setPicked}
           onReview={() => showChapter(people.review?.id)}
         />
@@ -812,13 +813,15 @@ function AutoAnswer({
 }
 
 // The change and its tests, each opening its tab, and its review, which opens the review's chapter in Activity; once
-// its tests passed, whether the director tried it, which opens Try it.
+// its tests passed, whether the director tried it, which opens Try it; and while the story shows its Pages tab, what
+// its visual check captured, which opens Pages.
 function Tiles({
   projectId,
   task,
   studio,
   looks,
   tryable,
+  pages,
   onShow,
   onReview,
 }: {
@@ -827,6 +830,7 @@ function Tiles({
   studio: StudioState;
   looks: Map<string, AgentLook>;
   tryable: boolean;
+  pages: boolean;
   onShow: (tab: TabId) => void;
   onReview: () => void;
 }) {
@@ -934,6 +938,7 @@ function Tiles({
         </span>
       </button>
       {tryable && <TriedTile projectId={projectId} taskId={task.id} onShow={() => onShow('try')} />}
+      {pages && <PagesTile projectId={projectId} task={task} studio={studio} onShow={() => onShow('pages')} />}
     </div>
   );
 }

@@ -2,15 +2,39 @@
 // (visual-check.ts): the pages its next check captures, each with its path and its steps in words, whether they were
 // planned with the story or changed by the director, and while they may still change, Add a page and Edit. The
 // controller checks and saves the pages (src/connectors/story-pages.mjs) for the next check; only the director's Save
-// or Remove this page sends anything.
+// or Remove this page sends anything. Below them, what the check of the story's candidate captured, from its recorded
+// visual-check.json, with the review's note on each image, or why nothing was; and The pages tile, which opens the tab.
 import { Link } from '@tanstack/react-router';
 import { useId, useState } from 'react';
-import type { StoryPage, StoryPageStep, Task } from './api';
+import type {
+  AttemptSummary,
+  StoryPage,
+  StoryPageStep,
+  Task,
+  VisualCheckRecord,
+  VisualImage,
+  VisualNote,
+  VisualTheme,
+} from './api';
 import { Dialog } from './design/dialog';
+import { plural } from './evidence';
+import { FileDialog, Preview } from './files';
 import { storyPeople } from './story';
 import type { StudioState } from './studio-runs';
 import { useToast } from './toast';
-import { stepText, useSavePages, useStoryPages, useVisualView } from './visual-check';
+import {
+  browserName,
+  imagesByPage,
+  noBrowser,
+  notesByImage,
+  stepText,
+  useSavePages,
+  useStoryPages,
+  useVisualNotes,
+  useVisualRecord,
+  useVisualView,
+  widthLabel,
+} from './visual-check';
 
 // The most pages a story names, and steps a page takes, as the controller checks them (story-pages.mjs).
 const maxPages = 10,
@@ -163,8 +187,7 @@ export function PagesPanel({ projectId, task, studio }: { projectId: string; tas
           )
         )}
       </section>
-      {/* The pages' images: what the candidate's check captured, by page, with the reviewer's notes (the
-          pages-images story), go here, below This story's pages. */}
+      <Captured projectId={projectId} task={task} studio={studio} />
       <Dialog
         open={!!editing}
         label={editing?.page ? `Edit ${editing.page.name}` : 'Add a page'}
@@ -359,5 +382,244 @@ function PageForm({
         </button>
       </div>
     </form>
+  );
+}
+
+const themeNames: Record<VisualTheme, string> = { light: 'Light', dark: 'Dark' };
+const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+// A recorded reason as the end of a sentence, with one full stop.
+const stop = (text: string) => (/[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`);
+
+// The tile's value and the line under it: how many images the check took and with which browser, or that it did not
+// run, failed or has not run yet.
+function tileWords(record: VisualCheckRecord | undefined): [string, string | null] {
+  if (!record) return ['Not yet', null];
+  if (noBrowser(record)) return ['Not run', 'No browser found'];
+  if (record.state !== 'captured')
+    return [record.state === 'failed' ? 'Failed' : 'Not run', record.reason ? capital(record.reason) : null];
+  const count = record.images.length;
+  return [`${count} ${plural(count, 'image')}`, record.browser ? `with ${browserName(record.browser)}` : null];
+}
+
+// The pages tile, beside Tried by you while the story shows its Pages tab, which it opens: the check of the story's
+// candidate, else its build, as its recorded visual-check.json says.
+export function PagesTile({
+  projectId,
+  task,
+  studio,
+  onShow,
+}: {
+  projectId: string;
+  task: Task;
+  studio: StudioState;
+  onShow: () => void;
+}) {
+  const { candidate, build } = storyPeople(task, studio),
+    [value, line] = tileWords(useVisualRecord(projectId, candidate ?? build).data);
+  return (
+    <button type="button" className="sd-tile sd-tile--raised" onClick={onShow}>
+      <span className="sd-eyebrow">
+        <span className="sd-wide-only">The pages</span>
+        <span className="sd-narrow-only">Pages</span>
+      </span>
+      <b className="sd-tile__value sd-tile__value--lg">{value}</b>
+      {line && <span className="sd-meta">{line}</span>}
+    </button>
+  );
+}
+
+// What the check of the story's candidate, else its build, captured, from its recorded visual-check.json, with the
+// note the story's review gave each image: the images by page, or why there are none. A check that failed part way
+// shows the images it took before it stopped, which the review received.
+function Captured({ projectId, task, studio }: { projectId: string; task: Task; studio: StudioState }) {
+  const title = useId(),
+    { candidate, build, review, reviewer } = storyPeople(task, studio),
+    built = candidate ?? build,
+    record = useVisualRecord(projectId, built),
+    notes = useVisualNotes(projectId, review),
+    data = record.data,
+    count = data?.images.length ?? 0,
+    // Without images, the reviewer judges the change from its files alone.
+    without = `${capital(reviewer)} ${review?.finishedAt ? 'reviewed' : 'reviews'} it without images.`,
+    matched = data ? notesByImage(data.images, notes.data ?? []) : new Map<string, VisualNote>();
+  return (
+    <section aria-labelledby={title} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-12)' }}>
+      <span className="sd-eyebrow" id={title}>
+        What the check captured
+      </span>
+      {record.error ? (
+        <p role="alert" style={{ margin: 0 }}>
+          The check&apos;s record could not be read: {record.error.message}
+        </p>
+      ) : record.isLoading ? (
+        <p role="status" className="sd-meta" style={{ margin: 0 }}>
+          Reading what the check captured…
+        </p>
+      ) : !data || !built ? (
+        <p className="sd-meta" style={{ margin: 0 }}>
+          The pages are captured after the candidate&apos;s tests pass, when the project&apos;s check is on.
+        </p>
+      ) : noBrowser(data) ? (
+        <p style={{ margin: 0, color: 'var(--ink-2)' }}>
+          The check did not run because no Chromium-based browser was found on this computer. {without} Installing
+          Microsoft Edge or Google Chrome lets {reviewer} see the pages;{' '}
+          <Link className="sd-link" to="/p/$projectId/settings" params={{ projectId }} hash="visual-check">
+            Settings → Visual check
+          </Link>{' '}
+          shows the browser it finds.
+        </p>
+      ) : (
+        <>
+          <p style={{ margin: 0, color: 'var(--ink-2)' }}>
+            {data.state === 'captured'
+              ? `${count} ${plural(count, 'image')}${data.browser ? ` with ${browserName(data.browser)}` : ''}.`
+              : `The check ${data.state === 'failed' ? 'failed' : 'did not run'}${data.reason ? `: ${stop(data.reason)}` : '.'}${count ? '' : ` ${without}`}`}
+          </p>
+          {notes.error && (
+            <p role="alert" style={{ margin: 0 }}>
+              The review&apos;s notes could not be read: {notes.error.message}
+            </p>
+          )}
+          {(data.state === 'captured' || count > 0) &&
+            imagesByPage(data).map(group => (
+              <PageShots
+                key={group.name}
+                projectId={projectId}
+                attempt={built}
+                name={group.name}
+                path={group.path}
+                images={group.images}
+                notes={matched}
+              />
+            ))}
+        </>
+      )}
+    </section>
+  );
+}
+
+// One page's images under its name and path.
+function PageShots({
+  projectId,
+  attempt,
+  name,
+  path,
+  images,
+  notes,
+}: {
+  projectId: string;
+  attempt: AttemptSummary;
+  name: string;
+  path: string;
+  images: VisualImage[];
+  notes: Map<string, VisualNote>;
+}) {
+  const heading = useId();
+  return (
+    <section aria-labelledby={heading} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+      <h3
+        style={{
+          margin: 0,
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 'var(--space-8)',
+          alignItems: 'center',
+          font: '700 15px/1.3 var(--font-sans)',
+        }}
+      >
+        <span id={heading}>{name}</span>
+        <span className="sd-file sd-file--path">{path}</span>
+      </h3>
+      {images.length ? (
+        <ul
+          style={{
+            listStyle: 'none',
+            margin: 0,
+            padding: 0,
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+            gap: 'var(--space-14)',
+          }}
+        >
+          {images.map(image => (
+            <Shot key={image.path} projectId={projectId} attempt={attempt} image={image} note={notes.get(image.path)} />
+          ))}
+        </ul>
+      ) : (
+        <span className="sd-meta">No image of this page was taken.</span>
+      )}
+    </section>
+  );
+}
+
+// An image by its width and theme, opening over the page, with the review's note and mark, and what went wrong as it
+// was taken: a step that found nothing or a page that did not open, or a page too long to keep whole.
+function Shot({
+  projectId,
+  attempt,
+  image,
+  note,
+}: {
+  projectId: string;
+  attempt: AttemptSummary;
+  image: VisualImage;
+  note?: VisualNote;
+}) {
+  const [open, setOpen] = useState(false),
+    item = attempt.artifacts?.find(file => file.path === image.path),
+    label = `${widthLabel(image.width)} · ${themeNames[image.theme] ?? image.theme}`;
+  return (
+    <li>
+      <figure className="sd-picture" style={{ margin: 0 }} aria-label={label}>
+        {item ? (
+          <button
+            type="button"
+            className="sd-picture__frame"
+            aria-label={`View ${image.page}, ${label}`}
+            onClick={() => setOpen(true)}
+          >
+            <Preview projectId={projectId} attemptId={attempt.id} item={item} />
+            <span className="sd-picture__expand" aria-hidden="true">
+              ↗
+            </span>
+          </button>
+        ) : (
+          <div className="sd-picture__frame sd-picture__frame--still">
+            <span className="sd-picture__pending">No image was saved.</span>
+          </div>
+        )}
+        <figcaption style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+          <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)', alignItems: 'center' }}>
+            <b>{label}</b>
+            {note && (
+              <span className={`sd-chip sd-chip--${note.verdict === 'match' ? 'ok' : 'bad'}`}>
+                <span className="sd-chip__dot"></span>
+                {note.verdict === 'match' ? 'Match' : 'Problem'}
+              </span>
+            )}
+          </span>
+          {note ? (
+            <span>{note.note}</span>
+          ) : (
+            <span className="sd-meta">The review has not described this image yet.</span>
+          )}
+          {image.problem && <span style={{ color: 'var(--bad)' }}>Taken with a problem: {stop(image.problem)}</span>}
+          {image.trimmed && (
+            <span className="sd-meta">
+              Trimmed: the whole page made too large an image, so only its first screen was kept.
+            </span>
+          )}
+        </figcaption>
+      </figure>
+      {item && (
+        <FileDialog
+          projectId={projectId}
+          attemptId={attempt.id}
+          item={item}
+          open={open}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </li>
   );
 }

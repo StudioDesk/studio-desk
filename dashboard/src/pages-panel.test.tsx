@@ -2,13 +2,14 @@
 // and the project's visual check view as the stand-in controller serves them: each page's name, path and steps in
 // words, whether they were planned with the story or changed by the director, and while they may still change, Add a
 // page and Edit, which send the whole list to the controller. A story with no pages, no capture and the check off
-// keeps its tabs. Model-free.
+// keeps its tabs. Below them, what the check of the story's candidate captured, from its recorded visual-check.json,
+// with the review's note on each image, or why nothing was, and The pages tile, which opens the tab. Model-free.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { StoryPage, StoryPagesView } from './api';
+import type { StoryPage, StoryPagesView, VisualCheckRecord, VisualImage, VisualNote, VisualTheme } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
@@ -338,4 +339,235 @@ test('with the check off the tab says so and links to Settings → Visual check'
     "The project's visual check is off, so nothing is captured until it is on in Settings → Visual check.",
   );
   expect(pageRow(panel, 'Board').getByText('No steps: captured as it opens.')).toBeTruthy();
+});
+
+// The candidate's check: its record and each image among its artifacts, as the controller lists them, and the review,
+// finished, describing images by their copies among its inputs.
+const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const shot = (
+  number: number,
+  page: StoryPage,
+  width: number,
+  theme: VisualTheme,
+  fields: Partial<VisualImage> = {},
+): VisualImage => ({
+  path: `visual/${String(number).padStart(2, '0')}-${page.name.toLowerCase()}-${width}-${theme}.png`,
+  page: page.name,
+  pagePath: page.path,
+  width,
+  theme,
+  height: 900,
+  ...fields,
+});
+const shots: VisualImage[] = [
+  shot(1, board, 1440, 'light'),
+  shot(2, board, 390, 'dark'),
+  shot(3, settings, 1440, 'dark', { problem: 'nothing to click shows "Visual check"' }),
+  shot(4, settings, 390, 'light', { trimmed: true }),
+];
+function recorded(fields: Partial<VisualCheckRecord> = {}) {
+  const record: VisualCheckRecord = {
+    schemaVersion: 'visual-check-v1',
+    state: 'captured',
+    browser: edge,
+    widths: [1440, 390],
+    themes: ['light', 'dark'],
+    pages: [board, settings],
+    address: 'http://localhost:5173/',
+    images: shots,
+    ...fields,
+  };
+  controller.artifacts['attempt-build/visual-check.json'] = JSON.stringify(record);
+  for (const image of record.images) controller.artifacts[`attempt-build/${image.path}`] = 'png';
+  controller.attempts[0]!.artifacts = [
+    { path: 'visual-check.json', hash: 'record-hash', kind: 'visual-check' },
+    ...record.images.map(image => ({ path: image.path, hash: `${image.path}-hash`, kind: 'visual-capture' })),
+  ];
+}
+function reviewed(visual: VisualNote[]) {
+  controller.attempts[1] = {
+    ...controller.attempts[1]!,
+    status: 'accepted',
+    finishedAt: '2026-10-29T08:40:00.000Z',
+    artifacts: [{ path: 'source-change-review.json', hash: 'review-hash', kind: 'source-change-review' }],
+  };
+  controller.artifacts['attempt-review/source-change-review.json'] = JSON.stringify({ verdict: 'pass', visual });
+}
+const tiles = () => [...document.querySelectorAll<HTMLElement>('.sd-tiles .sd-tile')];
+const eyebrow = (tile: HTMLElement | undefined) => tile?.querySelector('.sd-eyebrow')?.textContent;
+// The pages tile once it reads its value and the line under it, if any.
+const pagesTile = async (value: string, line: string | null) => {
+  const tile = () => tiles().find(item => eyebrow(item) === 'The pagesPages');
+  await waitFor(
+    () =>
+      expect([
+        tile()?.querySelector('.sd-tile__value')?.textContent,
+        tile()?.querySelector('.sd-meta')?.textContent ?? null,
+      ]).toEqual([value, line]),
+    { timeout: 5000 },
+  );
+  return tile()!;
+};
+// Opens the Pages tab and gives what the check captured, under the story's pages.
+const capturedIn = async (user: ReturnType<typeof userEvent.setup>) =>
+  within((await pagesTab(user)).getByRole('region', { name: 'What the check captured' }));
+const recordRead = '/api/attempts/attempt-build/artifact?projectId=project-x&path=visual-check.json';
+const imageRead = (image: VisualImage) =>
+  `/api/attempts/attempt-build/artifact?projectId=project-x&path=${encodeURIComponent(image.path)}`;
+const figureNames = (region: HTMLElement) =>
+  within(region)
+    .getAllByRole('figure')
+    .map(figure => figure.getAttribute('aria-label'));
+
+test("the tab shows the candidate's images by page, each with its width, theme, the review's note and its mark", async () => {
+  const user = userEvent.setup();
+  checkOn();
+  pages([board, settings]);
+  recorded();
+  reviewed([
+    { image: '../inputs/T-1/5-01-board-1440-light.png', note: 'The board shows three columns.', verdict: 'match' },
+    { image: '../inputs/T-1/6-02-board-390-dark.png', note: 'The columns stack on a phone.', verdict: 'match' },
+    {
+      image: '../inputs/T-1/7-03-settings-1440-dark.png',
+      note: 'The Visual check section is missing.',
+      verdict: 'problem',
+    },
+  ]);
+  open();
+  const captured = await capturedIn(user),
+    boardRegion = await captured.findByRole('region', { name: 'Board' }),
+    settingsRegion = captured.getByRole('region', { name: 'Settings' });
+  expect(captured.getByText('4 images with Microsoft Edge.')).toBeTruthy();
+  // Each page under its name and path, in the record's order, its images by width and then theme.
+  expect(captured.getAllByRole('heading', { level: 3 }).map(heading => heading.textContent)).toEqual([
+    'Board/',
+    'Settings/settings',
+  ]);
+  expect(figureNames(boardRegion)).toEqual(['Desktop · 1440 px · Light', 'Phone · 390 px · Dark']);
+  expect(figureNames(settingsRegion)).toEqual(['Desktop · 1440 px · Dark', 'Phone · 390 px · Light']);
+  const figure = (region: HTMLElement, name: string) => within(within(region).getByRole('figure', { name }));
+  // The review's note, matched by the image's own name among its inputs, with its mark.
+  const wide = figure(boardRegion, 'Desktop · 1440 px · Light');
+  expect(await wide.findByText('The board shows three columns.')).toBeTruthy();
+  expect(wide.getByText('Match')).toBeTruthy();
+  expect(figure(boardRegion, 'Phone · 390 px · Dark').getByText('The columns stack on a phone.')).toBeTruthy();
+  const broken = figure(settingsRegion, 'Desktop · 1440 px · Dark');
+  expect(broken.getByText('The Visual check section is missing.')).toBeTruthy();
+  expect(broken.getByText('Problem')).toBeTruthy();
+  expect(broken.queryByText('Match')).toBeNull();
+  // The image's own problem as it was taken.
+  expect(broken.getByText('Taken with a problem: nothing to click shows "Visual check".')).toBeTruthy();
+  // An image the review did not describe says so and has no mark; a trimmed one says it was trimmed.
+  const phone = figure(settingsRegion, 'Phone · 390 px · Light');
+  expect(phone.getByText('The review has not described this image yet.')).toBeTruthy();
+  expect(phone.queryByText('Match')).toBeNull();
+  expect(phone.queryByText('Problem')).toBeNull();
+  expect(phone.getByText(/^Trimmed: /)).toBeTruthy();
+  expect(wide.queryByText(/^Trimmed: /)).toBeNull();
+  expect(wide.queryByText(/^Taken with a problem/)).toBeNull();
+  // Each image is read from the candidate through the recorded-file route, once its record is, and opens over the
+  // page.
+  await waitFor(() => expect(controller.reads()).toEqual(expect.arrayContaining(shots.map(imageRead))));
+  expect(controller.reads().filter(url => url === recordRead)).toHaveLength(1);
+  await user.click(within(boardRegion).getByRole('button', { name: 'View Board, Desktop · 1440 px · Light' }));
+  expect(await screen.findByRole('dialog', { name: 'visual/01-board-1440-light.png' })).toBeTruthy();
+});
+
+test('The pages tile reads the images taken with the browser, beside Tried by you, and opens the Pages tab', async () => {
+  const user = userEvent.setup();
+  checkOn();
+  pages([board, settings]);
+  recorded();
+  open();
+  const tile = await pagesTile('4 images', 'with Microsoft Edge');
+  expect(eyebrow(tiles()[3])).toBe('Tried by youTried');
+  expect(tiles()[4]).toBe(tile);
+  expect(screen.getByRole('tab', { name: /^Changes/ }).getAttribute('aria-selected')).toBe('true');
+  await user.click(tile);
+  expect(screen.getByRole('tab', { name: 'Pages' }).getAttribute('aria-selected')).toBe('true');
+  expect(await within(screen.getByRole('tabpanel')).findByRole('region', { name: 'Board' })).toBeTruthy();
+});
+
+test('with no browser found the tile reads Not run and the tab says why, with a link to Settings → Visual check', async () => {
+  const user = userEvent.setup();
+  checkOn();
+  controller.visualView.browser = null;
+  pages([board, settings]);
+  recorded({
+    state: 'not-run',
+    reason: 'no browser found',
+    note: 'Installing Microsoft Edge or Google Chrome lets the reviewer see the pages; nothing is downloaded for you.',
+    browser: null,
+    images: [],
+  });
+  reviewed([]);
+  open();
+  await pagesTile('Not run', 'No browser found');
+  const captured = await capturedIn(user),
+    link = await captured.findByRole('link', { name: 'Settings → Visual check' });
+  expect(link.getAttribute('href')).toBe('/p/project-x/settings#visual-check');
+  expect(link.closest('p')?.textContent).toBe(
+    'The check did not run because no Chromium-based browser was found on this computer. Morgan reviewed it without ' +
+      'images. Installing Microsoft Edge or Google Chrome lets Morgan see the pages; Settings → Visual check shows the ' +
+      'browser it finds.',
+  );
+  expect(captured.queryAllByRole('figure')).toEqual([]);
+  expect(captured.queryByRole('region')).toBeNull();
+});
+
+test('a failed check, or one that did not run for another reason, gives its reason on the tile and the tab', async () => {
+  const user = userEvent.setup(),
+    failure = 'The browser refused its DevTools connection.';
+  checkOn();
+  pages([board, settings]);
+  recorded({ state: 'failed', reason: failure, images: [] });
+  open();
+  await pagesTile('Failed', failure);
+  let captured = await capturedIn(user);
+  // The review has not finished, so it reviews without images.
+  expect(await captured.findByText(`The check failed: ${failure} Morgan reviews it without images.`)).toBeTruthy();
+  expect(captured.queryByRole('link')).toBeNull();
+  expect(captured.queryByRole('region')).toBeNull();
+  cleanup();
+  const blocked = "The built-in sandbox here keeps an app's port inside it, so the check cannot reach the candidate.";
+  recorded({ state: 'not-run', reason: blocked, images: [] });
+  open();
+  await pagesTile('Not run', blocked);
+  captured = await capturedIn(user);
+  expect(await captured.findByText(`The check did not run: ${blocked} Morgan reviews it without images.`)).toBeTruthy();
+  cleanup();
+  // A check that failed part way shows the images it took, which the review received.
+  recorded({ state: 'failed', reason: failure, images: [shots[0]!] });
+  open();
+  captured = await capturedIn(user);
+  expect(await captured.findByText(`The check failed: ${failure}`)).toBeTruthy();
+  expect(figureNames(captured.getByRole('region', { name: 'Board' }))).toEqual(['Desktop · 1440 px · Light']);
+  expect(
+    within(captured.getByRole('region', { name: 'Settings' })).getByText('No image of this page was taken.'),
+  ).toBeTruthy();
+});
+
+test('a story whose candidate recorded no check reads Not yet and says when its pages are captured', async () => {
+  const user = userEvent.setup();
+  checkOn();
+  pages([board]);
+  open();
+  await pagesTile('Not yet', null);
+  const captured = await capturedIn(user);
+  expect(
+    captured.getByText("The pages are captured after the candidate's tests pass, when the project's check is on."),
+  ).toBeTruthy();
+  // Its attempt lists no record, so none is read.
+  expect(controller.reads()).not.toContain(recordRead);
+});
+
+test('a story without the Pages tab has no The pages tile', async () => {
+  open();
+  expect(await tabNames()).toEqual(['Changes', 'Checks', 'Try it', 'Activity']);
+  await waitFor(() => expect(pageReads()).toBe(1));
+  await waitFor(() => expect(controller.reads()).toContain('/api/projects/project-x/visual-check'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(tiles()).toHaveLength(4);
+  expect(tiles().map(eyebrow)).not.toContain('The pagesPages');
+  expect(screen.queryByText('The pages')).toBeNull();
 });
