@@ -38,6 +38,8 @@ export const queryKeys = {
     [projectId, 'test-record', attemptId, run, text ? 'text' : 'summary'] as const,
   shell: (projectId: string) => [projectId, 'shell'] as const,
   instructions: (projectId: string) => [projectId, 'instructions'] as const,
+  // Under the instructions, so whatever reads them again reads what each agent is told again too.
+  told: (projectId: string, workerId: string) => [projectId, 'instructions', 'told', workerId] as const,
   live: (projectId: string) => [projectId, 'live'] as const,
   finished: (projectId: string) => [projectId, 'finished'] as const,
   run: (projectId: string, runId: string) => [projectId, 'run', runId] as const,

@@ -409,6 +409,36 @@ export interface InstructionsPage {
   };
 }
 
+// What an agent is told, as rules (1.2 step 1, src/core/rules.mjs): each paragraph of a document is one rule, named by
+// the bold words it opens with, or with no name (null) when it opens without them.
+export interface Rule {
+  title: string | null;
+  text: string;
+}
+// One document an agent reads, in the order its attempts read them (src/core/instructions.mjs toldView): every
+// project's shared document (never edited from a project, read by every project: `readers` null), the project's, its
+// team's and its own. `draft.current` says the draft was saved on the published revision, so it may be published.
+export interface ToldLayer {
+  layer: 'every-project' | 'project' | 'team' | 'own';
+  scope: 'company' | 'team' | 'employee';
+  id: string;
+  projectId: string | null;
+  editable: boolean;
+  revision: number;
+  publishedAt: string | null;
+  readers: string[] | null;
+  text: string;
+  rules: Rule[];
+  draft: { baseRevision: number; savedAt: string | null; current: boolean; text: string; rules: Rule[] } | null;
+}
+// GET /api/projects/:id/agents/:workerId/told: the agent, its documents, and exactly the text they put at the start of
+// its next attempt's instructions, with each current draft in place of its published text (`drafts` of them).
+export interface ToldView {
+  agent: { id: string; name: string; teamId: string; team: string; role: string | null };
+  layers: ToldLayer[];
+  receives: { text: string; drafts: number };
+}
+
 export interface RunRecord {
   id: string;
   createdAt?: string;
@@ -752,6 +782,9 @@ export const activityUrl = (projectId: string, before: number | null) =>
 export const runUrl = (projectId: string, runId: string) =>
   `${projectPath(projectId, 'runs')}/${encodeURIComponent(runId)}`;
 export const instructionsUrl = (projectId: string) => projectPath(projectId, 'instructions');
+// What one agent of the project is told, as rules.
+export const toldUrl = (projectId: string, workerId: string) =>
+  projectPath(projectId, `agents/${encodeURIComponent(workerId)}/told`);
 // The try view, and its Run's output as plain text.
 export const tryUrl = (projectId: string) => projectPath(projectId, 'try');
 export const tryOutputUrl = (projectId: string) => projectPath(projectId, 'try/output');

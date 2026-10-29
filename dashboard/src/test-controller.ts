@@ -25,6 +25,8 @@ import type {
   StoryPagesView,
   Task,
   TestRecordSummary,
+  ToldLayer,
+  ToldView,
   TryView,
   VisualView,
 } from './api';
@@ -108,6 +110,51 @@ export const taskFixture = (id: string, extra: Partial<Task> = {}): Task => ({
   ...extra,
 });
 
+// What an agent is told as the controller's told view answers it (src/core/instructions.mjs toldView): every project's
+// shared set, read-only here, then the project's (its text the stand-in's company instructions), the team's and the
+// agent's own, each published at revision 1 with no draft, and the text they start its next attempt with. A rule's
+// name is its document's bold opening, as src/core/rules.mjs reads it.
+export function toldFixture(workerId = 'W-1', projectId = 'project-x'): ToldView {
+  const set = (
+    layer: ToldLayer['layer'],
+    scope: ToldLayer['scope'],
+    id: string,
+    rules: ToldLayer['rules'],
+  ): ToldLayer => ({
+    layer,
+    scope,
+    id,
+    projectId: layer === 'every-project' ? null : projectId,
+    editable: layer !== 'every-project',
+    revision: 1,
+    publishedAt: '2026-10-21T20:00:00Z',
+    readers: layer === 'every-project' ? null : [workerId],
+    text: rules.map(rule => (rule.title ? `**${rule.title}.** ${rule.text}` : rule.text)).join('\n\n'),
+    rules,
+    draft: null,
+  });
+  const layers = [
+    set('every-project', 'company', 'company', [
+      { title: 'Stay local', text: 'Keep records, files and the dashboard on this computer.' },
+    ]),
+    set('project', 'company', 'company', [{ title: null, text: 'Company direction.' }]),
+    set('team', 'team', 'engineering', [
+      { title: 'Hand off what changed', text: 'Say which files changed and what you checked.' },
+    ]),
+    set('own', 'employee', workerId, [
+      { title: 'Stay inside the story', text: 'Change only the files the story may change.' },
+      { title: null, text: 'Ask the director when a choice is not yours to make.' },
+    ]),
+  ];
+  const heading = (layer: ToldLayer) =>
+    `# ${layer.projectId ? 'Project ' : ''}${layer.scope}: ${layer.id} (revision ${layer.revision})`;
+  return {
+    agent: { id: workerId, name: 'Eli', teamId: 'engineering', team: 'Engineering', role: 'Software engineer' },
+    layers,
+    receives: { text: layers.map(layer => `${heading(layer)}\n\n${layer.text}`).join('\n\n'), drafts: 0 },
+  };
+}
+
 export interface Controller {
   shell: Shell;
   tasks: Task[];
@@ -132,6 +179,9 @@ export interface Controller {
   // answers and the text its /text route sends. A run not listed answers as one the attempt did not measure does.
   testRecords: Record<string, { summary: TestRecordSummary; text?: string }>;
   instructions: InstructionsPage['instructions'];
+  // What each agent is told, as rules (1.2 step 1), by agent: the told route answers it, and an agent not listed as
+  // one the project does not hold (404). The default tells W-1 the four sets toldFixture lays out.
+  told: Record<string, ToldView>;
   people: PeopleSummary;
   // Pages of recorded events, newest first; each page's `next` names the sequence the following one starts before.
   activity: ActivityPage[];
@@ -209,6 +259,7 @@ export function fakeController(projectId = 'project-x'): Controller {
       teams: {},
       employees: {},
     },
+    told: { 'W-1': toldFixture('W-1', projectId) },
     people: { tasks: 0, accepted: { total: 0, workers: {}, teams: {} }, goals: {} },
     activity: [{ events: [], next: null }],
     stories: {},
@@ -328,6 +379,11 @@ export function fakeController(projectId = 'project-x'): Controller {
       }
       if (path === `/api/projects/${projectId}/instructions`) return respond({ instructions: controller.instructions });
       if (path === `/api/projects/${projectId}/people`) return respond(controller.people);
+      const toldBy = path.match(new RegExp(`^/api/projects/${projectId}/agents/([^/]+)/told$`))?.[1];
+      if (toldBy) {
+        const view = controller.told[decodeURIComponent(toldBy)];
+        return view ? respond(view) : respond({ error: 'This agent is not in this project.' }, false, 404);
+      }
       if (path === `/api/projects/${projectId}/try`) return respond(controller.tryView);
       if (path === `/api/projects/${projectId}/try/output`) return respond(controller.tryOutput);
       if (path === `/api/projects/${projectId}/visual-check`) return respond(controller.visualView);
