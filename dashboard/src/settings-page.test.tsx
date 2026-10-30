@@ -2,7 +2,7 @@
 // shows, with the current dashboard's settings and actions.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { BuiltInSandbox, TrySettings, TryView } from './api';
@@ -465,6 +465,46 @@ test('the appearance is kept in this browser and applied at once', async () => {
   await user.click(theme.getByRole('button', { name: 'System' }));
   expect(document.documentElement.dataset.theme).toBeUndefined();
   expect(localStorage.getItem('studio-theme')).toBeNull();
+});
+
+test('the chat box preview is off on a fresh browser, kept in this browser when switched, and never sent to the controller', async () => {
+  const user = userEvent.setup();
+  open('/p/project-x/settings');
+  const appearance = within(await screen.findByRole('region', { name: 'Appearance' }));
+  const chatBox = () => appearance.getByRole('switch', { name: 'The chat box (preview)' });
+  expect(chatBox().getAttribute('aria-checked')).toBe('false');
+  expect(
+    appearance.getByText(
+      'With it on, New idea opens a chat box beside the page; with it off, New idea works as it always has.',
+    ),
+  ).toBeTruthy();
+  const sent = commands();
+  await user.click(chatBox());
+  expect(chatBox().getAttribute('aria-checked')).toBe('true');
+  expect(localStorage.getItem('studio-chat-box')).toBe('on');
+  await user.click(chatBox());
+  expect(chatBox().getAttribute('aria-checked')).toBe('false');
+  expect(localStorage.getItem('studio-chat-box')).toBeNull();
+  await user.click(chatBox());
+  expect(commands()).toEqual(sent);
+  // Reopened, Settings reads the switch from this browser.
+  cleanup();
+  open('/p/project-x/settings');
+  const reopened = await screen.findByRole('switch', { name: 'The chat box (preview)' });
+  expect(reopened.getAttribute('aria-checked')).toBe('true');
+  expect(commands()).toEqual(sent);
+});
+
+test('the chat box preview follows a change made in another tab without a reload', async () => {
+  open('/p/project-x/settings');
+  const chatBox = await screen.findByRole('switch', { name: 'The chat box (preview)' });
+  localStorage.setItem('studio-chat-box', 'on');
+  fireEvent(window, new StorageEvent('storage', { key: 'studio-chat-box', newValue: 'on' }));
+  expect(chatBox.getAttribute('aria-checked')).toBe('true');
+  // Another tab clearing this browser's storage turns it off too.
+  localStorage.clear();
+  fireEvent(window, new StorageEvent('storage', { key: null }));
+  expect(chatBox.getAttribute('aria-checked')).toBe('false');
 });
 
 test('the house rules switch a gate between you and the studio, and save against the revision they read', async () => {
