@@ -193,6 +193,27 @@ test('New idea opens Today from any page', async () => {
   await waitFor(() => expect(router.history.location.pathname).toBe('/p/project-x'));
 });
 
+test('with the chat box switched off, Ctrl J opens no panel and N still opens Today', async () => {
+  // Today scrolls its box into view, which the simulated page cannot do.
+  const scrolled = vi.fn();
+  Element.prototype.scrollIntoView = scrolled;
+  try {
+    const router = open('/p/project-x/board');
+    await screen.findAllByRole('button', { name: 'New idea' });
+    // The key is left to the browser.
+    expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(true);
+    expect(screen.queryByRole('complementary', { name: 'The chat box' })).toBeNull();
+    fireEvent.keyDown(window, { key: 'n' });
+    await waitFor(() => expect(router.history.location.pathname).toBe('/p/project-x'));
+    const box = await screen.findByRole('textbox', { name: 'New idea for Project X' });
+    await waitFor(() => expect(document.activeElement).toBe(box));
+    expect(scrolled).toHaveBeenCalled();
+    expect(screen.queryByRole('complementary', { name: 'The chat box' })).toBeNull();
+  } finally {
+    delete (Element.prototype as Partial<Element>).scrollIntoView;
+  }
+});
+
 test("a page's trail marks only the page itself as current, never a step back", async () => {
   open('/p/project-x/settings/activity');
   const trail = within(await screen.findByRole('navigation', { name: 'You are here' }));

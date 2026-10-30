@@ -5689,6 +5689,54 @@ button.sd-tab {
     padding: var(--space-8) var(--space-16) 120px;
   }
 }
+/* The chat box (a preview): a column docked at the right, at the window's height like the frame, and the page narrows
+   beside it. At 860px and under it covers the page, the bottom tabs too, until Back closes it. */
+.sd-chat {
+  position: sticky;
+  top: 0;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  width: clamp(320px, 30vw, 420px);
+  height: 100vh;
+  box-sizing: border-box;
+  background: var(--surface);
+  border-left: 1.5px solid var(--line);
+  overflow-y: auto;
+}
+.sd-chat__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-14) var(--space-16);
+  border-bottom: 1.5px solid var(--line);
+}
+.sd-chat__title {
+  flex: 1;
+  min-width: 0;
+  font: 800 19px/1.2 var(--font-display);
+  letter-spacing: -0.02em;
+}
+.sd-chat__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+  padding: var(--space-16);
+}
+@media (max-width: 860px) {
+  .sd-chat {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    width: auto;
+    height: auto;
+    border-left: 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .sd-chat__head {
+    padding: var(--space-8) var(--space-8) var(--space-8) var(--space-4);
+  }
+}
 .sd-rail {
   flex: none;
   width: var(--rail-width);

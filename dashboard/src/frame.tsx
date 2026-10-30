@@ -4,7 +4,8 @@
 // project and opens the search, and bottom tabs carry the pages with New idea in the middle. The sidebar's Needs you
 // count is the current project's (the director, October 22); each tile on the rail counts its own project's calls,
 // pointing at or focusing another project's count shows them in a card beside it, and the tab's title counts every
-// project's (the attention indicator, October 29).
+// project's (the attention indicator, October 29). With the chat box switched on (chat-box.ts), New idea and Ctrl J
+// open the chat box beside the page instead (chat-panel.tsx).
 import { Outlet, useRouter, useRouterState } from '@tanstack/react-router';
 import {
   Fragment,
@@ -19,6 +20,8 @@ import {
   type ReactNode,
 } from 'react';
 import type { Project } from './api';
+import { useChatBox } from './chat-box';
+import { ChatPanel } from './chat-panel';
 import { COLORS } from './design/agent-kit.js';
 import { Icon, Mark, type IconName } from './design/icons';
 import { journeyChip } from './journey';
@@ -228,7 +231,11 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
     [peek, setPeek] = useState<{ id: string; tile: HTMLElement; place: CardPlace } | null>(null),
     card = useRef<HTMLDivElement>(null),
     // Set while Escape in the card gives the tile its focus back, which opens nothing.
-    quiet = useRef(false);
+    quiet = useRef(false),
+    // The chat box, while its switch is on: whether it is open, and each request to put the cursor in its box.
+    chatBox = useChatBox(),
+    [chatting, setChatting] = useState(false),
+    [chatFocus, setChatFocus] = useState(0);
   const projects: Project[] = shell?.projects ?? [{ id: projectId, name: projectId }],
     project = projects.find(item => item.id === projectId) ?? { id: projectId, name: shell?.project.name ?? '' },
     index = projects.findIndex(item => item.id === projectId),
@@ -254,8 +261,15 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
       window.removeEventListener('scroll', move, true);
     };
   }, [anchor]);
-  // New idea opens Today, which puts the cursor in its idea box (or raises it as a sheet on a phone).
+  // The chat box opens, or stays open, with the cursor in its box.
+  const chat = () => {
+    setChatting(true);
+    setChatFocus(times => times + 1);
+  };
+  // New idea opens Today, which puts the cursor in its idea box (or raises it as a sheet on a phone); with the chat box
+  // switched on, it opens the chat box beside whichever page is shown.
   const newIdea = () => {
+    if (chatBox) return chat();
     router.history.push(href(''));
     requestNewIdea();
   };
@@ -279,6 +293,16 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
       if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setSearching(open => !open);
+      } else if (
+        chatBox &&
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === 'j'
+      ) {
+        // Ctrl J opens the chat box even while typing in a field.
+        event.preventDefault();
+        chat();
       } else if (event.key === 'n' && !event.ctrlKey && !event.metaKey && !event.altKey && !typing(event.target)) {
         event.preventDefault();
         newIdea();
@@ -455,6 +479,14 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
           <Outlet />
         </div>
       </main>
+      {chatBox && chatting && (
+        <ChatPanel
+          projectId={projectId}
+          accent={projectColor(project, index).background}
+          focus={chatFocus}
+          onHide={() => setChatting(false)}
+        />
+      )}
       <nav className="sd-tabbar" aria-label="Pages">
         {pages
           // A phone keeps the design's four tabs; Artifacts, Releases and Settings are in the sidebar's menu.

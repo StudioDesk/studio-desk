@@ -2,7 +2,7 @@
 // checked here as the controller checks them, then sent as one request to the project's intake, with Auto mode
 // only when the director changed it from the Settings and with the library entries the director left out. On a phone
 // the box rises as a sheet from New idea. The draft stays in memory for its project, so leaving Today and coming back
-// keeps it; nothing is stored in the browser.
+// keeps it; nothing is stored in the browser. The chat box (chat-panel.tsx) holds the same box with a draft of its own.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useEffect, useId, useRef, useState } from 'react';
@@ -16,6 +16,15 @@ import { useLiveStream, useStreamReady } from './stream-context';
 import { useToast } from './toast';
 
 const narrow = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 860px)').matches;
+
+// The chat box's own text, apart from Today's.
+export const chatIdeaText = 'chat-idea-text';
+
+// The project's idea intake in the controller's order (src/server.mjs /api/intake): source checks and a breakdown
+// first, then the planner; without either there is no box.
+export function ideaIntake(kinds: string[]): IdeaIntake | null {
+  return kinds.includes('studio-development:breakdown') ? 'source' : kinds.includes('general:plan') ? 'plan' : null;
+}
 
 // Today's draft also holds the library entries the director leaves out of this idea's work (1.2 step 6).
 type TodayDraft = Draft & { leftOut?: string[] };
@@ -167,6 +176,7 @@ export function TodayIdea({
   intake,
   accent,
   suggestions,
+  place = 'today',
 }: {
   projectId: string;
   shell: Shell;
@@ -174,8 +184,14 @@ export function TodayIdea({
   accent: string;
   // A sample project's suggested first ideas, until it has one (first-run-guide.tsx).
   suggestions?: string[];
+  // Where the box is: on Today, where New idea finds it and a phone raises it as a sheet, or in the chat box, flush
+  // in its panel with a draft of its own and no sheet.
+  place?: 'today' | 'panel';
 }) {
-  const [draft, setDraft] = useState<TodayDraft>(() => drafts.get(projectId) ?? emptyDraft()),
+  const panel = place === 'panel',
+    // The chat box's draft is kept apart from Today's, so neither box overwrites the other.
+    key = panel ? `${projectId}#chat` : projectId;
+  const [draft, setDraft] = useState<TodayDraft>(() => drafts.get(key) ?? emptyDraft()),
     [auto, setAuto] = useState<boolean | undefined>(),
     [sheet, setSheet] = useState(false),
     dialog = useRef<HTMLDialogElement>(null),
@@ -185,23 +201,23 @@ export function TodayIdea({
     { planner, reviewer } = crew(shell),
     name = shell.project.name;
   useEffect(() => {
-    drafts.set(projectId, draft);
-  }, [projectId, draft]);
-  // New idea from the frame: the cursor goes in the box, or on a phone the box rises as a sheet.
-  useEffect(
-    () =>
-      onNewIdea(() => {
-        newIdeaHandled();
-        if (narrow()) setSheet(true);
-        else
-          requestAnimationFrame(() => {
-            const box = document.getElementById('idea-text');
-            box?.scrollIntoView({ block: 'center' });
-            box?.focus();
-          });
-      }),
-    [],
-  );
+    drafts.set(key, draft);
+  }, [key, draft]);
+  // New idea from the frame: the cursor goes in the box, or on a phone the box rises as a sheet. The chat box's own
+  // box leaves New idea to the frame, which opens the panel.
+  useEffect(() => {
+    if (panel) return;
+    return onNewIdea(() => {
+      newIdeaHandled();
+      if (narrow()) setSheet(true);
+      else
+        requestAnimationFrame(() => {
+          const box = document.getElementById('idea-text');
+          box?.scrollIntoView({ block: 'center' });
+          box?.focus();
+        });
+    });
+  }, [panel]);
   useEffect(() => {
     const element = dialog.current;
     if (!element) return;
@@ -241,7 +257,7 @@ export function TodayIdea({
     onSuccess: runId => {
       draft.files.forEach(item => item.url && URL.revokeObjectURL(item.url));
       const empty = emptyDraft();
-      drafts.set(projectId, empty);
+      drafts.set(key, empty);
       setDraft(empty);
       setAuto(undefined);
       lands.reset();
@@ -313,6 +329,7 @@ export function TodayIdea({
       onSend={() => submit.mutate()}
     />
   );
+  if (panel) return box(chatIdeaText, 'flush');
   return (
     <>
       <div className="sd-wide-only">{box('idea-text', 'card')}</div>
