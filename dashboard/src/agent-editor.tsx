@@ -238,10 +238,15 @@ function Does({
       const agent = [...state.workers, ...(state.employeeDirectory ?? [])].find(entry => entry.id === owner);
       return agent?.displayName ?? owner;
     },
-    // Each kind in words beside its name: who does it now, or that the project does not take it yet.
+    // Each kind in words beside its name: who does it now, or that the project does not take it yet and giving it
+    // turns it on.
     aside = (item: string) => {
       const owner = ownerName(item);
-      return owner ? ` · ${owner} does it now` : takes.includes(item) ? '' : ' · not taken yet';
+      return owner
+        ? ` · ${owner} does it now`
+        : takes.includes(item)
+          ? ''
+          : ' · Not taken yet: giving it turns it on for the project';
     },
     chosen = kind && offered.includes(kind) ? kind : '';
   const give = () =>

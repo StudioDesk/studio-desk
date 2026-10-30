@@ -199,7 +199,7 @@ test('Does lists its kinds, and a kind the project does not take is given with t
   expect([...picker.options].map(option => option.textContent)).toEqual([
     'Choose a kind of work',
     'Code review · Ana does it now',
-    'Layout · not taken yet',
+    'Layout · Not taken yet: giving it turns it on for the project',
   ]);
   expect(
     does.getByText('A kind another agent does moves to Eli. Work that starts after you save goes to Eli.'),
