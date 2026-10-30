@@ -1,9 +1,14 @@
 // Trusted controller operation shared by source checks and consumers of measured source.
 // This does not resolve accepted inputs or grant an employee access to source: the caller
 // supplies the recorded commit and, for a verified planning copy, its accepted check report.
+// An attempt makes and checks its copy in a process of its own (inSnapshotProcess), as a story's
+// setup does (source-setup.mjs): git and hashing a large repository take seconds, which the
+// controller would otherwise spend not answering (October 29: 7- and 19-second stalls as an
+// idea's planning started). This file is also that process.
 import fs from 'node:fs';
 import path from 'node:path';
-import { sourcePlan } from '../connectors/source-checks.mjs';
+import { fileURLToPath } from 'node:url';
+import { sourcePlan, verifyCopy } from '../connectors/source-checks.mjs';
 import { snapshotCommit as copyCommit, removeSourceWorktree } from '../connectors/source-worktrees.mjs';
 import { profileOf, studioDeskProfile } from '../connectors/source-profile.mjs';
 
@@ -51,4 +56,58 @@ export function snapshotCommit(root, parent, name, base, destination, report, pr
     // preparing its allowlisted directories, before returning the worktree path.
     if (fs.existsSync(worktree)) removeSourceWorktree(root, worktree);
   }
+}
+
+const self = fileURLToPath(import.meta.url),
+  operations = {
+    snapshotCommit: r => snapshotCommit(r.root, r.parent, r.name, r.base, r.destination, r.report, r.profile),
+    verifySnapshot: r => verifySnapshot(r.plan, r.destination, r.report),
+    verifyCopy: r => verifyCopy(r.plan, r.destination) ?? null,
+  };
+
+// Runs one of the operations above as a step of the attempt, in a process of its own, so a stop and the
+// attempt's time limit end it as they end every other step, then calls `next` with what it returned. A
+// failed operation fails the attempt with its error, worded by `failure`. While a snapshot is made, its
+// worktree is the attempt's (entry.snapshotWorktree), so a story's setup does not take it for a leftover.
+// The process answers in a file in the job folder, { value } or { error }, never through the attempt's log.
+export function inSnapshotProcess(runtime, entry, operation, request, next, failure = message => message) {
+  const answer = path.join(entry.job, operation + '.json');
+  if (operation === 'snapshotCommit') entry.snapshotWorktree = request.name;
+  runtime.runNative(entry, process.execPath, [self], JSON.stringify({ operation, request, answer }), () => null, {
+    cwd: entry.job,
+    resultOnFailure: true,
+    onComplete: (result, code) => {
+      delete entry.snapshotWorktree;
+      let answered = {};
+      try {
+        answered = JSON.parse(fs.readFileSync(answer, 'utf8'));
+        fs.rmSync(answer, { force: true });
+      } catch {}
+      if (code !== 0 || !Object.hasOwn(answered, 'value'))
+        throw new Error(failure(answered.error || 'Copying the source failed. See the attempt log.'));
+      next(answered.value);
+    },
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === self) {
+  let input = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', chunk => (input += chunk));
+  process.stdin.on('end', () => {
+    const { operation, request, answer } = JSON.parse(input),
+      // Written anew, never through a file left in its place.
+      reply = value => {
+        fs.rmSync(answer, { force: true });
+        fs.writeFileSync(answer, JSON.stringify(value), { flag: 'wx' });
+      };
+    try {
+      if (!Object.hasOwn(operations, operation)) throw new Error('Unknown source operation.');
+      reply({ value: operations[operation](request) });
+    } catch (error) {
+      console.error(error.message);
+      reply({ error: error.message });
+      process.exitCode = 1;
+    }
+  });
 }

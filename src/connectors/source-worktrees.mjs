@@ -156,6 +156,8 @@ export function leftoverWorktrees(runtime, parent) {
         (attempt.status === 'interrupted' && !attempt.reconciledAt))
     )
       kept.add(path.basename(attempt.sourceWorktree.path));
+  // So does the worktree an idea's checks or planner measures its snapshot in, while its process makes it.
+  for (const entry of runtime.active.values()) if (entry.snapshotWorktree) kept.add(entry.snapshotWorktree);
   // An integration's worktree, and a carry's (1.1 step 4), stay while they run or wait to be reconciled.
   const holding = ['verifying', 'committing', 'needs-reconciliation'];
   for (const journal of [

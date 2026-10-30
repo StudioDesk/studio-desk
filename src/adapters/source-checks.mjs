@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   sourceChecksConnector,
-  verifyCopy,
   sourceContext,
   checkReport,
   failedTests,
@@ -14,7 +13,7 @@ import {
 import { sourceWorktreeRoot, worktreeName } from '../connectors/source-worktrees.mjs';
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
 import { runInstallStep } from '../connectors/package-installs.mjs';
-import { snapshotCommit } from './source-snapshot.mjs';
+import { inSnapshotProcess } from './source-snapshot.mjs';
 import { subscriptionEnvironment } from './process.mjs';
 import { chosenTestSandbox } from './source-test-sandbox.mjs';
 import { builtInSandboxCommand, builtInSandboxReady } from './built-in-sandbox.mjs';
@@ -57,33 +56,24 @@ export const sourceChecksAdapter = {
       snapshot = path.join(entry.job, 'source');
     // Measure the recorded commit in its own worktree (MP-016 slice 4), which is removed again
     // before the tests start; the copy is what the tests run on. The project's source profile
-    // was recorded with the commit when the attempt was prepared.
-    a.sourceCheck = snapshotCommit(
-      a.sourceCheck.root,
-      sourceWorktreeRoot(runtime),
-      'c-' + worktreeName(a.id),
-      a.sourceCheck.base,
-      snapshot,
-      undefined,
-      profileOf(a.sourceCheck),
-    );
-    runtime.store.updateAttempt(a);
-    const sandboxed = a.configuration?.testSandbox === 'built-in',
-      command =
-        runtime.sourceCheckCommand ||
-        (sandboxed ? builtInSandboxCommand({ root: snapshot, command: a.sourceCheck.command }) : a.sourceCheck.command);
-    const environment = subscriptionEnvironment();
-    // Snapshot tests must not inherit live provider/engine overrides.
-    for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
-    // In a sandbox the copied harness runs as candidate tests do; only it reads this marker.
-    if (sandboxed) environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-    // The copy gets its installed packages first (MP-026), then the tests run on it. The test run alone waits for the
-    // computer's test turn, and the attempt's time limit starts again with it.
-    runInstallStep(runtime, entry, snapshot, installsPackages(profileOf(a.sourceCheck)), environment, () =>
-      takeTestTurn(runtime, entry, {
-        limitMs: a.assignment?.maxSeconds * 1000,
-        start: () => runTests(runtime, entry, a, command, snapshot, environment),
-      }),
+    // was recorded with the commit when the attempt was prepared. Made in a process of its own.
+    inSnapshotProcess(
+      runtime,
+      entry,
+      'snapshotCommit',
+      {
+        root: a.sourceCheck.root,
+        parent: sourceWorktreeRoot(runtime),
+        name: 'c-' + worktreeName(a.id),
+        base: a.sourceCheck.base,
+        destination: snapshot,
+        profile: profileOf(a.sourceCheck),
+      },
+      plan => {
+        a.sourceCheck = plan;
+        runtime.store.updateAttempt(a);
+        testSnapshot(runtime, entry, a, snapshot);
+      },
     );
   },
   // An attempt that waited for the test turn when the controller stopped no longer waits.
@@ -91,6 +81,26 @@ export const sourceChecksAdapter = {
     delete a.testTurn;
   },
 };
+
+function testSnapshot(runtime, entry, a, snapshot) {
+  const sandboxed = a.configuration?.testSandbox === 'built-in',
+    command =
+      runtime.sourceCheckCommand ||
+      (sandboxed ? builtInSandboxCommand({ root: snapshot, command: a.sourceCheck.command }) : a.sourceCheck.command);
+  const environment = subscriptionEnvironment();
+  // Snapshot tests must not inherit live provider/engine overrides.
+  for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
+  // In a sandbox the copied harness runs as candidate tests do; only it reads this marker.
+  if (sandboxed) environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
+  // The copy gets its installed packages first (MP-026), then the tests run on it. The test run alone waits for the
+  // computer's test turn, and the attempt's time limit starts again with it.
+  runInstallStep(runtime, entry, snapshot, installsPackages(profileOf(a.sourceCheck)), environment, () =>
+    takeTestTurn(runtime, entry, {
+      limitMs: a.assignment?.maxSeconds * 1000,
+      start: () => runTests(runtime, entry, a, command, snapshot, environment),
+    }),
+  );
+}
 
 function runTests(runtime, entry, a, command, snapshot, environment) {
   const startedAt = new Date().toISOString();
@@ -111,54 +121,76 @@ function runTests(runtime, entry, a, command, snapshot, environment) {
     (exitCode, signal) => {
       // The test process has closed; a stop or a failed start releases the turn with the attempt's other leases.
       releaseTestTurn(runtime.store, a.id);
-      verifyCopy(a.sourceCheck, snapshot);
-      if (Buffer.byteLength(stdout + stderr) > 192 * 1024) throw new Error('Source test evidence exceeds 192 KB.');
-      a.checkExecution = {
-        taskId: a.taskId,
-        attemptId: a.id,
-        pid: a.pid,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        exitCode,
-        signal,
-        fixture: !!runtime.sourceCheckCommand,
-      };
-      const report = checkReport(a.sourceCheck, a.checkExecution, stdout, stderr);
-      runtime.store.finishPhase(testPhase, report.passed ? 'succeeded' : 'failed', testPhaseEvidence(stdout));
-      a.failedTests = failedTests(stdout);
-      fs.writeFileSync(path.join(entry.output, 'test-output.txt'), stdout);
-      fs.writeFileSync(path.join(entry.output, 'test-errors.txt'), stderr);
-      fs.writeFileSync(
-        path.join(entry.output, 'source-context.json'),
-        JSON.stringify(sourceContext(a.sourceCheck, snapshot), null, 2),
-      );
-      fs.writeFileSync(path.join(entry.output, 'check-report.json'), JSON.stringify(report, null, 2));
-      return {
-        taskId: a.taskId,
-        outcome: 'completed',
-        summary: `${a.checkExecution.fixture ? 'Protocol fixture' : 'Measured source checks'}: ${testsSentence(report.totals)}.`,
-        artifacts: [
-          { path: 'check-report.json', kind: 'source-check-report' },
-          { path: 'test-output.txt', kind: 'test-log' },
-          { path: 'test-errors.txt', kind: 'test-log' },
-          { path: 'source-context.json', kind: 'source-context' },
-        ],
-        checks: [
-          {
-            name: 'Node test suite',
-            status: report.passed ? 'pass' : 'fail',
-            evidence: `Exit ${exitCode}; ${JSON.stringify(report.totals)}. ${a.checkExecution.fixture ? 'Model-free process fixture.' : 'Actual copied-source execution.'}`,
-          },
-          { name: 'Browser layout', status: 'not-run', evidence: 'The event harness has no browser renderer.' },
-        ],
-        issues: report.passed
-          ? []
-          : ['Accepting this report records negative evidence; it does not approve a release.'],
-        handoff: 'Inspect the measured report. Director acceptance releases the dependent CLI review.',
-      };
+      return { exitCode, signal, pid: a.pid, finishedAt: new Date().toISOString() };
     },
-    { cwd: snapshot, environment, resultOnFailure: true },
+    {
+      cwd: snapshot,
+      environment,
+      resultOnFailure: true,
+      // The tests must have left the copy as it was, which is checked in a process of its own; then the report.
+      onComplete: closed =>
+        inSnapshotProcess(
+          runtime,
+          entry,
+          'verifyCopy',
+          { plan: a.sourceCheck, destination: snapshot },
+          () => {
+            let result;
+            try {
+              result = checkResult(closed);
+            } catch (error) {
+              throw new Error(`CLI result rejected: ${error.message}`);
+            }
+            runtime.finish(entry, result);
+          },
+          message => `CLI result rejected: ${message}`,
+        ),
+    },
   );
+  function checkResult({ exitCode, signal, pid, finishedAt }) {
+    if (Buffer.byteLength(stdout + stderr) > 192 * 1024) throw new Error('Source test evidence exceeds 192 KB.');
+    a.checkExecution = {
+      taskId: a.taskId,
+      attemptId: a.id,
+      pid,
+      startedAt,
+      finishedAt,
+      exitCode,
+      signal,
+      fixture: !!runtime.sourceCheckCommand,
+    };
+    const report = checkReport(a.sourceCheck, a.checkExecution, stdout, stderr);
+    runtime.store.finishPhase(testPhase, report.passed ? 'succeeded' : 'failed', testPhaseEvidence(stdout));
+    a.failedTests = failedTests(stdout);
+    fs.writeFileSync(path.join(entry.output, 'test-output.txt'), stdout);
+    fs.writeFileSync(path.join(entry.output, 'test-errors.txt'), stderr);
+    fs.writeFileSync(
+      path.join(entry.output, 'source-context.json'),
+      JSON.stringify(sourceContext(a.sourceCheck, snapshot), null, 2),
+    );
+    fs.writeFileSync(path.join(entry.output, 'check-report.json'), JSON.stringify(report, null, 2));
+    return {
+      taskId: a.taskId,
+      outcome: 'completed',
+      summary: `${a.checkExecution.fixture ? 'Protocol fixture' : 'Measured source checks'}: ${testsSentence(report.totals)}.`,
+      artifacts: [
+        { path: 'check-report.json', kind: 'source-check-report' },
+        { path: 'test-output.txt', kind: 'test-log' },
+        { path: 'test-errors.txt', kind: 'test-log' },
+        { path: 'source-context.json', kind: 'source-context' },
+      ],
+      checks: [
+        {
+          name: 'Node test suite',
+          status: report.passed ? 'pass' : 'fail',
+          evidence: `Exit ${exitCode}; ${JSON.stringify(report.totals)}. ${a.checkExecution.fixture ? 'Model-free process fixture.' : 'Actual copied-source execution.'}`,
+        },
+        { name: 'Browser layout', status: 'not-run', evidence: 'The event harness has no browser renderer.' },
+      ],
+      issues: report.passed ? [] : ['Accepting this report records negative evidence; it does not approve a release.'],
+      handoff: 'Inspect the measured report. Director acceptance releases the dependent CLI review.',
+    };
+  }
   // Every byte goes to test-output-full.txt as it arrives; the reports and reviews read the bounded text
   // (testOutput), so a growing suite still reports its totals.
   const output = testOutput(testOutputLimit, path.join(entry.output, 'test-output-full.txt'));

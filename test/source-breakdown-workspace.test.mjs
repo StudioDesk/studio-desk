@@ -116,15 +116,16 @@ async function setup(t, { provider = 'codex', mode = '', execution, registries =
     return store.attempt(task.lastAttemptId);
   };
   store.putTask(task('checks', 'checks', 'W-06'));
-  // A real, tiny fixed Node suite, independent of the outer reporter protocol.
+  // A real, tiny fixed Node suite, independent of the outer reporter protocol. Its copy is made in a process of its
+  // own, so the suite starts after start returns, and the setting is restored once the checks finish.
   const testContext = process.env.NODE_TEST_CONTEXT;
+  delete process.env.NODE_TEST_CONTEXT;
+  runner.start('checks');
   try {
-    delete process.env.NODE_TEST_CONTEXT;
-    runner.start('checks');
+    c.checked = await c.wait('checks');
   } finally {
     if (testContext !== undefined) process.env.NODE_TEST_CONTEXT = testContext;
   }
-  c.checked = await c.wait('checks');
   assert.equal(c.checked.status, 'review', c.checked.error);
   assert.equal(c.checked.checkExecution.fixture, false);
   assert.equal(c.checked.result.checks.find(check => check.name === 'Node test suite').status, 'pass');
@@ -250,7 +251,8 @@ for (const problem of ['mismatched manifest', 'unavailable commit'])
     assert.equal(a.status, 'failed');
     assert.match(a.error, /Breakdown source reference preparation failed:.*No employee model was started/);
     assert.match(a.error, problem === 'mismatched manifest' ? /integrity failure/ : /git worktree failed/);
-    assert.equal(a.pid, null);
+    // The only process was the controller's own copy (src/adapters/source-snapshot.mjs): the model's CLI, which
+    // records its arguments, never ran.
     assert.equal(fs.existsSync(path.join(a.outputFolder, '..', 'fixture-args.json')), false);
     assert.equal(fs.existsSync(c.reference(a)), false);
     assert.deepEqual(store.leases(), []);

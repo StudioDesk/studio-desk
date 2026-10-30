@@ -5,7 +5,7 @@ import { artifactPath } from '../core/artifacts.mjs';
 import { jobDirectory, recordProject } from '../core/projects.mjs';
 import { measuredSourceEvidence } from '../connectors/source-changes.mjs';
 import { sourceWorktreeRoot, worktreeName } from '../connectors/source-worktrees.mjs';
-import { snapshotCommit, verifySnapshot } from './source-snapshot.mjs';
+import { inSnapshotProcess } from './source-snapshot.mjs';
 import { live } from './process.mjs';
 import { profileOf } from '../connectors/source-profile.mjs';
 
@@ -95,47 +95,53 @@ export const sourceBreakdownAdapter = {
     )
       throw new Error('Recorded breakdown/check source identities changed. Request fresh evidence.');
     a.sourceBreakdownContext = { mode };
-    let plan, report;
-    const destination = path.join(entry.job, 'source');
-    if (mode === 'workspace') {
-      const checked = runtime.store.attempt(source.attemptId);
-      report = JSON.parse(fs.readFileSync(artifactPath(runtime.store, checked, source.path)));
-      a.sourceBreakdownContext = {
-        mode,
-        path: referencePath,
-        commit: report.source.commit,
-        sourceHash: source.sourceHash,
+    let report;
+    const destination = path.join(entry.job, 'source'),
+      run = plan => {
+        runtime.store.updateAttempt(a);
+        entry.model = model;
+        model.run(runtime, entry, worker, {
+          mode,
+          // Text receives only the already staged measured report/context, never a repository payload.
+          editable: [],
+          context: [],
+          // The reference must be as it was copied, which is checked in a process of its own.
+          onComplete(result) {
+            if (!plan) return runtime.finish(entry, result);
+            inSnapshotProcess(runtime, entry, 'verifySnapshot', { plan, destination, report }, () =>
+              runtime.finish(entry, result),
+            );
+          },
+        });
       };
-      runtime.store.updateAttempt(a);
-      try {
-        plan = snapshotCommit(
-          checked.sourceCheck.root,
-          sourceWorktreeRoot(runtime),
-          'b-' + worktreeName(a.id),
-          { commit: report.source.commit },
-          destination,
-          report,
-          profileOf(checked.sourceCheck),
-        );
-      } catch (error) {
-        throw new Error(
-          `Breakdown source reference preparation failed: ${error.message} No employee model was started.`,
-        );
-      }
-      entry.cleanup.push(() => removeReference(runtime, a));
-    }
-    runtime.store.updateAttempt(a);
-    entry.model = model;
-    model.run(runtime, entry, worker, {
+    if (mode !== 'workspace') return run(null);
+    const checked = runtime.store.attempt(source.attemptId);
+    report = JSON.parse(fs.readFileSync(artifactPath(runtime.store, checked, source.path)));
+    a.sourceBreakdownContext = {
       mode,
-      // Text receives only the already staged measured report/context, never a repository payload.
-      editable: [],
-      context: [],
-      onComplete(result) {
-        if (plan) verifySnapshot(plan, destination, report);
-        runtime.finish(entry, result);
+      path: referencePath,
+      commit: report.source.commit,
+      sourceHash: source.sourceHash,
+    };
+    runtime.store.updateAttempt(a);
+    // A copy its process left unfinished, when the attempt was stopped, goes with the reference.
+    entry.cleanup.push(() => removeReference(runtime, a));
+    inSnapshotProcess(
+      runtime,
+      entry,
+      'snapshotCommit',
+      {
+        root: checked.sourceCheck.root,
+        parent: sourceWorktreeRoot(runtime),
+        name: 'b-' + worktreeName(a.id),
+        base: { commit: report.source.commit },
+        destination,
+        report,
+        profile: profileOf(checked.sourceCheck),
       },
-    });
+      run,
+      message => `Breakdown source reference preparation failed: ${message} No employee model was started.`,
+    );
   },
   recordEvent: (runtime, entry, data) => entry.model?.recordEvent?.(runtime, entry, data),
   reconcile(runtime, taskId) {

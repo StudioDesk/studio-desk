@@ -14,7 +14,7 @@ import {
   sourcePlan,
 } from '../src/connectors/source-checks.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
-import { createSourceWorktree, removeSourceWorktree } from '../src/connectors/source-worktrees.mjs';
+import { createSourceWorktree, leftoverWorktrees, removeSourceWorktree } from '../src/connectors/source-worktrees.mjs';
 
 function setup(t) {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-snap-'))),
@@ -228,4 +228,31 @@ test('a pre-existing worktree or destination remains owned by its original calle
   assert.throws(() => c.copy(), /destination already exists/);
   assert.equal(fs.readFileSync(sentinel, 'utf8'), 'Owned by another caller\n');
   assertClean(c);
+});
+
+// An idea's checks and its planner make their snapshot in a process of their own (inSnapshotProcess), so a story's
+// setup can start while the snapshot's worktree exists: that worktree is the running attempt's, not a leftover.
+test("a snapshot's worktree is kept from the leftover sweep while its attempt's process makes it", t => {
+  const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-left-')));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  for (const name of ['c-12345678', 'b-87654321', 'c-00000000']) fs.mkdirSync(path.join(parent, name));
+  const runtime = {
+    sourceChangeRoot: parent,
+    store: {
+      liveAttempts: () => [],
+      integrationJournals: () => [],
+      carryJournals: () => [],
+      projects: () => [],
+      setting: () => null,
+    },
+    active: new Map([
+      ['attempt-a', { attempt: { id: 'attempt-a' }, snapshotWorktree: 'c-12345678' }],
+      ['attempt-b', { attempt: { id: 'attempt-b' }, snapshotWorktree: 'b-87654321' }],
+      ['attempt-c', { attempt: { id: 'attempt-c' } }],
+    ]),
+  };
+  assert.deepEqual(
+    leftoverWorktrees(runtime, parent).worktrees.map(item => path.basename(item.path)),
+    ['c-00000000'],
+  );
 });

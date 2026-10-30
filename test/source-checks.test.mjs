@@ -175,15 +175,22 @@ function measuredConsumer(t, mode, partial) {
     },
     runNative(entry, executable, args, input, complete, options) {
       entry.child = { stdout: new EventEmitter(), stderr: new EventEmitter() };
-      // The install step (MP-026) runs for real with the stand-in for npm; then the tests start.
-      if (options.onComplete) {
-        installed = spawnSync(executable, args, {
+      // The steps around the tests run for real: the snapshot, and its check once the tests close, in a process of
+      // their own (src/adapters/source-snapshot.mjs), and the install step (MP-026) with the stand-in for npm. The
+      // test itself runs the tests.
+      if (
+        executable !== original.command.executable ||
+        JSON.stringify(args) !== JSON.stringify(original.command.args)
+      ) {
+        const ran = spawnSync(executable, args, {
           cwd: options.cwd,
+          input,
           encoding: 'utf8',
           windowsHide: true,
           timeout: 30000,
         });
-        return options.onComplete(null, installed.status);
+        if (!args.some(arg => arg.endsWith('source-snapshot.mjs'))) installed = ran;
+        return options.onComplete(complete(ran.status, ran.signal), ran.status, ran.signal);
       }
       invocation = { executable, args, input, complete, options };
     },
@@ -228,7 +235,13 @@ function measuredConsumer(t, mode, partial) {
     phaseStore,
     runtime,
     entry,
-    finish: () => invocation.complete(run.status, run.signal),
+    // The tests close: their copy is checked in its own process, and the attempt finishes with the report.
+    finish: () => {
+      let finished;
+      runtime.finish = (_, result, error) => (finished = { result, error });
+      invocation.options.onComplete(invocation.complete(run.status, run.signal), run.status, run.signal);
+      return finished.result;
+    },
   };
 }
 
