@@ -1,6 +1,7 @@
 // What an agent is told, as rules (rules.ts): the rules a set shows and its edits, the words for a rule and for what a
-// draft changes, and finding a rule, from the records alone; and the told view, the director's draft, publish and
-// discard as they reach the stand-in controller. Model-free; no page shows any of it yet.
+// draft changes, finding a rule and the page's own copy of the told view after a draft save or discard, from the
+// records alone; and the told view, the director's draft, publish and discard as they reach the stand-in controller.
+// Model-free; no page shows any of it yet.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
@@ -11,13 +12,17 @@ import {
   addRule,
   canMove,
   draftChange,
+  draftText,
   findRules,
   firstLine,
   moveRule,
   nameRule,
+  readRules,
   removeRule,
   replaceRule,
   ruleLabel,
+  toldWithDraft,
+  toldWithoutDraft,
   useDiscardRules,
   usePublishRules,
   useSaveRules,
@@ -160,6 +165,119 @@ test('what a draft changes is said in words, by comparing its rules with the pub
   // A set without a current draft has none to describe.
   expect(draftChange(own)).toBeNull();
   expect(draftChange(drafted(own, [stay], false))).toBeNull();
+});
+
+test("a draft's text is written as the controller writes its rules, and read back as the controller reads it", () => {
+  expect(draftText([{ title: 'Keep it short...', text: ' Say less. ' }])).toBe('**Keep it short.** Say less.');
+  // A name ending in ? or ! keeps it without a full stop.
+  expect(draftText([{ title: ' Why? ', text: 'Say what it is for.' }])).toBe('**Why?** Say what it is for.');
+  expect(draftText([{ title: 'Now!', text: 'Do it.' }])).toBe('**Now!** Do it.');
+  expect(draftText([{ title: 'Name', text: '  ' }])).toBe('**Name.**');
+  expect(draftText([{ title: null, text: '  Ask first.\n' }])).toBe('Ask first.');
+  // A name of full stops alone is no name.
+  expect(draftText([{ title: ' .. ', text: 'Ask first.' }])).toBe('Ask first.');
+  expect(draftText([{ title: 'Hand off', text: 'Say what changed.\r\nSay what you checked.\rStop.' }])).toBe(
+    '**Hand off.** Say what changed.\nSay what you checked.\nStop.',
+  );
+  expect(draftText([stay, ask])).toBe(
+    '**Stay inside the story.** Change only the files the story may change.\n\nAsk the director when a choice is not yours to make.',
+  );
+  // Read back, a rule's name has no trailing full stops and its text is trimmed.
+  expect(readRules(draftText([{ title: 'Keep it short...', text: ' Say less. ' }, ask]))).toEqual([
+    { title: 'Keep it short', text: 'Say less.' },
+    ask,
+  ]);
+  expect(readRules('**Why?** Say it.\r\n \r\n\r\n**Name.**\n\n**...**  Untitled.')).toEqual([
+    { title: 'Why?', text: 'Say it.' },
+    { title: 'Name', text: '' },
+    { title: null, text: 'Untitled.' },
+  ]);
+});
+
+// The fixture's What it receives, one set at a time.
+const sections = [
+  '# company: company (revision 1)\n\n**Stay local.** Keep records, files and the dashboard on this computer.',
+  '# Project company: company (revision 1)\n\nCompany direction.',
+  '# Project team: engineering (revision 1)\n\n**Hand off what changed.** Say which files changed and what you checked.',
+  '# Project employee: W-1 (revision 1)\n\n**Stay inside the story.** Change only the files the story may change.\n\nAsk the director when a choice is not yours to make.',
+];
+
+test("a saved draft gives the told view the controller will answer: the set's draft and what the agent receives", () => {
+  const given = toldFixture();
+  expect(given.receives.text).toBe(sections.join('\n\n'));
+  const told = toldWithDraft(given, 'own', moveRule(given.layers[3]!.rules, 0, 1)),
+    saved = told.layers[3]!,
+    text =
+      'Ask the director when a choice is not yours to make.\n\n**Stay inside the story.** Change only the files the story may change.';
+  expect(saved.draft).toEqual({ baseRevision: 1, savedAt: null, current: true, text, rules: [ask, stay] });
+  expect({ ...saved, draft: null }).toEqual(given.layers[3]);
+  expect(workingRules(saved)).toEqual([ask, stay]);
+  expect(draftChange(saved)).toBe("one rule moved in the agent's own rules");
+  expect(told.agent).toEqual(given.agent);
+  expect(told.layers.slice(0, 3)).toEqual(given.layers.slice(0, 3));
+  expect(told.receives).toEqual({
+    text: [...sections.slice(0, 3), `# Project employee: W-1 (revision 2)\n\n${text}`].join('\n\n'),
+    drafts: 1,
+  });
+  // The view given is left as it was.
+  expect(given).toEqual(toldFixture());
+  // Saving over a draft keeps when it was saved, and one saved on an earlier revision becomes one on the set's.
+  const stale: ToldView = { ...given, layers: [...given.layers.slice(0, 3), drafted(own, [ask], false)] };
+  expect(toldWithDraft(stale, 'own', [stay]).layers[3]!.draft).toEqual({
+    baseRevision: 1,
+    savedAt: '2026-10-29T12:00:00Z',
+    current: true,
+    text: '**Stay inside the story.** Change only the files the story may change.',
+    rules: [stay],
+  });
+});
+
+test("the project's set is found by which set it is, never as the shared set with its scope and id, and a discard gives back what is published", () => {
+  const given = toldFixture(),
+    told = toldWithDraft(given, 'project', [{ title: null, text: 'Company direction.' }, added]);
+  expect(given.layers[0]).toMatchObject({ scope: 'company', id: 'company' });
+  expect(given.layers[1]).toMatchObject({ scope: 'company', id: 'company' });
+  expect(told.layers[0]).toEqual(given.layers[0]);
+  expect(told.layers[1]!.draft).toMatchObject({
+    baseRevision: 1,
+    current: true,
+    rules: [{ title: null, text: 'Company direction.' }, added],
+  });
+  expect(told.layers.slice(2)).toEqual(given.layers.slice(2));
+  expect(told.receives).toEqual({
+    text: [
+      sections[0],
+      '# Project company: company (revision 2)\n\nCompany direction.\n\n**Run the checks.** Run the focused tests before handing off.',
+      ...sections.slice(2),
+    ].join('\n\n'),
+    drafts: 1,
+  });
+  const discarded = toldWithoutDraft(told, 'project');
+  expect(discarded.layers[1]!.draft).toBeNull();
+  expect(discarded.receives).toEqual(toldFixture().receives);
+  expect(discarded).toEqual(toldFixture());
+  expect(told.layers[1]!.draft).not.toBeNull();
+});
+
+test('a set holding a draft saved on an earlier revision keeps it and stays published in what the agent receives', () => {
+  const given = toldFixture(),
+    stale = drafted({ ...given.layers[2]!, revision: 3 }, [hand, added], false),
+    view: ToldView = { ...given, layers: [given.layers[0]!, given.layers[1]!, stale, given.layers[3]!] },
+    team3 =
+      '# Project team: engineering (revision 3)\n\n**Hand off what changed.** Say which files changed and what you checked.',
+    told = toldWithDraft(view, 'own', [stay]);
+  expect(told.layers[2]).toEqual(stale);
+  expect(told.receives).toEqual({
+    text: [
+      ...sections.slice(0, 2),
+      team3,
+      '# Project employee: W-1 (revision 2)\n\n**Stay inside the story.** Change only the files the story may change.',
+    ].join('\n\n'),
+    drafts: 1,
+  });
+  const discarded = toldWithoutDraft(told, 'own');
+  expect(discarded.layers[2]).toEqual(stale);
+  expect(discarded.receives).toEqual({ text: [...sections.slice(0, 2), team3, sections[3]].join('\n\n'), drafts: 0 });
 });
 
 let controller: Controller, client: QueryClient;

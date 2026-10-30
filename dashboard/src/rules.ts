@@ -1,8 +1,8 @@
 // What an agent is told, as rules (1.2 step 1), as the dashboard reads it: the controller's told view of one agent
 // (src/core/instructions.mjs toldView), the rules each set shows and its edits start from, edits that each return a new
-// list, the words a page shows for a rule and for what a draft changes, finding a rule across every set, and the
-// director's draft, publish and discard. The controller writes a draft's rules as its document's text and owns every
-// revision; only those three commands send anything.
+// list, the words a page shows for a rule and for what a draft changes, finding a rule across every set, the page's own
+// copy of the told view after a draft save or discard, and the director's draft, publish and discard. The controller
+// writes a draft's rules as its document's text and owns every revision; only those three commands send anything.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { send, toldUrl, type InstructionDoc, type Rule, type ToldLayer, type ToldView } from './api';
 import { queryKeys } from './records';
@@ -166,6 +166,83 @@ export function draftChange(layer: ToldLayer): string | null {
     only = parts.length === 1 ? parts[0] : null;
   return `${list} ${only === 'added' ? 'to' : only === 'removed' ? 'from' : 'in'} ${set}`;
 }
+
+// The page's own copy of what the controller will answer after a draft save or discard, so a page can show it before
+// the controller does. Each answers a new value and never changes the one given; none checks the rules, since the
+// controller refuses what it cannot keep and the page then reads its answer.
+
+// The draft's text the controller writes for rules it accepts (src/core/rules.mjs formatRules): a rule's name, trimmed
+// and without its trailing full stops, in bold with a full stop unless it ends in ? or !, then its text, trimmed and
+// with CRLF or CR as LF; a rule without a name is its text alone. One blank line between rules.
+export const draftText = (rules: readonly Rule[]): string =>
+  rules
+    .map(rule => {
+      const name = (rule.title ?? '').trim().replace(/\.+$/, '').trim(),
+        body = rule.text.replace(/\r\n?/g, '\n').trim();
+      if (!name) return body;
+      return `**${name}${/[?!]$/.test(name) ? '' : '.'}**${body ? ` ${body}` : ''}`;
+    })
+    .join('\n\n');
+
+const named = /^\*\*([^*\n]+)\*\*[ \t]*/;
+// The rules a draft's text holds once saved (src/core/rules.mjs parseRules): one per paragraph, named by the bold
+// words it opens with, without their full stops (null when none are left), and its text trimmed.
+export const readRules = (text: string): Rule[] =>
+  text
+    .replace(/\r\n?/g, '\n')
+    .split(/\n[ \t]*\n+/)
+    .map(block => block.trim())
+    .filter(Boolean)
+    .map(block => {
+      const match = named.exec(block);
+      if (!match) return { title: null, text: block };
+      return { title: match[1]!.trim().replace(/\.+$/, '').trim() || null, text: block.slice(match[0].length).trim() };
+    });
+
+// What the agent's next attempt receives (src/core/instructions.mjs toldView): each set under its heading
+// (documentTitle), a set with a current draft as its next revision with the draft's text and every other one as
+// published, so a draft saved on an earlier revision is left out; `drafts` counts the current drafts.
+function receivesOf(layers: readonly ToldLayer[]): ToldView['receives'] {
+  const section = (layer: ToldLayer, revision: number, text: string) =>
+    `# ${layer.projectId ? 'Project ' : ''}${layer.scope}: ${layer.id} (revision ${revision})\n\n${text}`;
+  return {
+    text: layers
+      .map(layer =>
+        layer.draft?.current
+          ? section(layer, layer.revision + 1, layer.draft.text)
+          : section(layer, layer.revision, layer.text),
+      )
+      .join('\n\n'),
+    drafts: layers.filter(layer => layer.draft?.current).length,
+  };
+}
+
+// A told view with one set changed, found by which set it is: the shared set and the project's are both
+// company/company, so never by its scope and id.
+function withSet(view: ToldView, set: ToldLayer['layer'], change: (layer: ToldLayer) => ToldLayer): ToldView {
+  const layers = view.layers.map(layer => (layer.layer === set ? change(layer) : layer));
+  return { ...view, layers, receives: receivesOf(layers) };
+}
+
+// The told view once a set's draft is saved with these rules: a current draft on the set's revision, with its text as
+// the controller writes it and its rules as it reads them back.
+export function toldWithDraft(view: ToldView, set: ToldLayer['layer'], rules: readonly Rule[]): ToldView {
+  const text = draftText(rules);
+  return withSet(view, set, layer => ({
+    ...layer,
+    draft: {
+      baseRevision: layer.revision,
+      savedAt: layer.draft?.savedAt ?? null,
+      current: true,
+      text,
+      rules: readRules(text),
+    },
+  }));
+}
+
+// The told view once a set's draft is discarded.
+export const toldWithoutDraft = (view: ToldView, set: ToldLayer['layer']): ToldView =>
+  withSet(view, set, layer => ({ ...layer, draft: null }));
 
 // A set's instruction commands (src/server.mjs): its scope is the controller's, `employee` for the agent's own.
 const commandUrl = (layer: ToldLayer, action: 'draft' | 'publish' | 'discard') =>
