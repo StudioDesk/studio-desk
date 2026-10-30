@@ -115,6 +115,42 @@ test('with integration after a passing review automatic, the policy integrates e
   );
 });
 
+// October 30: with stories building at once, several passed review while one integration waited, and the policy handed
+// each of the others to the director. Now each waits its turn and is integrated in the order its review was accepted.
+test('stories whose reviews pass while an integration waits are integrated in turn, never handed to the director', async t => {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),
+    store = c.app.store,
+    { runner } = c.app,
+    { ids } = await c.breakdown([
+      { files: ['src/core/workflows.mjs'], dependencies: [] },
+      { files: ['src/core/projects.mjs'], dependencies: [] },
+    ]);
+  policyFor(c)('auto');
+  // The project's source is held, so the first story's integration waits in the policy's one request.
+  const held = ['source:studio-desk-integration', 'source:studio-desk-tests'];
+  store.claim(held, 'held-source');
+  for (const id of ids) {
+    approveWork(store, runner.registries, store.task(id));
+    runner.queueStart(id);
+  }
+  for (const id of ids) await acceptEdit(c, id);
+  await until(
+    () => ids.every(id => reviewOf(store, id)?.status === 'accepted' && store.task(id).status === 'done'),
+    'both reviews to pass',
+  );
+  assert.ok(ids.includes(runner.autonomy.pendingIntegration()?.taskId));
+  const handedOver = () =>
+    store.events().filter(event => event.kind === 'autonomy_attention' && ids.includes(event.task_id));
+  assert.deepEqual(handedOver(), [], 'Waiting for the integration ahead is no call for the director.');
+  for (const id of ids) assert.equal(store.task(id).autonomyNote, undefined);
+  for (const resource of held) store.releaseResource(resource, 'held-source');
+  runner.autonomy.tryIntegration();
+  for (const id of ids)
+    await until(() => store.task(id).sourceStage?.current === 'integrated', `${id} to be integrated`);
+  assert.deepEqual(handedOver(), []);
+  assert.equal(runner.autonomy.pendingIntegration(), null);
+});
+
 test('the director stays the fallback: the policy waits when set to, never acts on a review that requested changes, and does not retry a failed integration (MP-023)', async t => {
   // Only a task type with an integration step has the mode; policies without it ask the director.
   const waiting = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),

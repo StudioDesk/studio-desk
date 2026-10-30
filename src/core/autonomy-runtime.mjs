@@ -185,7 +185,39 @@ export class Autonomy {
         by: { type: 'policy', revision: policy.revision, reason: `${operation.label}: ${ready.reason}` },
       });
     } catch (error) {
+      // Another integration holds the one request: this one waits its turn (integrateWaiting), which is no call for
+      // the director (October 30: with stories building at once, three waited two hours as the director's).
+      if (error.waiting) return;
       this.attention(task, `The policy could not request integration; approve it yourself. ${error.message}`);
+    }
+  }
+  // Once the request is free, the policy asks for the next accepted story that waits to be integrated, the one
+  // accepted first, as it would have when its review passed. A story whose integration stopped for anything else
+  // waits for the director, with its note; one the policy left waiting carries none (or the earlier note that an
+  // integration was already waiting).
+  integrateWaiting() {
+    if (this.runner.closing || this.store.setting(INTEGRATION)) return;
+    const acceptedAt = task => {
+      try {
+        return this.store.attempt(task.acceptedAttemptId).acceptedAt || '';
+      } catch {
+        return '';
+      }
+    };
+    const waiting = this.store
+      .tasks()
+      .filter(
+        task =>
+          task.status === 'done' &&
+          task.sourceStage?.current === 'waiting-for-integration' &&
+          (!task.autonomyNote || /An integration is already waiting\.$/.test(task.autonomyNote)),
+      )
+      .sort((a, b) => acceptedAt(a).localeCompare(acceptedAt(b)));
+    for (const task of waiting) {
+      const policy = this.policy(task);
+      if (!policy.enabled) continue;
+      this.integrateAccepted(task, policy);
+      if (this.store.setting(INTEGRATION)) return;
     }
   }
 
@@ -352,7 +384,8 @@ export class Autonomy {
       this.runner.integration.failed(this.runner, task, error.message);
       throw error;
     }
-    if (this.store.setting(INTEGRATION)) throw new Error('An integration is already waiting.');
+    if (this.store.setting(INTEGRATION))
+      throw Object.assign(new Error('An integration is already waiting.'), { waiting: true });
     // Only integrating the controller's own source replaces its running modules.
     const org = this.store.organization(),
       paused = !!this.runner.integration.pauses(task);
@@ -419,10 +452,14 @@ export class Autonomy {
         { ...(pending.override ? { override: pending.override } : {}), by: pending.by || { type: 'director' } },
       );
       if (result?.state !== 'verifying') this.integrationSettled(task, pending, result);
+      // The request is free again: the next story waiting to be integrated asks for it, and starts once this one lets
+      // go of the source.
+      this.integrateWaiting();
       return result;
     } catch (error) {
       this.runner.integration.failed(this.runner, task, error.message);
       this.attention(task, `Integration did not complete${stays(pending)}. ${error.message}`);
+      this.integrateWaiting();
       return { state: 'failed', error: error.message };
     }
   }
