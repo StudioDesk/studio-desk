@@ -1,13 +1,15 @@
 // The Artifacts page of a project that is not code (1.2 step 6): the library at the top, then The work, one row per
 // file the work made with its kind, readable name, agent, idea or step and latest date, In the library or Add to the
 // library, Open and its versions, the All, Documents and Images filter with the idea and agent choices, then the line
-// counting the records of how the work was done with Open the ideas.
+// counting the records of how the work was done with Open the ideas. A code project's page: the card saying its code is
+// in the repository with Open Releases, the library, what the work made that isn't code with each story's visual check
+// opening the story on its Pages tab, and the records line with Open the board, and no snapshots.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { ProjectWork, WorkFile, WorkVersion } from './api';
+import type { ProjectWork, WorkFile, WorkPictures, WorkVersion } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, type Controller } from './test-controller';
@@ -303,4 +305,156 @@ test('a library change while the page is open reads the work again, so the file 
   });
   expect(await row('art/hero_banner.png').findByText('In the library')).toBeTruthy();
   expect(row('art/hero_banner.png').queryByRole('button', { name: /to the library/ })).toBeNull();
+});
+
+// A code project: its code stories' files are records, so the work is what its other steps handed back, and one
+// story's visual check took four pictures.
+const pictures = (taskId: string, title: string, at: string, count: number): WorkPictures => ({
+  taskId,
+  title,
+  runId: 'run-launch',
+  attemptId: `attempt-${taskId}-candidate`,
+  at,
+  images: Array.from({ length: count }, (_, index) => ({ path: `pages/page-${index + 1}.png`, hash: `hash-${index}` })),
+});
+const codeProject = () => {
+  controller.shell.organizationConfiguration = {
+    taskKinds: ['studio-development:breakdown', 'studio-development:change'],
+  };
+  controller.projectWork = {
+    work: [
+      work('T-plan', 'docs/launch-plan.md', {
+        runId: 'run-launch',
+        workerId: 'W-2',
+        hash: 'hash-T-plan-2',
+        attemptId: 'attempt-T-plan-2',
+        acceptedAt: '2026-10-23T12:00:00Z',
+        libraryEntryId: 'lib-plan',
+        versions: [
+          version('T-plan', 2, { workerId: 'W-2', at: '2026-10-23T12:00:00Z', current: true, why: 'Shorter.' }),
+          version('T-plan', 1, { workerId: 'W-2', at: '2026-10-21T12:00:00Z' }),
+        ],
+      }),
+      work('T-notes', 'notes/release_notes.md', { title: 'Write the release notes' }),
+    ],
+    pictures: [pictures('T-cards', 'Board cards show their stage', '2026-10-22T12:00:00Z', 4)],
+    records: records(653),
+  };
+};
+const codeSentence =
+  "The files that go with this project's code: the library every agent follows, and what the work made that isn't " +
+  'code. The code itself lives in the repository.';
+const notCode = () => screen.getByRole('region', { name: "What the work made that isn't code" });
+
+test("a code project's page says its code is in the repository, with Open Releases, above the library and no snapshots", async () => {
+  const user = userEvent.setup();
+  codeProject();
+  const router = open();
+  expect(await screen.findByText(codeSentence)).toBeTruthy();
+  expect(
+    screen.queryByText("What this project's work made and you accepted, one row per file, and your own uploads."),
+  ).toBeNull();
+  const card = screen.getByRole('region', { name: 'The code' });
+  expect(within(card).getByText('The code is in the repository.')).toBeTruthy();
+  expect(
+    within(card).getByText("Each story's changes are on its Changes tab, and what each line shipped is on Releases."),
+  ).toBeTruthy();
+  // The library follows, with Upload a file, as on any project.
+  const library = screen.getByRole('region', { name: 'Library' });
+  expect(within(library).getByRole('button', { name: 'Upload a file' })).toBeTruthy();
+  expect(card.compareDocumentPosition(library) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await screen.findByRole('list', { name: 'The work' });
+  expect(library.compareDocumentPosition(notCode()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // A code project has Releases, not snapshots.
+  expect(screen.queryByRole('region', { name: 'Snapshots' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'New snapshot' })).toBeNull();
+  expect(controller.reads()).not.toContain('/api/projects/project-x/snapshots');
+
+  const releases = within(card).getByRole('link', { name: 'Open Releases' });
+  expect(releases.getAttribute('href')).toBe('/p/project-x/releases');
+  await user.click(releases);
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-x/releases'));
+});
+
+test("what the work made that isn't code lists a step's documents and each story's visual check, which opens its Pages tab", async () => {
+  const user = userEvent.setup();
+  codeProject();
+  const router = open();
+  await screen.findByRole('list', { name: 'The work' });
+  expect(within(notCode()).getByRole('heading', { level: 2, name: "What the work made that isn't code" })).toBeTruthy();
+  // The documents first, then the visual check, without the work's own heading or filter.
+  expect(rows()).toHaveLength(3);
+  expect(names()).toEqual(['Launch plan', 'Release notes', undefined]);
+  expect(screen.queryByRole('region', { name: 'The work' })).toBeNull();
+  expect(screen.queryByRole('group', { name: 'Show' })).toBeNull();
+
+  // A step's document reads as on any project: its kind, line, versions, In the library and Open.
+  const plan = row('docs/launch-plan.md');
+  expect(plan.getByText('Document')).toBeTruthy();
+  expect(plan.getByText(`Ada · “Make the launch page” · ${when('2026-10-23T12:00:00Z')}`)).toBeTruthy();
+  expect(plan.getByText('In the library')).toBeTruthy();
+  expect(plan.getByRole('button', { name: '2 versions of docs/launch-plan.md' }).textContent).toBe('2 versions');
+  expect(plan.getByRole('link', { name: 'Open docs/launch-plan.md' }).getAttribute('href')).toBe(
+    '/api/attempts/attempt-T-plan-2/artifact?projectId=project-x&path=docs%2Flaunch-plan.md',
+  );
+  // One the library does not hold offers Add to the library, which opens it.
+  const notes = row('notes/release_notes.md');
+  expect(notes.getByText(`Eli · “Write the release notes” · ${when('2026-10-20T12:00:00Z')}`)).toBeTruthy();
+  await user.click(notes.getByRole('button', { name: 'Add notes/release_notes.md to the library' }));
+  const adding = await screen.findByRole('dialog', { name: 'Add to the library' });
+  await user.click(within(adding).getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add to the library' })).toBeNull());
+
+  // The visual check reads as its story's row and opens the story on its Pages tab.
+  const check = within(rows()[2]!).getByRole('link');
+  expect(check.textContent).toBe(
+    `The visual check · “Board cards show their stage” · ${when('2026-10-22T12:00:00Z')} · 4 pictures`,
+  );
+  expect(check.getAttribute('href')).toBe('/p/project-x/tasks/T-cards?tab=pages');
+  await user.click(check);
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-x/tasks/T-cards'));
+  expect(router.state.location.search).toEqual({ tab: 'pages' });
+});
+
+test("a code project's records line counts how the stories were built, and Open the board goes to the board", async () => {
+  const user = userEvent.setup();
+  codeProject();
+  const router = open();
+  const line = (await screen.findByText(/^653 records of how the stories were built\. /)).closest('p')!;
+  expect(line.textContent).toBe(
+    '653 records of how the stories were built. Reviews, test results, plans and the copies of changed files stay on ' +
+      "each story's Changes, Checks and Activity. They are never listed here. Open the board",
+  );
+  expect(notCode().compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.queryByRole('link', { name: 'Open the ideas' })).toBeNull();
+  const board = within(line).getByRole('link', { name: 'Open the board' });
+  expect(board.getAttribute('href')).toBe('/p/project-x/board');
+  await user.click(board);
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-x/board'));
+});
+
+test('a code project whose work has made nothing that is not code says so plainly, and a visual check alone is listed', async () => {
+  codeProject();
+  controller.projectWork = { work: [], pictures: [], records: records(0) };
+  open();
+  const section = within(await screen.findByRole('region', { name: "What the work made that isn't code" }));
+  expect(await section.findByText('Nothing has been made yet.')).toBeTruthy();
+  expect(screen.queryByRole('list', { name: 'The work' })).toBeNull();
+  // With no records the line is left out.
+  expect(screen.queryByText(/records? of how/)).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Open the board' })).toBeNull();
+  cleanup();
+
+  controller.projectWork = {
+    work: [],
+    pictures: [pictures('T-cards', 'Board cards show their stage', '2026-10-22T12:00:00Z', 1)],
+    records: records(0),
+  };
+  open();
+  await screen.findByRole('list', { name: 'The work' });
+  expect(rows()).toHaveLength(1);
+  expect(within(rows()[0]!).getByRole('link').textContent).toBe(
+    `The visual check · “Board cards show their stage” · ${when('2026-10-22T12:00:00Z')} · 1 picture`,
+  );
+  expect(screen.queryByText('Nothing has been made yet.')).toBeNull();
 });

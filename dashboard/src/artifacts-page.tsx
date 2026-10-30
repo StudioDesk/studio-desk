@@ -5,14 +5,18 @@
 // with the All, Documents and Images filter and the idea and agent choices. Then how many records of how the work was
 // done there are, with Open the ideas. A project that is not code names sets of the accepted files as snapshots below;
 // a code project has Releases instead.
+// A code project's code is in its repository, which a card above the library says, with Open Releases. Below the
+// library, what the work made that isn't code: the files its other steps handed back, as on any project, and each
+// story's visual check, which opens the story on its Pages tab. Its records line opens the board.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useId, useState } from 'react';
-import { artifactsUrl, getJSON, workUrl, type ProjectArtifact, type ProjectWork } from './api';
+import { artifactsUrl, getJSON, workUrl, type ProjectArtifact, type ProjectWork, type WorkPictures } from './api';
 import {
   acceptedFile,
   matchingWork,
   newestAttemptId,
+  picturesLine,
   recordsSentence,
   versionCount,
   workChoices,
@@ -73,14 +77,21 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
     [stream, client, projectId],
   );
   const files = listing.data,
-    names = { files, records: state };
-  // Agents' proposals and the library stay pinned at the top whatever the work's state.
+    names = { files, records: state },
+    code = !!shell && isCodeProject(shell);
+  // Agents' proposals and the library stay pinned at the top whatever the work's state, below a code project's card.
   const top = (
     <>
       <Heading
         title="Artifacts"
-        lead="What this project's work made and you accepted, one row per file, and your own uploads."
+        lead={
+          code
+            ? "The files that go with this project's code: the library every agent follows, and what the work made " +
+              "that isn't code. The code itself lives in the repository."
+            : "What this project's work made and you accepted, one row per file, and your own uploads."
+        }
       />
+      {code && <Repository projectId={projectId} />}
       <LibraryProposals projectId={projectId} names={names} />
       <Library projectId={projectId} names={names} />
     </>
@@ -115,7 +126,28 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
   const rows = workRows(data.work, state),
     shown = matchingWork(rows, filter),
     filtered = !!(filter.idea || filter.agent || (filter.show && filter.show !== 'all')),
-    records = recordsSentence(data.records, !!shell && isCodeProject(shell));
+    records = recordsSentence(data.records, code);
+  if (code)
+    return (
+      <>
+        {top}
+        <NotCode
+          projectId={projectId}
+          rows={rows}
+          pictures={data.pictures}
+          onAdd={row => setAdding(acceptedFile(row.file))}
+        />
+        {records && (
+          <p className="sd-meta" style={{ margin: 0 }}>
+            {records}{' '}
+            <Link to="/p/$projectId/board" params={{ projectId }}>
+              Open the board
+            </Link>
+          </p>
+        )}
+        <AddToLibrary projectId={projectId} file={adding} onClose={() => setAdding(null)} />
+      </>
+    );
   return (
     <>
       {top}
@@ -198,6 +230,85 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
       {snapshots}
       <AddToLibrary projectId={projectId} file={adding} onClose={() => setAdding(null)} />
     </>
+  );
+}
+
+// A code project's card: its code is in the repository, where each story's Changes tab and Releases show it.
+function Repository({ projectId }: { projectId: string }) {
+  return (
+    <section
+      className="sd-card"
+      aria-label="The code"
+      style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-10)', padding: '14px 18px' }}
+    >
+      <span style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', flex: 1, minWidth: 0 }}>
+        <b>The code is in the repository.</b>
+        <span className="sd-meta">
+          Each story's changes are on its Changes tab, and what each line shipped is on Releases.
+        </span>
+      </span>
+      <Link className="sd-btn sd-btn--sm" to="/p/$projectId/releases" params={{ projectId }}>
+        Open Releases
+      </Link>
+    </section>
+  );
+}
+
+// What a code project's work made that isn't code: the files its other steps handed back, then each story's visual
+// check, each newest first as the controller answers. The list keeps the work's name, as on any project.
+function NotCode({
+  projectId,
+  rows,
+  pictures,
+  onAdd,
+}: {
+  projectId: string;
+  rows: WorkRow[];
+  pictures: WorkPictures[];
+  onAdd: (row: WorkRow) => void;
+}) {
+  return (
+    <section aria-labelledby="not-code" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <h2 id="not-code" className="sd-section-title sd-section-title--sm">
+        What the work made that isn't code
+      </h2>
+      {rows.length || pictures.length ? (
+        <div className="sd-card sd-cardlist" role="list" aria-label="The work">
+          {rows.map(row => (
+            <WorkItem key={row.key} projectId={projectId} row={row} onAdd={() => onAdd(row)} />
+          ))}
+          {pictures.map(item => (
+            <PicturesItem key={item.attemptId} projectId={projectId} pictures={item} />
+          ))}
+        </div>
+      ) : (
+        <div className="sd-card sd-empty">
+          <b>Nothing has been made yet.</b>
+          <span>
+            The documents from steps that aren't code, and the pictures each story's visual check takes, show here once
+            you accept them.
+          </span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// One story's visual check: "The visual check · “its title” · Oct 28 · 4 pictures", which opens the story on its Pages
+// tab, where the pictures are.
+function PicturesItem({ projectId, pictures }: { projectId: string; pictures: WorkPictures }) {
+  return (
+    <div role="listitem" className="sd-cardlist__row sd-cardlist__row--line">
+      <Link
+        className="sd-cardlist__label"
+        style={{ padding: '10px 0', overflowWrap: 'anywhere' }}
+        to="/p/$projectId/tasks/$taskId"
+        params={{ projectId, taskId: pictures.taskId }}
+        search={{ tab: 'pages' }}
+      >
+        {picturesLine(pictures)}
+      </Link>
+    </div>
   );
 }
 
