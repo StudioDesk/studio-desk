@@ -372,6 +372,44 @@ export function denyWork(store, task, reason = '') {
   return { ok: true };
 }
 
+// A plan whose steps have not started is planned again with the director's reply (the chat box, October 30). Under
+// house rules that accept a plan by themselves, the plan is accepted the moment it arrives and its steps wait for the
+// director, so a reply to it in the idea's conversation comes after its acceptance. Every step is checked before any
+// changes: each is set aside (denied, with the reply as its reason), and the plan step goes back to ready with the reply
+// as its direction, to be started as the director's Start would. Its accepted attempt stays recorded, marked as
+// planned again; the new plan's steps join the same idea.
+export function replanWork(store, registries, task, direction) {
+  if (typeof direction !== 'string' || !direction.trim() || direction.length > 24000)
+    throw new Error('Say what to change in the plan.');
+  const plan = store.task(task.id),
+    steps = (plan.proposedTaskIds || []).map(id => store.task(id)).filter(step => step.status !== 'denied');
+  if (plan.status !== 'done' || !plan.acceptedAttemptId || !steps.length)
+    throw new Error('Only an accepted plan whose steps wait for your approval can be planned again.');
+  if (!steps.every(step => denial(store, step)))
+    throw new Error("Some of this plan's steps have started; change them on their own pages instead.");
+  const words = direction.trim(),
+    reason = `Planned again with your reply: ${words.split('\n')[0].slice(0, 200)}`;
+  for (const step of steps) denyWork(store, step, reason);
+  store.tx(() => {
+    const accepted = store.attempt(plan.acceptedAttemptId),
+      current = store.task(plan.id);
+    accepted.replannedBy = { type: 'director', at: new Date().toISOString(), reason: words };
+    store.updateAttempt(accepted);
+    registries.workflows.direct(current, words);
+    Object.assign(current, { status: 'ready', reason: '', queued: false });
+    delete current.acceptedAttemptId;
+    delete current.autonomyNote;
+    store.putTask(current);
+  });
+  store.event(
+    'replanned',
+    plan.id,
+    null,
+    `Director replied to the plan: its ${steps.length} waiting step${steps.length === 1 ? ' was' : 's were'} set aside, and it is planned again with the reply.`,
+  );
+  return { ok: true, setAside: steps.map(step => step.id) };
+}
+
 // Closes several unstarted tasks at once (for example, what is left of a stopped run).
 // Every task is checked before any is changed.
 export function closeWork(store, projectId, taskIds, reason = '') {

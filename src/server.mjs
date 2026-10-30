@@ -122,6 +122,7 @@ import {
   closeWork,
   closeStartedWork,
   sendBackWork,
+  replanWork,
 } from './core/proposals.mjs';
 import { acceptAttempt } from './core/acceptance.mjs';
 import { applyWorkerExecution, taskExecution } from './core/execution.mjs';
@@ -1864,6 +1865,20 @@ export function createStudio({
             const approved = approveWork(store, registries, t);
             runner.autonomy.approved(t.id);
             return json(res, approved);
+          }
+          // The director's reply to an accepted plan whose steps have not started (the chat box, October 30): the steps
+          // are set aside and the plan runs again with the reply, started as the director's Start.
+          if (action === 'replan') {
+            if (Object.keys(data).some(key => !['projectId', 'direction'].includes(key)))
+              fail('A reply to a plan takes only its words.');
+            const replanned = replanWork(store, registries, t, data.direction);
+            let start;
+            try {
+              start = runner.queueStart(t.id);
+            } catch (error) {
+              start = { ok: false, reason: error.message };
+            }
+            return json(res, { ...replanned, start }, 202);
           }
           // Work denied or closed may free its line for a milestone's next waiting idea (1.1 step 2a).
           if (action === 'deny-work') {

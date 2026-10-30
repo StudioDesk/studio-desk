@@ -417,6 +417,57 @@ test("with autonomy on, only approving the plan's work is the director's; a revi
   }
 });
 
+// The chat box, October 30: under house rules that accept a plan by themselves, the director's reply comes after the
+// plan was accepted, while its steps wait for approval.
+test('a reply to a plan the house rules accepted sets its waiting steps aside and plans again with the reply', async t => {
+  const c = await setup(t),
+    projectId = await c.project('Replanned guide', shapes.bench),
+    policy = await c.request(`/api/projects/${projectId}/autonomy`, {
+      projectId,
+      expectedRevision: 0,
+      enabled: true,
+      retries: 0,
+      kinds: {
+        'general:plan': { approve: 'director', accept: 'auto' },
+        'general:work': { approve: 'director', accept: 'auto' },
+        'general:review': { approve: 'auto', accept: 'auto' },
+      },
+      cycle: { enabled: false, workflowId: null, maxPerDay: 3 },
+    });
+  assert.equal(policy.status, 200, JSON.stringify(policy.data));
+  const intake = await c.request('/api/intake', { projectId, idea: 'Write a guide.' }),
+    planId = intake.data.taskIds[0],
+    [stepId] = await c.until(() => c.store.task(planId).proposedTaskIds, 'the plan to propose work'),
+    first = c.store.task(planId).acceptedAttemptId;
+  assert.equal(c.store.task(stepId).approval.status, 'pending');
+  // Only its words.
+  assert.equal((await c.request(`/api/tasks/${planId}/replan`, { projectId, direction: '' })).status, 400);
+  const replied = await c.request(`/api/tasks/${planId}/replan`, { projectId, direction: 'Make it a one-page guide.' });
+  assert.equal(replied.status, 202, JSON.stringify(replied.data));
+  assert.deepEqual(replied.data.setAside, [stepId]);
+  const setAside = c.store.task(stepId);
+  assert.equal(setAside.status, 'denied');
+  assert.equal(setAside.approval.reason, 'Planned again with your reply: Make it a one-page guide.');
+  assert.equal(c.store.attempt(first).status, 'accepted', 'The first plan stays recorded.');
+  assert.equal(c.store.attempt(first).replannedBy.reason, 'Make it a one-page guide.');
+  // The plan runs again with the reply and proposes its new step, waiting for the director as before.
+  const replanned = await c.until(() => {
+    const plan = c.store.task(planId);
+    return plan.status === 'done' && plan.acceptedAttemptId && plan.acceptedAttemptId !== first && plan;
+  }, 'the plan to run again');
+  assert.match(c.store.attempt(replanned.acceptedAttemptId).assignment.direction, /Make it a one-page guide\./);
+  const fresh = replanned.proposedTaskIds.filter(id => id !== stepId);
+  assert.ok(fresh.length);
+  for (const id of fresh) assert.equal(c.store.task(id).approval.status, 'pending');
+  // Once one of its steps has started, the plan is no longer planned again; nothing changes.
+  assert.equal((await c.request(`/api/tasks/${fresh[0]}/approve-work`, { projectId })).status, 200);
+  await c.until(() => c.store.attempts(fresh[0]).length, 'the new step to start');
+  const refused = await c.request(`/api/tasks/${planId}/replan`, { projectId, direction: 'Shorter still.' });
+  assert.equal(refused.status, 400);
+  assert.match(refused.data.error, /have started/);
+  assert.equal(c.store.task(planId).acceptedAttemptId, replanned.acceptedAttemptId);
+});
+
 // The Simulator review of a step titled REWORK ... FAILED CHECK asks for changes and also reports a
 // failed check of its own, as a reviewer may when it records the problem it found both ways.
 const checkedIdea = 'Write a guide.\n- REWORK the guide draft with a FAILED CHECK';
