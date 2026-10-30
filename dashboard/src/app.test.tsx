@@ -75,6 +75,9 @@ test("a project's pages share one frame: the project rail, its pages and the con
   );
   expect(rail.getByRole('link', { name: 'Project X' }).getAttribute('aria-current')).toBe('true');
   expect(rail.getByRole('link', { name: 'Project Y' }).getAttribute('aria-current')).toBeNull();
+  // With no calls anywhere, no tile has a badge and the tab's title has no count.
+  expect(document.querySelector('.sd-rail__badge')).toBeNull();
+  expect(document.title).toBe('Studio desk');
   expect(screen.getByText('Connecting to your studio…')).toBeTruthy();
   latest().emit('open');
   expect(screen.getByText('Controller connected')).toBeTruthy();
@@ -151,6 +154,13 @@ test('the Needs you count follows the live set, and a tile on the rail opens its
   controller.tasks = [taskFixture('T-1', { title: 'Waiting to start' })];
   const router = open('/p/project-x/runs');
   expect(await screen.findAllByLabelText('1 call for you')).toHaveLength(2);
+  // The open project's tile counts the same call; Project Y, whose records the stand-in does not know, shows none.
+  const rail = within(screen.getByRole('navigation', { name: 'Projects' })),
+    tile = await rail.findByRole('link', { name: 'Project X: 1 call for you' });
+  expect(tile.getAttribute('title')).toBe('Project X: 1 call for you');
+  expect(tile.querySelector('.sd-rail__badge')?.textContent).toBe('1');
+  expect(rail.getByRole('link', { name: 'Project Y' }).querySelector('.sd-rail__badge')).toBeNull();
+  expect(document.title).toBe('(1) Studio desk');
   fireEvent.click(await screen.findByRole('link', { name: 'Project Y' }));
   await waitFor(() => expect(router.history.location.pathname).toBe('/p/project-y'));
 });

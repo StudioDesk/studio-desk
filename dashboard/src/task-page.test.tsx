@@ -68,12 +68,15 @@ test("the page loads its task with the project's shared records, and a change fe
   open();
   expect(await screen.findByRole('heading', { level: 1, name: 'Show finished results' })).toBeTruthy();
   expect(latest().url).toBe('/api/events?projectId=project-x');
-  // Pages read once the stream has opened, so nothing is read twice; the attempt shown reads its full record.
+  // Pages read once the stream has opened, so nothing is read twice; the attempt shown reads its full record, and the
+  // rail reads Project Y's shell and live set once for its count.
   await waitFor(() =>
     expect([...controller.reads()].sort()).toEqual([
       detailUrl,
       '/api/projects/project-x/live',
       '/api/projects/project-x/shell',
+      '/api/projects/project-y/live',
+      '/api/projects/project-y/shell',
       taskUrl,
     ]),
   );
@@ -83,10 +86,10 @@ test("the page loads its task with the project's shared records, and a change fe
     { seq: 11, type: 'attempt', id: 'attempt-9', taskId: 'T-2', projectId: 'project-x' },
     { seq: 11, type: 'run', id: 'run-1', projectId: 'project-x' },
   ]);
-  await waitFor(() => expect(controller.reads()).toHaveLength(5));
+  await waitFor(() => expect(controller.reads()).toHaveLength(7));
   await new Promise(resolve => setTimeout(resolve, 50));
   expect(controller.reads().at(-1)).toBe('/api/projects/project-x/live');
-  expect(controller.reads()).toHaveLength(5);
+  expect(controller.reads()).toHaveLength(7);
   edit({ title: 'Show finished results inline' });
   change(12, [{ seq: 12, type: 'task', id: 'T-1', projectId: 'project-x' }]);
   expect(await screen.findByRole('heading', { name: 'Show finished results inline' })).toBeTruthy();
@@ -94,7 +97,7 @@ test("the page loads its task with the project's shared records, and a change fe
   change(13, [{ seq: 13, type: 'attempt', id: 'attempt-1', taskId: 'T-1', projectId: 'project-x' }]);
   expect(await screen.findByText('Halfway.')).toBeTruthy();
   // A change to the shown attempt reads its full record again; one to the task alone does not.
-  await waitFor(() => expect(controller.reads().slice(5).sort()).toEqual([detailUrl, taskUrl, taskUrl]));
+  await waitFor(() => expect(controller.reads().slice(7).sort()).toEqual([detailUrl, taskUrl, taskUrl]));
 });
 
 test('a brief written in Markdown reads as formatted text, not as its marks', async () => {

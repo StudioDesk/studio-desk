@@ -1,13 +1,15 @@
 // One event stream per project page (MP-026). Change events name the records that changed; a log watch
 // streams one attempt's events while its activity is on screen. After a reconnect the stream asks the
 // controller what it missed, and reloads what is shown when the controller cannot say. A controller that
-// restarted also has a new request token, which the page picks up for its commands.
+// restarted also has a new request token, which the page picks up for its commands. The stream also names the
+// other projects whose records changed, for the project rail's counts.
 import { changesUrl, eventsUrl, getJSON, refreshToken, type ChangeMessage, type LogEvent } from './api';
 
 export interface LiveListener {
   changes?(message: ChangeMessage): void;
   log?(event: LogEvent): void;
   status?(status: StreamStatus): void;
+  projects?(projectIds: string[]): void;
 }
 
 export type StreamFactory = (url: string) => EventSource;
@@ -69,6 +71,10 @@ export class LiveStream {
       const log: LogEvent = JSON.parse((event as MessageEvent).data);
       if (this.watch && log.attempt_id === this.watch.attemptId) this.watch.after = Math.max(this.watch.after, log.seq);
       for (const listener of this.listeners) listener.log?.(log);
+    });
+    source.addEventListener('projects', event => {
+      const { projectIds } = JSON.parse((event as MessageEvent).data) as { projectIds: string[] };
+      for (const listener of this.listeners) listener.projects?.(projectIds);
     });
   }
 

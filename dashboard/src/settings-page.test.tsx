@@ -164,10 +164,13 @@ test('Settings links the records it keeps elsewhere and changes where candidate 
       { url: '/api/control', method: 'POST', body: { projectId: 'project-x', testSandbox: 'none' } },
     ]),
   );
-  // Settings reads the shell and the live set: no instructions or history.
+  // Settings reads the shell and the live set: no instructions or history. The rail reads Project Y's once for its
+  // count.
   expect([...new Set(controller.reads())].sort()).toEqual([
     '/api/projects/project-x/live',
     '/api/projects/project-x/shell',
+    '/api/projects/project-y/live',
+    '/api/projects/project-y/shell',
   ]);
 });
 

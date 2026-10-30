@@ -1,8 +1,9 @@
 // The frame every page of a project shares, as the design's Sidebar draws it (the project rail with Find a
 // project, chosen October 22): a rail with a tile for each project, then the current project's sidebar with Find
 // a project (Ctrl K), New idea (N), its pages and the controller's status. At 860px and under, a top bar names the
-// project and opens the search, and bottom tabs carry the pages with New idea in the middle. Only the current
-// project's Needs you count shows: each tab counts its own project's open work (the director, October 22).
+// project and opens the search, and bottom tabs carry the pages with New idea in the middle. The sidebar's Needs you
+// count is the current project's (the director, October 22); each tile on the rail counts its own project's calls,
+// and the tab's title counts every project's (the attention indicator, October 29).
 import { Outlet, useRouter, useRouterState } from '@tanstack/react-router';
 import {
   lazy,
@@ -20,6 +21,7 @@ import { COLORS } from './design/agent-kit.js';
 import { Icon, Mark, type IconName } from './design/icons';
 import { journeyChip } from './journey';
 import { requestNewIdea } from './new-idea';
+import { useRailCalls } from './rail-calls';
 import { finishedState, useFinished, useStudio } from './records';
 import { useConnection } from './stream-context';
 import { liveSummary, runStories, type RunStory, type StudioState } from './studio-runs';
@@ -224,6 +226,7 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
     index = projects.findIndex(item => item.id === projectId),
     page = currentPage(path, projectId),
     decisions = state ? liveSummary(state).decisions : 0,
+    rail = useRailCalls(projectId, projects),
     href = (suffix: string) => `/p/${projectId}${suffix}`;
   // New idea opens Today, which puts the cursor in its idea box (or raises it as a sheet on a phone).
   const newIdea = () => {
@@ -238,6 +241,13 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
       // Without browser storage a new tab opens the first project.
     }
   }, [projectId]);
+  // A tab in the background still says how many calls wait, in every project.
+  useEffect(() => {
+    document.title = rail.total > 0 ? `(${rail.total}) Studio desk` : 'Studio desk';
+    return () => {
+      document.title = 'Studio desk';
+    };
+  }, [rail.total]);
   useEffect(() => {
     const onKey = (event: globalThis.KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'k') {
@@ -263,20 +273,29 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
         <nav className="sd-rail" aria-label="Projects">
           <Mark />
           <span className="sd-rail__rule" aria-hidden="true"></span>
-          {projects.map((item, position) => (
-            <a
-              key={item.id}
-              href={`/p/${item.id}`}
-              className="sd-rail__tile"
-              style={projectColor(item, position)}
-              aria-current={item.id === projectId ? 'true' : undefined}
-              aria-label={item.name}
-              title={item.name}
-              onClick={go(`/p/${item.id}`)}
-            >
-              {initials(item.name)}
-            </a>
-          ))}
+          {projects.map((item, position) => {
+            const waiting = rail.calls[item.id]?.count ?? 0,
+              label = waiting > 0 ? `${item.name}: ${waiting} ${waiting === 1 ? 'call' : 'calls'} for you` : item.name;
+            return (
+              <a
+                key={item.id}
+                href={`/p/${item.id}`}
+                className="sd-rail__tile"
+                style={projectColor(item, position)}
+                aria-current={item.id === projectId ? 'true' : undefined}
+                aria-label={label}
+                title={label}
+                onClick={go(`/p/${item.id}`)}
+              >
+                {initials(item.name)}
+                {waiting > 0 && (
+                  <span className="sd-rail__badge" aria-hidden="true">
+                    {waiting}
+                  </span>
+                )}
+              </a>
+            );
+          })}
           <button
             type="button"
             className="sd-rail__add"

@@ -12,6 +12,7 @@ import type {
   InstructionsPage,
   LibraryIndex,
   LibraryReader,
+  Live,
   LogEvent,
   PeopleSummary,
   ProjectArtifact,
@@ -187,8 +188,10 @@ export interface Controller {
   activity: ActivityPage[];
   // What happened to each task besides its agents' output, by task; none recorded reads as nothing yet.
   stories: Record<string, StoryActivity>;
-  // Other projects' shells by ID, for a test that opens another project: their pages read no records yet.
+  // Other projects' shells by ID, for a test that opens another project or counts its calls on the project rail, and
+  // their live sets by ID (a project not listed holds no work); their other pages read no records yet.
   shells: Record<string, Shell>;
+  lives: Record<string, Live>;
   // No projects yet's templates and signed-in CLIs (v1.0 item 24); none answers as a controller without the route.
   templates?: FirstRunTemplates;
   // The Releases page's records (1.1 step 6); none answers as a project without the source workflow.
@@ -267,6 +270,7 @@ export function fakeController(projectId = 'project-x'): Controller {
     activity: [{ events: [], next: null }],
     stories: {},
     shells: {},
+    lives: {},
     bringBack: {},
     runBringBack: {},
     tryView: {
@@ -323,13 +327,13 @@ export function fakeController(projectId = 'project-x'): Controller {
         return controller.templates
           ? respond(controller.templates)
           : respond({ error: 'Unknown controller route.' }, false);
-      // Another project the test names reads its shell and no records.
+      // Another project the test names reads its shell, the live set the test gives it, and no other records.
       const [, other, page] = path.match(/^\/api\/projects\/([^/]+)\/([a-z]+)$/) ?? [],
         otherShell = other && other !== projectId ? controller.shells[decodeURIComponent(other)] : undefined;
       if (otherShell && page) {
         const records: Record<string, unknown> = {
           shell: otherShell,
-          live: { tasks: [], attempts: [], runs: [] },
+          live: controller.lives[decodeURIComponent(other!)] ?? { tasks: [], attempts: [], runs: [] },
           runs: { runs: [], next: null },
           settled: { tasks: [], attempts: [], next: null, counts: { accepted: 0, closed: 0 } },
           people: { tasks: 0, accepted: { total: 0, workers: {}, teams: {} }, goals: {} },
