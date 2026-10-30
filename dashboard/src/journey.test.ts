@@ -192,6 +192,156 @@ test("other work's review that asked for changes says so, with its finding, befo
   ]);
 });
 
+// An agent that stopped to ask the director (1.2 step 2) asked; it did not stop. Its question and each answer read
+// in the director's color, with the recommended option marked and auto mode's answer marked while it may change.
+const question = {
+    ask: 'Split the page part into two stories?',
+    why: 'Two pages share it.',
+    options: [{ label: 'One story' }, { label: 'Two stories', detail: 'one a page' }],
+    recommended: 1,
+    choice: 'inside-story',
+    topics: [],
+  },
+  byAuto = { type: 'auto-mode', at: at(6) },
+  autoAnswer = { attemptId: 'a-ask', option: 1, label: 'Two stories', by: byAuto },
+  directorAnswer = {
+    attemptId: 'a-ask',
+    option: 1,
+    label: 'Two stories',
+    text: 'Keep the shared part in the first.',
+    by: { type: 'director', at: at(7) },
+    at: at(7),
+  },
+  // The plan step asked at minute 5; then, once answered, it planned again.
+  planAsked = (fields: Partial<Task>, later: AttemptSummary[] = []) =>
+    ({
+      ...state,
+      tasks: [checks, { ...plan, ...fields }, first, second],
+      attempts: [
+        ...attempts.filter(item => item.taskId !== 'T-plan'),
+        attempt('a-ask', 'T-plan', 4, 5, {
+          workerId: 'W-4',
+          status: 'blocked',
+          error: 'Needs a call from the director.',
+          question,
+        }),
+        ...later,
+      ],
+    }) as unknown as StudioState,
+  planned = attempt('a-plan', 'T-plan', 8, 9, { workerId: 'W-4', result: { summary: 'Two serial stories.' } }),
+  told = (records: StudioState, group = 0) =>
+    happened(run, records)[group]!.entries.map(entry => `${entry.lead} ${entry.text ?? ''}`.trim());
+
+test("a plan step's question reads as asked, with its options and the director's answer, not as a stop", () => {
+  const records = planAsked({ answers: [directorAnswer] }, [planned]),
+    entries = happened(run, records)[0]!.entries;
+  expect(told(records)).toEqual([
+    'You sent the idea.',
+    'Avery checked the source: 539 of 539 tests passed in 2 min.',
+    'Mara asked you: Split the page part into two stories?',
+    'You answered: Two stories — Keep the shared part in the first.',
+    'Mara planned it as 2 stories that run one after another, in 1 min.',
+    'The 2 stories were approved.',
+  ]);
+  const asking = entries.find(entry => entry.question)!;
+  expect(asking).toMatchObject({ at: at(5), icon: 'note', tone: 'you', decision: true, taskId: 'T-plan' });
+  expect(asking.stop).toBeUndefined();
+  expect(asking.question).toEqual({
+    attemptId: 'a-ask',
+    options: [
+      { label: 'One story', recommended: false },
+      { label: 'Two stories', detail: 'one a page', recommended: true },
+    ],
+    waiting: false,
+  });
+  expect(entries.find(entry => entry.answer)).toMatchObject({
+    at: at(7),
+    tone: 'you',
+    decision: true,
+    answer: { attemptId: 'a-ask', by: 'director', changeable: false },
+  });
+  expect(entries.filter(entry => `${entry.lead} ${entry.text}`.includes('stopped'))).toEqual([]);
+});
+
+test("auto mode's answer says so, and may be changed only while the work it started is open", () => {
+  const answerOf = (fields: Partial<Task>) =>
+    happened(run, planAsked(fields, [planned]))[0]!.entries.filter(entry => entry.answer);
+  const running = answerOf({ status: 'running', answers: [autoAnswer] });
+  expect(running.map(entry => `${entry.lead} ${entry.text}`)).toEqual(['Auto mode answered for you: Two stories']);
+  // Auto mode's answer recorded no time of its own, so it reads at the time auto mode gave it.
+  expect(running[0]).toMatchObject({ at: at(6), answer: { attemptId: 'a-ask', by: 'auto-mode', changeable: true } });
+  expect(answerOf({ status: 'done', answers: [autoAnswer] })[0]!.answer!.changeable).toBe(false);
+  expect(answerOf({ status: 'running', closed: true, answers: [autoAnswer] })[0]!.answer!.changeable).toBe(false);
+  // The director's answer that replaced auto mode's says so; auto mode's can no longer be changed.
+  const changed = answerOf({ status: 'running', answers: [autoAnswer, { ...directorAnswer, replaces: 'auto-mode' }] });
+  expect(changed.map(entry => [entry.lead, entry.answer])).toEqual([
+    ['Auto mode answered for you:', { attemptId: 'a-ask', by: 'auto-mode', changeable: false }],
+    ["You changed auto mode's answer:", { attemptId: 'a-ask', by: 'director', changeable: false }],
+  ]);
+});
+
+test('a question still waiting for the director says so, with no answer yet', () => {
+  const records = planAsked({ status: 'blocked', lastAttemptId: 'a-ask' }),
+    entries = happened(run, records)[0]!.entries;
+  expect(told(records)).toContain('Mara asked you: Split the page part into two stories?');
+  expect(entries.find(entry => entry.question)!.question!.waiting).toBe(true);
+  expect(entries.filter(entry => entry.answer)).toEqual([]);
+  expect(entries.filter(entry => entry.stop)).toEqual([]);
+});
+
+test("a story's build attempt that asked reads as its agent asking, in that story", () => {
+  const records = {
+    ...state,
+    tasks: [checks, plan, first, { ...second, status: 'blocked' }],
+    attempts: attempts.map(item =>
+      item.id === 'a-2b' ? { ...item, status: 'blocked', finishedAt: at(48), question } : item,
+    ),
+  } as unknown as StudioState;
+  const story = happened(run, records)[2]!;
+  expect(story.entries.map(entry => entry.lead)).toEqual(['Attempt 1 stopped:', 'Attempt 2 started', 'Eli asked you:']);
+  expect(story.entries.at(-1)).toMatchObject({
+    at: at(48),
+    tone: 'you',
+    text: 'Split the page part into two stories?',
+    taskId: 'T-2',
+    question: { attemptId: 'a-2b', waiting: true },
+  });
+});
+
+test('a failed attempt, and a blocked one without a readable question, still read as stops', () => {
+  const blocked = (fields: object) => {
+    const records = planAsked({ status: 'blocked', lastAttemptId: 'a-ask' });
+    records.attempts = records.attempts.map(item => (item.id === 'a-ask' ? { ...item, ...fields } : item));
+    return happened(run, records)[0]!.entries.find(entry => entry.taskId === 'T-plan')!;
+  };
+  for (const fields of [
+    { question: undefined },
+    { question: { problem: 'question.json must be readable JSON.' } },
+    { status: 'failed' },
+  ])
+    expect(blocked(fields)).toMatchObject({
+      lead: 'Mara stopped:',
+      text: 'Needs a call from the director.',
+      tone: 'bad',
+      stop: true,
+    });
+  // A story's build attempt whose question could not be read stopped, as a failed one does.
+  const records = {
+    ...state,
+    attempts: attempts.map(item =>
+      item.id === 'a-2b'
+        ? { ...item, status: 'blocked', finishedAt: at(48), error: 'Asks: nothing.', question: { problem: 'No ask.' } }
+        : item,
+    ),
+  } as unknown as StudioState;
+  const stops = happened(run, records)[2]!.entries.filter(entry => entry.stop);
+  expect(stops.map(entry => `${entry.lead} ${entry.text}`)).toEqual([
+    'Attempt 1 stopped: The attempt ran out of its 20 minutes.',
+    'Attempt 2 stopped: Asks: nothing.',
+  ]);
+  expect(stops.every(entry => !entry.question)).toBe(true);
+});
+
 test('who worked on the idea, what each did and for how long', () => {
   expect(whoWorked(run, state).map(person => `${person.name}: ${person.did}`)).toEqual([
     'Avery: checks',

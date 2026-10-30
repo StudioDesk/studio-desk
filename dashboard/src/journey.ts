@@ -4,6 +4,7 @@
 import type { AttemptSummary, Task } from './api';
 import { plural, reviewOf, spoken, totalsOf } from './evidence';
 import { workerName } from './names';
+import { changeableAnswer, exchange, waitingQuestion } from './questions';
 import { cliName, isSourceStory, standing, storySteps } from './story';
 import { active, type GraphNode, type RunStory, type StudioState } from './studio-runs';
 
@@ -228,6 +229,15 @@ export interface HappenedEntry {
   stop?: boolean;
   decision?: boolean;
   live?: boolean;
+  // An agent's question to the director (1.2 step 2): the asking attempt, its options in order with the one it
+  // recommends marked, and whether it still waits for an answer.
+  question?: {
+    attemptId: string;
+    options: { label: string; detail?: string; recommended: boolean }[];
+    waiting: boolean;
+  };
+  // An answer to that question: whose it is, and whether it is auto mode's answer the director may still change.
+  answer?: { attemptId: string; by: 'director' | 'auto-mode'; changeable: boolean };
 }
 export interface HappenedGroup {
   key: string;
@@ -246,6 +256,56 @@ const reason = (attempt: AttemptSummary) =>
     220,
   );
 
+// An attempt that finished blocked to ask the director, told as its question and then each answer recorded for it,
+// all the director's to read; null for any other attempt, which reads as a stop or a finish as before.
+const asked = (task: Task, attempt: AttemptSummary, who: string, own: AttemptSummary[]): HappenedEntry[] | null => {
+  const told = attempt.status === 'blocked' && attempt.finishedAt ? exchange(task, attempt) : null;
+  if (!told) return null;
+  const { question } = told,
+    changeable = changeableAnswer(task);
+  return [
+    {
+      at: String(attempt.finishedAt),
+      icon: 'note',
+      tone: 'you',
+      lead: `${who} asked you:`,
+      text: question.ask,
+      decision: true,
+      taskId: task.id,
+      question: {
+        attemptId: attempt.id,
+        options: (question.options ?? []).map((option, index) => ({
+          label: option.label,
+          ...(option.detail ? { detail: option.detail } : {}),
+          recommended: question.recommended === index,
+        })),
+        waiting: waitingQuestion(task, own)?.id === attempt.id,
+      },
+    },
+    ...told.answers.map((answer): HappenedEntry => {
+      const auto = answer.by?.type === 'auto-mode';
+      return {
+        at: String(answer.at ?? answer.by?.at ?? attempt.finishedAt),
+        icon: 'note',
+        tone: 'you',
+        lead: auto
+          ? 'Auto mode answered for you:'
+          : answer.replaces === 'auto-mode'
+            ? "You changed auto mode's answer:"
+            : 'You answered:',
+        text: [answer.label, answer.text].filter(Boolean).join(' — '),
+        decision: true,
+        taskId: task.id,
+        answer: {
+          attemptId: attempt.id,
+          by: auto ? 'auto-mode' : 'director',
+          changeable: auto && answer === changeable,
+        },
+      };
+    }),
+  ];
+};
+
 // What happened, grouped: the checks and plan, then each story, each told in plain sentences.
 export function happened(run: RunStory, state: StudioState): HappenedGroup[] {
   const { nodes, tasks, attempts, stories } = runRecords(run, state),
@@ -254,8 +314,9 @@ export function happened(run: RunStory, state: StudioState): HappenedGroup[] {
   for (const node of nodes.filter(item => !isStory(item.kind))) {
     const task = tasks.get(node.taskId);
     if (!task) continue;
-    const who = workerName(state, task.workerId);
-    for (const attempt of attempts(task.id)) {
+    const who = workerName(state, task.workerId),
+      own = attempts(task.id);
+    for (const attempt of own) {
       if (!attempt.finishedAt) {
         first.push({
           at: String(attempt.startedAt),
@@ -264,6 +325,11 @@ export function happened(run: RunStory, state: StudioState): HappenedGroup[] {
           lead: `${who} is working on it now.`,
           live: true,
         });
+        continue;
+      }
+      const question = asked(task, attempt, who, own);
+      if (question) {
+        first.push(...question);
         continue;
       }
       if (!['accepted', 'review'].includes(attempt.status)) {
@@ -487,6 +553,11 @@ export function happened(run: RunStory, state: StudioState): HappenedGroup[] {
           text: `in ${spoken(ms(attempt))}${totals?.tests ? `, and ${totals.pass} of ${totals.tests} tests passed` : ''}.`,
           taskId: task.id,
         });
+        continue;
+      }
+      const question = asked(task, attempt, who, own);
+      if (question) {
+        entries.push(...question);
         continue;
       }
       const tests = ((attempt.failedTests as { name?: string; file?: string }[] | undefined) ?? []).map(
