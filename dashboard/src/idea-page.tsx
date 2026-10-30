@@ -3,7 +3,8 @@
 // and decisions, the idea in full, who worked on it and what landed. Its actions are the run page's: pausing the
 // project, archiving a finished idea and closing what is left of one, and bringing an idea whose stories landed back
 // to an older line (1.1). An agent's question in What happened leads to its Answer box on Today, and auto mode's answer
-// may be changed in place (1.2 step 2).
+// may be changed in place (1.2 step 2). The checks and the plan have no cards of their own, so What happened, and on a
+// phone the stops, link each one's own page.
 import { notifyManager, useMutation, useQueries } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -26,12 +27,13 @@ import {
   type HappenedEntry,
   type JourneyStage,
   type JourneyStory,
+  type Tone,
 } from './journey';
 import { plural } from './evidence';
 import { workerName } from './names';
 import { produced } from './produced';
 import { AnswerBox } from './question-card';
-import { integratesController } from './story';
+import { integratesController, storySteps } from './story';
 import {
   newestBranch,
   ReleaseChip,
@@ -74,7 +76,13 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
     groups = happened(run, state),
     people = whoWorked(run, state),
     chip = journeyChip(run, state),
-    { stories: storyTasks, tasks: runTasks } = runRecords(run, state),
+    { nodes, stories: storyTasks, tasks: runTasks } = runRecords(run, state),
+    // The checks and the plan: the graph's steps that are not stories, in its order. Their cards are not on the board
+    // or the Ideas list, so What happened leads to each one's own page.
+    planning = nodes.flatMap(node => {
+      const task = runTasks.get(node.taskId);
+      return task && !storyTasks.includes(task) ? [task] : [];
+    }),
     serial = storyTasks.every(
       (task, index) => index === 0 || (task.dependencies ?? []).includes(storyTasks[index - 1]!.id),
     ),
@@ -245,7 +253,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
       )}
       {narrow ? (
         <>
-          <Stops groups={groups} />
+          <Stops projectId={projectId} state={state} groups={groups} steps={planning} />
           <details className="sd-card" style={{ padding: '4px 16px' }}>
             <summary
               style={{ minHeight: '48px', display: 'flex', alignItems: 'center', fontWeight: 700, cursor: 'pointer' }}
@@ -259,7 +267,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
         </>
       ) : (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '28px', alignItems: 'flex-start' }}>
-          <Happened projectId={projectId} state={state} groups={groups} />
+          <Happened projectId={projectId} state={state} groups={groups} steps={planning} />
           <aside
             style={{ flex: '2 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-16)' }}
           >
@@ -572,15 +580,71 @@ function ChangeAnswer({
   );
 }
 
+// Where a planning step stands, in a word, from the steps its page and the board read: done, running, waiting for
+// the director, stopped, or waiting.
+function stepChip(task: Task, state: StudioState): { tone: Tone; label: string } {
+  const states = storySteps(task, state).map(step => step.state);
+  return task.status === 'done'
+    ? { tone: 'ok', label: 'Done' }
+    : task.closed || task.status === 'denied'
+      ? { tone: 'wait', label: 'Closed' }
+      : states.includes('live')
+        ? { tone: 'live', label: 'Running' }
+        : states.includes('you')
+          ? { tone: 'you', label: 'Waiting for you' }
+          : states.includes('bad')
+            ? { tone: 'bad', label: 'Stopped' }
+            : { tone: 'wait', label: 'Waiting' };
+}
+
+// A link to each planning step's own page, named in plain words, with where it stands beside it.
+function PlanningSteps({ projectId, state, steps }: { projectId: string; state: StudioState; steps: Task[] }) {
+  return (
+    <ul
+      aria-label="Checks and plan"
+      style={{
+        listStyle: 'none',
+        margin: '0 0 12px',
+        padding: 0,
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 'var(--space-10)',
+      }}
+    >
+      {steps.map(task => {
+        const chip = stepChip(task, state);
+        return (
+          <li key={task.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-6)' }}>
+            <Link
+              className="sd-btn sd-btn--sm"
+              to="/p/$projectId/tasks/$taskId"
+              params={{ projectId, taskId: task.id }}
+            >
+              {task.kind === 'studio-development:checks' ? 'Open the checks' : 'Open the plan'}
+            </Link>
+            <span className={`sd-chip sd-chip--inline${chip.tone === 'wait' ? '' : ` sd-chip--${chip.tone}`}`}>
+              <span className="sd-chip__dot"></span>
+              {chip.label}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 // What happened, everything or only the stops and decisions (an agent's question and its answers are decisions).
+// The checks and plan group ends with its steps' own pages, in either view.
 function Happened({
   projectId,
   state,
   groups,
+  steps,
 }: {
   projectId: string;
   state: StudioState;
   groups: ReturnType<typeof happened>;
+  steps: Task[];
 }) {
   const [only, setOnly] = useState(false),
     id = useId();
@@ -600,8 +664,9 @@ function Happened({
         </div>
       </div>
       {groups.map(group => {
-        const entries = only ? group.entries.filter(entry => entry.stop || entry.decision) : group.entries;
-        if (!entries.length) return null;
+        const entries = only ? group.entries.filter(entry => entry.stop || entry.decision) : group.entries,
+          links = group.key === 'plan' && steps.length > 0;
+        if (!entries.length && !links) return null;
         return (
           <Fragment key={group.key}>
             <div className="sd-group">
@@ -615,11 +680,14 @@ function Happened({
                 </span>
               )}
             </div>
-            <ol className="sd-timeline">
-              {entries.map((entry, index) => (
-                <Entry key={index} projectId={projectId} state={state} entry={entry} />
-              ))}
-            </ol>
+            {entries.length > 0 && (
+              <ol className="sd-timeline">
+                {entries.map((entry, index) => (
+                  <Entry key={index} projectId={projectId} state={state} entry={entry} />
+                ))}
+              </ol>
+            )}
+            {links && <PlanningSteps projectId={projectId} state={state} steps={steps} />}
           </Fragment>
         );
       })}
@@ -632,8 +700,19 @@ function Happened({
   );
 }
 
-// On a phone: the stops along the way, or everything. An agent's question and its answers are not stops.
-function Stops({ groups }: { groups: ReturnType<typeof happened> }) {
+// On a phone: the stops along the way, or everything. An agent's question and its answers are not stops. Under them,
+// the checks' and the plan's own pages.
+function Stops({
+  projectId,
+  state,
+  groups,
+  steps,
+}: {
+  projectId: string;
+  state: StudioState;
+  groups: ReturnType<typeof happened>;
+  steps: Task[];
+}) {
   const [all, setAll] = useState(false),
     entries = groups.flatMap(group => group.entries).filter(entry => all || entry.stop);
   return (
@@ -667,6 +746,14 @@ function Stops({ groups }: { groups: ReturnType<typeof happened> }) {
         <p className="sd-meta" style={{ margin: '0 0 10px' }}>
           No stops so far.
         </p>
+      )}
+      {steps.length > 0 && (
+        <>
+          <div className="sd-group">
+            <span className="sd-eyebrow">Checks and plan</span>
+          </div>
+          <PlanningSteps projectId={projectId} state={state} steps={steps} />
+        </>
       )}
     </section>
   );

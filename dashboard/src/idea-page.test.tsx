@@ -1,7 +1,8 @@
 // Bringing an idea back to an older line from its page (1.1, October 27): once every one of its source stories landed
 // or was closed, and one landed, the page offers each older line the controller answers with, confirmed first; before
 // then it never asks the controller. And an agent's question in What happened (1.2 step 2), with its options, its
-// answers, Answer while it waits and Change the answer for auto mode's.
+// answers, Answer while it waits and Change the answer for auto mode's. And the checks' and the plan's own pages,
+// linked under Checks and plan and, on a phone, under the stops.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -524,4 +525,113 @@ test('Only stops and decisions keeps the question and its answer; on a phone, on
   await user.click(within(stops).getByRole('button', { name: 'Everything' }));
   expect(rows()).toContain('Eli asked you: Split the page part into two stories?');
   expect(rows()).toContain('You answered: Two stories — Keep the shared part in the first.');
+});
+
+// The idea's checks step, accepted with the source's tests run.
+const checksStep = () => {
+  controller.attempts.push({
+    id: 'attempt-checks',
+    taskId: 'T-checks',
+    status: 'accepted',
+    workerId: 'W-1',
+    startedAt: '2026-10-27T09:00:10Z',
+    finishedAt: '2026-10-27T09:00:50Z',
+  });
+  return taskFixture('T-checks', {
+    title: 'Check the source',
+    kind: 'studio-development:checks',
+    status: 'done',
+    acceptedAttemptId: 'attempt-checks',
+    lastAttemptId: 'attempt-checks',
+    workflowReference: { runId: 'run-1', key: 'checks' },
+  });
+};
+// The plan step after the checks, whose only attempt failed.
+const failedPlan = () => {
+  controller.attempts.push({
+    id: 'attempt-plan',
+    taskId: 'T-plan',
+    status: 'failed',
+    workerId: 'W-1',
+    startedAt: '2026-10-27T09:01:00Z',
+    finishedAt: '2026-10-27T09:04:00Z',
+    error: 'The plan named a file twice.',
+  });
+  return taskFixture('T-plan', {
+    title: 'Plan the idea',
+    kind: 'studio-development:breakdown',
+    status: 'failed',
+    lastAttemptId: 'attempt-plan',
+    dependencies: ['T-checks'],
+    workflowReference: { runId: 'run-1', key: 'plan' },
+  });
+};
+// The planning steps' links as the director reads them: each one's words, where it goes and where its step stands.
+const stepsIn = (container: HTMLElement) =>
+  within(within(container).getByRole('list', { name: 'Checks and plan' }))
+    .getAllByRole('listitem')
+    .map(item => {
+      const link = within(item).getByRole('link');
+      return `${link.textContent} → ${link.getAttribute('href')} · ${item.querySelector('.sd-chip')?.textContent}`;
+    });
+
+test("Checks and plan links each planning step's own page, while the plan runs and once it is accepted", async () => {
+  open([checksStep(), planStep('planning', { answers: [yourAnswer], dependencies: ['T-checks'] })]);
+  const region = await whatHappened();
+  expect(stepsIn(region)).toEqual([
+    'Open the checks → /p/project-x/tasks/T-checks · Done',
+    'Open the plan → /p/project-x/tasks/T-plan · Running',
+  ]);
+  // The links follow the checks and plan group's lines.
+  const list = within(region).getByRole('list', { name: 'Checks and plan' }),
+    lines = list.previousElementSibling;
+  expect(lines?.classList.contains('sd-timeline')).toBe(true);
+  expect(lines?.previousElementSibling?.querySelector('.sd-eyebrow')?.textContent).toBe('Checks and plan');
+  // What happened reads as before.
+  expect(told(region)[0]![0]).toBe('Checks and plan');
+  expect(told(region)[0]).toContain('Eli is working on it now.');
+  cleanup();
+  // Accepted, with its story proposed: the story keeps its own card and gets no link here.
+  controller.requests = [];
+  controller.attempts = [];
+  open([
+    checksStep(),
+    planStep('planned', { answers: [yourAnswer], dependencies: ['T-checks'] }),
+    planned('T-1', 'First', { dependencies: ['T-plan'] }),
+  ]);
+  const done = await whatHappened();
+  expect(stepsIn(done)).toEqual([
+    'Open the checks → /p/project-x/tasks/T-checks · Done',
+    'Open the plan → /p/project-x/tasks/T-plan · Done',
+  ]);
+  expect([...document.querySelectorAll('.sd-storycard__title')].map(item => item.textContent)).toEqual(['First']);
+});
+
+test('an idea without checks links only its plan, waiting for you while its question does, in either view', async () => {
+  const user = userEvent.setup();
+  open([planStep('waiting')]);
+  const region = await whatHappened();
+  expect(stepsIn(region)).toEqual(['Open the plan → /p/project-x/tasks/T-plan · Waiting for you']);
+  // The question's own Answer link is unchanged.
+  expect(within(asking(region)).getByRole('link', { name: 'Answer' }).getAttribute('href')).toBe('/p/project-x#calls');
+  await user.click(within(region).getByRole('button', { name: 'Only stops and decisions' }));
+  expect(stepsIn(region)).toEqual(['Open the plan → /p/project-x/tasks/T-plan · Waiting for you']);
+});
+
+test('on a phone, the stops end with the planning steps’ own pages, a failed plan reading Stopped', async () => {
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: query === '(max-width: 860px)',
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  open([checksStep(), failedPlan()]);
+  const stops = await screen.findByRole('region', { name: 'Stops along the way' }, { timeout: 5000 });
+  expect([...stops.querySelectorAll('.sd-row')].map(row => row.lastElementChild?.textContent?.trim())).toEqual([
+    'Eli stopped: The plan named a file twice.',
+  ]);
+  expect(stepsIn(stops)).toEqual([
+    'Open the checks → /p/project-x/tasks/T-checks · Done',
+    'Open the plan → /p/project-x/tasks/T-plan · Stopped',
+  ]);
 });
