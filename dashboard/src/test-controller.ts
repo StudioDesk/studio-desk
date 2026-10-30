@@ -16,6 +16,7 @@ import type {
   LogEvent,
   PeopleSummary,
   ProjectArtifact,
+  ProjectWork,
   ReleaseOverview,
   RunRecord,
   SettledKind,
@@ -208,9 +209,11 @@ export interface Controller {
   // may still change.
   visualView: VisualView;
   pages: Record<string, StoryPagesView>;
-  // The project's accepted files as its Artifacts listing sends them, its library, each entry's readers by entry (an
-  // entry not listed has none) and its snapshots (1.2 step 6); the defaults are a project with none of them yet.
+  // The project's accepted files as its Artifacts listing sends them, what its work made, its library, each entry's
+  // readers by entry (an entry not listed has none) and its snapshots (1.2 step 6); the defaults are a project with
+  // none of them yet.
   projectArtifacts: ProjectArtifact[];
+  projectWork: ProjectWork;
   library: LibraryIndex;
   libraryReaders: Record<string, LibraryReader[]>;
   // Library revisions' text, as `<entry>/<revision>`, which the revision's route answers as plain text; a revision not
@@ -287,6 +290,7 @@ export function fakeController(projectId = 'project-x'): Controller {
     },
     pages: {},
     projectArtifacts: [],
+    projectWork: { work: [], pictures: [], records: { count: 0, kinds: {} } },
     library: { entries: [], proposals: [] },
     libraryReaders: {},
     libraryTexts: {},
@@ -396,6 +400,7 @@ export function fakeController(projectId = 'project-x'): Controller {
       if (path === `/api/projects/${projectId}/try/output`) return respond(controller.tryOutput);
       if (path === `/api/projects/${projectId}/visual-check`) return respond(controller.visualView);
       if (path === `/api/projects/${projectId}/artifacts`) return respond(controller.projectArtifacts);
+      if (path === `/api/projects/${projectId}/work`) return respond(controller.projectWork);
       if (path === `/api/projects/${projectId}/library`) return respond(controller.library);
       if (path === `/api/projects/${projectId}/snapshots`) return respond(controller.snapshots);
       const readers = path.match(new RegExp(`^/api/projects/${projectId}/library/([^/]+)/readers$`))?.[1];

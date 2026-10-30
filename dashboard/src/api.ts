@@ -672,6 +672,49 @@ export interface ProjectArtifact {
   hash: string;
   acceptedAt: string | null;
 }
+// What a project's work made (GET /api/projects/:id/work, src/core/project-work.mjs projectWork). Each file the work
+// handed back as its result, newest first: its story, the run of the idea it came from (null outside an idea), its
+// accepted attempt and agent, the library entry whose newest revision came from it (null when none did) and its
+// versions newest first, each from an accepted attempt, with why it was made (null for the first version and when
+// nothing was recorded).
+export interface WorkVersion {
+  n: number;
+  attemptId: string;
+  workerId: string | null;
+  hash: string | null;
+  at: string | null;
+  current: boolean;
+  why: string | null;
+}
+export interface WorkFile {
+  taskId: string;
+  title: string;
+  runId: string | null;
+  path: string;
+  kind?: string;
+  hash: string;
+  attemptId: string;
+  workerId: string | null;
+  acceptedAt: string | null;
+  libraryEntryId: string | null;
+  versions: WorkVersion[];
+}
+// The pictures one code story's visual check took, on its accepted candidate.
+export interface WorkPictures {
+  taskId: string;
+  title: string;
+  runId: string | null;
+  attemptId: string;
+  at: string | null;
+  images: { path: string; hash: string }[];
+}
+// The work, the visual checks' pictures, and how many records of how the work was done there are, by kind; records
+// are only counted here.
+export interface ProjectWork {
+  work: WorkFile[];
+  pictures: WorkPictures[];
+  records: { count: number; kinds: Record<string, number> };
+}
 // Who recorded a library change or a snapshot: the director, or the autonomy policy at its revision.
 export interface RecordedBy {
   type: string;
@@ -792,9 +835,10 @@ export const tryOutputUrl = (projectId: string) => projectPath(projectId, 'try/o
 export const visualUrl = (projectId: string) => projectPath(projectId, 'visual-check');
 export const storyPagesUrl = (projectId: string, taskId: string) =>
   `/api/tasks/${encodeURIComponent(taskId)}/pages?${project(projectId)}`;
-// The project's accepted files, its library with an entry's readers and a revision's bytes, and its snapshots with
-// one's zip.
+// The project's accepted files, what its work made, its library with an entry's readers and a revision's bytes, and
+// its snapshots with one's zip.
 export const artifactsUrl = (projectId: string) => projectPath(projectId, 'artifacts');
+export const workUrl = (projectId: string) => projectPath(projectId, 'work');
 export const libraryUrl = (projectId: string) => projectPath(projectId, 'library');
 export const libraryReadersUrl = (projectId: string, entryId: string) =>
   projectPath(projectId, `library/${encodeURIComponent(entryId)}/readers`);
