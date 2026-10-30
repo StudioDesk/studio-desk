@@ -3,7 +3,7 @@ import { expect, test } from 'vitest';
 import type { AttemptSummary, Task, Worker } from './api';
 import { CLASSIC } from './design/agent-kit.js';
 import type { RunStory, StudioState } from './studio-runs';
-import { agentLooks, callsTitle, lastDone, quoted, shippedToday, when } from './today';
+import { agentLooks, callsTitle, floorSentence, lastDone, quoted, shippedToday, when } from './today';
 
 test('the title counts the calls in words, shorter on a phone', () => {
   expect(callsTitle(0)).toBe('Nothing needs you right now.');
@@ -26,6 +26,47 @@ test('a time today is the clock, and an earlier one the date', () => {
   expect(when('2026-10-22T18:55:00', now)).toBe('6:55 PM');
   expect(when('2026-10-14T19:02:00', now)).toBe('Oct 14');
   expect(when(null, now)).toBe('');
+});
+
+// An agent may run several stories at once (Decision MP-033): the sentence counted the second as another agent.
+test("Today's sentence names the first running story, then counts the other running stories, not agents", () => {
+  const task = (id: string, title: string, status = 'running') =>
+      ({ id, title, kind: 'general:work', status, workerId: 'W-1' }) as Task,
+    sentence = (tasks: Task[], stories: RunStory[] = [], shipped = 0) =>
+      floorSentence(
+        {
+          project: { id: 'project-x' },
+          workers: [{ id: 'W-1', displayName: 'Eli' }],
+          tasks,
+          attempts: tasks
+            .filter(item => item.status === 'running')
+            .map(item => ({ id: `a-${item.id}`, taskId: item.id, workerId: 'W-1', status: 'running' })),
+        } as unknown as StudioState,
+        stories,
+        shipped,
+      );
+  const board = task('T-1', 'Build the board'),
+    guide = task('T-2', 'Write the guide');
+  // One running story reads as it always has.
+  expect(sentence([board])).toBe('Eli is working on “Build the board”.');
+  // Eli running two: the second is one more story running, not one more agent working.
+  const two = sentence([board, guide]);
+  expect(two).toBe('Eli is working on “Build the board”. One more story is running.');
+  expect(two).not.toMatch(/more agents? (is|are) working/);
+  expect(sentence([board, guide, task('T-3', 'Fix the strip')], [], 1)).toBe(
+    'Eli is working on “Build the board”. Two more stories are running. One idea shipped today.',
+  );
+  // Within an idea, the first story keeps its place and what waits behind it.
+  const idea = {
+    id: 'run',
+    brief: 'Show the runs page',
+    startedAt: '2026-10-29T10:00:00Z',
+    taskIds: ['T-1', 'T-2', 'T-4'],
+    graph: { stages: [['T-1', 'T-2', 'T-4'].map(taskId => ({ taskId, kind: 'general:work' }))] },
+  } as unknown as RunStory;
+  expect(sentence([board, guide, task('T-4', 'Write the notes', 'ready')], [idea])).toBe(
+    'Eli is working on story 1 of your latest idea, and one story waits behind it. One more story is running.',
+  );
 });
 
 test("today's agents keep their faces, and every other agent gets one of its own", () => {

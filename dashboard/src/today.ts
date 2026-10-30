@@ -65,7 +65,8 @@ const doing: Record<string, string> = {
   'general:review': 'reviewing',
 };
 
-// The line under Today's sentence: who is working on what and what waits behind it, then what shipped today.
+// The line under Today's sentence: who is working on what and what waits behind it, how much more is running (stories,
+// not agents, since one agent may run several), then what shipped today.
 export function floorSentence(state: StudioState, stories: RunStory[], shipped: number) {
   const running = state.tasks.filter(active),
     newest = [...stories].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))[0],
@@ -99,7 +100,7 @@ export function floorSentence(state: StudioState, stories: RunStory[], shipped: 
     sentences.push(sentence + '.');
     if (running.length > 1)
       sentences.push(
-        `${counted(running.length - 1)} more ${plural(running.length - 1, 'agent is', 'agents are')} working.`,
+        `${counted(running.length - 1)} more ${plural(running.length - 1, 'story is', 'stories are')} running.`,
       );
   } else
     sentences.push(

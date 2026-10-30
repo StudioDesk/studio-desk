@@ -427,6 +427,58 @@ test('running work shows on the floor with who is on it and a way to watch, and 
   expect(screen.queryByLabelText(/calls? for you$/)).toBeNull();
 });
 
+// An agent may run several attempts at once (Decision MP-033): the floor showed only its first, and the sentence
+// counted its second story as another agent.
+test('an agent running two attempts has a card for each on the floor, and the strip shows it once', async () => {
+  controller.shell.workers = [
+    { id: 'W-1', displayName: 'Eli', team: 'Engineering' },
+    { id: 'W-2', displayName: 'Morgan', team: 'Review' },
+  ];
+  controller.tasks = [
+    taskFixture('T-2', { title: 'Build the board', status: 'running', lastAttemptId: 'attempt-2' }),
+    taskFixture('T-5', {
+      title: 'Write the guide',
+      status: 'running',
+      lastAttemptId: 'attempt-5',
+      maxAttempts: 2,
+      maxSeconds: 1200,
+    }),
+  ];
+  controller.attempts = [
+    { id: 'attempt-2', taskId: 'T-2', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+    {
+      id: 'attempt-5',
+      taskId: 'T-5',
+      status: 'running',
+      workerId: 'W-1',
+      startedAt: new Date(Date.now() - 6 * minute).toISOString(),
+    },
+  ];
+  open();
+  await waitFor(() => expect(screen.getAllByRole('region', { name: 'Eli is working' })).toHaveLength(2));
+  const [first, second] = screen.getAllByRole('region', { name: 'Eli is working' }).map(region => within(region));
+  expect(first!.getByRole('link', { name: 'Build the board' }).getAttribute('href')).toBe('/p/project-x/tasks/T-2');
+  expect(first!.getByText('Attempt 1 of 3 · doing the work')).toBeTruthy();
+  expect(first!.getByRole('link', { name: 'Watch Eli work' }).getAttribute('href')).toBe('/p/project-x/tasks/T-2');
+  expect(second!.getByRole('link', { name: 'Write the guide' }).getAttribute('href')).toBe('/p/project-x/tasks/T-5');
+  expect(second!.getByText('Attempt 1 of 2 · doing the work')).toBeTruthy();
+  expect(second!.getByText('6 of 20 min')).toBeTruthy();
+  expect(second!.getByRole('link', { name: 'Watch Eli work' }).getAttribute('href')).toBe('/p/project-x/tasks/T-5');
+  // Eli is not free while running either; Morgan is.
+  const free = within(screen.getByRole('region', { name: 'Free agents' }));
+  expect(free.getByText('Morgan')).toBeTruthy();
+  expect(free.queryByText('Eli')).toBeNull();
+  // The phone's strip shows Eli once, at the first story, with how many it is on.
+  const strip = within(screen.getByRole('region', { name: 'On the floor' }));
+  const eli = strip.getAllByRole('link').filter(link => link.textContent?.includes('Eli'));
+  expect(eli).toHaveLength(1);
+  expect(eli[0]!.getAttribute('href')).toBe('/p/project-x/tasks/T-2');
+  expect(eli[0]!.textContent).toContain('working on 2');
+  // The sentence counts the second story as running work, not as another agent.
+  expect(screen.getByText(/^Eli is working on “Build the board”\. One more story is running\./)).toBeTruthy();
+  expect(screen.queryByText(/more agents? (is|are) working/)).toBeNull();
+});
+
 test("a working agent's minutes on the floor move on as the minute does, with no other change", async () => {
   const start = Date.parse('2026-10-26T12:00:00Z'),
     interval = fakeClock(start);

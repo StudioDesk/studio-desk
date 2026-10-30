@@ -889,32 +889,36 @@ const working: Record<string, { chip: string; line: string; strip: string }> = {
   'general:review': { chip: 'Reviewing', line: 'reviewing the work', strip: 'reviewing' },
 };
 
+interface FloorWork {
+  task: Task;
+  attempt: AttemptSummary;
+}
+
 interface FloorAgent {
   worker: Worker;
   name: string;
   look: AgentLook;
-  task?: Task;
-  attempt?: AttemptSummary;
+  // Every attempt the agent is running in this project, in the state's order; none when it is free.
+  work: FloorWork[];
 }
 
 function floorOf(state: StudioState, looks: Map<string, AgentLook>): FloorAgent[] {
   return state.workers
     .filter(worker => worker.enabled !== false)
-    .map(worker => {
-      const attempt = state.attempts.find(
-        item => item.workerId === worker.id && ['running', 'stopping'].includes(item.status),
-      );
-      return {
-        worker,
-        name: workerName(state, worker.id),
-        look: looks.get(worker.id)!,
-        attempt,
-        task: attempt ? state.tasks.find(task => task.id === attempt.taskId) : undefined,
-      };
-    });
+    .map(worker => ({
+      worker,
+      name: workerName(state, worker.id),
+      look: looks.get(worker.id)!,
+      work: state.attempts.flatMap(attempt => {
+        if (attempt.workerId !== worker.id || !['running', 'stopping'].includes(attempt.status)) return [];
+        const task = state.tasks.find(item => item.id === attempt.taskId);
+        return task ? [{ task, attempt }] : [];
+      }),
+    }));
 }
 
-// On the floor: each working agent's card, then the free agents with what they last did.
+// On the floor: a card for each attempt an agent is running (an agent running two has two), then the free agents
+// with what they last did.
 function Floor({
   projectId,
   state,
@@ -927,15 +931,15 @@ function Floor({
   agents: FloorAgent[];
 }) {
   // The working cards' minutes follow the shared clock, which sets no timer while nobody is working.
-  const busy = agents.filter(agent => agent.task && agent.attempt),
+  const busy = agents.flatMap(agent => agent.work.map(work => ({ ...agent, ...work }))),
     now = useNow(busy.length > 0),
-    free = agents.filter(agent => !agent.task),
+    free = agents.filter(agent => !agent.work.length),
     verifying = state.attempts.filter(attempt => attempt.sourceIntegration?.state === 'verifying');
   return (
     <>
       {busy.map(({ worker, name, look, task, attempt }) => {
-        const said = (attempt!.lastSay as { text?: string; at?: string } | undefined)?.text
-            ? (attempt!.lastSay as { text: string; at: string })
+        const said = (attempt.lastSay as { text?: string; at?: string } | undefined)?.text
+            ? (attempt.lastSay as { text: string; at: string })
             : null,
           phase = openPhaseOf(attempt),
           words =
@@ -943,18 +947,18 @@ function Floor({
               ? { chip: 'Running tests', line: 'now testing', strip: 'testing' }
               : phase === 'source.edit'
                 ? { chip: 'Editing', line: 'editing', strip: 'editing' }
-                : (working[(attempt!.assignment as { kind?: string } | undefined)?.kind ?? task!.kind] ??
+                : (working[(attempt.assignment as { kind?: string } | undefined)?.kind ?? task.kind] ??
                   working['general:work']!),
           step = attemptName(
-            task!,
-            state.attempts.filter(item => item.taskId === task!.id),
-            attempt!,
+            task,
+            state.attempts.filter(item => item.taskId === task.id),
+            attempt,
             true,
           ),
-          elapsed = attempt!.startedAt ? now - Date.parse(attempt!.startedAt) : 0,
-          limit = task!.maxSeconds ? task!.maxSeconds * 1000 : null;
+          elapsed = attempt.startedAt ? now - Date.parse(attempt.startedAt) : 0,
+          limit = task.maxSeconds ? task.maxSeconds * 1000 : null;
         return (
-          <section key={worker.id} className="sd-card sd-card--live sd-floor-live" aria-label={`${name} is working`}>
+          <section key={attempt.id} className="sd-card sd-card--live sd-floor-live" aria-label={`${name} is working`}>
             <div className="sd-floor-live__who">
               <AgentAvatar look={look} state="working" size={48} />
               <div style={{ minWidth: 0 }}>
@@ -971,9 +975,9 @@ function Floor({
             <Link
               className="sd-floor-live__story"
               to="/p/$projectId/tasks/$taskId"
-              params={{ projectId, taskId: task!.id }}
+              params={{ projectId, taskId: task.id }}
             >
-              {task!.title}
+              {task.title}
             </Link>
             {/* The agent's latest words, as the controller keeps them while it runs (item 21's lastSay, at most
                 every ten seconds). Plain text, never markup. */}
@@ -1007,7 +1011,7 @@ function Floor({
               className="sd-btn sd-btn--sm"
               style={{ alignSelf: 'flex-start' }}
               to="/p/$projectId/tasks/$taskId"
-              params={{ projectId, taskId: task!.id }}
+              params={{ projectId, taskId: task.id }}
             >
               Watch {name} work
             </Link>
@@ -1062,13 +1066,15 @@ function Floor({
   );
 }
 
-// On a phone, the floor is a row of faces at the top of Today.
+// On a phone, the floor is a row of faces at the top of Today: each agent once, linking to its first running work,
+// and "working on 2" when it runs several.
 function FloorStrip({ projectId, agents }: { projectId: string; agents: FloorAgent[] }) {
   return (
     <section aria-label="On the floor" className="sd-narrow-only">
       <div className="sd-floor-strip">
-        {agents.map(({ worker, name, look, task }) => {
-          const words = task ? (working[task.kind] ?? working['general:work']!) : null;
+        {agents.map(({ worker, name, look, work }) => {
+          const task = work[0]?.task,
+            words = task ? (working[task.kind] ?? working['general:work']!) : null;
           const face = (
             <>
               <span className={`sd-floor-strip__ring${task ? ' sd-floor-strip__ring--live' : ''}`}>
@@ -1076,7 +1082,13 @@ function FloorStrip({ projectId, agents }: { projectId: string; agents: FloorAge
               </span>
               {name}
               <span className={`sd-floor-strip__state${task ? ' sd-floor-strip__state--live' : ''}`}>
-                {words ? words.strip : worker.paused ? 'paused' : 'free'}
+                {work.length > 1
+                  ? `working on ${work.length}`
+                  : words
+                    ? words.strip
+                    : worker.paused
+                      ? 'paused'
+                      : 'free'}
               </span>
             </>
           );
