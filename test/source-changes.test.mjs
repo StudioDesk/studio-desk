@@ -11,6 +11,7 @@ import { sourceDiff, sourceDiffStat } from '../src/connectors/source-diff.mjs';
 import { hash } from '../src/core/contracts.mjs';
 import { readContinuation } from '../src/core/attempt-continuation.mjs';
 import { Runner } from '../src/runner.mjs';
+import { limitHoldMs } from '../src/core/orchestrator.mjs';
 import { acceptedReference, artifactPath } from '../src/core/artifacts.mjs';
 import { approveWork, closeStartedWork, sendBackWork } from '../src/core/proposals.mjs';
 import { acceptAttempt } from '../src/core/acceptance.mjs';
@@ -1934,6 +1935,66 @@ test("a Claude editor runs the project's tests on its edits through the controll
   // The candidate is tested again as before, and the live source is untouched.
   assert.equal(validateSourceChange(a, name => fs.readFileSync(path.join(a.outputFolder, name))).report.passed, true);
   assert.equal(sourcePlan(c.root).sourceHash, before.sourceHash);
+});
+
+// The director, October 29: "The agent is what costs so docking it for long running tests seems like the wrong method."
+test("an editor's own test run leaves its time limit out, and the attempt records how long it held", async t => {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], { claudeBinary: claudeFixture }),
+    { store, runner } = c.app;
+  const org = store.organization();
+  Object.assign(
+    org.workers.find(worker => worker.id === store.task(c.taskId).workerId),
+    { provider: 'claude' },
+  );
+  store.setOrganization(org);
+  // An 8-second limit, and the editor's own run takes 9 seconds; the candidate's run is quick.
+  const task = store.task(c.taskId);
+  task.maxSeconds = 8;
+  store.putTask(task);
+  Object.defineProperty(runner, 'sourceCheckCommand', {
+    configurable: true,
+    get: () => ({
+      executable: process.execPath,
+      args: [tests, [...runner.active.values()].some(entry => entry.employeeTests) ? 'outlast' : 'pass'],
+    }),
+  });
+  await c.start('run-tests');
+  const a = await c.wait(c.taskId);
+  assert.equal(a.error ?? null, null);
+  assert.equal(a.status, 'review');
+  assert.deepEqual(
+    a.employeeTestRuns.map(run => [run.exitCode, run.totals.pass]),
+    [[0, 1]],
+  );
+  assert.ok(a.limitHeldMs >= 9000, `The limit was held for ${a.limitHeldMs} ms.`);
+});
+
+test('an attempt leaves at most an hour of its own test runs out of its limit; past that they count again', t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const stopped = [],
+    a = { id: 'attempt-hold', limitHeldMs: limitHoldMs - 1000 },
+    entry = { attempt: a },
+    runner = {
+      active: new Map([[a.id, entry]]),
+      store: { updateAttempt() {} },
+      stop: id => stopped.push(id),
+    };
+  for (const name of ['setTimeLimit', 'holdTimeLimit', 'resumeTimeLimit']) runner[name] = Runner.prototype[name];
+  runner.setTimeLimit(entry, 10000);
+  t.mock.timers.tick(4000);
+  // A run of five seconds with one second of the hour left: four seconds of it count against the six left.
+  const hold = runner.holdTimeLimit(entry);
+  assert.equal(hold.left, 6000);
+  t.mock.timers.tick(5000);
+  runner.resumeTimeLimit(entry, hold);
+  assert.equal(a.limitHeldMs, limitHoldMs + 4000);
+  t.mock.timers.tick(1999);
+  assert.deepEqual(stopped, []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(stopped, [a.id]);
+  // With the hour used, a run no longer holds the limit.
+  runner.setTimeLimit(entry, 10000);
+  assert.equal(runner.holdTimeLimit(entry), null);
 });
 
 test("a Claude editor's test run leads with a failed test that its kept output no longer holds", async t => {

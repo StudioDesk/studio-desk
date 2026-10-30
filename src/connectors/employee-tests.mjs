@@ -206,7 +206,9 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
       status: 400,
     });
   tests.busy = true;
-  const directory = path.join(runtime.store.directory, 'tests', a.id.slice(-8));
+  const directory = path.join(runtime.store.directory, 'tests', a.id.slice(-8)),
+    // The run, its copy and its install leave the editor's time limit out (Runner.holdTimeLimit).
+    hold = runtime.holdTimeLimit?.(entry) ?? null;
   try {
     // The copy is made in a process of its own, so the controller keeps answering while it is made.
     const scope = a.sourceChange,
@@ -317,5 +319,6 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
     // in the background, so the controller keeps answering, and before the next run may start.
     await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
     tests.busy = false;
+    runtime.resumeTimeLimit?.(entry, hold);
   }
 }

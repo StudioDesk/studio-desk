@@ -2,6 +2,8 @@
 const mode = process.argv[2];
 // Slow tests that still pass.
 if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500));
+// Passing tests that outlast a story's shortest time limit (an editor's own run leaves its limit out).
+if (mode === 'outlast') await new Promise(resolve => setTimeout(resolve, 9000));
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'malformed') console.log('No test totals');
 // One failure first, with its location and a block error, then more passing output (over 200 KB) than an

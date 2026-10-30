@@ -31,6 +31,8 @@ import { attemptResource } from './store.mjs';
 const waiting = reason => /^Waiting for /.test(reason || '');
 // What queued work in a paused project waits for; the director's resume starts it.
 const projectPaused = 'Waiting for the project to resume: this project is paused.';
+// How much of an attempt's own test runs its time limit leaves out (holdTimeLimit).
+export const limitHoldMs = 60 * 60 * 1000;
 // setTimeout's longest delay; a later reset re-arms the timer when it fires.
 const maxTimerDelay = 2 ** 31 - 1;
 // How long a process asked to stop has to close before it is forced.
@@ -943,16 +945,39 @@ export class Runner {
           id,
           `Director started attempt ${a.directorOverride.attemptNumber}, past the ${a.directorOverride.attemptLimit}-attempt limit for automatic runs.`,
         );
-      entry.timer = setTimeout(() => {
-        entry.timedOut = true;
-        this.stop(id);
-      }, task.maxSeconds * 1000);
+      this.setTimeLimit(entry, task.maxSeconds * 1000);
       validateProtectedFiles(entry);
       adapter.start(this, entry, worker);
     } catch (err) {
       this.finish(entry, null, err.message);
     }
     return { attemptId: id };
+  }
+  // An attempt's time limit, from now, with when it ends, so an agent's own test runs can leave it out.
+  setTimeLimit(entry, ms) {
+    clearTimeout(entry.timer);
+    entry.limitEndsAt = Date.now() + ms;
+    entry.timer = setTimeout(() => {
+      entry.timedOut = true;
+      this.stop(entry.attempt.id);
+    }, ms);
+  }
+  // An agent's own test runs (connectors/employee-tests.mjs) do not count against its time limit. The director,
+  // October 29: "The agent is what costs so docking it for long running tests seems like the wrong method." The
+  // limit stops while a run goes on and starts again with the time that was left, for up to limitHoldMs of runs in
+  // all per attempt (attempt.limitHeldMs); past that, runs count again, so a loop of runs still ends.
+  holdTimeLimit(entry) {
+    if (!entry.timer || !entry.limitEndsAt || (entry.attempt.limitHeldMs || 0) >= limitHoldMs) return null;
+    clearTimeout(entry.timer);
+    entry.timer = null;
+    return { left: Math.max(0, entry.limitEndsAt - Date.now()), at: Date.now() };
+  }
+  resumeTimeLimit(entry, hold) {
+    if (!hold || entry.timer || entry.cancelled || this.active.get(entry.attempt.id) !== entry) return;
+    const a = entry.attempt;
+    a.limitHeldMs = (a.limitHeldMs || 0) + (Date.now() - hold.at);
+    this.store.updateAttempt(a);
+    this.setTimeLimit(entry, Math.max(0, hold.left - Math.max(0, a.limitHeldMs - limitHoldMs)));
   }
   // Writes the work an attempt continues from (continueFrom) at its original paths in the new output
   // folder: each file's verified checkpoint bytes, as an ordinary work file rather than a protected
