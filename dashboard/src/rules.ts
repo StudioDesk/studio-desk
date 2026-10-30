@@ -1,9 +1,18 @@
 // What an agent is told, as rules (1.2 step 1), as the dashboard reads it: the controller's told view of one agent
 // (src/core/instructions.mjs toldView), the rules each set shows and its edits start from, edits that each return a new
 // list, the words a page shows for a rule and for what a draft changes, finding a rule across every set, the page's own
-// copy of the told view after a draft save or discard, and the director's draft, publish and discard. The controller
-// writes a draft's rules as its document's text and owns every revision; only those three commands send anything.
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+// copy of the told view after a draft save or discard, and the director's draft, publish and discard, which go to the
+// controller one after another. The controller writes a draft's rules as its document's text and owns every revision;
+// only those three commands send anything.
+import {
+  notifyManager,
+  useIsMutating,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type QueryKey,
+} from '@tanstack/react-query';
 import { send, toldUrl, type InstructionDoc, type Rule, type ToldLayer, type ToldView } from './api';
 import { queryKeys } from './records';
 import { useStreamReady } from './stream-context';
@@ -18,10 +27,17 @@ async function readTold(url: string, signal?: AbortSignal): Promise<ToldView | n
   return body as ToldView;
 }
 
-// Under the project's instructions (records.ts), so a change to the organization's records reads it again.
+// The page's instruction commands, which go to the controller one after another in the order they were made.
+const commandKey = (projectId: string) => [projectId, 'instruction-command'] as const;
+
+// Under the project's instructions (records.ts), so a change to the organization's records reads it again; but not
+// while one of the page's instruction commands is waiting, so a read cannot paint over a change the page already shows,
+// and once none is.
 export function useTold(projectId: string, workerId: string) {
+  const ready = useStreamReady(),
+    waiting = useIsMutating({ mutationKey: commandKey(projectId) }) > 0;
   return useQuery({
-    enabled: useStreamReady(),
+    enabled: ready && !waiting,
     queryKey: queryKeys.told(projectId, workerId),
     queryFn: ({ signal }) => readTold(toldUrl(projectId, workerId), signal),
   });
@@ -248,41 +264,132 @@ export const toldWithoutDraft = (view: ToldView, set: ToldLayer['layer']): ToldV
 const commandUrl = (layer: ToldLayer, action: 'draft' | 'publish' | 'discard') =>
   `/api/instructions/${layer.scope}/${encodeURIComponent(layer.id)}/${action}`;
 
-// Each command names the revision the set shows, so a set published since is refused rather than overwritten; saved or
-// refused (with the controller's message on the Refusal it rejects with), the project's instructions are read again,
-// what each agent is told among them.
-function useRuleCommand<T>(projectId: string, command: (input: T) => Promise<InstructionDoc>) {
+// A change made before a refusal was answered, which built on the refused change, so it is not sent.
+class Dropped extends Error {}
+// How many of a project's changes the controller has refused here, which each change records when it is made.
+const refusals = new WeakMap<QueryClient, Map<string, number>>();
+const refusedSoFar = (client: QueryClient, projectId: string) => refusals.get(client)?.get(projectId) ?? 0;
+function countRefusal(client: QueryClient, projectId: string) {
+  const projects = refusals.get(client) ?? new Map<string, number>();
+  projects.set(projectId, refusedSoFar(client, projectId) + 1);
+  refusals.set(client, projects);
+}
+// The drafts the page's copy put together, each with the text the controller answered it kept, once it has.
+const keptAs = new WeakMap<NonNullable<ToldLayer['draft']>, string | null>();
+
+interface Made<T> {
+  input: T;
+  after: number;
+  refused?: (message: string) => void;
+}
+interface Copy {
+  before: [QueryKey, ToldView][];
+  drafts: NonNullable<ToldLayer['draft']>[];
+}
+// Every agent's told view of the project, under its instructions (records.ts).
+const toldViews = (projectId: string) => [...queryKeys.instructions(projectId), 'told'];
+
+// Each command names the revision the set shows, so a set published since is refused rather than overwritten, and
+// waits for the page's commands made before it (one mutation scope per project). A command that changes the set
+// changes it at once in each told view the page holds that has it, once any read of the instructions under way is
+// cancelled; refused (with the controller's message on the Refusal it rejects with), it puts those views back as they
+// were before it, which the controller then held, and the changes made after it are dropped. Once no command is
+// waiting, the project's instructions are read again, what each agent is told among them.
+function useRuleCommand<T>(
+  projectId: string,
+  command: (input: T) => Promise<InstructionDoc>,
+  change?: { set: (input: T) => ToldLayer; view: (view: ToldView, input: T) => ToldView },
+) {
   const client = useQueryClient();
-  return useMutation({
-    mutationFn: command,
-    onSettled: () => client.invalidateQueries({ queryKey: queryKeys.instructions(projectId) }),
+  const { mutate, mutateAsync, isPending, error, reset } = useMutation({
+    mutationKey: commandKey(projectId),
+    scope: { id: commandKey(projectId).join('/') },
+    onMutate: async ({ input }: Made<T>): Promise<Copy> => {
+      if (!change) return { before: [], drafts: [] };
+      await client.cancelQueries({ queryKey: queryKeys.instructions(projectId) });
+      const set = change.set(input),
+        held = (layer: ToldLayer) => layer.layer === set.layer && layer.scope === set.scope && layer.id === set.id,
+        before = client
+          .getQueriesData<ToldView>({ queryKey: toldViews(projectId) })
+          .flatMap(([key, view]): [QueryKey, ToldView][] => (view?.layers.some(held) ? [[key, view]] : [])),
+        drafts: Copy['drafts'] = [];
+      for (const [key, view] of before) {
+        // The draft as the cache keeps it, which shares what did not change with what it held.
+        const draft = client.setQueryData<ToldView>(key, change.view(view, input))?.layers.find(held)?.draft;
+        if (draft) drafts.push(draft);
+      }
+      for (const draft of drafts) keptAs.set(draft, null);
+      return { before, drafts };
+    },
+    mutationFn: ({ input, after }: Made<T>) =>
+      after === refusedSoFar(client, projectId) ? command(input) : Promise.reject(new Dropped()),
+    onSuccess: (answer, _made, copy) => {
+      for (const draft of copy.drafts) keptAs.set(draft, answer.draft?.text ?? null);
+    },
+    onError: (refusal, { refused }, copy) => {
+      if (refusal instanceof Dropped) return;
+      if (change) countRefusal(client, projectId);
+      // The rules put back and the message show together.
+      notifyManager.batch(() => {
+        for (const [key, view] of copy?.before ?? []) client.setQueryData(key, view);
+        if (refused) notifyManager.schedule(() => refused(refusal.message));
+      });
+    },
+    onSettled: () =>
+      client.invalidateQueries({
+        queryKey: queryKeys.instructions(projectId),
+        refetchType: client.isMutating({ mutationKey: commandKey(projectId) }) > 1 ? 'none' : 'active',
+      }),
   });
+  const made = (input: T, refused?: (message: string) => void): Made<T> => ({
+    input,
+    after: refusedSoFar(client, projectId),
+    refused,
+  });
+  return {
+    // Makes the change; `refused` hears the controller's message if it refuses it.
+    run: (input: T, refused?: (message: string) => void) => mutate(made(input, refused)),
+    // Makes the change and answers what the controller answers, or rejects with its refusal.
+    mutateAsync: (input: T) => mutateAsync(made(input)),
+    waiting: isPending,
+    // The controller's refusal of the last command this part of the page made; a dropped one is none.
+    refusal: error instanceof Dropped ? null : error,
+    reset,
+  };
 }
 
 // Saves a set's whole list of rules as its draft, as rules and never as text: the controller writes them as the
-// document's text, and refuses rules it could not (src/core/rules.mjs formatRules).
+// document's text, and refuses rules it could not (src/core/rules.mjs formatRules). The page shows the draft at once.
 export const useSaveRules = (projectId: string) =>
-  useRuleCommand(projectId, ({ layer, rules }: { layer: ToldLayer; rules: readonly Rule[] }) =>
-    send<InstructionDoc>(commandUrl(layer, 'draft'), {
-      projectId,
-      baseRevision: layer.revision,
-      rules: rules.map(({ title, text }) => ({ title, text })),
-    }),
+  useRuleCommand(
+    projectId,
+    ({ layer, rules }: { layer: ToldLayer; rules: readonly Rule[] }) =>
+      send<InstructionDoc>(commandUrl(layer, 'draft'), {
+        projectId,
+        baseRevision: layer.revision,
+        rules: rules.map(({ title, text }) => ({ title, text })),
+      }),
+    { set: ({ layer }) => layer, view: (view, { layer, rules }) => toldWithDraft(view, layer.layer, rules) },
   );
 
-// Publishes a set's draft as its next revision, sending the draft's exact text, which the controller checks is the
-// draft it saved.
+// Publishes a set's draft as its next revision, once the commands before it are answered, and shows only when the
+// controller has. It sends the draft's exact text as the controller holds it, which the controller checks is the
+// draft it saved: the text it read, or for a draft the page put together, the text the controller answered it kept,
+// and never the page's own.
 export const usePublishRules = (projectId: string) =>
   useRuleCommand(projectId, async (layer: ToldLayer) => {
     if (!layer.draft) throw new Error('This set has no draft to publish.');
-    return send<InstructionDoc>(commandUrl(layer, 'publish'), {
-      projectId,
-      baseRevision: layer.revision,
-      text: layer.draft.text,
-    });
+    const text = keptAs.has(layer.draft) ? keptAs.get(layer.draft) : layer.draft.text;
+    if (text == null)
+      throw new Error('The controller did not say which draft it kept. Open the page again to publish.');
+    return send<InstructionDoc>(commandUrl(layer, 'publish'), { projectId, baseRevision: layer.revision, text });
   });
 
+// Discards a set's draft; the page drops it at once.
 export const useDiscardRules = (projectId: string) =>
-  useRuleCommand(projectId, (layer: ToldLayer) =>
-    send<InstructionDoc>(commandUrl(layer, 'discard'), { projectId, baseRevision: layer.revision }),
+  useRuleCommand(
+    projectId,
+    (layer: ToldLayer) =>
+      send<InstructionDoc>(commandUrl(layer, 'discard'), { projectId, baseRevision: layer.revision }),
+    { set: layer => layer, view: (view, layer) => toldWithoutDraft(view, layer.layer) },
   );
