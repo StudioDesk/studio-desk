@@ -1,7 +1,8 @@
 // The card beside another project's tile on the project rail (the attention indicator, October 29): pointing at the
 // tile or focusing it shows the project's mark, its name, how many calls wait and a line for each call, saying what
-// to do and where, in the order the project's Today lists them. The card reads nothing itself: the rail has read the
-// project's shell and live set, and the card follows them as the rail reads them again.
+// to do and where, in the order the project's Today lists them; each line links to its call's page in the project.
+// The card reads nothing itself: the rail has read the project's shell and live set, and the card follows them as
+// the rail reads them again.
 import { useQuery } from '@tanstack/react-query';
 import {
   useMemo,
@@ -33,7 +34,12 @@ export interface CallLine {
   verb: string;
   // Where: the idea in the director's words, or the task's title.
   where: string | null;
+  // The call's page, after the project's address (/p/<id>): its idea's page, the step's own page outside any idea, or
+  // Today at Your calls for a hold or a call with neither.
+  to: string;
 }
+
+const ideaPage = (run: RunStory) => `/runs/${encodeURIComponent(run.id)}`;
 
 // One call in a line: what to do, chosen the way Today's Call chooses the call's card, and where it is.
 export function callLine(item: HomeItem, state: StudioState, stories: RunStory[]): CallLine {
@@ -43,6 +49,7 @@ export function callLine(item: HomeItem, state: StudioState, stories: RunStory[]
       key: `hold:${item.provider}`,
       verb: `Clear the ${item.label} hold`,
       where: waiting ? `${waiting} ${plural(waiting, 'step waits', 'steps wait')} on it` : null,
+      to: '#calls',
     };
   }
   if (isCleanup(item)) {
@@ -51,6 +58,7 @@ export function callLine(item: HomeItem, state: StudioState, stories: RunStory[]
       key: `cleanup:${item.run.id}`,
       verb: `Close ${count} unstarted ${plural(count, 'step')}`,
       where: idea(item.run),
+      to: ideaPage(item.run),
     };
   }
   const task = state.tasks.find(record => record.id === item.taskId),
@@ -59,6 +67,7 @@ export function callLine(item: HomeItem, state: StudioState, stories: RunStory[]
       key: item.taskId,
       verb,
       where: place ? idea(place.run) : (task?.title ?? item.taskId),
+      to: place ? ideaPage(place.run) : task ? `/tasks/${encodeURIComponent(task.id)}` : '#calls',
     });
   if (!task) return line(item.action ?? 'Open the story');
   const decision = decisionState(task, state);
@@ -114,7 +123,7 @@ export function RailCard({
   position,
   calls,
   place,
-  onOpen,
+  go,
   onPointerLeave,
   onBlur,
   onKeyDown,
@@ -125,8 +134,9 @@ export function RailCard({
   position: number;
   calls: ProjectCalls;
   place: CardPlace;
-  // A click on the project's name, which opens its Today.
-  onOpen: MouseEventHandler<HTMLAnchorElement>;
+  // A click on a link in the card, the project's name or a call's line, by the frame's rule for its links: a plain
+  // click opens the page in the app and closes the card, and any other click is the browser's.
+  go: (href: string) => MouseEventHandler<HTMLAnchorElement>;
   onPointerLeave?: PointerEventHandler<HTMLDivElement>;
   onBlur?: FocusEventHandler<HTMLDivElement>;
   onKeyDown?: KeyboardEventHandler<HTMLDivElement>;
@@ -151,7 +161,7 @@ export function RailCard({
             {initials(project.name)}
           </span>
           <div className="sd-railcard__title">
-            <a className="sd-railcard__name" href={`/p/${project.id}`} onClick={onOpen}>
+            <a className="sd-railcard__name" href={`/p/${project.id}`} onClick={go(`/p/${project.id}`)}>
               {project.name}
             </a>
             <span className="sd-chip sd-chip--you">
@@ -161,12 +171,22 @@ export function RailCard({
           </div>
         </div>
         <ul className="sd-railcard__calls">
-          {lines.map(line => (
-            <li key={line.key} className="sd-railcard__call">
-              <b>{line.verb}</b>
-              {line.where && <span className="sd-meta">{line.where}</span>}
-            </li>
-          ))}
+          {lines.map(line => {
+            const href = `/p/${project.id}${line.to}`;
+            return (
+              <li key={line.key}>
+                <a className="sd-railcard__call" href={href} onClick={go(href)}>
+                  <b>{line.verb}</b>
+                  {line.where && (
+                    <>
+                      {' '}
+                      <span className="sd-meta">{line.where}</span>
+                    </>
+                  )}
+                </a>
+              </li>
+            );
+          })}
         </ul>
       </div>
     </div>

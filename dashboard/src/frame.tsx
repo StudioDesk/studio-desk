@@ -3,10 +3,10 @@
 // a project (Ctrl K), New idea (N), its pages and the controller's status. At 860px and under, a top bar names the
 // project and opens the search, and bottom tabs carry the pages with New idea in the middle. The sidebar's Needs you
 // count is the current project's (the director, October 22); each tile on the rail counts its own project's calls,
-// pointing at or focusing another project's count shows them in a card beside it, and the tab's title counts every
-// project's (the attention indicator, October 29). With the chat box switched on (chat-box.ts), New idea and Ctrl J
-// open the chat box beside the page instead (chat-panel.tsx), and the sidebar lists the talks going (talks.ts), each
-// opening its conversation there.
+// pointing at or focusing another project's count shows them in a card beside it, each line opening its call's page
+// there, and the tab's title counts every project's (the attention indicator, October 29). With the chat box switched
+// on (chat-box.ts), New idea and Ctrl J open the chat box beside the page instead (chat-panel.tsx), and the sidebar
+// lists the talks going (talks.ts), each opening its conversation there.
 import { Outlet, useRouter, useRouterState } from '@tanstack/react-router';
 import {
   Fragment,
@@ -407,7 +407,11 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
                     position={position}
                     calls={calls}
                     place={open.place}
-                    onOpen={go(`/p/${item.id}`)}
+                    go={target => event => {
+                      go(target)(event);
+                      // A plain click opened the page in the app, Today or a call's page: the card closes.
+                      if (event.isDefaultPrevented()) hide(item.id);
+                    }}
                     onPointerLeave={event =>
                       !(event.relatedTarget instanceof Node && open.tile.contains(event.relatedTarget)) && hide(item.id)
                     }

@@ -1,6 +1,7 @@
 // The card beside another project's tile (the attention indicator, October 29): pointing at or focusing a tile with a
 // count shows the project's mark, name, count and one line for each of its calls, what to do and where, in the order
-// its Today lists them; leaving, blurring away and Escape close it, and it follows the rail's reads.
+// its Today lists them, each a link to its call's page in that project; leaving, blurring away and Escape close it, and
+// it follows the rail's reads.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -10,30 +11,32 @@ import type { AttemptSummary, Live, RunRecord, Shell, Task } from './api';
 import { App } from './app';
 import type { Question } from './questions';
 import { callLine } from './rail-card';
+import * as railCalls from './rail-calls';
+import { queryKeys } from './records';
 import { createAppRouter } from './router';
-import { liveSummary, type StudioState } from './studio-runs';
+import { liveSummary, type HomeItem, type StudioState } from './studio-runs';
 import { createStream, fakeController, latest, shellFixture, taskFixture, type Controller } from './test-controller';
 
 let controller: Controller;
 beforeEach(() => {
   controller = fakeController();
   localStorage.clear();
+  // Fragment links ask the browser to scroll to Your calls; jsdom has no layout or scrollIntoView.
+  Element.prototype.scrollIntoView = vi.fn();
 });
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  delete (Element.prototype as Partial<Element>).scrollIntoView;
 });
 
-const open = (path = '/p/project-x') => {
+const open = (
+  path = '/p/project-x',
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } }),
+) => {
   const router = createAppRouter(createMemoryHistory({ initialEntries: [path] }));
-  render(
-    <App
-      router={router}
-      queryClient={new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })}
-      createStream={createStream}
-    />,
-  );
+  render(<App router={router} queryClient={queryClient} createStream={createStream} />);
   return router;
 };
 
@@ -121,19 +124,56 @@ const twoCalls = (): Live => {
     runs: [idea('run-rail', railIdea, '2026-10-29T09:00:00.000Z', [planning])],
   };
 };
+// Each line: what to do, where, and the page it links: the plan's idea, and the question's own step.
 const twoLines = [
-  ['Approve the plan', `“${railIdea}”`],
-  ['Answer a question', 'Retire the old route'],
+  ['Approve the plan', `“${railIdea}”`, '/p/project-y/runs/run-rail'],
+  ['Answer a question', 'Retire the old route', '/p/project-y/tasks/T-ask'],
 ];
+// Project Y's CLI held for its usage with no known reset, with two steps waiting on it.
+const held = (): [Partial<Shell>, Live] => [
+  {
+    workers: [{ id: 'W-1', displayName: 'Eli', team: 'Engineering', provider: 'claude' }],
+    quota: { claude: true },
+    adapters: { claude: { id: 'claude', name: 'Claude Code CLI', quotaLabel: 'Claude Code' } },
+  },
+  {
+    tasks: [
+      taskFixture('T-1', { title: 'First held work', status: 'ready', queued: true }),
+      taskFixture('T-2', { title: 'Second held work', status: 'ready', queued: true }),
+    ],
+    attempts: [],
+    runs: [],
+  },
+];
+// A call whose step the records do not know, as when the rail's calls have moved on before the card follows.
+const gone: HomeItem = {
+  taskId: 'T-gone',
+  kind: 'interrupted',
+  reason: '',
+  details: [],
+  next: '',
+  action: 'Reconcile interrupted attempt',
+  requiresDirector: true,
+  text: '',
+  cleanup: false,
+  canClose: false,
+};
 
 const rail = () => within(screen.getByRole('navigation', { name: 'Projects' }));
 const queryCard = () => screen.queryByRole('group', { name: /^Calls in / });
 const card = () => screen.getByRole('group', { name: 'Calls in Project Y' });
-// Each line of the card: what to do, and where.
+// Each line of the card: what to do, where, and the page its link opens.
 const lines = () =>
   within(card())
     .getAllByRole('listitem')
-    .map(item => [item.querySelector('b')?.textContent, item.querySelector('.sd-meta')?.textContent ?? null]);
+    .map(item => [
+      item.querySelector('b')?.textContent,
+      item.querySelector('.sd-meta')?.textContent ?? null,
+      within(item).getByRole('link').getAttribute('href'),
+    ]);
+// A line's link, by its words: what to do, then where.
+const lineLink = (words: string) => within(card()).getByRole('link', { name: words });
+const planLine = `Approve the plan “${railIdea}”`;
 const liveReads = () => controller.reads().filter(read => read === '/api/projects/project-y/live').length;
 const tileY = (calls: number) =>
   screen.findByRole('link', { name: `Project Y: ${calls} ${calls === 1 ? 'call' : 'calls'} for you` });
@@ -188,9 +228,14 @@ test('focusing the tile from the keyboard opens the card; Tab moves into it, and
   const tile = await tileY(2);
   await tabTo(user, tile);
   expect(lines()).toEqual(twoLines);
-  // Tab moves into the card, which stays open, and on out of it, which closes it.
+  // Tab moves into the card, which stays open, through the project's name and each line in the card's order, and on
+  // out of it, which closes it.
   await user.tab();
   expect(document.activeElement).toBe(within(card()).getByRole('link', { name: 'Project Y' }));
+  for (const [verb, where] of twoLines) {
+    await user.tab();
+    expect(document.activeElement).toBe(lineLink(`${verb} ${where}`));
+  }
   await user.tab();
   expect(document.activeElement).toBe(rail().getByRole('button', { name: 'Add a project' }));
   expect(queryCard()).toBeNull();
@@ -206,6 +251,15 @@ test('focusing the tile from the keyboard opens the card; Tab moves into it, and
   await user.tab();
   expect(queryCard()).not.toBeNull();
   await user.tab();
+  await user.keyboard('{Escape}');
+  expect(queryCard()).toBeNull();
+  expect(document.activeElement).toBe(tile);
+  // Escape on a line does the same.
+  await user.tab({ shift: true });
+  await user.tab();
+  await user.tab();
+  await user.tab();
+  expect(document.activeElement).toBe(lineLink(planLine));
   await user.keyboard('{Escape}');
   expect(queryCard()).toBeNull();
   expect(document.activeElement).toBe(tile);
@@ -241,10 +295,10 @@ test("the card's lines are Project Y's calls in the order its Today lists them",
   expect(lines()).toEqual(
     calls.map(item => {
       const line = callLine(item, state, summary.stories);
-      return [line.verb, line.where];
+      return [line.verb, line.where, `/p/project-y${line.to}`];
     }),
   );
-  expect(lines()).toEqual([['Approve the story', '“Name every tile”'], ...twoLines]);
+  expect(lines()).toEqual([['Approve the story', '“Name every tile”', '/p/project-y/runs/run-names'], ...twoLines]);
   // Project Y's own Today lists the same calls in the same order.
   cleanup();
   controller = fakeController('project-y');
@@ -319,12 +373,105 @@ test('after a projects event names Project Y and it is read again, the open card
   const [task, attempt] = result();
   controller.lives['project-y'] = { tasks: [task], attempts: [attempt], runs: [] };
   latest().emit('projects', { projectIds: ['project-y'] });
-  await waitFor(() => expect(lines()).toEqual([['Accept the result', 'Show the badge']]));
+  await waitFor(() =>
+    expect(lines()).toEqual([['Accept the result', 'Show the badge', '/p/project-y/tasks/T-result']]),
+  );
   expect(within(card()).getByText('1 call for you')).toBeTruthy();
   expect(liveReads()).toBe(2);
 });
 
-// Each call as callLine puts it, from Project Y's shell with the records given.
+test("a line for a call inside an idea links to the idea's page in Project Y; a plain click goes there and closes the card", async () => {
+  controller.shells['project-y'] = projectY();
+  controller.lives['project-y'] = twoCalls();
+  const router = open();
+  fireEvent.pointerEnter(await tileY(2));
+  // The line keeps its words: what to do, and the idea in the director's words.
+  const line = lineLink(planLine);
+  expect(line.getAttribute('href')).toBe('/p/project-y/runs/run-rail');
+  expect(fireEvent.click(line)).toBe(false);
+  expect(queryCard()).toBeNull();
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-y/runs/run-rail'));
+});
+
+test("a line for a call on a step outside any idea links to the step's page in Project Y, and a plain click goes there", async () => {
+  controller.shells['project-y'] = projectY();
+  controller.lives['project-y'] = twoCalls();
+  const router = open();
+  fireEvent.pointerEnter(await tileY(2));
+  const line = lineLink('Answer a question Retire the old route');
+  expect(line.getAttribute('href')).toBe('/p/project-y/tasks/T-ask');
+  expect(fireEvent.click(line)).toBe(false);
+  expect(queryCard()).toBeNull();
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-y/tasks/T-ask'));
+});
+
+test("a hold's line links to Project Y's Today at Your calls, and a plain click opens it there", async () => {
+  const [shell, live] = held();
+  controller.shells['project-y'] = { ...projectY(), ...shell };
+  controller.lives['project-y'] = live;
+  const router = open();
+  fireEvent.pointerEnter(await tileY(1));
+  const line = lineLink('Clear the Claude Code hold 2 steps wait on it');
+  expect(line.getAttribute('href')).toBe('/p/project-y#calls');
+  expect(fireEvent.click(line)).toBe(false);
+  expect(queryCard()).toBeNull();
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-y'));
+  expect(router.state.location.hash).toBe('calls');
+  // Project Y is the open project, on its Today.
+  await waitFor(() =>
+    expect(
+      rail()
+        .getByRole('link', { name: /^Project Y/ })
+        .getAttribute('aria-current'),
+    ).toBe('true'),
+  );
+});
+
+test("a call with neither an idea nor a known step links to Project Y's Today at Your calls, and a plain click opens it there", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  controller.shells['project-y'] = projectY();
+  controller.lives['project-y'] = twoCalls();
+  client.setQueryData(queryKeys.shell('project-y'), projectY());
+  client.setQueryData(queryKeys.live('project-y'), twoCalls());
+  // Model the rail still holding a call whose task the card's records no longer know. Navigation and dismissal
+  // still use the real frame, router and card.
+  const calls = vi.spyOn(railCalls, 'useRailCalls').mockReturnValue({
+    calls: { 'project-y': { count: 1, items: [gone] } },
+    total: 1,
+    others: 1,
+  });
+  try {
+    const router = open('/p/project-x', client);
+    fireEvent.pointerEnter(await tileY(1));
+    const line = lineLink('Reconcile interrupted attempt T-gone');
+    expect(line.getAttribute('href')).toBe('/p/project-y#calls');
+    expect(fireEvent.click(line)).toBe(false);
+    expect(queryCard()).toBeNull();
+    await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-y'));
+    expect(router.state.location.hash).toBe('calls');
+  } finally {
+    cleanup();
+    calls.mockRestore();
+  }
+});
+
+test('a modified or middle click on a line is left to the browser, and the app stays where it is', async () => {
+  controller.shells['project-y'] = projectY();
+  controller.lives['project-y'] = twoCalls();
+  const router = open();
+  fireEvent.pointerEnter(await tileY(2));
+  for (const keys of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+    expect(fireEvent.click(lineLink(planLine), keys)).toBe(true);
+    expect(fireEvent.click(lineLink('Answer a question Retire the old route'), keys)).toBe(true);
+  }
+  // Nothing moved, and the card stays for the next line.
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(router.state.location.pathname).toBe('/p/project-x');
+  expect(queryCard()).not.toBeNull();
+});
+
+// Each call as callLine puts it, from Project Y's shell with the records given: what to do, where, and the page it
+// links after the project's address.
 const linesOf = (records: Partial<Live>, shell: Partial<Shell> = {}) => {
   const state: StudioState = { ...projectY(), ...shell, tasks: [], attempts: [], runs: [], ...records },
     summary = liveSummary(state);
@@ -332,7 +479,7 @@ const linesOf = (records: Partial<Live>, shell: Partial<Shell> = {}) => {
     .filter(item => item.requiresDirector)
     .map(item => {
       const line = callLine(item, state, summary.stories);
-      return [line.verb, line.where];
+      return [line.verb, line.where, line.to];
     });
 };
 // A staged story whose passing review waits to be integrated, or whose review asked for changes.
@@ -428,9 +575,12 @@ const stopped = (extra: Partial<AttemptSummary>): Partial<Live> => ({
   ],
 });
 
-test('callLine says what each kind of call asks, as Today chooses its card, and where it is', () => {
-  expect(linesOf(reviewed('pass'))).toEqual([['Try and integrate', 'Explain a change']]);
-  expect(linesOf(reviewed('needs-work'))).toEqual([['Look at the requested changes', 'Explain a change']]);
+test('callLine says what each kind of call asks, as Today chooses its card, where it is and the page it links', () => {
+  // A step outside any idea links to its own page.
+  expect(linesOf(reviewed('pass'))).toEqual([['Try and integrate', 'Explain a change', '/tasks/T-1']]);
+  expect(linesOf(reviewed('needs-work'))).toEqual([
+    ['Look at the requested changes', 'Explain a change', '/tasks/T-1'],
+  ]);
   expect(
     linesOf(
       stopped({
@@ -442,13 +592,16 @@ test('callLine says what each kind of call asks, as Today chooses its card, and 
         },
       }),
     ),
-  ).toEqual([['Answer a file request', 'Greet the director']]);
+  ).toEqual([['Answer a file request', 'Greet the director', '/tasks/T-story']]);
   expect(linesOf(stopped({ commandDenials: [{ tool: 'Bash', command: 'npm test', reason: 'Not allowed' }] }))).toEqual([
-    ['Answer a command request', 'Greet the director'],
+    ['Answer a command request', 'Greet the director', '/tasks/T-story'],
   ]);
   const [question, asking] = asked();
-  expect(linesOf({ tasks: [question], attempts: [asking] })).toEqual([['Answer a question', 'Retire the old route']]);
-  // A planning step asks to approve the plan, and a story to approve the story, each named by its idea's words.
+  expect(linesOf({ tasks: [question], attempts: [asking] })).toEqual([
+    ['Answer a question', 'Retire the old route', '/tasks/T-ask'],
+  ]);
+  // A planning step asks to approve the plan, and a story to approve the story, each named by its idea's words and
+  // linking its idea's page.
   const story = taskFixture('T-story', {
     title: 'Name the tiles',
     kind: 'general:work',
@@ -462,51 +615,56 @@ test('callLine says what each kind of call asks, as Today chooses its card, and 
       runs: [idea('run-rail', railIdea, '2026-10-29T09:00:00.000Z', [plan(), story])],
     }),
   ).toEqual([
-    ['Approve the plan', `“${railIdea}”`],
-    ['Approve the story', `“${railIdea}”`],
+    ['Approve the plan', `“${railIdea}”`, '/runs/run-rail'],
+    ['Approve the story', `“${railIdea}”`, '/runs/run-rail'],
   ]);
   const [task, attempt] = result();
-  expect(linesOf({ tasks: [task], attempts: [attempt] })).toEqual([['Accept the result', 'Show the badge']]);
+  expect(linesOf({ tasks: [task], attempts: [attempt] })).toEqual([
+    ['Accept the result', 'Show the badge', '/tasks/T-result'],
+  ]);
+  // An ID that is no plain word is encoded in the address.
+  expect(linesOf({ tasks: [{ ...task, id: 'T result/2' }], attempts: [{ ...attempt, taskId: 'T result/2' }] })).toEqual(
+    [['Accept the result', 'Show the badge', '/tasks/T%20result%2F2']],
+  );
 });
 
 test('callLine puts a hold and stopped work only the director can clear in their own words', () => {
-  // A CLI's usage hold with no known reset, with the work waiting on it.
-  expect(
-    linesOf(
-      {
-        tasks: [
-          taskFixture('T-1', { title: 'First held work', status: 'ready', queued: true }),
-          taskFixture('T-2', { title: 'Second held work', status: 'ready', queued: true }),
-        ],
-      },
-      {
-        workers: [{ id: 'W-1', displayName: 'Eli', team: 'Engineering', provider: 'claude' }],
-        quota: { claude: true },
-        adapters: { claude: { id: 'claude', name: 'Claude Code CLI', quotaLabel: 'Claude Code' } },
-      },
-    ),
-  ).toEqual([['Clear the Claude Code hold', '2 steps wait on it']]);
-  // A cancelled story, and the unstarted step of its idea that waits on it.
-  const cancelled = taskFixture('T-stop', {
+  // A CLI's usage hold with no known reset, with the work waiting on it, links to Today at Your calls.
+  const [shell, live] = held();
+  expect(linesOf(live, shell)).toEqual([['Clear the Claude Code hold', '2 steps wait on it', '#calls']]);
+  // A cancelled story, and the unstarted step of its idea that waits on it, link to their idea's page, with its ID
+  // encoded in both links.
+  const runId = 'run rail/2',
+    cancelled = taskFixture('T-stop', {
       title: 'Draw the card',
       status: 'cancelled',
       lastAttemptId: 'attempt-stop',
-      ...inRun('run-rail'),
+      ...inRun(runId),
     }),
     next = taskFixture('T-next', {
       title: 'Test the card',
       status: 'ready',
       dependencies: ['T-stop'],
-      ...inRun('run-rail'),
+      ...inRun(runId),
     });
   expect(
     linesOf({
       tasks: [cancelled, next],
       attempts: [{ id: 'attempt-stop', taskId: 'T-stop', status: 'cancelled', workerId: 'W-1' }],
-      runs: [idea('run-rail', railIdea, '2026-10-29T09:00:00.000Z', [cancelled, next])],
+      runs: [idea(runId, railIdea, '2026-10-29T09:00:00.000Z', [cancelled, next])],
     }),
   ).toEqual([
-    ['Start assignment', `“${railIdea}”`],
-    ['Close 1 unstarted step', `“${railIdea}”`],
+    ['Start assignment', `“${railIdea}”`, '/runs/run%20rail%2F2'],
+    ['Close 1 unstarted step', `“${railIdea}”`, '/runs/run%20rail%2F2'],
   ]);
+});
+
+test('callLine links a call with neither an idea nor a known step to Today at Your calls', () => {
+  const state: StudioState = { ...projectY(), ...twoCalls() };
+  expect(callLine(gone, state, liveSummary(state).stories)).toEqual({
+    key: 'T-gone',
+    verb: 'Reconcile interrupted attempt',
+    where: 'T-gone',
+    to: '#calls',
+  });
 });
