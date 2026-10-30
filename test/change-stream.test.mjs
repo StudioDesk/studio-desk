@@ -353,6 +353,11 @@ test("a tab's change events name only its project's records and the shared ones,
   store.putTask({ ...store.tasks()[0], id: 'T-elsewhere', projectId: 'project-other' });
   await pause(400);
   assert.equal(legacy.named('change').length, 1, "Another project's task is not this tab's change.");
+  // It hears only that the other project changed, so the project rail can count that project's calls again.
+  assert.deepEqual(
+    legacy.named('projects').map(event => event.data),
+    [{ projectIds: ['project-other'] }],
+  );
   const task = store.tasks()[0];
   store.putTask(task);
   store.putSetting('change-stream-shared', { value: true });
@@ -371,6 +376,7 @@ test("a tab's change events name only its project's records and the shared ones,
     ],
   );
   assert.equal(legacy.named('change').at(-1).data.version, store.version);
+  assert.equal(legacy.named('projects').length, 1, "Its own project's changes are never a projects event.");
   // A reconnecting tab asks what it missed since the last change it saw.
   const missed = await (await fetch(`${origin}/api/changes?after=${version}&start=${start}`)).json();
   assert.deepEqual(

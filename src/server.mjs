@@ -304,7 +304,9 @@ export function createStudio({
   // record of the tab's project and every shared one, with the store's version. Log lines are not
   // changes: they go only to the tabs watching their attempt. Recent changes stay in a capped list in
   // memory, so a reconnecting tab catches up (/api/changes); after a restart, or a gap beyond the list,
-  // it reloads what it shows.
+  // it reloads what it shows. A tab also hears which other projects' records changed (a `projects` event naming
+  // them), so the project rail can count each project's calls for the director as its own page does (the attention
+  // indicator, October 29).
   const journal = [],
     journalLimit = 2000,
     relevant = (change, projectId) => !change.projectId || change.projectId === projectId;
@@ -314,7 +316,10 @@ export function createStudio({
     lastBroadcast = Date.now();
     const batch = pending;
     pending = [];
+    const changedProjects = [...new Set(batch.map(change => change.projectId).filter(Boolean))];
     for (const client of clients) {
+      const elsewhere = changedProjects.filter(projectId => projectId !== client.projectId);
+      if (elsewhere.length) client.res.write(`event: projects\ndata: ${JSON.stringify({ projectIds: elsewhere })}\n\n`);
       const changes = batch.filter(change => relevant(change, client.projectId));
       if (!changes.length) continue;
       const data =
