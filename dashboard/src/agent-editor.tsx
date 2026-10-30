@@ -293,7 +293,7 @@ function Does({
             <select
               id={`${id}-kind`}
               className="sd-select"
-              style={{ flex: '1 1 180px', width: 'auto' }}
+              style={{ flex: '1 1 180px', width: 'auto', minWidth: 0 }}
               value={chosen}
               disabled={save.isPending}
               onChange={event => {

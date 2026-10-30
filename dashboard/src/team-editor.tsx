@@ -314,7 +314,15 @@ export function TeamEditor({
                 return (
                   <li key={member.workerId} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-10)' }}>
                     {look && <AgentAvatar look={look} size={36} ring={false} />}
-                    <span style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', flex: '1 1 0' }}>
+                    <span
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 'var(--space-4)',
+                        flex: '1 1 0',
+                        minWidth: 0,
+                      }}
+                    >
                       <b>{agentName(worker)}</b>
                       <input
                         className="sd-input"

@@ -103,7 +103,7 @@ const open = (path: string) => {
   return router;
 };
 const commands = () => controller.requests.filter(request => request.method !== 'GET');
-// The page's own Add an agent, at the top of the flow, and the panel it opens.
+// The page's own Add an agent, in its head above the flow, and the panel it opens.
 const addAnAgent = async (user: ReturnType<typeof userEvent.setup>) => {
   await user.click(
     within(await screen.findByRole('region', { name: 'Agents' })).getByRole('link', { name: 'Add an agent' }),
@@ -116,7 +116,8 @@ const studioRows = (panel: HTMLElement) =>
   within(within(panel).getByRole('list', { name: 'Agents the studio has' }))
     .getAllByRole('button')
     .map(row => [...row.querySelectorAll('b, .sd-meta')].map(line => line.textContent));
-// The window's width as useNarrow reads it: a phone matches the design's break. afterEach puts the window's own back.
+// The window's width as the page's layout reads it (agents-layout.ts): a phone matches the design's break, checked
+// first. afterEach puts the window's own back.
 const width = (phone: boolean) =>
   vi.stubGlobal('matchMedia', (query: string) => ({
     matches: phone && query === '(max-width: 860px)',
@@ -141,9 +142,12 @@ test("the top Add an agent opens its titled panel in the editor's place, with th
   expect(panel.getByRole('region', { name: 'An agent the studio has' })).toBeTruthy();
   expect(panel.getByRole('region', { name: 'Make a new one' })).toBeTruthy();
   expect(panel.getByRole('form', { name: 'A new agent for Product' })).toBeTruthy();
-  // Beside the flow in the editor's place, the agent's editor gone, and the panel's heading has the focus.
+  // Beside the flow in the editor's place, its column's own, not under the page's buttons or in the flow's column; the
+  // agent's editor gone, and the panel's heading has the focus.
   const steps = screen.getByRole('list', { name: 'How the work flows' });
-  expect(screen.getByRole('region', { name: 'Agents' }).contains(region)).toBe(false);
+  expect(region.parentElement?.classList.contains('sd-agents__editor')).toBe(true);
+  expect(steps.parentElement?.contains(region)).toBe(false);
+  expect(steps.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(region.closest('.sd-agents')).toBe(steps.closest('.sd-agents'));
   expect(screen.queryByRole('heading', { level: 2, name: 'Eli' })).toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(heading));

@@ -2474,7 +2474,9 @@ button.sd-row[aria-pressed='true'] {
 
 /* The agents: a list of the project's agents beside the one chosen, with what it is told, how it runs and its runs */
 .sd-agentspage {
-  display: contents;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-20);
 }
 .sd-page:has(> .sd-agentspage) {
   max-width: 1240px;
@@ -2483,6 +2485,60 @@ button.sd-row[aria-pressed='true'] {
   display: flex;
   gap: 22px;
   align-items: flex-start;
+}
+/* The Agents page's columns under its head (agents-page.tsx), laid out by agents-layout.ts's choice for the window's
+   width in data-layout: beside above underBreak (1200px), under from 861px to 1200px, and phone at phoneBreak (860px)
+   and under, where the 860px block below stacks them. The Instructions page's .sd-agents and .sd-agentdetail keep
+   their own look. */
+.sd-agents[data-layout] {
+  gap: var(--space-20);
+}
+.sd-agents__flow {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+}
+.sd-agents__editor {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.sd-agentspage .sd-agentdetail,
+.sd-agentspage .sd-agentgrid {
+  gap: var(--space-16);
+}
+/* Above 1200px, beside the flow: the editor's column stays in view as the window scrolls, scrolling on its own when
+   it is taller than the window; the team editor's bar sticks to the foot of the column. */
+.sd-agents[data-layout='beside'] > .sd-agents__editor {
+  position: sticky;
+  top: var(--space-20);
+  max-height: calc(100vh - var(--space-20));
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding-bottom: var(--space-16);
+}
+/* From 861px to 1200px, under the flow: one column, the editor at full width before what they're told */
+.sd-agents[data-layout='under'] {
+  flex-direction: column;
+  align-items: stretch;
+}
+.sd-agents[data-layout='under'] > * {
+  flex: none;
+}
+/* However narrow the editor's column, its grids, rows and approved commands fit inside it */
+.sd-agents__editor .sd-fieldgrid {
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+}
+.sd-agents__editor .sd-commands > li {
+  min-width: 0;
+  max-width: 100%;
+}
+.sd-agents__editor .sd-commands .sd-file {
+  max-width: 100%;
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .sd-agentlist {
   flex: 0 0 280px;

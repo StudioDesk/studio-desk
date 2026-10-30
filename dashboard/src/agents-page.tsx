@@ -3,12 +3,15 @@
 // editor (team-editor.tsx), or with Add an agent its own panel (add-agent.tsx). The flow starts with the director
 // sending an idea, goes through each team in its saved order with its agents as cards, and ends with the director
 // integrating what passed review; below it, what the agents are told. An agent is a set of instructions and a CLI; it
-// is not reserved, and runs several attempts at once, each its own process and record.
+// is not reserved, and runs several attempts at once, each its own process and record. The window's width chooses the
+// layout (agents-layout.ts): the editor beside the flow, in view as the page scrolls; under the flow at full width,
+// before what they're told, where the two no longer fit side by side; or the phone's.
 import { Link } from '@tanstack/react-router';
-import { useMemo, type ReactNode } from 'react';
+import { useMemo } from 'react';
 import { AddAgent } from './add-agent';
 import type { AttemptSummary, Team, Worker } from './api';
 import { AgentEditor, isReview, kindLabel, kindOwners, runsOn, toldSets } from './agent-editor';
+import { useAgentsLayout } from './agents-layout';
 import { AgentAvatar } from './design/avatar';
 import { agentState } from './faces';
 import type { AgentLook } from './design/agent-kit.js';
@@ -19,7 +22,6 @@ import { useTold } from './rules';
 import type { StudioState } from './studio-runs';
 import { TeamEditor } from './team-editor';
 import { agentLooks } from './today';
-import { useNarrow } from './use-narrow';
 
 // The team being edited, `new` for a new one, and whether its Add an agent starts open; without a team, whether the
 // Add an agent panel is open.
@@ -51,7 +53,8 @@ function Agents({
       () => agentLooks(projectId, [...state.workers, ...(state.employeeDirectory ?? [])]),
       [projectId, state.workers, state.employeeDirectory],
     ),
-    narrow = useNarrow(),
+    layout = useAgentsLayout(),
+    phone = layout === 'phone',
     workers = state.workers,
     addingAgent = !team && !!adding,
     editing = !!team || addingAgent,
@@ -66,47 +69,75 @@ function Agents({
             workers.find(worker => worker.enabled !== false) ??
             workers[0])));
   // What they're told reads for the agent picked, else the first.
-  const told = chosen ?? workers[0];
+  const told = chosen ?? workers[0],
+    toldCard = told && <FlowTold projectId={projectId} worker={told} />,
+    editor = addingAgent ? (
+      !phone && <AddAgent projectId={projectId} state={state} looks={looks} />
+    ) : team ? (
+      <TeamEditor
+        // Another team, or its Add an agent opened from the address, opens the editor afresh.
+        key={adding ? `${team}:add` : team}
+        projectId={projectId}
+        state={state}
+        teamId={team}
+        looks={looks}
+        adding={!!adding}
+      />
+    ) : chosen ? (
+      <AgentEditor key={chosen.id} projectId={projectId} state={state} worker={chosen} look={looks.get(chosen.id)} />
+    ) : (
+      <p role="status" className="sd-meta">
+        This agent is not in the project.
+      </p>
+    );
+  // The page's head above both columns, so the editor's column starts level with the flow. The flow's column and
+  // the editor's keep their places in every layout, so a window that changes width keeps an editor's draft; only
+  // what they're told moves, under the editor when the editor is under the flow.
   return (
-    <div className="sd-agentspage">
-      <div className="sd-agents">
-        <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '18px' }}>
-          <Flow
-            projectId={projectId}
-            state={state}
-            looks={looks}
-            current={chosen?.id}
-            // On a phone, Add an agent opens under the page's buttons, where it was pressed, and comes into view.
-            panel={addingAgent && narrow && <AddAgent projectId={projectId} state={state} looks={looks} phone />}
-          />
-          {told && <FlowTold projectId={projectId} worker={told} />}
+    <section className="sd-agentspage" aria-labelledby="agents-title">
+      <Head projectId={projectId} state={state} />
+      {/* On a phone, Add an agent opens under the page's buttons, where it was pressed, and comes into view. */}
+      {addingAgent && phone && <AddAgent projectId={projectId} state={state} looks={looks} phone />}
+      <div className="sd-agents" data-layout={layout}>
+        <div className="sd-agents__flow">
+          <Flow projectId={projectId} state={state} looks={looks} current={chosen?.id} />
+          {layout !== 'under' && toldCard}
         </div>
-        {addingAgent ? (
-          !narrow && <AddAgent projectId={projectId} state={state} looks={looks} />
-        ) : team ? (
-          <TeamEditor
-            // Another team, or its Add an agent opened from the address, opens the editor afresh.
-            key={adding ? `${team}:add` : team}
-            projectId={projectId}
-            state={state}
-            teamId={team}
-            looks={looks}
-            adding={!!adding}
-          />
-        ) : chosen ? (
-          <AgentEditor
-            key={chosen.id}
-            projectId={projectId}
-            state={state}
-            worker={chosen}
-            look={looks.get(chosen.id)}
-          />
-        ) : (
-          <p role="status" className="sd-meta">
-            This agent is not in the project.
-          </p>
-        )}
+        {editor && <div className="sd-agents__editor">{editor}</div>}
+        {layout === 'under' && toldCard}
       </div>
+    </section>
+  );
+}
+
+// The page's head: its title, the project it is for, and its buttons, which open their editor in the editor's
+// column.
+function Head({ projectId, state }: { projectId: string; state: StudioState }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 'var(--space-10)',
+      }}
+    >
+      <span style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+        <h1 id="agents-title" className="sd-sidecard__title" style={{ fontSize: '21px' }}>
+          Agents
+        </h1>
+        <span className="sd-meta">How the work flows through {state.project.name}&apos;s teams</span>
+      </span>
+      <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
+        <EditLink projectId={projectId} search={{ team: 'new' }} icon="plus">
+          Add a team
+        </EditLink>
+        {/* An agent the studio has, or a new one, joins the project in one of its teams, chosen in its panel. */}
+        <EditLink projectId={projectId} search={{ add: true }} icon="plus">
+          Add an agent
+        </EditLink>
+      </span>
     </div>
   );
 }
@@ -133,8 +164,8 @@ function rowState(state: StudioState, worker: Worker) {
   return { tone: 'wait', lines: [{ key: 'free', text: 'Free' }] };
 }
 
-// Adding a team and editing a team open the team's editor beside the flow, the team in the address; adding an agent
-// opens its own panel there, `add` in the address.
+// Adding a team and editing a team open the team's editor in the editor's column, the team in the address; adding an
+// agent opens its own panel there, `add` in the address.
 function EditLink({
   projectId,
   search,
@@ -182,90 +213,56 @@ function You({ does, first = false }: { does: string; first?: boolean }) {
   );
 }
 
-// How the work flows through the project: the director, each team in its saved order with its agents, the director;
-// and any panel the page's buttons open in place, under them.
+// How the work flows through the project: the director, each team in its saved order with its agents, the director.
 function Flow({
   projectId,
   state,
   looks,
   current,
-  panel,
 }: {
   projectId: string;
   state: StudioState;
   looks: Map<string, AgentLook>;
   current?: string;
-  panel?: ReactNode;
 }) {
   const teams = state.teams ?? [],
     owners = kindOwners(state);
   return (
-    <section
-      aria-labelledby="agents-title"
-      style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)' }}
+    <ol
+      aria-label="How the work flows"
+      style={{
+        listStyle: 'none',
+        margin: 0,
+        padding: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--space-8)',
+      }}
     >
-      <div
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 'var(--space-10)',
-        }}
-      >
-        <span style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
-          <h1 id="agents-title" className="sd-sidecard__title" style={{ fontSize: '21px' }}>
-            Agents
-          </h1>
-          <span className="sd-meta">How the work flows through {state.project.name}&apos;s teams</span>
-        </span>
-        <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
-          <EditLink projectId={projectId} search={{ team: 'new' }} icon="plus">
-            Add a team
-          </EditLink>
-          {/* An agent the studio has, or a new one, joins the project in one of its teams, chosen in its panel. */}
-          <EditLink projectId={projectId} search={{ add: true }} icon="plus">
-            Add an agent
-          </EditLink>
-        </span>
-      </div>
-      {panel}
-      <ol
-        aria-label="How the work flows"
-        style={{
-          listStyle: 'none',
-          margin: 0,
-          padding: 0,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 'var(--space-8)',
-        }}
-      >
-        <You first does="Send an idea" />
-        {teams.length ? (
-          teams.map(team => (
-            <FlowTeam
-              key={team.id}
-              projectId={projectId}
-              state={state}
-              team={team}
-              looks={looks}
-              owners={owners}
-              current={current}
-            />
-          ))
-        ) : (
-          <li style={stepStyle}>
-            <Arrow />
-            <span className="sd-meta">
-              {state.project.name} has no teams yet. Add a team, and its agents do the work between your idea and its
-              integration.
-            </span>
-          </li>
-        )}
-        <You does="Integrate what passed review" />
-      </ol>
-    </section>
+      <You first does="Send an idea" />
+      {teams.length ? (
+        teams.map(team => (
+          <FlowTeam
+            key={team.id}
+            projectId={projectId}
+            state={state}
+            team={team}
+            looks={looks}
+            owners={owners}
+            current={current}
+          />
+        ))
+      ) : (
+        <li style={stepStyle}>
+          <Arrow />
+          <span className="sd-meta">
+            {state.project.name} has no teams yet. Add a team, and its agents do the work between your idea and its
+            integration.
+          </span>
+        </li>
+      )}
+      <You does="Integrate what passed review" />
+    </ol>
   );
 }
 
