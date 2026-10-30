@@ -3,7 +3,7 @@ import { expect, test } from 'vitest';
 import type { AttemptSummary, Task, Worker } from './api';
 import { CLASSIC } from './design/agent-kit.js';
 import type { RunStory, StudioState } from './studio-runs';
-import { agentLooks, callsTitle, floorSentence, lastDone, quoted, shippedToday, when } from './today';
+import { agentLooks, callsTitle, floorSentence, lastDone, othersLine, quoted, shippedToday, when } from './today';
 
 test('the title counts the calls in words, shorter on a phone', () => {
   expect(callsTitle(0)).toBe('Nothing needs you right now.');
@@ -11,6 +11,23 @@ test('the title counts the calls in words, shorter on a phone', () => {
   expect(callsTitle(3)).toBe('Three calls are yours to make.');
   expect(callsTitle(3, true)).toBe('Three calls are yours.');
   expect(callsTitle(12)).toBe('12 calls are yours to make.');
+});
+
+test("the line under the title counts the other projects' calls, and is none when they have none", () => {
+  expect(othersLine(1, 2)).toBe(
+    'One call waits for you here, and 2 more in your other projects. Their counts are on the rail at the left.',
+  );
+  expect(othersLine(3, 1)).toBe(
+    'Three calls wait for you here, and 1 more in your other projects. Their counts are on the rail at the left.',
+  );
+  expect(othersLine(0, 2)).toBe(
+    'Nothing waits for you here, and 2 calls wait in your other projects. Their counts are on the rail at the left.',
+  );
+  expect(othersLine(0, 1)).toBe(
+    'Nothing waits for you here, and 1 call waits in your other projects. Their counts are on the rail at the left.',
+  );
+  expect(othersLine(2, 0)).toBeNull();
+  expect(othersLine(0, 0)).toBeNull();
 });
 
 test('an idea is quoted in its own words, cut at a word', () => {

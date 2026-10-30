@@ -6,11 +6,19 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary, CommandRecords, LibraryProposal, Task } from './api';
+import type { AttemptSummary, CommandRecords, LibraryProposal, Live, Task } from './api';
 import { App } from './app';
 import type { Answer, Question } from './questions';
 import { createAppRouter } from './router';
-import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
+import {
+  createStream,
+  fakeController,
+  latest,
+  shellFixture,
+  taskFixture,
+  whenShown,
+  type Controller,
+} from './test-controller';
 import { when } from './today';
 
 let controller: Controller;
@@ -1117,4 +1125,74 @@ test('a file the autonomy policy adds while Today is open joins the fold when th
   expect(within(fold()!).getByRole('link', { name: 'Brand guide' }).getAttribute('href')).toBe(
     '/p/project-x/artifacts',
   );
+});
+
+// Project Y's shell, and its live set holding the given number of plans waiting for the director's approval.
+const projectY = () => ({ ...shellFixture(), project: { id: 'project-y', name: 'Project Y' } });
+const callsInY = (count: number): Live => ({
+  tasks: Array.from({ length: count }, (_, index) =>
+    taskFixture(`T-y${index}`, { title: `Plan ${index}`, status: 'backlog', approval: { status: 'pending' } }),
+  ),
+  attempts: [],
+  runs: [],
+});
+const lineHere = async () => {
+  const heading = await screen.findByRole('heading', { level: 1 });
+  return heading.closest('.sd-pagehead__text') as HTMLElement;
+};
+const elsewhere = /in your other projects/;
+
+test("a line under the title counts the calls waiting in the other projects, as the rail's badges do", async () => {
+  controller.tasks = [taskFixture('T-1', { title: 'Waiting to start' })];
+  controller.shells['project-y'] = projectY();
+  controller.lives['project-y'] = callsInY(2);
+  open();
+  const text = await lineHere();
+  expect(
+    await within(text).findByText(
+      'One call waits for you here, and 2 more in your other projects. Their counts are on the rail at the left.',
+    ),
+  ).toBeTruthy();
+  // It sits after the title and its lead sentence, and the rail's tile shows the same count.
+  expect(text.lastElementChild?.textContent).toMatch(elsewhere);
+  expect(await screen.findByRole('link', { name: 'Project Y: 2 calls for you' })).toBeTruthy();
+  expect((await lineHere()).querySelector('h1')?.textContent).toContain('One call is yours to make.');
+});
+
+test('no line shows when the other projects hold no calls', async () => {
+  controller.tasks = [taskFixture('T-1', { title: 'Waiting to start' })];
+  controller.shells['project-y'] = projectY();
+  controller.lives['project-y'] = callsInY(0);
+  open();
+  const text = await lineHere();
+  await waitFor(() =>
+    expect(controller.reads().filter(read => read === '/api/projects/project-y/live')).toHaveLength(1),
+  );
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(within(text).queryByText(elsewhere)).toBeNull();
+  expect(text.querySelector('h1')?.textContent).toContain('One call is yours to make.');
+});
+
+test("the line follows another project's calls when the stream names it, without a reload", async () => {
+  controller.tasks = [taskFixture('T-1', { title: 'Waiting to start' })];
+  controller.shells['project-y'] = projectY();
+  controller.lives['project-y'] = callsInY(2);
+  open();
+  const text = await lineHere();
+  await within(text).findByText(/and 2 more in your other projects/);
+  const reads = () => controller.reads().filter(read => read === '/api/projects/project-y/live').length;
+  expect(reads()).toBe(1);
+  controller.lives['project-y'] = callsInY(1);
+  latest().emit('projects', { projectIds: ['project-y'] });
+  expect(
+    await within(text).findByText(
+      'One call waits for you here, and 1 more in your other projects. Their counts are on the rail at the left.',
+    ),
+  ).toBeTruthy();
+  // Today reads nothing of its own: the rail's one read a moment after the event is the only one.
+  expect(reads()).toBe(2);
+  controller.lives['project-y'] = callsInY(0);
+  latest().emit('projects', { projectIds: ['project-y'] });
+  await waitFor(() => expect(within(text).queryByText(elsewhere)).toBeNull(), { timeout: 2000 });
+  expect(reads()).toBe(3);
 });
