@@ -2,6 +2,8 @@
 const mode = process.argv[2];
 // Slow tests that still pass.
 if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500));
+// Longer passing tests, beside the longer edit.
+if (mode === 'slower') await new Promise(resolve => setTimeout(resolve, 4000));
 // Passing tests that outlast a story's shortest time limit (an editor's own run leaves its limit out).
 if (mode === 'outlast') await new Promise(resolve => setTimeout(resolve, 9000));
 if (mode === 'hang') setInterval(() => {}, 1000);

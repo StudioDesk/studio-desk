@@ -3786,13 +3786,14 @@ test('saving a change task from before stages leaves its record as it was; a liv
 // The story's time limit bounds the editor and ends when it stops: the candidate's install and tests get
 // the controller's own limits, so a long edit never leaves them no time (v1.0 tally row 7).
 test("a long edit leaves the candidate's tests their own time, which still bounds them", async t => {
-  const c = await setup(t, 'slow'),
+  const c = await setup(t, 'slower'),
     store = c.app.store,
     task = store.task(c.taskId);
-  // Shorter than the edit and the tests together, though each fits on its own.
-  task.maxSeconds = 2;
+  // Shorter than the edit and the tests together (eight seconds), though each fits on its own, with room for the
+  // story's setup on a busy computer (October 30: two seconds against a 1.5-second edit failed under load).
+  task.maxSeconds = 6;
   store.putTask(task);
-  await c.start('slow');
+  await c.start('slower');
   const passed = await c.wait(c.taskId);
   assert.equal(passed.status, 'review', JSON.stringify(passed.error));
   assert.equal(passed.result.checks.find(check => check.name === 'Candidate Node test suite').status, 'pass');

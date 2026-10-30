@@ -14,6 +14,8 @@ const limit =
   mode === 'quota' || (mode === 'quota-soon' && !JSON.parse(fs.readFileSync('source-scope.json')).continueFrom);
 // A long edit, otherwise like 'pass'.
 if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500));
+// A longer edit, for a time limit with room for a slow setup on a busy computer.
+if (mode === 'slower') await new Promise(resolve => setTimeout(resolve, 4000));
 // Identifiable work survives even when no common result can be returned.
 if ((limit || mode === 'hang') && assignment.kind === 'studio-development:change') {
   const scope = JSON.parse(fs.readFileSync('source-scope.json')),
