@@ -2526,15 +2526,19 @@ button.sd-row[aria-pressed='true'] {
 .sd-agents[data-layout='under'] > * {
   flex: none;
 }
-/* However narrow the editor's column, its grids, rows and approved commands fit inside it */
-.sd-agents__editor .sd-fieldgrid {
+/* However narrow the editor's column, or on a phone the editor in the flow, its grids, rows and approved commands fit
+   inside it */
+.sd-agents__editor .sd-fieldgrid,
+.sd-agents__picked .sd-fieldgrid {
   grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
 }
-.sd-agents__editor .sd-commands > li {
+.sd-agents__editor .sd-commands > li,
+.sd-agents__picked .sd-commands > li {
   min-width: 0;
   max-width: 100%;
 }
-.sd-agents__editor .sd-commands .sd-file {
+.sd-agents__editor .sd-commands .sd-file,
+.sd-agents__picked .sd-commands .sd-file {
   max-width: 100%;
   box-sizing: border-box;
   white-space: normal;
@@ -2675,6 +2679,34 @@ button.sd-row[aria-pressed='true'] {
   }
   .sd-agenthead__name {
     font-size: 30px;
+  }
+  /* The Agents page on a phone (agents-page.tsx): the picked agent's or team's editor in the flow, under its card at
+     the full width of its team's agents row or step, or a new team's under the page's buttons, with Close at its top.
+     It scrolls with the page, neither sticky nor scrolling on its own, and its cards are tighter to fit the width. */
+  .sd-agentspage .sd-agents__picked {
+    flex: 1 1 100%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-10);
+    scroll-margin-top: var(--space-16);
+  }
+  .sd-agentspage .sd-agents__picked > * {
+    flex: none;
+  }
+  .sd-agentspage .sd-agents__close {
+    align-self: flex-end;
+  }
+  .sd-agentspage .sd-agents__picked .sd-agentdetail,
+  .sd-agentspage .sd-agents__picked .sd-agentgrid {
+    gap: var(--space-12);
+  }
+  .sd-agentspage .sd-agents__picked .sd-agenthead {
+    gap: var(--space-14);
+    padding: var(--space-16);
+  }
+  .sd-agentspage .sd-agents__picked .sd-sidecard--roomy {
+    padding: var(--space-14) var(--space-16);
   }
 }
 

@@ -1,10 +1,12 @@
 // The Agents page's layout for the window's width: beside above 1200px, the editor level with the flow; under from
-// 861px to 1200px, the editor after the flow and before what they're told; the phone's at 860px and under, as it was.
-// The page's head is above both columns in each. Model-free, with the stand-in controller and matchMedia stubbed; no
-// browser lays anything out, so stickiness and fit are the stylesheet's, not measured here.
+// 861px to 1200px, the editor after the flow and before what they're told; at 860px and under, the phone's, where the
+// picked agent's or team's editor opens in the flow under what was picked, is brought into view and has Close. The
+// page's head is above both columns in each. Model-free, with the stand-in controller, matchMedia stubbed and
+// scrollIntoView a spy; no browser lays anything out, so placement is checked in the document's order, and
+// stickiness, fit and where a phone scrolls to are the stylesheet's and the browser's, not measured here.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { act, cleanup, render, renderHook, screen, within } from '@testing-library/react';
+import { act, cleanup, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { agentsLayout, phoneBreak, phoneQuery, underBreak, underQuery, useAgentsLayout } from './agents-layout';
@@ -60,6 +62,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  // The window's own, which jsdom does not have.
+  delete (Element.prototype as Partial<Element>).scrollIntoView;
 });
 
 const open = (path: string) => {
@@ -84,7 +88,14 @@ const matching = (...queries: string[]) =>
 const desktop = () => matching(),
   tablet = () => matching(underQuery),
   // The existing tests' phone, which matches only the design's break.
-  phone = () => matching(phoneQuery);
+  phone = () => matching(phoneQuery),
+  // A real phone, which matches the tablet's break too, its scrolling a spy.
+  handset = () => {
+    matching(phoneQuery, underQuery);
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    return scrolled;
+  };
 // A window that changes width: each max-width query matches at its width and under, any other query never, and a
 // change tells the listeners.
 const resizable = (start: number) => {
@@ -260,17 +271,215 @@ test("on a tablet Edit the team's editor is under the flow, before What they're 
   expect(told.parentElement).toBe(columns);
 });
 
-test("on a phone the page keeps its order: the head, the flow, What they're told, then the editor", async () => {
-  phone();
+// A second team after Engineering, Review, with Ana in it, so a pick can move from one team's step to another's.
+const withReview = () => {
+  const review = {
+      id: 'review',
+      name: 'Review',
+      mark: 'RV',
+      purpose: 'Check the work.',
+      leadId: 'W-2',
+      goalTaskIds: [],
+    },
+    ana = { id: 'W-2', displayName: 'Ana', jobTitle: 'Reviewer', team: 'Review', teamId: 'review', provider: 'codex' },
+    shell = controller.shell,
+    config = shell.organizationConfiguration!,
+    teams = [...shell.teams!, review];
+  controller.shell = {
+    ...shell,
+    teams,
+    workers: [...shell.workers, { ...ana, model: '', enabled: true }],
+    employeeDirectory: [
+      ...shell.employeeDirectory!,
+      { id: 'W-2', displayName: 'Ana', provider: 'codex', enabled: true },
+    ],
+    organizationConfiguration: {
+      ...config,
+      teams,
+      members: [
+        ...config.members!,
+        { workerId: 'W-2', teamId: 'review', role: 'Reviewer', responsibility: 'Reviews the work.', roles: [] },
+      ],
+    },
+  };
+};
+// A team's step in the flow, its card (the region named for it) and an agent's card in the flow.
+const stepOf = (team: string) => {
+  const card = within(screen.getByRole('list', { name: 'How the work flows' })).getByRole('region', { name: team });
+  return { card, step: card.closest('li')! };
+};
+const cardOf = (workerId: string) =>
+  document.querySelector<HTMLElement>(`a.sd-agentrow[href="/p/project-x/agents/${workerId}"]`)!;
+// The phone's editor's wrapper, which comes into view, with Close at its top.
+const wrapperOf = (editor: HTMLElement) => editor.closest<HTMLElement>('.sd-agents__picked')!;
+
+test("on a phone the agent in the address opens its editor under its card in its team's step, alone, in view and with Close", async () => {
+  const scrolled = handset();
+  withReview();
   open('/p/project-x/agents/W-1');
-  const { flow, columns, head } = await page(),
-    does = await screen.findByRole('region', { name: 'Does' }),
-    told = await screen.findByRole('region', { name: "What they're told" });
+  const does = await screen.findByRole('region', { name: 'Does' }),
+    { flow, columns, head } = await page(),
+    engineering = stepOf('Engineering'),
+    review = stepOf('Review'),
+    card = cardOf('W-1'),
+    wrapper = wrapperOf(does);
   expect(columns.getAttribute('data-layout')).toBe('phone');
   for (const part of head) expect(follows(part, columns)).toBe(true);
-  expect(flow.parentElement!.contains(told)).toBe(true);
+  // In Engineering's card, right after Eli's, at the full width of its agents' row, and before Review's step.
+  expect(screen.getAllByRole('region', { name: 'Does' })).toHaveLength(1);
+  expect(engineering.card.contains(does)).toBe(true);
+  expect(card.getAttribute('aria-current')).toBe('page');
+  expect(card.nextElementSibling).toBe(wrapper);
+  expect(wrapper.parentElement).toBe(card.parentElement);
+  expect(follows(does, review.step)).toBe(true);
+  expect(review.step.contains(does)).toBe(false);
+  // Nothing in an editor's column, and What they're told still after the flow.
+  expect(columns.querySelector('.sd-agents__editor')).toBeNull();
+  const told = screen.getByRole('region', { name: "What they're told" });
   expect(follows(flow, told)).toBe(true);
-  expect(follows(told, does)).toBe(true);
+  expect(wrapper.contains(told)).toBe(false);
+  // Close first, then Eli's editor; the wrapper is brought into view, its top at the window's top.
+  expect(wrapper.firstElementChild).toBe(within(wrapper).getByRole('link', { name: 'Close Eli' }));
+  expect(within(wrapper).getByRole('region', { name: 'Eli' })).toBeTruthy();
+  await waitFor(() => expect(scrolled.mock.contexts).toContain(wrapper));
+  expect(scrolled.mock.calls[scrolled.mock.contexts.indexOf(wrapper)]).toEqual([{ block: 'start' }]);
+  expect(controller.requests.filter(request => request.method !== 'GET')).toEqual([]);
+});
+
+test("on a phone picking an agent in another team moves the editor under that agent's card and into view", async () => {
+  const user = userEvent.setup(),
+    scrolled = handset();
+  withReview();
+  const router = open('/p/project-x/agents/W-1');
+  const first = wrapperOf(await screen.findByRole('region', { name: 'Does' }));
+  await waitFor(() => expect(scrolled.mock.contexts).toContain(first));
+  const before = scrolled.mock.calls.length;
+  await user.click(cardOf('W-2'));
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-x/agents/W-2'));
+  expect(router.state.location.search).toEqual({});
+  const ana = await screen.findByRole('region', { name: 'Ana' }),
+    does = screen.getAllByRole('region', { name: 'Does' }),
+    wrapper = wrapperOf(ana),
+    engineering = stepOf('Engineering'),
+    review = stepOf('Review');
+  // One editor, Ana's, right after her card in Review's step; none left under Eli's.
+  expect(does).toHaveLength(1);
+  expect(wrapper.contains(does[0]!)).toBe(true);
+  expect(review.card.contains(wrapper)).toBe(true);
+  expect(cardOf('W-2').nextElementSibling).toBe(wrapper);
+  expect(cardOf('W-2').getAttribute('aria-current')).toBe('page');
+  expect(cardOf('W-1').getAttribute('aria-current')).toBeNull();
+  expect(cardOf('W-1').nextElementSibling).toBeNull();
+  expect(engineering.step.querySelector('.sd-agents__picked')).toBeNull();
+  expect(document.querySelectorAll('.sd-agents__picked')).toHaveLength(1);
+  expect(within(wrapper).getByRole('link', { name: 'Close Ana' })).toBe(wrapper.firstElementChild);
+  // A new wrapper, brought into view again.
+  expect(wrapper).not.toBe(first);
+  await waitFor(() => expect(scrolled.mock.contexts.slice(before)).toContain(wrapper));
+  expect(scrolled).toHaveBeenLastCalledWith({ block: 'start' });
+});
+
+test("on a phone Edit the team opens the team's editor in its step under its card, and nowhere else", async () => {
+  const user = userEvent.setup(),
+    scrolled = handset();
+  withReview();
+  const router = open('/p/project-x/agents/W-1');
+  const editor = await editTeam(user),
+    { columns } = await page(),
+    engineering = stepOf('Engineering'),
+    review = stepOf('Review'),
+    wrapper = wrapperOf(editor);
+  expect(router.state.location.search).toEqual({ team: 'engineering' });
+  expect(columns.getAttribute('data-layout')).toBe('phone');
+  // In Engineering's step, right after its card, not inside the card; one editor, and no agent's.
+  expect(screen.getAllByRole('region', { name: 'Edit Engineering' })).toHaveLength(1);
+  expect(wrapper.parentElement).toBe(engineering.step);
+  expect(engineering.card.nextElementSibling).toBe(wrapper);
+  expect(engineering.card.contains(editor)).toBe(false);
+  expect(review.step.contains(editor)).toBe(false);
+  expect(follows(editor, review.step)).toBe(true);
+  expect(columns.querySelector('.sd-agents__editor')).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Does' })).toBeNull();
+  expect(document.querySelectorAll('.sd-agents__picked')).toHaveLength(1);
+  expect(wrapper.firstElementChild).toBe(within(wrapper).getByRole('link', { name: 'Close Engineering' }));
+  await waitFor(() => expect(scrolled.mock.contexts).toContain(wrapper));
+  expect(scrolled).toHaveBeenLastCalledWith({ block: 'start' });
+});
+
+test("on a phone the team's address with add=true opens its editor in its step with Add an agent's choices open", async () => {
+  const scrolled = handset();
+  withReview();
+  open('/p/project-x/agents?team=review&add=true');
+  const editor = await screen.findByRole('region', { name: 'Edit Review' }),
+    who = within(within(editor).getByRole('region', { name: "Who's on it" })),
+    review = stepOf('Review'),
+    wrapper = wrapperOf(editor);
+  expect(who.getByRole('button', { name: 'Add an agent' }).getAttribute('aria-expanded')).toBe('true');
+  expect(review.card.nextElementSibling).toBe(wrapper);
+  expect(stepOf('Engineering').step.contains(editor)).toBe(false);
+  await waitFor(() => expect(scrolled.mock.contexts).toContain(wrapper));
+});
+
+test("on a phone Close goes back to the agents with nothing picked and no editor, the flow and What they're told kept", async () => {
+  const user = userEvent.setup();
+  handset();
+  withReview();
+  const router = open('/p/project-x/agents/W-2');
+  await screen.findByRole('region', { name: 'Ana' });
+  await user.click(screen.getByRole('link', { name: 'Close Ana' }));
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-x/agents'));
+  expect(router.state.location.search).toEqual({});
+  const { flow } = await page();
+  // No editor anywhere, and no agent picked by default: none of the cards is current.
+  expect(screen.queryByRole('region', { name: 'Does' })).toBeNull();
+  expect(document.querySelector('.sd-agents__picked')).toBeNull();
+  expect(flow.querySelector('[aria-current="page"]')).toBeNull();
+  // What they're told still reads, for the first agent.
+  const told = within(await screen.findByRole('region', { name: "What they're told" }));
+  expect(await told.findByText('What Eli reads with each piece of work:')).toBeTruthy();
+  // A team's editor closes the same way.
+  await editTeam(user);
+  await user.click(screen.getByRole('link', { name: 'Close Engineering' }));
+  await waitFor(() => expect(router.state.location.search).toEqual({}));
+  expect(router.state.location.pathname).toBe('/p/project-x/agents');
+  expect(screen.queryByRole('region', { name: 'Edit Engineering' })).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Does' })).toBeNull();
+  expect(screen.getByRole('list', { name: 'How the work flows' })).toBeTruthy();
+  expect(screen.getByRole('region', { name: "What they're told" })).toBeTruthy();
+  expect(controller.requests.filter(request => request.method !== 'GET')).toEqual([]);
+});
+
+test("on a phone Add a team opens the new team's editor under the page's buttons, before the flow, in view", async () => {
+  const user = userEvent.setup(),
+    scrolled = handset();
+  const router = open('/p/project-x/agents/W-1');
+  await screen.findByRole('region', { name: 'Does' });
+  await user.click(within(screen.getByRole('region', { name: 'Agents' })).getByRole('link', { name: 'Add a team' }));
+  const editor = await screen.findByRole('region', { name: 'A new team' }),
+    { flow, region, columns, head } = await page(),
+    wrapper = wrapperOf(editor);
+  expect(router.state.location.search).toEqual({ team: 'new' });
+  expect(region.contains(editor)).toBe(true);
+  // After the page's buttons and before the flow's list, outside the columns.
+  for (const part of head) expect(follows(part, editor)).toBe(true);
+  expect(follows(editor, flow)).toBe(true);
+  expect(columns.contains(editor)).toBe(false);
+  expect(screen.getAllByRole('region', { name: 'A new team' })).toHaveLength(1);
+  expect(screen.queryByRole('region', { name: 'Does' })).toBeNull();
+  expect(document.querySelectorAll('.sd-agents__picked')).toHaveLength(1);
+  expect(wrapper.firstElementChild).toBe(within(wrapper).getByRole('link', { name: 'Close' }));
+  await waitFor(() => expect(scrolled.mock.contexts).toContain(wrapper));
+});
+
+test('a phone whose address names an agent the project does not have says so under the buttons, with Close', async () => {
+  handset();
+  open('/p/project-x/agents/W-gone');
+  const said = await screen.findByText('This agent is not in the project.'),
+    { flow } = await page(),
+    wrapper = wrapperOf(said);
+  expect(follows(said, flow)).toBe(true);
+  expect(flow.contains(said)).toBe(false);
+  expect(within(wrapper).getByRole('link', { name: 'Close' })).toBe(wrapper.firstElementChild);
 });
 
 test("a window that changes width moves the team's editor between beside and under, keeping what was typed", async () => {

@@ -5,9 +5,10 @@
 // integrating what passed review; below it, what the agents are told. An agent is a set of instructions and a CLI; it
 // is not reserved, and runs several attempts at once, each its own process and record. The window's width chooses the
 // layout (agents-layout.ts): the editor beside the flow, in view as the page scrolls; under the flow at full width,
-// before what they're told, where the two no longer fit side by side; or the phone's.
+// before what they're told, where the two no longer fit side by side; or on a phone in the flow, under what was
+// picked, brought into view, with Close.
 import { Link } from '@tanstack/react-router';
-import { useMemo } from 'react';
+import { Fragment, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { AddAgent } from './add-agent';
 import type { AttemptSummary, Team, Worker } from './api';
 import { AgentEditor, isReview, kindLabel, kindOwners, runsOn, toldSets } from './agent-editor';
@@ -29,6 +30,17 @@ interface Editing {
   team?: string;
   adding?: boolean;
 }
+
+// On a phone, the editor in the flow: in the step of the team it is for, under the agent's card when it is an
+// agent's, else under the team's card; without a team, under the page's buttons.
+interface Picked {
+  teamId?: string;
+  workerId?: string;
+  node: ReactNode;
+}
+
+// An agent is in the team it names by ID, or, without one, by name.
+const inTeam = (worker: Worker, team: Team) => (worker.teamId ? worker.teamId === team.id : worker.team === team.name);
 
 export function AgentsPage({ projectId, workerId, team, adding }: { projectId: string; workerId?: string } & Editing) {
   const { state, error } = useStudio(projectId);
@@ -58,12 +70,13 @@ function Agents({
     workers = state.workers,
     addingAgent = !team && !!adding,
     editing = !!team || addingAgent,
-    // Without a choice in the address, the page opens on an agent at work, as the canvas does, else the first; with
-    // a team in it, on that team's editor, and with Add an agent, on its panel.
+    // Without a choice in the address, the page opens on an agent at work, as the canvas does, else the first, and on
+    // a phone, where an editor opens under what was picked, on none; with a team in it, on that team's editor, and
+    // with Add an agent, on its panel.
     chosen = editing
       ? undefined
       : (workers.find(worker => worker.id === workerId) ??
-        (workerId
+        (workerId || phone
           ? undefined
           : (workers.find(worker => agentState(state, worker.id) === 'working') ??
             workers.find(worker => worker.enabled !== false) ??
@@ -86,32 +99,82 @@ function Agents({
     ) : chosen ? (
       <AgentEditor key={chosen.id} projectId={projectId} state={state} worker={chosen} look={looks.get(chosen.id)} />
     ) : (
-      <p role="status" className="sd-meta">
-        This agent is not in the project.
-      </p>
+      (!phone || !!workerId) && (
+        <p role="status" className="sd-meta">
+          This agent is not in the project.
+        </p>
+      )
     );
-  // The page's head above both columns, so the editor's column starts level with the flow. The flow's column and
-  // the editor's keep their places in every layout, so a window that changes width keeps an editor's draft; only
-  // what they're told moves, under the editor when the editor is under the flow.
+  // On a phone the editor opens in the flow where it was picked, one at a time: an agent's under its card in its
+  // team's step, a team's under that team's card, and a new team's, or one the flow does not show, under the page's
+  // buttons. Each pick is a new place, so it opens afresh there and comes into view.
+  const step = team
+      ? state.teams?.find(item => item.id === team)
+      : chosen && state.teams?.find(item => inTeam(chosen, item)),
+    picked: Picked | undefined =
+      phone && editor
+        ? {
+            teamId: step?.id,
+            workerId: team ? undefined : chosen?.id,
+            node: (
+              <PhoneEditor
+                key={team ? `team:${adding ? `${team}:add` : team}` : `agent:${workerId}`}
+                projectId={projectId}
+                name={team ? step?.name : chosen && (chosen.displayName ?? chosen.id)}
+              >
+                {editor}
+              </PhoneEditor>
+            ),
+          }
+        : undefined;
+  // The page's head above both columns, so the editor's column starts level with the flow. Beside the flow and under
+  // it, the flow's column and the editor's keep their places, so a window that changes width between them keeps an
+  // editor's draft; only what they're told moves, under the editor when the editor is under the flow.
   return (
     <section className="sd-agentspage" aria-labelledby="agents-title">
       <Head projectId={projectId} state={state} />
-      {/* On a phone, Add an agent opens under the page's buttons, where it was pressed, and comes into view. */}
+      {/* On a phone, Add an agent and Add a team open under the page's buttons, where they were pressed, and come into
+          view. */}
       {addingAgent && phone && <AddAgent projectId={projectId} state={state} looks={looks} phone />}
+      {picked && !picked.teamId && picked.node}
       <div className="sd-agents" data-layout={layout}>
         <div className="sd-agents__flow">
-          <Flow projectId={projectId} state={state} looks={looks} current={chosen?.id} />
+          <Flow projectId={projectId} state={state} looks={looks} current={chosen?.id} picked={picked} />
           {layout !== 'under' && toldCard}
         </div>
-        {editor && <div className="sd-agents__editor">{editor}</div>}
+        {editor && !phone && <div className="sd-agents__editor">{editor}</div>}
         {layout === 'under' && toldCard}
       </div>
     </section>
   );
 }
 
+// On a phone, the editor where it was picked: it comes into view as it opens, so picking another agent or team, which
+// opens it afresh there, brings it into view again. Close, at its top, goes back to the agents with nothing picked.
+function PhoneEditor({ projectId, name, children }: { projectId: string; name?: string; children: ReactNode }) {
+  const wrapper = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    wrapper.current?.scrollIntoView?.({ block: 'start' });
+  }, []);
+  return (
+    <div ref={wrapper} className="sd-agents__picked">
+      <Link
+        className="sd-btn sd-btn--sm sd-agents__close"
+        to="/p/$projectId/agents"
+        params={{ projectId }}
+        search={{}}
+        aria-label={name ? `Close ${name}` : undefined}
+      >
+        <Icon name="close" size={16} />
+        Close
+      </Link>
+      {children}
+    </div>
+  );
+}
+
 // The page's head: its title, the project it is for, and its buttons, which open their editor in the editor's
-// column.
+// column, or on a phone under the buttons.
 function Head({ projectId, state }: { projectId: string; state: StudioState }) {
   return (
     <div
@@ -219,11 +282,13 @@ function Flow({
   state,
   looks,
   current,
+  picked,
 }: {
   projectId: string;
   state: StudioState;
   looks: Map<string, AgentLook>;
   current?: string;
+  picked?: Picked;
 }) {
   const teams = state.teams ?? [],
     owners = kindOwners(state);
@@ -250,6 +315,7 @@ function Flow({
             looks={looks}
             owners={owners}
             current={current}
+            picked={picked?.teamId === team.id ? picked : undefined}
           />
         ))
       ) : (
@@ -266,7 +332,8 @@ function Flow({
   );
 }
 
-// One team's step: its mark, name, purpose and lead, and its agents side by side.
+// One team's step: its mark, name, purpose and lead, and its agents side by side; on a phone, the editor picked in
+// it, under the agent's card at the full width of the agents' row, or under the team's card.
 function FlowTeam({
   projectId,
   state,
@@ -274,6 +341,7 @@ function FlowTeam({
   looks,
   owners,
   current,
+  picked,
 }: {
   projectId: string;
   state: StudioState;
@@ -281,10 +349,9 @@ function FlowTeam({
   looks: Map<string, AgentLook>;
   owners: Record<string, string>;
   current?: string;
+  picked?: Picked;
 }) {
-  const members = state.workers.filter(worker =>
-      worker.teamId ? worker.teamId === team.id : worker.team === team.name,
-    ),
+  const members = state.workers.filter(worker => inTeam(worker, team)),
     lead = [...state.workers, ...(state.employeeDirectory ?? [])].find(worker => worker.id === team.leadId);
   return (
     <li style={stepStyle}>
@@ -310,23 +377,26 @@ function FlowTeam({
         {members.length ? (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-10)' }}>
             {members.map(worker => (
-              <AgentCard
-                key={worker.id}
-                projectId={projectId}
-                state={state}
-                worker={worker}
-                look={looks.get(worker.id)}
-                does={Object.keys(owners)
-                  .filter(kind => owners[kind] === worker.id)
-                  .map(kind => kindLabel(state, kind))}
-                current={worker.id === current}
-              />
+              <Fragment key={worker.id}>
+                <AgentCard
+                  projectId={projectId}
+                  state={state}
+                  worker={worker}
+                  look={looks.get(worker.id)}
+                  does={Object.keys(owners)
+                    .filter(kind => owners[kind] === worker.id)
+                    .map(kind => kindLabel(state, kind))}
+                  current={worker.id === current}
+                />
+                {picked?.workerId === worker.id && picked.node}
+              </Fragment>
             ))}
           </div>
         ) : (
           <span className="sd-meta">No agents in this team yet.</span>
         )}
       </section>
+      {picked && !picked.workerId && picked.node}
     </li>
   );
 }
