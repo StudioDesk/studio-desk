@@ -4,7 +4,7 @@
 // files are read once, when their tab first opens.
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { AttemptSummary, Task } from './api';
 import {
   AgentTestRuns,
@@ -20,6 +20,7 @@ import {
   useAttemptDetail,
   type FullAttempt,
 } from './attempt-record';
+import { attemptRow, chipLabel, isReview, shownChips, shownName, type Chip } from './attempt-row';
 import { storyPaths } from './decisions';
 import { AgentAvatar } from './design/avatar';
 import { agentState, attemptState } from './faces';
@@ -38,24 +39,15 @@ import {
 } from './files';
 import { workerName } from './names';
 import { FileChanges, filesEditable, readArtifact, StoryEdit } from './source-story';
-import {
-  attemptsUsed,
-  cliName,
-  countsTowardLimit,
-  isSourceStory,
-  kindLabel,
-  storyPeople,
-  type Standing,
-} from './story';
+import { cliName, countsTowardLimit, isSourceStory, kindLabel, storyPeople, type Standing } from './story';
 import { active, liveSummary, type StudioState } from './studio-runs';
 import { IntegrationJournal, type Journal } from './task-decisions';
 import { TaskRow } from './task-row';
 import { when } from './today';
 
 const kindOf = (attempt?: AttemptSummary) => (attempt?.assignment as { kind?: string } | undefined)?.kind;
-// A review of the work, a code story's or other work's independent review, as on the Agents page.
-export const isReview = (attempt?: AttemptSummary) =>
-  ['studio-development:change-review', 'general:review'].includes(kindOf(attempt) ?? '');
+// A review of the work, which the attempts row reads too.
+export { isReview };
 const modelOf = (attempt: AttemptSummary) => (attempt.reportedModel ?? attempt.requestedModel) as string | undefined;
 
 // A check as the agents and the controller record it: its name, pass, fail or not run, and its evidence.
@@ -594,8 +586,8 @@ export function ReviewVerdict({
 // other work's own attempts, count against its limit; a review is a step of its own, not another attempt at the
 // work. An attempt that uses up none of them (a usage limit stopped it, or the controller's stop interrupted it and
 // it was reconciled) is named for what stopped it, so the next one never reads "attempt 3 of 2" (the recovery
-// drill, October 24). `short` leaves out "Build, ", as on the attempt strip's chips after its Build count and on
-// Today's floor.
+// drill, October 24). `short` leaves out "Build, ", as on the story's working line and on Today's floor. The attempts
+// row above the story's tabs says its own words (attempt-row.ts).
 export function attemptName(task: Task, attempts: AttemptSummary[], attempt: AttemptSummary, short = false) {
   const same = attempts.filter(item => isReview(item) === isReview(attempt)),
     counted = same.filter(countsTowardLimit),
@@ -685,8 +677,8 @@ function SetAside({ attempt, top }: { attempt?: AttemptSummary; top?: string }) 
 }
 
 // Keeps a chosen button in view in its row, which scrolls sideways on a phone: only the row scrolls, never the page.
-export function keepInRow(button?: Element | null) {
-  const row = button?.parentElement;
+// The row is the button's own unless one is given, as for the attempts row's review step.
+export function keepInRow(button?: Element | null, row: Element | null | undefined = button?.parentElement) {
   if (!button || !row || row.scrollWidth <= row.clientWidth) return;
   const at = button.getBoundingClientRect(),
     within = row.getBoundingClientRect();
@@ -696,13 +688,13 @@ export function keepInRow(button?: Element | null) {
 
 const attemptChipId = (attemptId: string) => `attempt-chip-${attemptId}`;
 
-// The story's attempts, a strip of chips above its tabs, where its Attempts tab was: each build or work attempt and
-// then each review, so a review never reads as another try at the build (the director, October 24), each named and
-// with how it ended. Before them, how many of the allowed attempts are used, counted as the Details card counts them,
-// and for a code story that is not running how many build attempts are left. Who ran each on what, when and for how
-// long is its chip's title. Choosing one shows it in every view; while one other than the latest is chosen, a line
-// under the strip names it, how it ended and who ran it, with Back to the latest. On a phone the chips scroll sideways
-// in their own row, the chosen one kept in view.
+// The story's attempts, a row of chips above its tabs, where its Attempts tab was (attempt-row.ts says them in words):
+// each build or work attempt as its number and how it ended, its latest four with "N earlier" opening the rest; then
+// the review as a step of its own, so a review never reads as another try at the build (the director, October 24),
+// naming the build it reviewed, or saying it comes after the build that runs now; and under the row, the limit said
+// once. Who ran each on what, when and for how long is its chip's title. Choosing one shows it in every view; while
+// one other than the latest is chosen, a line under the row names it, how it ended and who ran it, with Back to the
+// latest. On a phone the chips scroll sideways in their own row, the chosen one kept in view.
 export function AttemptStrip({
   task,
   studio,
@@ -723,70 +715,83 @@ export function AttemptStrip({
   onLatest: () => void;
   looks: Map<string, AgentLook>;
 }) {
-  const shownId = shown?.id;
+  const shownId = shown?.id,
+    // Whether the director opened the earlier attempts with "N earlier".
+    [open, setOpen] = useState(false);
   useEffect(() => {
-    if (shownId) keepInRow(document.getElementById(attemptChipId(shownId)));
-  }, [shownId]);
+    const chip = shownId ? document.getElementById(attemptChipId(shownId)) : null;
+    keepInRow(chip, chip?.closest('.sd-attemptstrip__chips'));
+  }, [shownId, open]);
   if (!attempts.length) return null;
-  const builds = attempts.filter(attempt => !isReview(attempt)),
-    reviews = attempts.filter(isReview),
-    source = isSourceStory(task),
-    used = source ? builds.filter(countsTowardLimit).length : attemptsUsed(task, attempts).used,
-    left = Math.max(0, (task.maxAttempts ?? 0) - used),
-    count = `${used} of ${task.maxAttempts ?? used} attempts used`,
-    // The step whose attempts count, when there is a review to tell them from: "Build · 2 of 3 attempts used".
-    counted = source || reviews.length ? `${source ? 'Build' : 'Work'} · ${count}` : count,
+  const row = attemptRow(task, attempts),
+    seen = shownChips(row, open, shownId),
     ran = (attempt: AttemptSummary) => [workerName(studio, attempt.workerId), ...ranOn(studio, attempt)].join(' · '),
-    ended = (attempt: AttemptSummary) => {
-      const [tone, label] = attemptChip(attempt);
+    ended = (tone: string, words: string) => (
+      <span className={`sd-chip${tone ? ` sd-chip--${tone}` : ''}`}>
+        <span className="sd-chip__dot"></span>
+        {words}
+      </span>
+    ),
+    chip = (item: Chip) => {
+      const { attempt } = item,
+        look = looks.get(attempt.workerId ?? ''),
+        label = chipLabel(item);
       return (
-        <span className={`sd-chip${tone ? ` sd-chip--${tone}` : ''}`}>
-          <span className="sd-chip__dot"></span>
-          {label}
-        </span>
+        <button
+          key={attempt.id}
+          id={attemptChipId(attempt.id)}
+          type="button"
+          className="sd-attemptchip"
+          aria-pressed={attempt.id === shownId}
+          title={ran(attempt)}
+          onClick={() => onChoose(attempt.id)}
+        >
+          {look && <AgentAvatar look={look} size={24} state={attemptState(attempt)} ring={false} />}
+          {/* "1 · Tests failed", "Of 3 · passed"; one that used none of the limit has no number. */}
+          {label && (
+            <>
+              <b>{label}</b>
+              {' · '}
+            </>
+          )}
+          {ended(item.tone, item.words)}
+        </button>
       );
-    };
+    },
+    earlier = (count: number) =>
+      count > 0 && (
+        <button type="button" className="sd-btn sd-btn--sm sd-attemptstrip__earlier" onClick={() => setOpen(true)}>
+          {count} earlier
+        </button>
+      ),
+    // The attempt chosen, as the line under the row names it.
+    picked = chosen && [...row.builds, ...row.reviews].find(item => item.attempt.id === chosen.id),
+    named = picked && shownName(task, picked);
   return (
     <>
       <section className="sd-attemptstrip" aria-label="Attempts">
-        <span className="sd-attemptstrip__count">
-          <span className="sd-eyebrow">{counted}</span>
-          {source && task.status !== 'running' && left > 0 && (
-            <span className="sd-meta">
-              {left} build {plural(left, 'attempt is', 'attempts are')} left.
+        <div className="sd-attemptstrip__chips">
+          {earlier(seen.earlierBuilds)}
+          {seen.builds.map(chip)}
+          {(row.review || row.waiting) && (
+            <span className="sd-attemptstrip__review" role="group" aria-label="Review">
+              <span className="sd-eyebrow">Review</span>
+              {earlier(seen.earlierReviews)}
+              {seen.reviews.map(chip)}
+              {row.waiting && <span className="sd-attemptstrip__waiting">{row.waiting}</span>}
             </span>
           )}
-        </span>
-        <div className="sd-attemptstrip__chips">
-          {[...builds, ...reviews].map(attempt => {
-            const look = looks.get(attempt.workerId ?? '');
-            return (
-              <button
-                key={attempt.id}
-                id={attemptChipId(attempt.id)}
-                type="button"
-                className="sd-attemptchip"
-                aria-pressed={attempt.id === shownId}
-                title={ran(attempt)}
-                onClick={() => onChoose(attempt.id)}
-              >
-                {look && <AgentAvatar look={look} size={24} state={attemptState(attempt)} ring={false} />}
-                {/* After the Build or Work count an attempt is just its number. */}
-                <b>{attemptName(task, attempts, attempt, true)}</b>
-                {ended(attempt)}
-              </button>
-            );
-          })}
         </div>
+        <p className="sd-meta sd-attemptstrip__limit">{row.limit}</p>
       </section>
-      {chosen && (
+      {picked && named && (
         <section className="sd-attemptline" aria-label="The attempt shown">
           <span className="sd-attemptline__text">
             <span>
-              Showing <b>{attemptName(task, attempts, chosen)}</b>
+              Showing <b>{named.name}</b>
             </span>
-            {ended(chosen)}
-            <span className="sd-meta">{ran(chosen)}</span>
+            {ended(picked.tone, named.words)}
+            <span className="sd-meta">{ran(picked.attempt)}</span>
           </span>
           <button type="button" className="sd-btn sd-btn--sm" onClick={onLatest}>
             Back to the latest

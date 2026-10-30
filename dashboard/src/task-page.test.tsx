@@ -429,7 +429,7 @@ test("a code story's attempts say in their chapters what earlier work they conti
     await screen.findByRole('region', { name: 'Attempts' }, { timeout: 5000 }),
   ).getAllByRole('button');
   expect(third!.getAttribute('aria-pressed')).toBe('true');
-  expect(third!.textContent).toMatch(/^Attempt 3 of /);
+  expect(third!.textContent).toBe('3 · Failed');
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
   const chapter = (name: string) => within(screen.getByRole('region', { name }));
   expect(
@@ -817,7 +817,7 @@ test("a reviewed step's Overview shows its work first, then the review, unless a
   expect(within(screen.getByRole('tabpanel')).getByText('Wrote the welcome guide.')).toBeTruthy();
 });
 
-test("a reviewed step's attempt strip lists its work and then its reviews, and counts only the work against its limit, as Details does", async () => {
+test("a reviewed step's attempt strip numbers its work, then its latest review naming the work it reviewed, and counts only the work against its limit, as Details does", async () => {
   const user = userEvent.setup(),
     step = (id: string, kind: string, startedAt: string, extra: object = {}) => ({
       id,
@@ -846,30 +846,35 @@ test("a reviewed step's attempt strip lists its work and then its reviews, and c
     acceptedAttemptId: 'attempt-w2',
     stageState: { version: 'stage-state-v1', current: 'review' },
   });
-  // The first review sent the work back; the second is waiting for the director.
+  // The first review sent the work back; the second is waiting for the director. Each names the work it reviewed.
+  const of = (attemptId: string) => ({ inputReferences: [{ taskId: 'T-1', attemptId }] });
   controller.attempts = [
     step('attempt-w1', 'general:work', '2026-10-24T10:00:00Z'),
-    step('attempt-r1', 'general:review', '2026-10-24T10:20:00Z', { workReviewVerdict: 'needs-work' }),
+    step('attempt-r1', 'general:review', '2026-10-24T10:20:00Z', {
+      workReviewVerdict: 'needs-work',
+      ...of('attempt-w1'),
+    }),
     step('attempt-w2', 'general:work', '2026-10-24T10:40:00Z'),
-    step('attempt-r2', 'general:review', '2026-10-24T11:00:00Z', { status: 'review' }),
+    step('attempt-r2', 'general:review', '2026-10-24T11:00:00Z', { status: 'review', ...of('attempt-w2') }),
   ];
   open();
   const strip = await screen.findByRole('region', { name: 'Attempts' }, { timeout: 5000 }),
-    chips = within(strip).getAllByRole('button');
-  // The strip counts the work's own attempts, as the side panel does; the reviews are a step of their own, after it.
-  expect(strip.querySelector('.sd-eyebrow')?.textContent).toBe('Work · 2 of 2 attempts used');
+    chips = [...strip.querySelectorAll<HTMLElement>('.sd-attemptchip')];
+  // The row numbers the work's own attempts, as the side panel counts them; the latest review is a step of its own,
+  // after them, naming the attempt it reviewed; the latest is the one shown.
+  expect(chips.map(chip => chip.textContent)).toEqual(['1 · Accepted', '2 · Accepted', 'Of 2 · waiting for you']);
+  expect(chips.map(chip => chip.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'true']);
+  expect(strip.querySelector('.sd-attemptstrip__limit')?.textContent).toBe(
+    'The house rules allow 2 automatic attempts. Both are used.',
+  );
   expect(within(screen.getByRole('region', { name: 'Details' })).getByText('2 of 2 used')).toBeTruthy();
-  expect(chips.map(chip => chip.querySelector('b')?.textContent)).toEqual([
-    'Attempt 1 of 2',
-    'Attempt 2 of 2',
-    'Review 1',
-    'Review 2',
+  // The earlier review reads as its verdict, as a code story's does, once "1 earlier" opens it.
+  const review = within(within(strip).getByRole('group', { name: 'Review' }));
+  await user.click(review.getByRole('button', { name: '1 earlier' }));
+  expect(review.getAllByRole('button').map(chip => chip.textContent)).toEqual([
+    'Of 1 · asked for changes',
+    'Of 2 · waiting for you',
   ]);
-  // A review reads as its verdict, as a code story's does; the latest is the one shown.
-  expect(chips[2]!.textContent).toContain('Asked for changes');
-  expect(chips.map(chip => chip.getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false', 'true']);
-  // Other work has no build attempts left to count.
-  expect(within(strip).queryByText(/left\.$/)).toBeNull();
   await user.click(chips[0]!);
   expect(chips[0]!.getAttribute('aria-pressed')).toBe('true');
 });
@@ -1571,7 +1576,7 @@ test("a question that could not be read shows the agent's stop with why, and no 
   expect(screen.queryByText('Build · asked you a question')).toBeNull();
 });
 
-test("the story's attempt strip names the attempt that asked as not counted, and the next one is attempt 1", async () => {
+test("the story's attempt strip names the attempt that asked without a number, and the next one is 1", async () => {
   askingStory({
     status: 'running',
     lastAttemptId: 'attempt-2',
@@ -1591,12 +1596,14 @@ test("the story's attempt strip names the attempt that asked as not counted, and
   ];
   open();
   const strip = await screen.findByRole('region', { name: 'Attempts' }, { timeout: 5000 }),
-    rows = [...strip.querySelectorAll('.sd-eyebrow, button')].map(item =>
-      item.tagName === 'BUTTON' ? item.querySelector('b')?.textContent : item.textContent,
-    );
-  expect(rows).toEqual(['Build · 1 of 3 attempts used', 'Asked you a question, not counted', 'Attempt 1 of 3']);
-  // While the story runs, the strip does not count what is left.
-  expect(within(strip).queryByText(/left\.$/)).toBeNull();
+    chips = [...strip.querySelectorAll('.sd-attemptchip')].map(chip => chip.textContent);
+  expect(chips).toEqual(['Asked you a question', '1 · Running now']);
+  // The limit counts the build that runs, not the one that asked; its review comes after it's built.
+  expect(strip.querySelector('.sd-attemptstrip__limit')?.textContent).toBe(
+    'The house rules allow 3 automatic attempts. 1 is used and 2 are left.',
+  );
+  expect(within(within(strip).getByRole('group', { name: 'Review' })).getByText("after it's built")).toBeTruthy();
+  expect(strip.textContent).not.toMatch(/Attempt \d+ of \d+/);
 });
 
 // What an attempt said, as its trace records it, so its conversation shows in the story's Activity.

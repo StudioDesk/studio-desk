@@ -1367,25 +1367,41 @@ button.sd-row[aria-pressed='true'] {
   gap: 12px;
   min-width: 0;
 }
-/* A story's attempts above its tabs: how many are used, then a chip for each that chooses it for every view, and
-   under them, while one other than the latest is chosen, a line naming it with Back to the latest */
+/* A story's attempts above its tabs: a chip for each build that chooses it for every view, the latest four after
+   "N earlier", then the review as a step of its own, and the limit in words under the row; under them, while one
+   other than the latest is chosen, a line naming it with Back to the latest */
 .sd-attemptstrip {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-8) var(--space-14);
-  min-width: 0;
-}
-.sd-attemptstrip__count {
-  display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-8);
+  min-width: 0;
 }
 .sd-attemptstrip__chips {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-8);
   min-width: 0;
+}
+.sd-attemptstrip__earlier {
+  flex: none;
+}
+/* The review step: its label, its earlier reviews once opened, then its latest review or when it comes */
+.sd-attemptstrip__review {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding-left: var(--space-14);
+  border-left: 1.5px solid var(--line-2);
+  white-space: nowrap;
+}
+.sd-attemptstrip__waiting {
+  color: var(--ink-3);
+  font: 600 14px/1.2 var(--font-sans);
+}
+.sd-attemptstrip__limit {
+  margin: 0;
 }
 .sd-attemptchip {
   flex: none;
@@ -1618,10 +1634,8 @@ button.sd-row[aria-pressed='true'] {
     border-color: var(--ink);
     color: var(--surface);
   }
-  /* The attempt chips in one row that scrolls sideways on its own, never the page */
+  /* The attempt chips, the review step with them, in one row that scrolls sideways on its own, never the page */
   .sd-attemptstrip {
-    flex-direction: column;
-    align-items: stretch;
     gap: var(--space-6);
   }
   .sd-attemptstrip__chips {
