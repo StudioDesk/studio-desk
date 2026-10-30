@@ -5677,6 +5677,77 @@ button.sd-tab {
   border-style: solid;
   border-color: transparent;
 }
+/* Another project's calls beside its tile: fixed to the window, so the rail's scrolling never clips it. Its clear
+   left edge meets the tile, so the pointer crosses from the tile into the card without leaving both. */
+.sd-railcard {
+  position: fixed;
+  z-index: 45;
+  display: flex;
+  box-sizing: border-box;
+  padding-left: var(--space-20);
+}
+.sd-railcard__card {
+  width: 300px;
+  max-height: inherit;
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: var(--space-14) var(--space-16);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  color: var(--ink);
+}
+.sd-railcard__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+}
+.sd-railcard__mark {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 800 13px/1 var(--font-display);
+  letter-spacing: -0.02em;
+}
+.sd-railcard__title {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+.sd-railcard__name {
+  font: 800 16px/1.2 var(--font-display);
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  text-decoration: none;
+}
+.sd-railcard__name:hover {
+  color: var(--link-hover);
+  text-decoration: underline;
+}
+.sd-railcard__calls {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.sd-railcard__call {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: var(--space-10);
+  border-left: 3px solid var(--you-dot);
+  font-size: 13.5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
 .sd-sidebar__project {
   display: flex;
   flex-direction: column;

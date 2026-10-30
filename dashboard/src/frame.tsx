@@ -3,9 +3,11 @@
 // a project (Ctrl K), New idea (N), its pages and the controller's status. At 860px and under, a top bar names the
 // project and opens the search, and bottom tabs carry the pages with New idea in the middle. The sidebar's Needs you
 // count is the current project's (the director, October 22); each tile on the rail counts its own project's calls,
-// and the tab's title counts every project's (the attention indicator, October 29).
+// pointing at or focusing another project's count shows them in a card beside it, and the tab's title counts every
+// project's (the attention indicator, October 29).
 import { Outlet, useRouter, useRouterState } from '@tanstack/react-router';
 import {
+  Fragment,
   lazy,
   Suspense,
   useEffect,
@@ -22,6 +24,7 @@ import { Icon, Mark, type IconName } from './design/icons';
 import { journeyChip } from './journey';
 import { requestNewIdea } from './new-idea';
 import { useRailCalls } from './rail-calls';
+import { cardPlace, RailCard, type CardPlace } from './rail-card';
 import { finishedState, useFinished, useStudio } from './records';
 import { useConnection } from './stream-context';
 import { liveSummary, runStories, type RunStory, type StudioState } from './studio-runs';
@@ -220,7 +223,12 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
     go = useGo(),
     path = useRouterState({ select: router => router.location.pathname }),
     [searching, setSearching] = useState(false),
-    [adding, setAdding] = useState(false);
+    [adding, setAdding] = useState(false),
+    // Another project's calls, in a card beside its tile while the director points at the tile or focuses it.
+    [peek, setPeek] = useState<{ id: string; tile: HTMLElement; place: CardPlace } | null>(null),
+    card = useRef<HTMLDivElement>(null),
+    // Set while Escape in the card gives the tile its focus back, which opens nothing.
+    quiet = useRef(false);
   const projects: Project[] = shell?.projects ?? [{ id: projectId, name: projectId }],
     project = projects.find(item => item.id === projectId) ?? { id: projectId, name: shell?.project.name ?? '' },
     index = projects.findIndex(item => item.id === projectId),
@@ -228,6 +236,24 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
     decisions = state ? liveSummary(state).decisions : 0,
     rail = useRailCalls(projectId, projects),
     href = (suffix: string) => `/p/${projectId}${suffix}`;
+  const show = (id: string, tile: HTMLElement) => setPeek({ id, tile, place: cardPlace(tile.getBoundingClientRect()) }),
+    hide = (id: string) => setPeek(open => (open?.id === id ? null : open)),
+    inCard = (target: EventTarget | null) => target instanceof Node && !!card.current?.contains(target);
+  // The card stays beside its tile as the rail or the page scrolls and the window changes size.
+  const anchor = peek?.tile;
+  useEffect(() => {
+    if (!anchor) return;
+    const move = () =>
+      setPeek(open =>
+        open && open.tile === anchor ? { ...open, place: cardPlace(anchor.getBoundingClientRect()) } : open,
+      );
+    window.addEventListener('resize', move);
+    window.addEventListener('scroll', move, true);
+    return () => {
+      window.removeEventListener('resize', move);
+      window.removeEventListener('scroll', move, true);
+    };
+  }, [anchor]);
   // New idea opens Today, which puts the cursor in its idea box (or raises it as a sheet on a phone).
   const newIdea = () => {
     router.history.push(href(''));
@@ -274,26 +300,57 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
           <Mark />
           <span className="sd-rail__rule" aria-hidden="true"></span>
           {projects.map((item, position) => {
-            const waiting = rail.calls[item.id]?.count ?? 0,
-              label = waiting > 0 ? `${item.name}: ${waiting} ${waiting === 1 ? 'call' : 'calls'} for you` : item.name;
+            const calls = rail.calls[item.id],
+              waiting = calls?.count ?? 0,
+              label = waiting > 0 ? `${item.name}: ${waiting} ${waiting === 1 ? 'call' : 'calls'} for you` : item.name,
+              // Another project's count opens its card; the open project's tile and a tile without calls open none.
+              peekable = item.id !== projectId && waiting > 0,
+              open = peekable && peek?.id === item.id ? peek : null;
             return (
-              <a
-                key={item.id}
-                href={`/p/${item.id}`}
-                className="sd-rail__tile"
-                style={projectColor(item, position)}
-                aria-current={item.id === projectId ? 'true' : undefined}
-                aria-label={label}
-                title={label}
-                onClick={go(`/p/${item.id}`)}
-              >
-                {initials(item.name)}
-                {waiting > 0 && (
-                  <span className="sd-rail__badge" aria-hidden="true">
-                    {waiting}
-                  </span>
+              <Fragment key={item.id}>
+                <a
+                  href={`/p/${item.id}`}
+                  className="sd-rail__tile"
+                  style={projectColor(item, position)}
+                  aria-current={item.id === projectId ? 'true' : undefined}
+                  aria-label={label}
+                  title={label}
+                  onClick={go(`/p/${item.id}`)}
+                  onPointerEnter={peekable ? event => show(item.id, event.currentTarget) : undefined}
+                  onFocus={peekable ? event => !quiet.current && show(item.id, event.currentTarget) : undefined}
+                  onPointerLeave={event => !inCard(event.relatedTarget) && hide(item.id)}
+                  onBlur={event => !inCard(event.relatedTarget) && hide(item.id)}
+                  onKeyDown={event => event.key === 'Escape' && hide(item.id)}
+                >
+                  {initials(item.name)}
+                  {waiting > 0 && (
+                    <span className="sd-rail__badge" aria-hidden="true">
+                      {waiting}
+                    </span>
+                  )}
+                </a>
+                {open && calls && (
+                  <RailCard
+                    ref={card}
+                    project={item}
+                    position={position}
+                    calls={calls}
+                    place={open.place}
+                    onOpen={go(`/p/${item.id}`)}
+                    onPointerLeave={event =>
+                      !(event.relatedTarget instanceof Node && open.tile.contains(event.relatedTarget)) && hide(item.id)
+                    }
+                    onBlur={event => !inCard(event.relatedTarget) && event.relatedTarget !== open.tile && hide(item.id)}
+                    onKeyDown={event => {
+                      if (event.key !== 'Escape') return;
+                      quiet.current = true;
+                      open.tile.focus();
+                      quiet.current = false;
+                      hide(item.id);
+                    }}
+                  />
                 )}
-              </a>
+              </Fragment>
             );
           })}
           <button
