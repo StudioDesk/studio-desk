@@ -2,7 +2,8 @@
 // checked here as the controller checks them, then sent as one request to the project's intake, with Auto mode
 // only when the director changed it from the Settings and with the library entries the director left out. On a phone
 // the box rises as a sheet from New idea. The draft stays in memory for its project, so leaving Today and coming back
-// keeps it; nothing is stored in the browser. The chat box (chat-panel.tsx) holds the same box with a draft of its own.
+// keeps it; nothing is stored in the browser. The chat box (chat-panel.tsx) holds the same box with a draft of its own,
+// and once it sends an idea, shows that idea's conversation instead of moving to its page.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useEffect, useId, useRef, useState } from 'react';
@@ -177,6 +178,7 @@ export function TodayIdea({
   accent,
   suggestions,
   place = 'today',
+  onSent,
 }: {
   projectId: string;
   shell: Shell;
@@ -187,6 +189,8 @@ export function TodayIdea({
   // Where the box is: on Today, where New idea finds it and a phone raises it as a sheet, or in the chat box, flush
   // in its panel with a draft of its own and no sheet.
   place?: 'today' | 'panel';
+  // Called with the idea's run once it is sent, after the toast, in place of moving to the idea's page.
+  onSent?: (runId: string) => void;
 }) {
   const panel = place === 'panel',
     // The chat box's draft is kept apart from Today's, so neither box overwrites the other.
@@ -263,7 +267,8 @@ export function TodayIdea({
       lands.reset();
       setSheet(false);
       toast(wording[intake].queued);
-      void navigate({ to: '/p/$projectId/runs/$runId', params: { projectId, runId } });
+      if (onSent) onSent(runId);
+      else void navigate({ to: '/p/$projectId/runs/$runId', params: { projectId, runId } });
     },
     onError: error => setDraft(current => ({ ...current, error: error.message })),
   });
