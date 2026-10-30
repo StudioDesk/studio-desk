@@ -1,11 +1,12 @@
 // The agents (the canvas's Employees board, v1.0 item 23): how the work flows through the project's teams, from the
-// project's own records, beside the picked agent's editor (agent-editor.tsx) or, with a team in the address, that
-// team's editor (team-editor.tsx). The flow starts with the director sending an idea, goes through each team in its
-// saved order with its agents as cards, and ends with the director integrating what passed review; below it, what the
-// agents are told. An agent is a set of instructions and a CLI; it is not reserved, and runs several attempts at once,
-// each its own process and record.
+// project's own records, beside the picked agent's editor (agent-editor.tsx), with a team in the address that team's
+// editor (team-editor.tsx), or with Add an agent its own panel (add-agent.tsx). The flow starts with the director
+// sending an idea, goes through each team in its saved order with its agents as cards, and ends with the director
+// integrating what passed review; below it, what the agents are told. An agent is a set of instructions and a CLI; it
+// is not reserved, and runs several attempts at once, each its own process and record.
 import { Link } from '@tanstack/react-router';
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
+import { AddAgent } from './add-agent';
 import type { AttemptSummary, Team, Worker } from './api';
 import { AgentEditor, isReview, kindLabel, kindOwners, runsOn, toldSets } from './agent-editor';
 import { AgentAvatar } from './design/avatar';
@@ -18,8 +19,10 @@ import { useTold } from './rules';
 import type { StudioState } from './studio-runs';
 import { TeamEditor } from './team-editor';
 import { agentLooks } from './today';
+import { useNarrow } from './use-narrow';
 
-// The team being edited, `new` for a new one, and whether its Add an agent starts open.
+// The team being edited, `new` for a new one, and whether its Add an agent starts open; without a team, whether the
+// Add an agent panel is open.
 interface Editing {
   team?: string;
   adding?: boolean;
@@ -48,10 +51,13 @@ function Agents({
       () => agentLooks(projectId, [...state.workers, ...(state.employeeDirectory ?? [])]),
       [projectId, state.workers, state.employeeDirectory],
     ),
+    narrow = useNarrow(),
     workers = state.workers,
+    addingAgent = !team && !!adding,
+    editing = !!team || addingAgent,
     // Without a choice in the address, the page opens on an agent at work, as the canvas does, else the first; with
-    // a team in it, on that team's editor.
-    chosen = team
+    // a team in it, on that team's editor, and with Add an agent, on its panel.
+    chosen = editing
       ? undefined
       : (workers.find(worker => worker.id === workerId) ??
         (workerId
@@ -65,12 +71,21 @@ function Agents({
     <div className="sd-agentspage">
       <div className="sd-agents">
         <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '18px' }}>
-          <Flow projectId={projectId} state={state} looks={looks} current={chosen?.id} />
+          <Flow
+            projectId={projectId}
+            state={state}
+            looks={looks}
+            current={chosen?.id}
+            // On a phone, Add an agent opens under the page's buttons, where it was pressed, and comes into view.
+            panel={addingAgent && narrow && <AddAgent projectId={projectId} state={state} looks={looks} phone />}
+          />
           {told && <FlowTold projectId={projectId} worker={told} />}
         </div>
-        {team ? (
+        {addingAgent ? (
+          !narrow && <AddAgent projectId={projectId} state={state} looks={looks} />
+        ) : team ? (
           <TeamEditor
-            // Another team, or Add an agent from the flow, opens the editor afresh.
+            // Another team, or its Add an agent opened from the address, opens the editor afresh.
             key={adding ? `${team}:add` : team}
             projectId={projectId}
             state={state}
@@ -118,17 +133,16 @@ function rowState(state: StudioState, worker: Worker) {
   return { tone: 'wait', lines: [{ key: 'free', text: 'Free' }] };
 }
 
-// Adding a team, adding an agent and editing a team open the team's editor beside the flow, the team in the address.
-function EditTeam({
+// Adding a team and editing a team open the team's editor beside the flow, the team in the address; adding an agent
+// opens its own panel there, `add` in the address.
+function EditLink({
   projectId,
-  team,
-  adding = false,
+  search,
   icon,
   children,
 }: {
   projectId: string;
-  team: string;
-  adding?: boolean;
+  search: { team: string } | { add: true };
   icon: 'plus' | 'pencil';
   children: string;
 }) {
@@ -137,7 +151,7 @@ function EditTeam({
       className={`sd-btn sd-btn--sm${icon === 'pencil' ? ' sd-btn--ghost' : ''}`}
       to="/p/$projectId/agents"
       params={{ projectId }}
-      search={adding ? { team, add: true } : { team }}
+      search={search}
     >
       <Icon name={icon} size={16} />
       {children}
@@ -168,17 +182,20 @@ function You({ does, first = false }: { does: string; first?: boolean }) {
   );
 }
 
-// How the work flows through the project: the director, each team in its saved order with its agents, the director.
+// How the work flows through the project: the director, each team in its saved order with its agents, the director;
+// and any panel the page's buttons open in place, under them.
 function Flow({
   projectId,
   state,
   looks,
   current,
+  panel,
 }: {
   projectId: string;
   state: StudioState;
   looks: Map<string, AgentLook>;
   current?: string;
+  panel?: ReactNode;
 }) {
   const teams = state.teams ?? [],
     owners = kindOwners(state);
@@ -203,16 +220,16 @@ function Flow({
           <span className="sd-meta">How the work flows through {state.project.name}&apos;s teams</span>
         </span>
         <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
-          <EditTeam projectId={projectId} team="new" icon="plus">
+          <EditLink projectId={projectId} search={{ team: 'new' }} icon="plus">
             Add a team
-          </EditTeam>
-          {/* An agent the studio has, or a new one, joins the project in one of its teams: the first one's Who's on
-              it opens with Add an agent. */}
-          <EditTeam projectId={projectId} team={teams[0]?.id ?? 'new'} adding icon="plus">
+          </EditLink>
+          {/* An agent the studio has, or a new one, joins the project in one of its teams, chosen in its panel. */}
+          <EditLink projectId={projectId} search={{ add: true }} icon="plus">
             Add an agent
-          </EditTeam>
+          </EditLink>
         </span>
       </div>
+      {panel}
       <ol
         aria-label="How the work flows"
         style={{
@@ -285,9 +302,9 @@ function FlowTeam({
               {team.name}
             </Link>
           </h2>
-          <EditTeam projectId={projectId} team={team.id} icon="pencil">
+          <EditLink projectId={projectId} search={{ team: team.id }} icon="pencil">
             Edit the team
-          </EditTeam>
+          </EditLink>
         </div>
         {team.purpose && <p style={{ margin: 0, color: 'var(--ink-2)' }}>{team.purpose}</p>}
         <span className="sd-meta">

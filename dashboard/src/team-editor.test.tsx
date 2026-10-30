@@ -437,16 +437,18 @@ test("a refusal shows the controller's message and keeps the edits", async () =>
   expect((editor.getByRole('button', { name: 'Save the team' }) as HTMLButtonElement).disabled).toBe(false);
 });
 
-test("Edit the teams' old address and the flow's Add an agent open the team editor", async () => {
+test("Edit the teams' old address opens the team editor, and the flow's Add an agent its own panel in the editor's place", async () => {
   const user = userEvent.setup();
   const router = open('/p/project-x/agents/teams?edit=true');
   await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-x/agents'));
   expect(router.state.location.search).toEqual({ team: 'engineering' });
   expect(await screen.findByRole('region', { name: 'Edit Engineering' })).toBeTruthy();
-  // Add an agent opens the first team's Who's on it with the agents the studio has.
+  // Add an agent opens its panel with the agents the studio has, and the team editor closes.
   const page = within(screen.getByRole('region', { name: 'Agents' }));
   await user.click(page.getByRole('link', { name: 'Add an agent' }));
-  await waitFor(() => expect(router.state.location.search).toEqual({ team: 'engineering', add: true }));
-  expect(await screen.findByRole('list', { name: 'Agents the studio has' })).toBeTruthy();
+  await waitFor(() => expect(router.state.location.search).toEqual({ add: true }));
+  const panel = within(await screen.findByRole('region', { name: 'Add an agent' }));
+  expect(panel.getByRole('list', { name: 'Agents the studio has' })).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Edit Engineering' })).toBeNull();
   expect(commands()).toEqual([]);
 });

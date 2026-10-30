@@ -2981,7 +2981,8 @@ button.sd-row[aria-pressed='true'] {
   max-height: min(56vh, 520px);
   overflow: auto;
 }
-.sd-agentpick > .sd-agentrow {
+.sd-agentpick > .sd-agentrow,
+.sd-addagent .sd-agentpick > li > .sd-agentrow {
   width: 100%;
   border: 0;
   background: transparent;
@@ -2989,8 +2990,40 @@ button.sd-row[aria-pressed='true'] {
   text-align: left;
   cursor: pointer;
 }
-.sd-agentpick > .sd-agentrow:hover {
+.sd-agentpick > .sd-agentrow:hover,
+.sd-addagent .sd-agentpick > li > .sd-agentrow:hover {
   background: var(--surface-2);
+}
+/* Add an agent's two choices, an agent the studio has and a new one, side by side, one under the other on a phone */
+.sd-addagent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  align-items: flex-start;
+}
+.sd-addagent > * {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+/* The field that finds an agent the studio has, its magnifier inside it */
+.sd-agentfind {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.sd-agentfind > svg {
+  position: absolute;
+  left: var(--space-14);
+  color: var(--ink-3);
+  pointer-events: none;
+}
+.sd-agentfind > .sd-input {
+  padding-left: 42px;
+}
+@media (max-width: 860px) {
+  .sd-addagent > * {
+    flex-basis: 100%;
+  }
 }
 /* The bar that saves the teams, in view at the foot of the screen while the page scrolls */
 .sd-editbar {

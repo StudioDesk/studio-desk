@@ -234,7 +234,8 @@ const releasesRoute = createRoute({
 
 // The agents' pages sit under Agents, as the sidebar has them: the agents, one agent and what it is told, the teams,
 // one team and the instructions. The team being edited beside the flow is part of the address (`new` for a new one,
-// with `add` when its Add an agent starts open), so reload and Back keep it.
+// with `add` when its Add an agent starts open), and so is the Add an agent panel (`add` without a team), so reload
+// and Back keep them.
 interface AgentsSearch {
   team?: string;
   add?: true;
@@ -242,10 +243,10 @@ interface AgentsSearch {
 const agentsRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: '/agents',
-  validateSearch: (search: Record<string, unknown>): AgentsSearch =>
-    typeof search.team === 'string' && search.team
-      ? { team: search.team, ...(search.add === true || search.add === 'true' ? { add: true } : {}) }
-      : {},
+  validateSearch: (search: Record<string, unknown>): AgentsSearch => ({
+    ...(typeof search.team === 'string' && search.team ? { team: search.team } : {}),
+    ...(search.add === true || search.add === 'true' ? { add: true } : {}),
+  }),
   component: function Agents() {
     const { projectId } = projectRoute.useParams(),
       { team, add } = agentsRoute.useSearch();

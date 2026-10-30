@@ -756,16 +756,16 @@ test('a new team takes an agent the studio already has, and an agent taken out o
   expect((body as { kindOwners?: unknown }).kindOwners).toEqual({});
 });
 
-test("Add an agent opens the first team's editor with the studio's agents, and a team page opens its team", async () => {
+test("Add an agent opens its own panel with the studio's agents, and a team page opens its team", async () => {
   const user = userEvent.setup();
   const router = open('/p/project-x/agents/W-1');
   // Add an agent sits at the top of the flow.
   const flow = within(await screen.findByRole('region', { name: 'Agents' }));
   await user.click(flow.getByRole('link', { name: 'Add an agent' }));
-  await waitFor(() => expect(router.state.location.search).toEqual({ team: 'engineering', add: true }));
-  const editor = within(await screen.findByRole('region', { name: 'Edit Engineering' }));
+  await waitFor(() => expect(router.state.location.search).toEqual({ add: true }));
+  const panel = within(await screen.findByRole('region', { name: 'Add an agent' }));
   expect(
-    within(editor.getByRole('list', { name: 'Agents the studio has' })).getByRole('button', { name: /Ana/ }),
+    within(panel.getByRole('list', { name: 'Agents the studio has' })).getByRole('button', { name: /Ana/ }),
   ).toBeTruthy();
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(commands()).toEqual([]);

@@ -4,15 +4,14 @@
 // (organization.ts); Undo puts back the saved team without sending anything; Remove the team asks in place first. A
 // team groups agents and grants them nothing. A change reaches work that starts after the save, and recorded attempts
 // keep what they ran with. Kinds of work are given from an agent's Does list.
-import { useMutation } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useId, useState } from 'react';
-import { send, type Execution, type Team, type Worker } from './api';
+import { contributor, NewAgent } from './add-agent';
+import type { Team, Worker } from './api';
 import type { AgentLook } from './design/agent-kit.js';
 import { AgentAvatar } from './design/avatar';
 import { Icon } from './design/icons';
 import { plural } from './evidence';
-import { cleanExecution, ExecutionFields } from './execution-fields';
 import {
   addTeam,
   organizationBody,
@@ -34,22 +33,8 @@ interface TeamDraft {
 
 const agentName = (worker: Worker) => worker.displayName ?? worker.id;
 const teamName = (team: Team) => team.name.trim() || 'New team';
-// Staffing roles as typed, "reviewer, engineer", as the list the controller takes.
-const roleList = (text: string) => [
-  ...new Set(
-    text
-      .split(/[\s,]+/)
-      .map(role => role.trim())
-      .filter(Boolean),
-  ),
-];
 // A new team's identity, made when it is first saved.
 const newTeamId = () => `team-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-// The part an agent the studio has takes in a team until the director changes it, as Edit the teams gave it.
-const contributor = {
-  role: 'Project contributor',
-  responsibility: 'Perform bounded project work and submit evidence for director review.',
-};
 
 const sectionStyle = { flex: '1 1 300px', minWidth: 0, gap: 'var(--space-10)' } as const;
 const listStyle = {
@@ -579,177 +564,5 @@ function TeamRules({
         Open the team&apos;s rules
       </Link>
     </>
-  );
-}
-
-// The CLI a new agent starts on: the one most of the project's agents run on, else the first signed-in CLI.
-function usualProvider(state: StudioState) {
-  const adapters = state.adapters ?? {},
-    choices = Object.values(adapters).filter(adapter => adapter.workerSelectable && adapter.id !== 'mock'),
-    counts = new Map<string, number>();
-  for (const worker of state.workers)
-    if (worker.provider && choices.some(adapter => adapter.id === worker.provider))
-      counts.set(worker.provider, (counts.get(worker.provider) ?? 0) + 1);
-  return (
-    [...counts].sort((a, b) => b[1] - a[1])[0]?.[0] ??
-    choices.find(adapter => adapter.available)?.id ??
-    choices[0]?.id ??
-    Object.keys(adapters)[0] ??
-    ''
-  );
-}
-
-// A new agent for a saved team: its name, its job here, the CLI it runs on and what it is told. It is saved at once as
-// the organization's next revision and belongs to this project; its face is the agent kit's until one is chosen on its
-// page.
-function NewAgent({
-  projectId,
-  state,
-  team,
-  expectedRevision,
-  onMade,
-  onClose,
-}: {
-  projectId: string;
-  state: StudioState;
-  team: Team;
-  expectedRevision: number;
-  onMade: (made: { worker: Worker; revision: number }, roles: string[]) => void;
-  onClose: () => void;
-}) {
-  const adapters = state.adapters ?? {},
-    [name, setName] = useState(''),
-    [title, setTitle] = useState(''),
-    [responsibility, setResponsibility] = useState(''),
-    [roles, setRoles] = useState(''),
-    [instructions, setInstructions] = useState(''),
-    [execution, setExecution] = useState<Execution>(() => ({
-      provider: usualProvider(state),
-      model: '',
-      effort: '',
-      mode: '',
-    }));
-  const make = useMutation({
-    mutationFn: () =>
-      send<{ worker: Worker; revision: number }>(`/api/projects/${encodeURIComponent(projectId)}/agents`, {
-        projectId,
-        expectedRevision,
-        displayName: name,
-        jobTitle: title,
-        responsibility,
-        teamId: team.id,
-        roles: roleList(roles),
-        ...cleanExecution(adapters, execution),
-        instructions,
-      }),
-    onSuccess: made => onMade(made, roleList(roles)),
-  });
-  return (
-    <form
-      className="sd-editpanel sd-card"
-      aria-label={`A new agent for ${team.name}`}
-      onSubmit={event => {
-        event.preventDefault();
-        make.mutate();
-      }}
-    >
-      <h3 style={{ margin: 0 }}>A new agent for {team.name}</h3>
-      <p className="sd-meta" style={{ margin: 0 }}>
-        It belongs to {state.project.name}: its name, CLI and instructions change nothing in any other project.
-      </p>
-      <div className="sd-field">
-        <label className="sd-field__label" htmlFor="new-agent-name">
-          Name
-        </label>
-        <input
-          id="new-agent-name"
-          className="sd-input"
-          value={name}
-          required
-          maxLength={40}
-          autoComplete="off"
-          onChange={event => setName(event.target.value)}
-        />
-      </div>
-      <div className="sd-field">
-        <label className="sd-field__label" htmlFor="new-agent-title">
-          Job title
-        </label>
-        <input
-          id="new-agent-title"
-          className="sd-input"
-          value={title}
-          required
-          maxLength={160}
-          placeholder="For example: Copywriter"
-          autoComplete="off"
-          onChange={event => setTitle(event.target.value)}
-        />
-      </div>
-      <div className="sd-field">
-        <label className="sd-field__label" htmlFor="new-agent-responsibility">
-          What it is responsible for
-        </label>
-        <textarea
-          id="new-agent-responsibility"
-          className="sd-textarea"
-          value={responsibility}
-          maxLength={4000}
-          onChange={event => setResponsibility(event.target.value)}
-        />
-      </div>
-      <ExecutionFields adapters={adapters} value={execution} onChange={setExecution} />
-      <div className="sd-field">
-        <label className="sd-field__label" htmlFor="new-agent-roles">
-          Staffing roles
-        </label>
-        <input
-          id="new-agent-roles"
-          className="sd-input"
-          value={roles}
-          list="staffing-roles-new"
-          maxLength={2000}
-          placeholder="For example: writer"
-          onChange={event => setRoles(event.target.value)}
-        />
-        <datalist id="staffing-roles-new">
-          {(state.roles ?? []).map(role => (
-            <option key={role.id} value={role.id}>
-              {role.label}
-            </option>
-          ))}
-        </datalist>
-        <span className="sd-meta">
-          The names a plan&apos;s steps can ask for, so the planner can give this agent work.
-        </span>
-      </div>
-      <div className="sd-field">
-        <label className="sd-field__label" htmlFor="new-agent-instructions">
-          What it is told
-        </label>
-        <textarea
-          id="new-agent-instructions"
-          className="sd-textarea"
-          rows={6}
-          value={instructions}
-          maxLength={48000}
-          placeholder="Its own instructions, after the project's and its team's. Edit them later on its told page."
-          onChange={event => setInstructions(event.target.value)}
-        />
-      </div>
-      {make.error && (
-        <p role="alert" className="sd-meta" style={{ margin: 0, color: 'var(--bad)' }}>
-          {make.error.message}
-        </p>
-      )}
-      <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
-        <button type="submit" className="sd-btn sd-btn--primary" disabled={make.isPending}>
-          {make.isPending ? 'Making…' : 'Make the agent'}
-        </button>
-        <button type="button" className="sd-btn sd-btn--ghost" disabled={make.isPending} onClick={onClose}>
-          Cancel
-        </button>
-      </span>
-    </form>
   );
 }

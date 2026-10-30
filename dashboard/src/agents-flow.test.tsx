@@ -133,12 +133,10 @@ test('the flow lists You, the teams in their saved order, then You, each team wi
   // Each team's agents are its own, side by side.
   expect(engineering.getAllByRole('link', { name: /^(Eli|Ana)/ })).toHaveLength(2);
   expect(team('Writing').queryByRole('link', { name: /^(Eli|Ana)/ })).toBeNull();
-  // Adding a team opens a new team's editor; adding an agent opens the first team's, with Add an agent open.
+  // Adding a team opens a new team's editor; adding an agent opens its own panel, where its team is chosen.
   const page = within(screen.getByRole('region', { name: 'Agents' }));
   expect(page.getByRole('link', { name: 'Add a team' }).getAttribute('href')).toBe('/p/project-x/agents?team=new');
-  expect(page.getByRole('link', { name: 'Add an agent' }).getAttribute('href')).toBe(
-    '/p/project-x/agents?team=writing&add=true',
-  );
+  expect(page.getByRole('link', { name: 'Add an agent' }).getAttribute('href')).toBe('/p/project-x/agents?add=true');
 });
 
 test('an agent card says what it does by label, what it runs on and whether it is free, paused or running', async () => {
