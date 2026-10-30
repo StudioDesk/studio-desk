@@ -1,21 +1,30 @@
 // An idea's planning conversation on its page (conversation.ts reads it from the records): the director's idea in their
 // own bubble, the checks line, each plan the planner sent with its numbered cards, its questions with their answers
 // in place, the director's replies between plans and a line for each plan attempt that stopped. The plan step's own
-// page supplies its attempts with their files, and each plan's file is read once and kept. Nothing here sends.
-import { useQueries, useQuery } from '@tanstack/react-query';
+// page supplies its attempts with their files, and each plan's file is read once and kept. While the idea is in
+// planning, the director replies under it and makes the plan official, each with the plan step's own recorded step:
+// a reply is its revise with the reply as direction, then its start; Make it official is its accept.
+import { useMutation, useQueries, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useId, type ReactNode } from 'react';
-import { getJSON, taskUrl, type AttemptSummary, type Task, type TaskPage } from './api';
+import { useId, useState, type ReactNode } from 'react';
+import { getJSON, send, taskUrl, type AttemptSummary, type Task, type TaskPage } from './api';
 import { named } from './bring-back';
 import { conversation, planArtifact, type ConversationEntry, type IdeaFile, type MarkedCard } from './conversation';
+import { decisionState } from './decisions';
 import { AgentAvatar } from './design/avatar';
 import type { AgentLook } from './design/agent-kit.js';
+import { IdeaBox } from './design/idea-box';
 import { artifactUrl, TextReader } from './files';
+import { projectColor } from './frame';
 import { fileSize } from './idea-composer';
 import { clockOf } from './journey';
 import { workerName } from './names';
+import { waitingQuestion } from './questions';
 import { queryKeys } from './records';
+import type { ReleaseOf } from './release-chip';
 import type { RunStory, StudioState } from './studio-runs';
+import { useToast } from './toast';
+import { useNow } from './use-now';
 
 const planKinds = ['studio-development:breakdown', 'general:plan'];
 // An attempt that finished with a plan, as conversation.ts reads it; only these plans' files are read.
@@ -80,7 +89,20 @@ async function planText(url: string, signal: AbortSignal) {
   return response.text();
 }
 
-// The conversation, titled for the planner: "Talk to Mara". It reads the plan step's page, then each plan's file.
+// What the controller's start answered, as the plan step's Start says it (task-decisions.tsx): started, or queued and
+// why.
+const startedToast = (started: Record<string, unknown>) =>
+  started.queued
+    ? /^Waiting for /.test(String(started.reason ?? ''))
+      ? `Queued. ${started.reason} It starts by itself when it can.`
+      : 'Queued behind busy work. It starts by itself when its agent, resources and an execution slot are free.'
+    : 'Started.';
+
+const live = ['running', 'stopping'];
+
+// The conversation, titled for the planner: "Talk to Mara". It reads the plan step's page, then each plan's file. While
+// a planning attempt runs, a line under the last message says the planner is replying and for how long; until the plan
+// is official, the reply box and Make it official follow.
 export function IdeaConversation({
   projectId,
   run,
@@ -128,7 +150,12 @@ export function IdeaConversation({
     face = (workerId: string) => {
       const look = looks.get(workerId);
       return look ? <AgentAvatar look={look} size={34} state="idle" ring={false} /> : null;
-    };
+    },
+    // The planning attempt that runs or stops, whose minutes follow the clock while it does.
+    replying = (records ?? state).attempts.find(attempt => attempt.taskId === plan.id && live.includes(attempt.status)),
+    now = useNow(!!replying),
+    started = Date.parse(String(replying?.startedAt ?? '')),
+    took = Number.isFinite(started) ? ` · ${Math.max(1, Math.round((now - started) / 60000))} min so far` : '';
   return (
     <section className="sd-card sd-happened" aria-labelledby={`${id}-title`}>
       <div className="sd-happened__head">
@@ -167,7 +194,140 @@ export function IdeaConversation({
           Reading the conversation…
         </p>
       )}
+      {records && replying && (
+        <div className="sd-say" style={{ alignItems: 'center', margin: '0 0 12px' }}>
+          {face(replying.workerId ?? plan.workerId ?? '')}
+          <span className="sd-typing" aria-hidden="true">
+            <i></i>
+            <i></i>
+            <i></i>
+          </span>
+          <span className="sd-meta">
+            {planner} is replying{took}
+          </span>
+        </div>
+      )}
+      <Reply
+        projectId={projectId}
+        run={run}
+        state={state}
+        records={records ?? state}
+        plan={plan}
+        planner={planner}
+        replying={!!replying}
+      />
     </section>
+  );
+}
+
+// Under the conversation while the idea is in planning: the reply box, on only while the plan step is in review with
+// a finished planning attempt, as the controller's revise accepts only that, and otherwise saying why in one line; then
+// Make it official, the plan step's approval, with where the plan lands. Once the plan is official, neither shows.
+function Reply({
+  projectId,
+  run,
+  state,
+  records,
+  plan,
+  planner,
+  replying,
+}: {
+  projectId: string;
+  run: RunStory;
+  state: StudioState;
+  // The records with the plan step's own page, once it is read.
+  records: StudioState;
+  plan: Task;
+  planner: string;
+  replying: boolean;
+}) {
+  const textId = useId(),
+    toast = useToast(),
+    [text, setText] = useState(''),
+    [error, setError] = useState(''),
+    id = encodeURIComponent(plan.id),
+    step = records.tasks.find(task => task.id === plan.id) ?? plan,
+    // The decision the plan step's own page offers for it in review (task-decisions.tsx), under the same conditions.
+    { latest, plan: proposal } = decisionState(step, records),
+    inReview = step.status === 'review' && !!latest && !live.includes(latest.status) && !replying,
+    asked = !!waitingQuestion(step, records.attempts),
+    index = state.projects.findIndex(project => project.id === projectId),
+    release = (state.runs.find(item => item.id === run.id)?.release as ReleaseOf | undefined)?.version;
+  // The reply is the plan step's revision with the director's words, then its start; a refused revision keeps the
+  // reply and starts nothing, and a refused start leaves the recorded reply for the plan step's own page.
+  const reply = useMutation({
+    mutationFn: async (direction: string) => {
+      await send(`/api/tasks/${id}/revise`, { projectId, direction });
+      try {
+        return startedToast(await send<Record<string, unknown>>(`/api/tasks/${id}/start`, { projectId }));
+      } catch (failure) {
+        return `Your reply is recorded. It did not start: ${(failure as Error).message}`;
+      }
+    },
+    onSuccess: message => {
+      setText('');
+      toast(message);
+    },
+    onError: failure => setError(failure.message),
+  });
+  // Make it official: accept-proposal for a legacy plan step with its plan, else accept, as the plan step's page sends.
+  const accept = useMutation({
+    mutationFn: ({ action, body }: { action: string; body: Record<string, unknown>; done?: string }) =>
+      send<Record<string, unknown>>(`/api/tasks/${id}/${action}`, { projectId, ...body }),
+    onSuccess: (_, { done }) => {
+      if (done) toast(done);
+    },
+    onError: failure => toast(failure.message),
+  });
+  if (step.status === 'done' || step.closed || step.status === 'denied') return null;
+  const why = replying
+    ? `${planner} is replying; you can reply once the plan arrives.`
+    : asked
+      ? `${planner} asked you a question; answer it first.`
+      : ['blocked', 'failed', 'cancelled'].includes(step.status)
+        ? 'The plan step stopped; start it again from its page to reply.'
+        : `You can reply once ${planner} sends a plan.`;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '12px' }}>
+      <IdeaBox
+        textId={textId}
+        label={`Reply to ${planner}`}
+        placeholder={`Tell ${planner} what to change in the plan.`}
+        accent={projectColor(state.projects[index], index).background}
+        text={text}
+        onText={value => {
+          setText(value);
+          setError('');
+        }}
+        error={error}
+        sendLabel={`Send to ${planner}`}
+        note={inReview ? `${planner} revises the plan with your words.` : why}
+        busy={reply.isPending || !inReview}
+        onSend={() => reply.mutate(text.trim())}
+      />
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-10)' }}>
+        <button
+          type="button"
+          className="sd-btn sd-btn--primary"
+          disabled={!inReview || accept.isPending}
+          onClick={() =>
+            proposal && latest
+              ? accept.mutate({
+                  action: 'accept-proposal',
+                  body: { attemptId: latest.id, proposalHash: proposal.hash },
+                })
+              : accept.mutate({ action: 'accept', body: {}, done: 'Result accepted.' })
+          }
+        >
+          Make it official
+        </button>
+        <span className="sd-meta">
+          {release
+            ? `Lands in ${release} · nothing starts until you make it official`
+            : 'Nothing starts until you make it official'}
+        </span>
+      </div>
+    </div>
   );
 }
 

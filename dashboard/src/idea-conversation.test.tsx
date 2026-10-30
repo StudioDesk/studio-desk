@@ -2,10 +2,13 @@
 // or Step cards with who builds, who reviews and what each builds on, the director's reply between plans with the
 // cards it changed marked, a question in place with its answer, and a stopped attempt as one line. It is the page's
 // main part while the idea is in planning and stays under Talk to <the planner> once the plan is official. The plans'
-// texts are the stand-in's recorded files; the page only reads.
+// texts are the stand-in's recorded files; reading them sends nothing. While the idea is in planning, a reply under the
+// conversation asks the planner to revise the plan, then starts it, a line says while the planner is replying, and
+// Make it official accepts the plan, each as the plan step's own page sends it.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary, RunRecord, Task, Worker } from './api';
 import { App } from './app';
@@ -68,24 +71,25 @@ const idea = (tasks: Task[]): RunRecord => ({
   })),
   archive: { archived: false },
 });
-const open = (tasks: Task[]) => {
+// Opens the idea, with what its record adds (its release), or another page of the project.
+const open = (tasks: Task[], record: Partial<RunRecord> = {}, page = '/p/project-x/runs/run-1') => {
   controller.tasks = tasks;
-  controller.runs = [idea(tasks)];
+  controller.runs = [{ ...idea(tasks), ...record }];
   render(
     <App
-      router={createAppRouter(createMemoryHistory({ initialEntries: ['/p/project-x/runs/run-1'] }))}
+      router={createAppRouter(createMemoryHistory({ initialEntries: [page] }))}
       queryClient={new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })}
       createStream={createStream}
     />,
   );
 };
 // Opens the idea again on fresh records, as the idea page's tests do.
-const reopen = (tasks: () => Task[]) => {
+const reopen = (tasks: () => Task[], record: Partial<RunRecord> = {}, page?: string) => {
   cleanup();
   controller.requests = [];
   controller.attempts = [];
   controller.artifacts = {};
-  open(tasks());
+  open(tasks(), record, page);
 };
 
 // The checks step, accepted with all 842 of the current code's tests passing.
@@ -478,5 +482,208 @@ test('the conversation only reads: a change re-reads the plan step, not its plan
   expect(await screen.findByRole('heading', { level: 1, name: `“${brief}”` }, { timeout: 5000 })).toBeTruthy();
   await new Promise(resolve => setTimeout(resolve, 50));
   expect(screen.queryByRole('heading', { name: /^Talk to / })).toBeNull();
+  expect(posted()).toEqual([]);
+});
+
+// Mara's plan in review, the attempt the plan step's revise and accept act on.
+const reviewing = () => {
+  planAttempt('a-plan', 4, 7, firstPlan);
+  return [checksStep(), planStep('review', { lastAttemptId: 'a-plan', dependencies: ['T-checks'] })];
+};
+// Under the conversation: the reply box's text and Make it official.
+const replyBox = (region: HTMLElement) =>
+  within(region).getByRole('textbox', { name: 'Reply to Mara' }) as HTMLTextAreaElement;
+const official = (region: HTMLElement) =>
+  within(region).queryByRole('button', { name: 'Make it official' }) as HTMLButtonElement | null;
+const toast = () => document.querySelector('.sd-toast')?.textContent;
+const revise = (direction: string) => ({
+  url: '/api/tasks/T-plan/revise',
+  method: 'POST',
+  body: { projectId: 'project-x', direction },
+});
+const start = { url: '/api/tasks/T-plan/start', method: 'POST', body: { projectId: 'project-x' } };
+
+test("a reply asks Mara to revise the plan with your words, then starts the plan step, and says what happened as Start's does", async () => {
+  const user = userEvent.setup();
+  controller.command = url =>
+    url.endsWith('/start') ? { queued: true, reason: 'Waiting for the usage limit to reset.' } : {};
+  open(reviewing());
+  const region = await talk();
+  await entries(region);
+  const box = replyBox(region);
+  expect(box.disabled).toBe(false);
+  expect(within(region).getByRole('form', { name: 'Reply to Mara' }).textContent).toContain(
+    'Mara revises the plan with your words.',
+  );
+  await user.type(box, 'Split the second story.');
+  await user.click(within(region).getByRole('button', { name: 'Send to Mara' }));
+  // The revision first, with the reply as its direction, then the start, once the revision is recorded.
+  await waitFor(() => expect(posted()).toEqual([revise('Split the second story.'), start]));
+  await waitFor(() =>
+    expect(toast()).toBe('Queued. Waiting for the usage limit to reset. It starts by itself when it can.'),
+  );
+  expect(box.value).toBe('');
+  // A start the controller ran at once reads as Start's does.
+  controller.command = () => ({});
+  await user.type(box, 'Keep the records story first.');
+  await user.click(within(region).getByRole('button', { name: 'Send to Mara' }));
+  await waitFor(() => expect(posted().slice(2)).toEqual([revise('Keep the records story first.'), start]));
+  await waitFor(() => expect(toast()).toBe('Started.'));
+});
+
+test('a revision the controller refuses shows its reason, keeps the reply in the box and starts nothing', async () => {
+  const user = userEvent.setup();
+  controller.command = url => {
+    if (url.endsWith('/revise')) throw new Error('Only work awaiting review can be revised.');
+    return {};
+  };
+  open(reviewing());
+  const region = await talk(),
+    box = replyBox(region);
+  await user.type(box, 'Split the second story.');
+  await user.click(within(region).getByRole('button', { name: 'Send to Mara' }));
+  expect((await within(region).findByRole('alert')).textContent).toBe('Only work awaiting review can be revised.');
+  expect(box.value).toBe('Split the second story.');
+  expect(box.disabled).toBe(false);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(posted()).toEqual([revise('Split the second story.')]);
+  // Changing the reply clears the reason.
+  await user.type(box, ' Please.');
+  expect(within(region).queryByRole('alert')).toBeNull();
+  expect(posted()).toHaveLength(1);
+});
+
+test('while the plan attempt runs, "Mara is replying" follows the clock under the last message, and nothing can be sent', async () => {
+  const real = Date.now.bind(Date);
+  let shift = 0;
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => real() + shift);
+  try {
+    planAttempt('a-plan-1', 4, 7, firstPlan, {
+      status: 'revision_requested',
+      revisionRequestedBy: { type: 'director', at: at(9), reason: 'Split the second story' },
+    });
+    controller.attempts.push({
+      id: 'a-plan-2',
+      taskId: 'T-plan',
+      status: 'running',
+      workerId: 'W-4',
+      startedAt: new Date(real() - 3 * 60000).toISOString(),
+    });
+    open([checksStep(), planStep('running', { lastAttemptId: 'a-plan-2', dependencies: ['T-checks'] })]);
+    const region = await talk(),
+      items = await entries(region);
+    expect(items.map(item => item.getAttribute('aria-label'))).toEqual([
+      'Your idea',
+      null,
+      "Mara's plan",
+      'Your reply',
+    ]);
+    // The line comes after the director's reply, the last message, with the minutes so far.
+    const line = await within(region).findByText(/^Mara is replying · /);
+    expect(line.textContent).toBe('Mara is replying · 3 min so far');
+    expect(follows(items.at(-1)!, line)).toBe(true);
+    // Two minutes on, the clock's next tick reads them.
+    shift = 2 * 60000;
+    await waitFor(() => expect(line.textContent).toBe('Mara is replying · 5 min so far'), { timeout: 3000 });
+    // The reply box is off and says why; Make it official is off too.
+    expect(replyBox(region).disabled).toBe(true);
+    expect((within(region).getByRole('button', { name: 'Send to Mara' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(region).getByText('Mara is replying; you can reply once the plan arrives.')).toBeTruthy();
+    expect(official(region)!.disabled).toBe(true);
+    expect(posted()).toEqual([]);
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+test("Make it official sends the plan step's accept, as its own page's decision does, and says the plan's release", async () => {
+  const user = userEvent.setup();
+  open(reviewing(), { release: { milestoneId: 'milestone-1.1.0', version: '1.1.0', by: { type: 'director' } } });
+  const region = await talk();
+  expect(within(region).getByText('Lands in 1.1.0 · nothing starts until you make it official')).toBeTruthy();
+  const button = official(region)!;
+  expect(button.disabled).toBe(false);
+  await user.click(button);
+  await waitFor(() =>
+    expect(posted()).toEqual([{ url: '/api/tasks/T-plan/accept', method: 'POST', body: { projectId: 'project-x' } }]),
+  );
+  await waitFor(() => expect(toast()).toBe('Result accepted.'));
+  // The plan step's own page sends the same request for its decision.
+  const sent = posted();
+  reopen(reviewing, {}, '/p/project-x/tasks/T-plan');
+  const decisions = within(await screen.findByRole('region', { name: 'Where it stands' }, { timeout: 5000 }));
+  await user.click(decisions.getByRole('button', { name: 'Accept result' }));
+  await waitFor(() => expect(posted()).toEqual(sent));
+  // An idea without a release says only that nothing starts.
+  reopen(reviewing);
+  const plain = await talk();
+  expect(within(plain).getByText('Nothing starts until you make it official')).toBeTruthy();
+  expect(within(plain).queryByText(/^Lands in/)).toBeNull();
+});
+
+test('once the plan is official, the conversation under Talk to Mara has no reply box and no Make it official', async () => {
+  const user = userEvent.setup();
+  // Accepting the plan makes the plan step done, with its records in the answer.
+  controller.command = url => {
+    if (!url.endsWith('/accept')) return {};
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-plan' ? { ...task, status: 'done', acceptedAttemptId: 'a-plan' } : task,
+    );
+    controller.attempts = controller.attempts.map(attempt =>
+      attempt.id === 'a-plan' ? { ...attempt, status: 'accepted' } : attempt,
+    );
+    return { ok: true, records: controller.records(['T-plan']) };
+  };
+  open(reviewing());
+  const before = await talk();
+  expect(replyBox(before)).toBeTruthy();
+  await user.click(official(before)!);
+  // The conversation moves to the page's foot, with neither the reply box nor Make it official.
+  await waitFor(() => expect(screen.getByRole('region', { name: 'Talk to Mara' })).not.toBe(before));
+  const region = await talk();
+  expect(region.parentElement?.lastElementChild).toBe(region);
+  expect((await entries(region)).map(item => item.getAttribute('aria-label'))).toEqual([
+    'Your idea',
+    null,
+    "Mara's plan",
+  ]);
+  expect(within(region).queryByRole('form', { name: 'Reply to Mara' })).toBeNull();
+  expect(within(region).queryByRole('textbox')).toBeNull();
+  expect(official(region)).toBeNull();
+  expect(within(region).queryByText(/nothing starts until you make it official/i)).toBeNull();
+  expect(posted()).toEqual([{ url: '/api/tasks/T-plan/accept', method: 'POST', body: { projectId: 'project-x' } }]);
+});
+
+test('the reply box says in one line why it is off: a question waits, the plan step stopped, or no plan yet', async () => {
+  asked();
+  open([planStep('blocked', { lastAttemptId: 'a-ask' })]);
+  let region = await talk();
+  expect(replyBox(region).disabled).toBe(true);
+  expect(within(region).getByText('Mara asked you a question; answer it first.')).toBeTruthy();
+  expect(official(region)!.disabled).toBe(true);
+  expect(within(region).getByText('Nothing starts until you make it official')).toBeTruthy();
+  // A failed plan attempt: the plan step stopped.
+  reopen(() => {
+    controller.attempts.push({
+      id: 'a-plan',
+      taskId: 'T-plan',
+      status: 'failed',
+      workerId: 'W-4',
+      startedAt: at(4),
+      finishedAt: at(6),
+      error: 'The plan named a file twice.',
+    });
+    return [planStep('failed', { lastAttemptId: 'a-plan' })];
+  });
+  region = await talk();
+  expect(replyBox(region).disabled).toBe(true);
+  expect(within(region).getByText('The plan step stopped; start it again from its page to reply.')).toBeTruthy();
+  expect(official(region)!.disabled).toBe(true);
+  // Before the planner sends a plan.
+  reopen(() => [checksStep(), planStep('backlog', { dependencies: ['T-checks'] })]);
+  region = await talk();
+  expect(replyBox(region).disabled).toBe(true);
+  expect(within(region).getByText('You can reply once Mara sends a plan.')).toBeTruthy();
+  expect(official(region)!.disabled).toBe(true);
   expect(posted()).toEqual([]);
 });
