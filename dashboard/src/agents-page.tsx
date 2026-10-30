@@ -2,12 +2,12 @@
 // project's own records, beside the picked agent's editor (agent-editor.tsx) or, with a team in the address, that
 // team's editor (team-editor.tsx). The flow starts with the director sending an idea, goes through each team in its
 // saved order with its agents as cards, and ends with the director integrating what passed review; below it, what the
-// agents are told and the kinds of work the project does not take. An agent is a set of instructions and a CLI; each
-// run is its own process, as the controller reserves it.
+// agents are told and the kinds of work the project does not take. An agent is a set of instructions and a CLI; it is
+// not reserved, and runs several attempts at once, each its own process and record.
 import { Link } from '@tanstack/react-router';
 import { useMemo } from 'react';
-import type { Team, Worker } from './api';
-import { AgentEditor, kindLabel, kindOwners, runsOn, toldSets } from './agent-editor';
+import type { AttemptSummary, Team, Worker } from './api';
+import { AgentEditor, isReview, kindLabel, kindOwners, runsOn, toldSets } from './agent-editor';
 import { AgentAvatar } from './design/avatar';
 import { agentState } from './faces';
 import type { AgentLook } from './design/agent-kit.js';
@@ -97,15 +97,26 @@ function Agents({
   );
 }
 
-// "1 running · Software engineer", or why it is not working.
+// What the agent is running in this project, one line for each attempt in the order they started ("Working on: Build
+// the board", "Reviewing: Write the guide"), or why it is not working.
 function rowState(state: StudioState, worker: Worker) {
-  const running = state.attempts.filter(
-    item => item.workerId === worker.id && ['running', 'stopping'].includes(item.status),
-  ).length;
-  if (worker.enabled === false) return { tone: 'wait', text: 'No CLI connected' };
-  if (running) return { tone: 'live', text: `${running} running` };
-  if (worker.paused) return { tone: 'wait', text: 'Paused' };
-  return { tone: 'wait', text: '' };
+  const started = (attempt: AttemptSummary) => Date.parse(String(attempt.startedAt ?? '')) || 0,
+    running = state.attempts
+      .filter(item => item.workerId === worker.id && ['running', 'stopping'].includes(item.status))
+      .sort((a, b) => started(a) - started(b));
+  if (worker.enabled === false) return { tone: 'wait', lines: [{ key: 'off', text: 'No CLI connected' }] };
+  if (running.length)
+    return {
+      tone: 'live',
+      lines: running.map(attempt => ({
+        key: attempt.id,
+        text: `${isReview(attempt) ? 'Reviewing' : 'Working on'}: ${
+          state.tasks.find(task => task.id === attempt.taskId)?.title ?? attempt.taskId
+        }`,
+      })),
+    };
+  if (worker.paused) return { tone: 'wait', lines: [{ key: 'paused', text: 'Paused' }] };
+  return { tone: 'wait', lines: [{ key: 'free', text: 'Free' }] };
 }
 
 // Adding a team, adding an agent and editing a team open the team's editor beside the flow, the team in the address.
@@ -348,18 +359,25 @@ function AgentCard({
       </span>
       <span className="sd-meta">Does: {does.length ? does.join(', ') : 'no kind of work of its own'}</span>
       {worker.enabled !== false && <span className="sd-meta">Runs on: {runsOn(state, worker)}</span>}
-      <span className="sd-meta" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-6)' }}>
+      {/* Plain text, one line each: the card is a link to the agent, so its running work is not a link of its own. */}
+      {now.lines.map(line => (
         <span
-          style={{
-            width: '7px',
-            height: '7px',
-            borderRadius: '50%',
-            flex: 'none',
-            background: now.tone === 'live' ? 'var(--live-dot)' : 'var(--wait-dot)',
-          }}
-        ></span>
-        {now.text || 'Free'}
-      </span>
+          key={line.key}
+          className="sd-meta"
+          style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-6)' }}
+        >
+          <span
+            style={{
+              width: '7px',
+              height: '7px',
+              borderRadius: '50%',
+              flex: 'none',
+              background: now.tone === 'live' ? 'var(--live-dot)' : 'var(--wait-dot)',
+            }}
+          ></span>
+          {line.text}
+        </span>
+      ))}
     </Link>
   );
 }

@@ -1,6 +1,7 @@
-// The picked agent's editor beside the flow: Does, with another kind of work given through the project's whole
-// organization; Runs on, saved on the agent or undone; Can use, the approved commands and the visual check; and Is
-// told, with its link to the agent's told page. Model-free, with the stand-in controller.
+// The picked agent's editor beside the flow: its head and Running now, with several attempts at once; Does, with
+// another kind of work given through the project's whole organization; Runs on, saved on the agent or undone; Can
+// use, the approved commands and the visual check; and Is told, with its link to the agent's told page. Model-free,
+// with the stand-in controller.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -8,7 +9,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test } from 'vitest';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, toldFixture, type Controller } from './test-controller';
+import { createStream, fakeController, taskFixture, toldFixture, type Controller } from './test-controller';
 
 const change = 'studio-development:change',
   review = 'studio-development:change-review';
@@ -143,6 +144,49 @@ test('picking an agent opens its editor beside the flow, its four sections above
   expect(screen.queryByRole('button', { name: /^Change how/ })).toBeNull();
   expect(screen.queryByRole('link', { name: 'Read and edit' })).toBeNull();
   expect(commands()).toEqual([]);
+});
+
+test('an agent running two attempts at once lists both in Running now, and its page says it can run several at once', async () => {
+  controller.tasks = [
+    taskFixture('T-guide', { title: 'Write the guide', status: 'running' }),
+    taskFixture('T-board', { title: 'Build the board', status: 'running', kind: change }),
+  ];
+  controller.attempts = [
+    { id: 'attempt-guide', taskId: 'T-guide', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+    { id: 'attempt-board', taskId: 'T-board', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+  ];
+  open('/p/project-x/agents/W-1');
+  const running = within(await screen.findByRole('region', { name: 'Running now' }));
+  expect(running.getByText('Write the guide')).toBeTruthy();
+  expect(running.getByText('Build the board')).toBeTruthy();
+  expect(running.queryByText('Eli is free. Nothing is running.')).toBeNull();
+  // Each has its own way to watch it work, on its own task.
+  expect(running.getAllByRole('link', { name: 'watch it work' }).map(link => link.getAttribute('href'))).toEqual([
+    '/p/project-x/tasks/T-guide',
+    '/p/project-x/tasks/T-board',
+  ]);
+  const head = screen.getByRole('region', { name: 'Eli' });
+  expect(within(head).getByText('2 running now')).toBeTruthy();
+  // Not one at a time, and the limit in Settings counts attempts across every project, not agents.
+  expect(head.textContent).not.toMatch(/runs one at a time/i);
+  expect(head.textContent).not.toMatch(/agents run together/i);
+  expect(head.textContent).toMatch(/Eli can run several at once, in this project and others/);
+  expect(head.textContent).toMatch(
+    /Attempts at the same time in Settings caps how many attempts run together across every project/,
+  );
+  expect(commands()).toEqual([]);
+  cleanup();
+
+  // With nothing running, the agent is free.
+  controller.attempts = [];
+  controller.tasks = [];
+  open('/p/project-x/agents/W-1');
+  expect(
+    await within(await screen.findByRole('region', { name: 'Running now' })).findByText(
+      'Eli is free. Nothing is running.',
+    ),
+  ).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'Eli' })).queryByText(/running now/)).toBeNull();
 });
 
 test('Does lists its kinds, and a kind the project does not take is given with the whole organization', async () => {

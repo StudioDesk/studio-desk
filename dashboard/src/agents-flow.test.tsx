@@ -1,6 +1,6 @@
 // The Agents page's flow, from the project's own records: You, each team in its saved order with its agents as cards,
-// then You; what the picked agent is told, by set; and the kinds of work the project does not take. Model-free, with
-// the stand-in controller.
+// each naming the work its agent is running; then You; what the picked agent is told, by set; and the kinds of work
+// the project does not take. Model-free, with the stand-in controller.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -155,7 +155,47 @@ test('an agent card says what it does by label, what it runs on and whether it i
   const kit = within(card(/^Kit/));
   expect(kit.getByText('Does: no kind of work of its own')).toBeTruthy();
   expect(kit.getByText('Runs on: Codex · default model')).toBeTruthy();
-  expect(kit.getByText('1 running')).toBeTruthy();
+  // A running agent's card names what it is working on, not a count.
+  expect(kit.getByText('Working on: Write the guide')).toBeTruthy();
+  expect(kit.queryByText(/running/)).toBeNull();
+  expect(kit.queryByText('Free')).toBeNull();
+});
+
+test("an agent running two attempts at once lists each one's task on its card, in the order they started", async () => {
+  controller.tasks = [
+    ...controller.tasks,
+    taskFixture('T-board', {
+      title: 'Build the board',
+      kind: 'studio-development:change',
+      status: 'review',
+      workerId: 'W-1',
+    }),
+  ];
+  // Kit's review of the board started after the guide, and is stopping; the stand-in holds it first.
+  controller.attempts = [
+    {
+      id: 'attempt-check',
+      taskId: 'T-board',
+      status: 'stopping',
+      workerId: 'W-3',
+      startedAt: '2026-10-29T10:05:00Z',
+      assignment: { kind: 'studio-development:change-review' },
+    },
+    { ...controller.attempts[0]!, startedAt: '2026-10-29T10:00:00Z' },
+  ];
+  open('/p/project-x/agents/W-1');
+  await flow();
+  const kit = card(/^Kit/);
+  expect(
+    [...kit.querySelectorAll('.sd-meta')]
+      .map(line => line.textContent)
+      .filter(text => /^(Working on|Reviewing):/.test(text ?? '')),
+  ).toEqual(['Working on: Write the guide', 'Reviewing: Build the board']);
+  // Text on the card, which is itself the link to Kit, not links of their own.
+  expect(within(kit).queryAllByRole('link')).toEqual([]);
+  expect(kit.getAttribute('href')).toBe('/p/project-x/agents/W-3');
+  expect(within(card(/^Eli/)).getByText('Free')).toBeTruthy();
+  expect(within(card(/^Ana/)).getByText('Paused')).toBeTruthy();
 });
 
 test('picking a card opens its agent with that card current', async () => {

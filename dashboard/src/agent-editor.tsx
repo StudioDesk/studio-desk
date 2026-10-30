@@ -30,7 +30,7 @@ import { useNow } from './use-now';
 import { useVisualView } from './visual-check';
 
 const kindOf = (attempt?: AttemptSummary) => (attempt?.assignment as { kind?: string } | undefined)?.kind;
-const isReview = (attempt?: AttemptSummary) =>
+export const isReview = (attempt?: AttemptSummary) =>
   ['studio-development:change-review', 'general:review'].includes(kindOf(attempt) ?? '');
 
 // What an agent runs on: its CLI, model and effort.
@@ -175,8 +175,8 @@ export function AgentEditor({
           {own
             ? `${name} belongs to this project, so changing ${name} changes nothing anywhere else.`
             : `${name} is shared by every project: a new name, face or CLI shows wherever ${name} works, and what ${name} is told here is this project's own.`}{' '}
-          Each run is its own process in its own folder; {name} runs one at a time, and the studio&apos;s limit in
-          Settings caps how many agents run together.
+          Each run is its own process in its own folder, so {name} can run several at once, in this project and others;
+          Attempts at the same time in Settings caps how many attempts run together across every project.
         </p>
         <Rename projectId={projectId} worker={worker} name={name} open={renaming} onClose={() => setRenaming(false)} />
         {own && (
