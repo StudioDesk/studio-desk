@@ -1,8 +1,8 @@
-// The Artifacts page's listing (1.2 step 6): each accepted file with what its row says, newest first, and the idea,
-// agent and kind filters, built from the listing's own values. And the model the redesigned page reads from what the
-// project's work made.
+// What the Artifacts page reads from what the project's work made (GET …/work, 1.2 step 6): each file's readable
+// name, its kind, its one line and its versions' words, the All, Documents and Images filter with the idea and agent
+// choices, and the words for the records and the visual checks' pictures.
 import type { Live, ProjectArtifact, ProjectWork, Shell, WorkFile, WorkPictures, WorkVersion } from './api';
-import { fileKind, imageFile } from './files';
+import { imageFile } from './files';
 import { workerName } from './names';
 import { quoted, when } from './today';
 
@@ -11,26 +11,10 @@ export type ArtifactRecords =
   | (Pick<Shell, 'workers' | 'employeeDirectory'> & Partial<Pick<Live, 'runs' | 'ideas'>>)
   | null;
 
-export const facets = ['idea', 'agent', 'kind'] as const;
-export type Facet = (typeof facets)[number];
 // One value a filter can take: what it matches, and its words.
 export interface Choice {
   value: string;
   label: string;
-}
-export interface ArtifactRow extends Record<Facet, Choice> {
-  key: string;
-  file: ProjectArtifact;
-}
-// The value each filter is set to; none set shows every file.
-export type ArtifactFilter = Partial<Record<Facet, string>>;
-
-// What a file is, as the dashboard's file lists say it; a kind they have no words for reads as itself.
-export function kindOf(file: ProjectArtifact) {
-  const words = fileKind(file);
-  if (words !== 'File' || !file.kind) return words;
-  const kind = file.kind.replace(/[-_]+/g, ' ').trim();
-  return kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
 // The idea's words when the records hold its run, or a finished idea they name.
@@ -41,40 +25,6 @@ function ideaWords(records: ArtifactRecords, runId: string | null) {
   return brief?.trim() ? quoted(brief, 60) : null;
 }
 
-// Every file newest first, each with its kind, its agent's name and its idea: the idea's words when the records hold
-// its run, otherwise its story's title, so files whose idea is not loaded are told apart by their stories.
-export function artifactRows(files: ProjectArtifact[], records: ArtifactRecords): ArtifactRow[] {
-  return [...files]
-    .sort((a, b) => (b.acceptedAt ?? '').localeCompare(a.acceptedAt ?? ''))
-    .map(file => {
-      const kind = kindOf(file),
-        words = ideaWords(records, file.runId);
-      return {
-        key: `${file.attemptId}/${file.path}`,
-        file,
-        kind: { value: kind, label: kind },
-        agent: { value: `agent:${file.workerId ?? ''}`, label: workerName(records, file.workerId) },
-        idea: words
-          ? { value: `run:${file.runId}`, label: words }
-          : { value: `task:${file.taskId}`, label: file.title },
-      };
-    });
-}
-
-// A filter's choices, each value the listing holds once: ideas newest first, as the listing has them, and agents and
-// kinds by name.
-export function choices<F extends string>(rows: Record<F, Choice>[], facet: F): Choice[] {
-  const seen = new Map<string, Choice>();
-  for (const row of rows) if (!seen.has(row[facet].value)) seen.set(row[facet].value, row[facet]);
-  const list = [...seen.values()];
-  return facet === 'idea' ? list : list.sort((a, b) => a.label.localeCompare(b.label));
-}
-
-export const matching = (rows: ArtifactRow[], filter: ArtifactFilter) =>
-  rows.filter(row => facets.every(facet => !filter[facet] || row[facet].value === filter[facet]));
-
-// What the redesigned page reads from what the project's work made (GET …/work): each file's readable name, its kind,
-// its one line and its versions' words, the filters, and the words for the records and the visual checks' pictures.
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 
 // A file's name as a person would say it: the last part of its path without its extension, hyphens and underscores
@@ -139,11 +89,34 @@ export function workRows(files: WorkFile[], records: ArtifactRecords): WorkRow[]
 export const workLine = (row: WorkRow, now = new Date()) =>
   [row.agent.label, row.idea.label, when(row.at, now)].filter(Boolean).join(' · ');
 
-// The idea and agent choices, each starting with any idea or any agent, which matches every row.
-export const workChoices = (rows: WorkRow[], facet: 'idea' | 'agent'): Choice[] => [
-  { value: '', label: facet === 'idea' ? 'Any idea' : 'Any agent' },
-  ...choices(rows, facet),
-];
+// Open opens the newest version, or the accepted attempt's file when the work lists no versions.
+export const newestAttemptId = (file: Pick<WorkFile, 'attemptId' | 'versions'>) =>
+  file.versions[0]?.attemptId ?? file.attemptId;
+
+// The file as Add to the library takes an accepted file: from its accepted attempt, as the controller checks it.
+export const acceptedFile = (file: WorkFile): ProjectArtifact => ({
+  taskId: file.taskId,
+  title: file.title,
+  attemptId: file.attemptId,
+  workerId: file.workerId ?? undefined,
+  runId: file.runId,
+  kind: file.kind,
+  path: file.path,
+  hash: file.hash,
+  acceptedAt: file.acceptedAt,
+});
+
+// The idea and agent choices, each starting with any idea or any agent, which matches every row, then each value the
+// rows hold once: ideas newest first, as the work lists them, and agents by name.
+export function workChoices(rows: WorkRow[], facet: 'idea' | 'agent'): Choice[] {
+  const seen = new Map<string, Choice>();
+  for (const row of rows) if (!seen.has(row[facet].value)) seen.set(row[facet].value, row[facet]);
+  const list = [...seen.values()];
+  return [
+    { value: '', label: facet === 'idea' ? 'Any idea' : 'Any agent' },
+    ...(facet === 'idea' ? list : list.sort((a, b) => a.label.localeCompare(b.label))),
+  ];
+}
 
 const showsKind: Record<WorkShow, WorkKind | null> = { all: null, documents: 'Document', images: 'Image' };
 export function matchingWork(rows: WorkRow[], filter: WorkFilter) {

@@ -1,12 +1,26 @@
-// Artifacts (1.2 step 6): every file the project's accepted work handed back, newest first, each with its kind, the
-// agent who made it, the idea it came from, when it was accepted and Open, which opens the file in a new tab. Filters
-// for idea, agent and kind narrow the list, and each file can be added to the project's library, which sits at the top,
-// above the files, after the files agents proposed for it. A project that is not code names sets of the files as
-// snapshots below them; a code project has Releases instead.
+// Artifacts (1.2 step 6): what the project's work made and the director accepted, one row per file, read from the
+// work (GET …/work). The files agents proposed for the library and the library itself, with Upload a file, sit at the
+// top. The work follows: each file's kind, readable name, agent, idea or step and latest date, In the library or Add to
+// the library, Open on its newest version and how many versions it has, with the All, Documents and Images filter and
+// the idea and agent choices. Then how many records of how the work was done there are, with Open the ideas. A project
+// that is not code names sets of the accepted files as snapshots below; a code project has Releases instead.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
-import { artifactsUrl, getJSON, type ProjectArtifact } from './api';
-import { artifactRows, choices, facets, matching, type ArtifactFilter, type Facet } from './artifacts';
+import { artifactsUrl, getJSON, workUrl, type ProjectArtifact, type ProjectWork } from './api';
+import {
+  acceptedFile,
+  matchingWork,
+  newestAttemptId,
+  recordsSentence,
+  versionCount,
+  workChoices,
+  workCount,
+  workLine,
+  workRows,
+  workShows,
+  type WorkFilter,
+} from './artifacts';
 import { artifactUrl } from './files';
 import { isCodeProject } from './frame';
 import { Heading } from './layout';
@@ -15,93 +29,123 @@ import { LibraryProposals } from './library-proposals';
 import { useStudio } from './records';
 import { Snapshots } from './snapshots';
 import { useLiveStream, useStreamReady } from './stream-context';
-import { when } from './today';
 
-const filterWords: Record<Facet, { label: string; every: string }> = {
-  idea: { label: 'Idea', every: 'Every idea' },
-  agent: { label: 'Agent', every: 'Every agent' },
-  kind: { label: 'Kind', every: 'Every kind' },
-};
-const files = (count: number) => `${count} file${count === 1 ? '' : 's'}`;
+const choiceWords = { idea: 'Idea', agent: 'Agent' } as const;
 
 export function ArtifactsPage({ projectId }: { projectId: string }) {
   const { state, error: recordsError, shell } = useStudio(projectId),
     stream = useLiveStream(),
     client = useQueryClient(),
-    [filter, setFilter] = useState<ArtifactFilter>({}),
+    ready = useStreamReady(),
+    [filter, setFilter] = useState<WorkFilter>({}),
     [adding, setAdding] = useState<ProjectArtifact | null>(null);
-  // Read on each visit, since work accepted while the page was away adds files.
-  const { data, error } = useQuery({
-    enabled: useStreamReady(),
+  // Both are read on each visit, since work accepted while the page was away adds files. The accepted files are what
+  // the library and its proposals name their stories from and what snapshots hold; the work is what the page lists.
+  const listing = useQuery({
+    enabled: ready,
     queryKey: [projectId, 'artifacts'],
     queryFn: ({ signal }) => getJSON<ProjectArtifact[]>(artifactsUrl(projectId), signal),
     refetchOnMount: 'always',
   });
-  // Work accepted while the page is open changes its task; the listing is read again then.
+  const { data, error } = useQuery({
+    enabled: ready,
+    queryKey: [projectId, 'work'],
+    queryFn: ({ signal }) => getJSON<ProjectWork>(workUrl(projectId), signal),
+    refetchOnMount: 'always',
+  });
+  // Work accepted while the page is open changes its task, and both are read again then. A library change moves which
+  // file the library holds, so the work is read again for it too.
   useEffect(
     () =>
       stream.subscribe({
         changes: message => {
-          if (message.changes?.some(change => change.type === 'task'))
+          const changes = message.changes ?? [];
+          if (changes.some(change => change.type === 'task')) {
             void client.invalidateQueries({ queryKey: [projectId, 'artifacts'] });
+            void client.invalidateQueries({ queryKey: [projectId, 'work'] });
+          } else if (changes.some(change => change.type === 'event' && change.kind?.startsWith('library_')))
+            void client.invalidateQueries({ queryKey: [projectId, 'work'] });
         },
       }),
     [stream, client, projectId],
   );
-  // Agents' proposals and the library stay pinned at the top whatever the listing's state, and name their accepted
-  // files' stories from it.
+  const files = listing.data,
+    names = { files, records: state };
+  // Agents' proposals and the library stay pinned at the top whatever the work's state.
   const top = (
     <>
-      <Heading title="Artifacts" lead="Every file the project's accepted work handed back, newest first." />
-      <LibraryProposals projectId={projectId} names={{ files: data, records: state }} />
-      <Library projectId={projectId} names={{ files: data, records: state }} />
+      <Heading
+        title="Artifacts"
+        lead="What this project's work made and you accepted, one row per file, and your own uploads."
+      />
+      <LibraryProposals projectId={projectId} names={names} />
+      <Library projectId={projectId} names={names} />
     </>
   );
+  // Snapshots hold the accepted files, so they wait for them; a code project has none.
+  const snapshots =
+    shell && !isCodeProject(shell) ? (
+      listing.error ? (
+        <p role="alert">The accepted files snapshots hold could not be loaded: {listing.error.message}</p>
+      ) : (
+        files && <Snapshots projectId={projectId} files={files} />
+      )
+    ) : null;
   if (error)
     return (
       <>
         {top}
-        <p role="alert">The accepted files could not be loaded: {error.message}</p>
+        <p role="alert">What the work made could not be loaded: {error.message}</p>
+        {snapshots}
       </>
     );
-  // Agents' names and ideas' words come from the project's records, so the list waits for them unless they fail.
+  // Agents' names and ideas' words come from the project's records, so the work waits for them unless they fail.
   if (!data || (!state && !recordsError))
     return (
       <>
         {top}
         <p role="status" className="sd-meta">
-          Loading the accepted files…
+          Loading what the work made…
         </p>
       </>
     );
-  const rows = artifactRows(data, state),
-    shown = matching(rows, filter),
-    filtered = facets.some(facet => filter[facet]);
+  const rows = workRows(data.work, state),
+    shown = matchingWork(rows, filter),
+    filtered = !!(filter.idea || filter.agent || (filter.show && filter.show !== 'all')),
+    records = recordsSentence(data.records, !!shell && isCodeProject(shell));
   return (
     <>
       {top}
-      <section aria-labelledby="accepted-files" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <section aria-labelledby="the-work" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 'var(--space-10)' }}>
-          <h2 id="accepted-files" className="sd-section-title sd-section-title--sm">
-            Accepted files
+          <h2 id="the-work" className="sd-section-title sd-section-title--sm">
+            The work
           </h2>
-          {rows.length > 0 && (
-            <span className="sd-meta">
-              {filtered ? `${shown.length} of ${files(rows.length)}` : files(rows.length)}
-            </span>
-          )}
+          {rows.length > 0 && <span className="sd-meta">{workCount(data.work)}</span>}
         </div>
         {rows.length === 0 ? (
           <div className="sd-card sd-empty">
-            <b>No accepted work has handed back files yet.</b>
-            <span>Each file an agent hands back shows here once its work is accepted.</span>
+            <b>Nothing has been made yet.</b>
+            <span>Each file the work hands back shows here once you accept it.</span>
           </div>
         ) : (
           <>
-            <div className="sd-toolbar" role="group" aria-label="Filter the files">
-              {facets.map(facet => (
+            <div className="sd-toolbar" role="group" aria-label="Filter the work">
+              <div className="sd-filters" role="group" aria-label="Show">
+                {workShows.map(show => (
+                  <button
+                    key={show.value}
+                    type="button"
+                    aria-pressed={(filter.show ?? 'all') === show.value}
+                    onClick={() => setFilter(current => ({ ...current, show: show.value }))}
+                  >
+                    {show.label}
+                  </button>
+                ))}
+              </div>
+              {(['idea', 'agent'] as const).map(facet => (
                 <label key={facet} className="sd-filter sd-relfilter">
-                  <span>{filterWords[facet].label}</span>
+                  <span>{choiceWords[facet]}</span>
                   <select
                     value={filter[facet] ?? ''}
                     onChange={event => {
@@ -109,8 +153,7 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
                       setFilter(current => ({ ...current, [facet]: value || undefined }));
                     }}
                   >
-                    <option value="">{filterWords[facet].every}</option>
-                    {choices(rows, facet).map(choice => (
+                    {workChoices(rows, facet).map(choice => (
                       <option key={choice.value} value={choice.value}>
                         {choice.label}
                       </option>
@@ -125,51 +168,54 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
               )}
             </div>
             {shown.length ? (
-              <div className="sd-card sd-cardlist" role="list" aria-label="Accepted files">
-                {shown.map(row => (
-                  <div key={row.key} role="listitem" className="sd-cardlist__row sd-cardlist__row--line">
-                    <span
-                      className="sd-cardlist__label"
-                      style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', padding: '10px 0' }}
-                    >
-                      <span className="sd-mono" style={{ overflowWrap: 'anywhere' }}>
-                        {row.file.path}
+              <div className="sd-card sd-cardlist" role="list" aria-label="The work">
+                {shown.map(row => {
+                  const versions = versionCount(row.file);
+                  return (
+                    <div key={row.key} role="listitem" className="sd-cardlist__row sd-cardlist__row--line">
+                      <span
+                        className="sd-cardlist__label"
+                        style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', padding: '10px 0' }}
+                      >
+                        <span
+                          style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-8)' }}
+                        >
+                          <span className="sd-chip sd-chip--inline sd-chip--outline">{row.kind}</span>
+                          <span title={row.file.path} style={{ overflowWrap: 'anywhere' }}>
+                            {row.name}
+                          </span>
+                        </span>
+                        <span className="sd-meta" style={{ fontWeight: 400 }}>
+                          {workLine(row)}
+                        </span>
                       </span>
-                      <span className="sd-cardlist__meta sd-meta" style={{ fontWeight: 400 }}>
-                        <span>{row.kind.label}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{row.agent.label}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{row.idea.label}</span>
-                        {row.file.acceptedAt && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <time dateTime={row.file.acceptedAt}>{when(row.file.acceptedAt)}</time>
-                          </>
+                      <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-6)' }}>
+                        {versions && <span className="sd-meta">{versions}</span>}
+                        {row.file.libraryEntryId ? (
+                          <span className="sd-chip sd-chip--inline sd-chip--ok">In the library</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="sd-btn sd-btn--sm"
+                            aria-label={`Add ${row.file.path} to the library`}
+                            onClick={() => setAdding(acceptedFile(row.file))}
+                          >
+                            Add to the library
+                          </button>
                         )}
+                        <a
+                          className="sd-btn sd-btn--sm"
+                          href={artifactUrl(projectId, newestAttemptId(row.file), row.file.path)}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={`Open ${row.file.path}`}
+                        >
+                          Open
+                        </a>
                       </span>
-                    </span>
-                    <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-6)' }}>
-                      <button
-                        type="button"
-                        className="sd-btn sd-btn--sm"
-                        aria-label={`Add ${row.file.path} to the library`}
-                        onClick={() => setAdding(row.file)}
-                      >
-                        Add to the library
-                      </button>
-                      <a
-                        className="sd-btn sd-btn--sm"
-                        href={artifactUrl(projectId, row.file.attemptId, row.file.path)}
-                        target="_blank"
-                        rel="noreferrer"
-                        aria-label={`Open ${row.file.path}`}
-                      >
-                        Open
-                      </a>
-                    </span>
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <div className="sd-card sd-empty">No file matches these filters.</div>
@@ -177,7 +223,15 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
           </>
         )}
       </section>
-      {shell && !isCodeProject(shell) && <Snapshots projectId={projectId} files={data} />}
+      {records && (
+        <p className="sd-meta" style={{ margin: 0 }}>
+          {records}{' '}
+          <Link to="/p/$projectId/runs" params={{ projectId }}>
+            Open the ideas
+          </Link>
+        </p>
+      )}
+      {snapshots}
       <AddToLibrary projectId={projectId} file={adding} onClose={() => setAdding(null)} />
     </>
   );

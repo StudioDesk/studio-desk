@@ -1,4 +1,4 @@
-// Snapshots below the accepted files on the Artifacts page of a project that is not code (1.2 step 6): each named set,
+// Snapshots below the work on the Artifacts page of a project that is not code (1.2 step 6): each named set,
 // newest first, with when it was made, how many files it holds and how many changed since against the files listed
 // now, What changed with the controller's own changes, Download to its zip, and New snapshot of every accepted file or
 // the chosen ones, with the controller's refusals shown in its dialog. A code project shows none.
@@ -7,7 +7,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { ProjectArtifact, Snapshot, SnapshotFile } from './api';
+import type { ProjectArtifact, Snapshot, SnapshotFile, WorkFile } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, type Controller } from './test-controller';
@@ -24,6 +24,23 @@ const file = (taskId: string, path: string, hash = `hash-${taskId}`): ProjectArt
   path,
   hash,
   acceptedAt: '2026-10-20T12:00:00Z',
+});
+// An accepted file as the work lists it, made once.
+const asWork = (accepted: ProjectArtifact): WorkFile => ({
+  ...accepted,
+  workerId: accepted.workerId ?? null,
+  libraryEntryId: null,
+  versions: [
+    {
+      n: 1,
+      attemptId: accepted.attemptId,
+      workerId: accepted.workerId ?? null,
+      hash: accepted.hash,
+      at: accepted.acceptedAt,
+      current: true,
+      why: null,
+    },
+  ],
 });
 const held = (taskId: string, path: string, hash = `hash-${taskId}`): SnapshotFile => ({
   taskId,
@@ -60,6 +77,11 @@ beforeEach(() => {
     file('T-2', 'notes/plan.md'),
     file('T-1', 'copy/launch.md', 'hash-T-1-new'),
   ];
+  controller.projectWork = {
+    work: controller.projectArtifacts.map(asWork),
+    pictures: [],
+    records: { count: 0, kinds: {} },
+  };
   // Oldest first, as the controller answers, each with what changed since the one before it.
   controller.snapshots = [
     snapshot(
@@ -139,8 +161,8 @@ test('the snapshots list newest first, each with its name, time, file count and 
   expect(first.getByText(when('2026-10-20T15:00:00Z')).getAttribute('datetime')).toBe('2026-10-20T15:00:00Z');
   expect(first.getByText('2 files')).toBeTruthy();
   expect(first.getByText('4 changed since (2 added, 1 changed, 1 gone)')).toBeTruthy();
-  // The section sits below the accepted files.
-  const files = screen.getByRole('list', { name: 'Accepted files' }),
+  // The section sits below the work.
+  const files = screen.getByRole('list', { name: 'The work' }),
     section = screen.getByRole('region', { name: 'Snapshots' });
   expect(files.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
@@ -342,7 +364,7 @@ test('a project with no snapshots says what they are for, and without accepted f
 test('a code project keeps Releases and shows no snapshots', async () => {
   controller.shell.organizationConfiguration = { taskKinds: ['studio-development:breakdown'] };
   open();
-  await screen.findByRole('list', { name: 'Accepted files' });
+  await screen.findByRole('list', { name: 'The work' });
   expect(screen.queryByRole('region', { name: 'Snapshots' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'New snapshot' })).toBeNull();
   expect(controller.reads()).not.toContain(snapshotsUrl);

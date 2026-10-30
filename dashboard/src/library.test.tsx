@@ -1,13 +1,13 @@
 // The library at the top of the Artifacts page (1.2 step 6): a card for each current entry with what it is for, its
 // newest revision and size, how many attempts read it and where it came from, the total against what every attempt
-// receives in full, Upload a file, and Add to the library on each accepted file, with the controller's refusals shown
-// in the dialog.
+// receives in full, Upload a file, and Add to the library on each file of the work the library does not hold, with the
+// controller's refusals shown in the dialog.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { LibraryEntry, LibraryReader, LibraryRevision, LibrarySource, ProjectArtifact } from './api';
+import type { LibraryEntry, LibraryReader, LibraryRevision, LibrarySource, ProjectArtifact, WorkFile } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, type Controller } from './test-controller';
@@ -52,6 +52,23 @@ const file = (taskId: string, path: string): ProjectArtifact => ({
   hash: `hash-${taskId}`,
   acceptedAt: '2026-10-20T12:00:00Z',
 });
+// The same file as the work lists it, made once.
+const made = (taskId: string, path: string, libraryEntryId: string | null = null): WorkFile => ({
+  ...file(taskId, path),
+  workerId: 'W-1',
+  libraryEntryId,
+  versions: [
+    {
+      n: 1,
+      attemptId: `attempt-${taskId}`,
+      workerId: 'W-1',
+      hash: `hash-${taskId}`,
+      at: '2026-10-20T12:00:00Z',
+      current: true,
+      why: null,
+    },
+  ],
+});
 const accepted: LibrarySource = {
   type: 'accepted',
   taskId: 'T-1',
@@ -63,6 +80,12 @@ const accepted: LibrarySource = {
 beforeEach(() => {
   controller = fakeController();
   controller.projectArtifacts = [file('T-1', 'copy/launch.md'), file('T-2', 'notes/plan.md')];
+  // The work lists both; the library holds the launch copy.
+  controller.projectWork = {
+    work: [made('T-1', 'copy/launch.md', 'lib-copy'), made('T-2', 'notes/plan.md')],
+    pictures: [],
+    records: { count: 0, kinds: {} },
+  };
   // One uploaded entry at its second revision, one from accepted work, and one removed, which later work no longer
   // follows.
   controller.library = {
@@ -142,8 +165,8 @@ test('each current entry shows as a card with its purpose, revision, size, reade
   expect(reads).toContain('/api/projects/project-x/library/lib-brand/readers');
   expect(reads).toContain('/api/projects/project-x/library/lib-copy/readers');
   expect(reads).not.toContain('/api/projects/project-x/library/lib-old/readers');
-  // The library sits above the accepted files.
-  const files = screen.getByRole('list', { name: 'Accepted files' });
+  // The library sits above the work.
+  const files = screen.getByRole('list', { name: 'The work' });
   expect(list.compareDocumentPosition(files) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
@@ -225,7 +248,7 @@ test('Upload a file posts the file in base64 with its name and purpose, and the 
   expect(await card('Tokens').findByText('Not read yet')).toBeTruthy();
 });
 
-test('Add to the library on an accepted file posts where it came from, and the new card names its story', async () => {
+test('Add to the library on a file of the work posts where it came from, and the new card names its story', async () => {
   const user = userEvent.setup();
   controller.command = adds(
     entry('lib-plan', 'Plan', 'The plan every story follows.', [
@@ -239,9 +262,10 @@ test('Add to the library on an accepted file posts where it came from, and the n
     ]),
   );
   open();
-  const files = await screen.findByRole('list', { name: 'Accepted files' });
-  // Every listed file offers it.
-  expect(within(files).getAllByRole('button', { name: /^Add .+ to the library$/ })).toHaveLength(2);
+  const files = await screen.findByRole('list', { name: 'The work' });
+  // Every file the library does not hold offers it; the one it holds says so.
+  expect(within(files).getAllByRole('button', { name: /^Add .+ to the library$/ })).toHaveLength(1);
+  expect(within(files).getAllByText('In the library')).toHaveLength(1);
   await user.click(within(files).getByRole('button', { name: 'Add notes/plan.md to the library' }));
   const add = await dialog('Add to the library');
   expect(add.getByText('notes/plan.md')).toBeTruthy();
@@ -274,11 +298,11 @@ test("the controller's refusal shows in the dialog, which stays open with what w
     );
   };
   open();
-  const files = await screen.findByRole('list', { name: 'Accepted files' });
-  await user.click(within(files).getByRole('button', { name: 'Add copy/launch.md to the library' }));
+  const files = await screen.findByRole('list', { name: 'The work' });
+  await user.click(within(files).getByRole('button', { name: 'Add notes/plan.md to the library' }));
   const add = await dialog('Add to the library');
   await user.type(add.getByLabelText('Name'), 'Brand guide');
-  await user.type(add.getByLabelText('What it is for'), 'The words the launch page says.');
+  await user.type(add.getByLabelText('What it is for'), 'The plan every story follows.');
   await user.click(add.getByRole('button', { name: 'Add to the library' }));
   expect((await add.findByRole('alert')).textContent).toBe(
     'The library already has an entry named Brand guide; add a new revision to it instead.',
@@ -288,13 +312,21 @@ test("the controller's refusal shows in the dialog, which stays open with what w
   expect(posted()).toHaveLength(1);
   // Changing the name clears the refusal, and the renamed entry is added.
   controller.command = adds(
-    entry('lib-launch', 'Launch words', 'The words the launch page says.', [revision(1, 512, accepted)]),
+    entry('lib-plan', 'Plan', 'The plan every story follows.', [
+      revision(1, 40, {
+        type: 'accepted',
+        taskId: 'T-2',
+        attemptId: 'attempt-T-2',
+        path: 'notes/plan.md',
+        hash: 'hash-T-2',
+      }),
+    ]),
   );
   await user.clear(add.getByLabelText('Name'));
   expect(add.queryByRole('alert')).toBeNull();
-  await user.type(add.getByLabelText('Name'), 'Launch words');
+  await user.type(add.getByLabelText('Name'), 'Plan');
   await user.click(add.getByRole('button', { name: 'Add to the library' }));
-  expect(await screen.findByRole('button', { name: 'Launch words' })).toBeTruthy();
+  expect(await screen.findByRole('button', { name: 'Plan' })).toBeTruthy();
   expect(posted()).toHaveLength(2);
 });
 
