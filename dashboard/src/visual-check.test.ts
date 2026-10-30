@@ -1,7 +1,7 @@
 // The visual check as the dashboard reads it (visual-check.ts): matching each image to the review's note, the images
-// by page, and the words for widths, browsers and steps, from the records alone; and the settings view, a story's
-// pages, the director's saves and the recorded files as they reach the stand-in controller. Model-free; no page shows
-// any of it yet.
+// by page and a page's in rows by width, and the words for widths, browsers and steps, from the records alone; and the
+// settings view, a story's pages, the director's saves and the recorded files as they reach the stand-in controller.
+// Model-free; no page shows any of it yet.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
@@ -22,6 +22,7 @@ import {
   browserName,
   imageKey,
   imagesByPage,
+  imagesByWidth,
   noBrowser,
   notesByImage,
   pagesTabShown,
@@ -121,6 +122,43 @@ test("the images are grouped by page in the record's page order, each page's by 
     { name: 'Board', path: '/', images: [] },
     { name: 'Settings', path: '/settings', images: [] },
   ]);
+});
+
+test("a page's images make one row per width, desktops before phones, each row's themes in the record's order", () => {
+  const shuffled = [
+    image(4, board, 390, 'dark'),
+    image(1, board, 1440, 'light'),
+    image(3, board, 390, 'light'),
+    image(2, board, 1440, 'dark'),
+  ];
+  const rows = (fields: Partial<VisualCheckRecord>) =>
+    imagesByWidth(imagesByPage(record({ images: shuffled, ...fields }))[0]!.images).map(row => [
+      row.width,
+      row.images.map(item => item.theme),
+    ]);
+  expect(rows({})).toEqual([
+    [1440, ['light', 'dark']],
+    [390, ['light', 'dark']],
+  ]);
+  // A record listing the phone width first, and dark first, still has the desktop row first, each row dark first.
+  expect(rows({ widths: [390, 1440], themes: ['dark', 'light'] })).toEqual([
+    [1440, ['dark', 'light']],
+    [390, ['dark', 'light']],
+  ]);
+  // Each row holds the page's own images, and each width is its own row: two desktops keep the record's order, the
+  // phones follow in theirs, and 600 px is a desktop.
+  const widths = [599, 1920, 390, 600],
+    many = widths.map((width, at) => image(at + 1, board, width, 'light')),
+    grouped = imagesByWidth(imagesByPage(record({ widths, themes: ['light'], images: many }))[0]!.images);
+  expect(grouped.map(row => row.width)).toEqual([1920, 600, 599, 390]);
+  expect(grouped.map(row => row.images)).toEqual([[many[1]], [many[3]], [many[0]], [many[2]]]);
+  expect(grouped[0]!.images[0]).toBe(many[1]);
+  // A width taken in one theme only, as a check that stopped part way, is still a row.
+  expect(imagesByWidth([image(1, board, 1440, 'light'), image(3, board, 390, 'light')])).toEqual([
+    { width: 1440, images: [image(1, board, 1440, 'light')] },
+    { width: 390, images: [image(3, board, 390, 'light')] },
+  ]);
+  expect(imagesByWidth([])).toEqual([]);
 });
 
 test('a width is a desktop from 600 px and a phone under it, with its pixels', () => {

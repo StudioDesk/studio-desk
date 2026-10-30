@@ -160,6 +160,22 @@ export function imagesByPage(record: VisualCheckRecord): PageImages[] {
 // A width as the capture takes it: a phone under 600 px, as the capture's own mobile rule, otherwise a desktop.
 export const widthLabel = (width: number) => `${width < 600 ? 'Phone' : 'Desktop'} · ${width} px`;
 
+// One page's images (in imagesByPage's order) in rows, one per width: the desktop widths, then the phone ones by
+// widthLabel's rule, each group in the order the images come in, and in each row its themes as they come in.
+export interface WidthImages {
+  width: number;
+  images: VisualImage[];
+}
+export function imagesByWidth(images: readonly VisualImage[]): WidthImages[] {
+  const rows = new Map<number, WidthImages>();
+  for (const image of images) {
+    if (!rows.has(image.width)) rows.set(image.width, { width: image.width, images: [] });
+    rows.get(image.width)!.images.push(image);
+  }
+  const all = [...rows.values()];
+  return [...all.filter(row => row.width >= 600), ...all.filter(row => row.width < 600)];
+}
+
 // The browser the check drives, by its program: Edge, Chrome and Chromium as they install, otherwise the file's name.
 export function browserName(path: string) {
   const file = path.split(/[\\/]/).pop() ?? path,

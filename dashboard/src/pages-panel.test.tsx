@@ -473,6 +473,61 @@ test("the tab shows the candidate's images by page, each with its width, theme, 
   expect(await screen.findByRole('dialog', { name: 'visual/01-board-1440-light.png' })).toBeTruthy();
 });
 
+test("a page's images sit in one row per width, desktop then phone, light then dark, each a thumbnail with its own note", async () => {
+  const user = userEvent.setup();
+  checkOn();
+  pages([board]);
+  const four = [
+    shot(1, board, 390, 'light', { trimmed: true }),
+    shot(2, board, 390, 'dark'),
+    shot(3, board, 1440, 'light'),
+    shot(4, board, 1440, 'dark', { problem: 'nothing to click shows "Menu"' }),
+  ];
+  // The record lists the phone width first; the desktop row still comes first.
+  recorded({ pages: [board], widths: [390, 1440], images: four });
+  // The phone's dark image was not saved among the candidate's files.
+  controller.attempts[0]!.artifacts = controller.attempts[0]!.artifacts!.filter(file => file.path !== four[1]!.path);
+  reviewed([
+    { image: '../inputs/T-1/5-03-board-1440-light.png', note: 'The board shows three columns.', verdict: 'match' },
+    { image: '../inputs/T-1/6-04-board-1440-dark.png', note: 'The menu is missing.', verdict: 'problem' },
+    { image: '../inputs/T-1/7-01-board-390-light.png', note: 'The columns stack on a phone.', verdict: 'match' },
+  ]);
+  open();
+  const captured = await capturedIn(user),
+    region = await captured.findByRole('region', { name: 'Board' }),
+    rows = within(region).getAllByRole('list');
+  expect(rows.map(row => row.getAttribute('aria-label'))).toEqual(['Desktop · 1440 px', 'Phone · 390 px']);
+  const desktop = within(region).getByRole('list', { name: 'Desktop · 1440 px' }),
+    phone = within(region).getByRole('list', { name: 'Phone · 390 px' });
+  expect(figureNames(desktop)).toEqual(['Desktop · 1440 px · Light', 'Desktop · 1440 px · Dark']);
+  expect(figureNames(phone)).toEqual(['Phone · 390 px · Light', 'Phone · 390 px · Dark']);
+  // Every picture's frame is a thumbnail, the one with no image saved too.
+  const frames = [...region.querySelectorAll('.sd-picture__frame')];
+  expect(frames).toHaveLength(4);
+  expect(frames.every(frame => frame.classList.contains('sd-picture__frame--thumb'))).toBe(true);
+  // Each picture keeps its own caption: the review's note and mark, and what went wrong as it was taken.
+  const figure = (row: HTMLElement, name: string) => within(within(row).getByRole('figure', { name }));
+  const wideLight = figure(desktop, 'Desktop · 1440 px · Light'),
+    wideDark = figure(desktop, 'Desktop · 1440 px · Dark'),
+    phoneLight = figure(phone, 'Phone · 390 px · Light'),
+    phoneDark = figure(phone, 'Phone · 390 px · Dark');
+  expect(await wideLight.findByText('The board shows three columns.')).toBeTruthy();
+  expect(wideLight.getByText('Match')).toBeTruthy();
+  expect(wideLight.queryByText(/^Taken with a problem/)).toBeNull();
+  expect(wideDark.getByText('The menu is missing.')).toBeTruthy();
+  expect(wideDark.getByText('Problem')).toBeTruthy();
+  expect(wideDark.getByText('Taken with a problem: nothing to click shows "Menu".')).toBeTruthy();
+  expect(phoneLight.getByText('The columns stack on a phone.')).toBeTruthy();
+  expect(phoneLight.getByText(/^Trimmed: /)).toBeTruthy();
+  expect(wideLight.queryByText(/^Trimmed: /)).toBeNull();
+  expect(phoneDark.getByText('The review has not described this image yet.')).toBeTruthy();
+  expect(phoneDark.getByText('No image was saved.')).toBeTruthy();
+  expect(phoneDark.queryByRole('button')).toBeNull();
+  // A thumbnail still opens its picture over the page.
+  await user.click(phoneLight.getByRole('button', { name: 'View Board, Phone · 390 px · Light' }));
+  expect(await screen.findByRole('dialog', { name: 'visual/01-board-390-light.png' })).toBeTruthy();
+});
+
 test('The pages tile reads the images taken with the browser, beside Tried by you, and opens the Pages tab', async () => {
   const user = userEvent.setup();
   checkOn();

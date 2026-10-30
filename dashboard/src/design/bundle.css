@@ -4117,6 +4117,23 @@ button.sd-row[aria-pressed='true'] {
 .sd-picture__frame--still svg {
   max-height: 60vh;
 }
+/* A visual check's thumbnail: every capture the same 220px tall, filled edge to edge with the top of its page, however
+   long the page; its one grid cell is the whole frame, so the picture's own height never sizes it */
+.sd-picture__frame--thumb {
+  height: 220px;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  grid-template: 100% / 100%;
+}
+.sd-picture__frame--thumb img {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  object-fit: cover;
+  object-position: top;
+}
 .sd-picture__expand {
   position: absolute;
   right: var(--space-10);

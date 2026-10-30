@@ -25,6 +25,7 @@ import { useToast } from './toast';
 import {
   browserName,
   imagesByPage,
+  imagesByWidth,
   noBrowser,
   notesByImage,
   stepText,
@@ -498,7 +499,17 @@ function Captured({ projectId, task, studio }: { projectId: string; task: Task; 
   );
 }
 
-// One page's images under its name and path.
+// Every width's row takes the same columns, so a page's thumbnails line up from one row to the next.
+const shotRow = {
+  listStyle: 'none',
+  margin: 0,
+  padding: 0,
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+  gap: 'var(--space-14)',
+} as const;
+
+// One page's images under its name and path, in one row per width named by it, desktops before phones.
 function PageShots({
   projectId,
   attempt,
@@ -531,20 +542,21 @@ function PageShots({
         <span className="sd-file sd-file--path">{path}</span>
       </h3>
       {images.length ? (
-        <ul
-          style={{
-            listStyle: 'none',
-            margin: 0,
-            padding: 0,
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-            gap: 'var(--space-14)',
-          }}
-        >
-          {images.map(image => (
-            <Shot key={image.path} projectId={projectId} attempt={attempt} image={image} note={notes.get(image.path)} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)' }}>
+          {imagesByWidth(images).map(row => (
+            <ul key={row.width} aria-label={widthLabel(row.width)} style={shotRow}>
+              {row.images.map(image => (
+                <Shot
+                  key={image.path}
+                  projectId={projectId}
+                  attempt={attempt}
+                  image={image}
+                  note={notes.get(image.path)}
+                />
+              ))}
+            </ul>
           ))}
-        </ul>
+        </div>
       ) : (
         <span className="sd-meta">No image of this page was taken.</span>
       )}
@@ -552,8 +564,9 @@ function PageShots({
   );
 }
 
-// An image by its width and theme, opening over the page, with the review's note and mark, and what went wrong as it
-// was taken: a step that found nothing or a page that did not open, or a page too long to keep whole.
+// An image by its width and theme, a thumbnail of the top of its page at the same height as every other, opening over
+// the page, with the review's note and mark, and what went wrong as it was taken: a step that found nothing or a page
+// that did not open, or a page too long to keep whole.
 function Shot({
   projectId,
   attempt,
@@ -574,7 +587,7 @@ function Shot({
         {item ? (
           <button
             type="button"
-            className="sd-picture__frame"
+            className="sd-picture__frame sd-picture__frame--thumb"
             aria-label={`View ${image.page}, ${label}`}
             onClick={() => setOpen(true)}
           >
@@ -584,7 +597,7 @@ function Shot({
             </span>
           </button>
         ) : (
-          <div className="sd-picture__frame sd-picture__frame--still">
+          <div className="sd-picture__frame sd-picture__frame--still sd-picture__frame--thumb">
             <span className="sd-picture__pending">No image was saved.</span>
           </div>
         )}
