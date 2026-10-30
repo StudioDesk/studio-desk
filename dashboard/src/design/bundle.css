@@ -4301,6 +4301,59 @@ button.sd-row[aria-pressed='true'] {
   }
 }
 
+/* New updates (follow.tsx): a pill with the count of updates waiting below a reader who scrolled up in live
+   content. For a box that scrolls itself it floats at the bottom of the box, in a .sd-follow wrapper around it; for
+   the page it floats near the bottom of the window, above the tab bar on a phone */
+.sd-follow {
+  position: relative;
+}
+.sd-newupdates {
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-12);
+  z-index: 30;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-8) 0 var(--space-12);
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--brand-press);
+  background: var(--brand);
+  color: #fff;
+  box-shadow: var(--shadow-card);
+  font: 600 14px/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+.sd-newupdates:hover {
+  background: var(--brand-press);
+}
+.sd-newupdates:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+.sd-newupdates__count {
+  min-width: 22px;
+  padding: 3px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.22);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.sd-newupdates--page {
+  position: fixed;
+  bottom: var(--space-20);
+}
+@media (max-width: 860px) {
+  .sd-newupdates--page {
+    bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
 /* Create a project: one wide dialog. The folder comes first, typed, pasted or browsed, with Inspect and Browse
    beside it (under it on a phone); the folder browser opens under the field; what the controller found is a list of
    evidence rows; the settings it proposes sit in an edit panel; then the name, goal and direction */
