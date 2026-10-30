@@ -497,6 +497,40 @@ test('the house rules switch a gate between you and the studio, and save against
   });
 });
 
+test('under the house rules table, a quiet line names each kind the project does not take yet, linking to the Agents page', async () => {
+  open('/p/project-x/settings');
+  const rules = within(await screen.findByRole('region', { name: 'House rules' })),
+    table = rules.getByRole('region', { name: 'House rules table' });
+  // The table still has only the kinds the project takes.
+  expect(
+    within(table)
+      .getAllByRole('rowheader')
+      .map(row => row.textContent),
+  ).toEqual(['Build a story', 'General work']);
+  const layout = rules.getByRole('link', { name: 'Layout' }),
+    line = table.nextElementSibling!;
+  expect(layout.getAttribute('href')).toBe('/p/project-x/agents');
+  expect(line.contains(layout)).toBe(true);
+  expect(line.className).toBe('sd-meta');
+  expect(line.textContent).toBe('Not taken yet: Layout. Give one to an agent on its Agents page to turn it on.');
+});
+
+test('when the project takes every kind, the house rules name none as not taken yet', async () => {
+  controller.shell = {
+    ...controller.shell,
+    taskKinds: { ...controller.shell.taskKinds, layout: { label: 'Layout', available: true } },
+  };
+  open('/p/project-x/settings');
+  const rules = within(await screen.findByRole('region', { name: 'House rules' }));
+  expect(
+    within(rules.getByRole('region', { name: 'House rules table' }))
+      .getAllByRole('rowheader')
+      .map(row => row.textContent),
+  ).toEqual(['Build a story', 'General work', 'Layout']);
+  expect(rules.queryByText(/Not taken yet/)).toBeNull();
+  expect(rules.queryByRole('link', { name: 'Layout' })).toBeNull();
+});
+
 test('instructions load only on their page, a draft keeps its text through a refresh, and Publish saves it first', async () => {
   const user = userEvent.setup();
   controller.instructions.teams.engineering = {

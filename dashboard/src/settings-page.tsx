@@ -5,7 +5,7 @@
 // change applies to work that starts after it.
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { useEffect, useId, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useId, useState, type ReactNode } from 'react';
 import {
   send,
   type KindModes,
@@ -765,12 +765,16 @@ interface RulesDraft {
 }
 
 // House rules (the autonomy policy): who decides at each gate, task type by task type. A tap switches a cell in a
-// draft; Save records a new revision, which applies to results from then on.
+// draft; Save records a new revision, which applies to results from then on. Under the table, a quiet line names
+// the task types the project does not take yet, each linking to the Agents page, where giving one to an agent
+// turns it on.
 function HouseRules({ projectId, state }: { projectId: string; state: StudioState }) {
   const policy = state.autonomy?.policy ?? {},
-    available = Object.entries(state.taskKinds)
-      .filter(([, definition]) => definition.available)
-      .sort(([a], [b]) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99)),
+    kinds = Object.entries(state.taskKinds).sort(
+      ([a], [b]) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99),
+    ),
+    available = kinds.filter(([, definition]) => definition.available),
+    notTaken = kinds.filter(([, definition]) => definition.available !== true),
     from = (): RulesDraft => ({
       enabled: !!policy.enabled,
       retries: policy.retries ?? 0,
@@ -926,6 +930,20 @@ function HouseRules({ projectId, state }: { projectId: string; state: StudioStat
           </tbody>
         </table>
       </div>
+      {notTaken.length > 0 && (
+        <p className="sd-meta" style={{ margin: 0 }}>
+          Not taken yet:{' '}
+          {notTaken.map(([kind, definition], index) => (
+            <Fragment key={kind}>
+              {index > 0 && ', '}
+              <Link to="/p/$projectId/agents" params={{ projectId }}>
+                {workNames[kind] ?? definition.label ?? kind}
+              </Link>
+            </Fragment>
+          ))}
+          . Give one to an agent on its Agents page to turn it on.
+        </p>
+      )}
       <div className="sd-meta" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 22px' }}>
         <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-8)' }}>
           <b style={{ color: 'var(--ink)' }}>When something fails:</b>
