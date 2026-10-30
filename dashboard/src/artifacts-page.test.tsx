@@ -137,10 +137,12 @@ test('the page names what it holds, keeps the library above the work and lists e
   const copy = row('copy/launch-page.md');
   expect(copy.getByText('Document')).toBeTruthy();
   expect(copy.getByText(`Ada · “Make the launch page” · ${when('2026-10-23T12:00:00Z')}`)).toBeTruthy();
-  // The library holds it, and it was made three times.
+  // The library holds it, and it was made three times, which opens its versions (work-versions.test.tsx).
   expect(copy.getByText('In the library')).toBeTruthy();
   expect(copy.queryByRole('button', { name: /to the library/ })).toBeNull();
-  expect(copy.getByText('3 versions')).toBeTruthy();
+  const versions = copy.getByRole('button', { name: '3 versions of copy/launch-page.md' });
+  expect(versions.textContent).toBe('3 versions');
+  expect(versions.getAttribute('aria-expanded')).toBe('false');
   // Open opens the newest version in a new tab.
   const link = copy.getByRole('link', { name: 'Open copy/launch-page.md' });
   expect(link.textContent).toBe('Open');
@@ -159,6 +161,7 @@ test('the page names what it holds, keeps the library above the work and lists e
   );
   expect(hero.queryByText('In the library')).toBeNull();
   expect(hero.queryByText(/versions?$/)).toBeNull();
+  expect(hero.queryByRole('button', { name: /versions? of/ })).toBeNull();
   // A finished idea the records name, by an agent only the company's directory holds.
   expect(
     row('pricing-table.csv').getByText(`Sam · “Plan the pricing table” · ${when('2026-10-21T12:00:00Z')}`),

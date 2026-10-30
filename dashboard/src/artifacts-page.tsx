@@ -1,12 +1,13 @@
 // Artifacts (1.2 step 6): what the project's work made and the director accepted, one row per file, read from the
 // work (GET …/work). The files agents proposed for the library and the library itself, with Upload a file, sit at the
 // top. The work follows: each file's kind, readable name, agent, idea or step and latest date, In the library or Add to
-// the library, Open on its newest version and how many versions it has, with the All, Documents and Images filter and
-// the idea and agent choices. Then how many records of how the work was done there are, with Open the ideas. A project
-// that is not code names sets of the accepted files as snapshots below; a code project has Releases instead.
+// the library, Open on its newest version and how many versions it has, which opens each version (work-versions.tsx),
+// with the All, Documents and Images filter and the idea and agent choices. Then how many records of how the work was
+// done there are, with Open the ideas. A project that is not code names sets of the accepted files as snapshots below;
+// a code project has Releases instead.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { artifactsUrl, getJSON, workUrl, type ProjectArtifact, type ProjectWork } from './api';
 import {
   acceptedFile,
@@ -20,6 +21,7 @@ import {
   workRows,
   workShows,
   type WorkFilter,
+  type WorkRow,
 } from './artifacts';
 import { artifactUrl } from './files';
 import { isCodeProject } from './frame';
@@ -29,6 +31,7 @@ import { LibraryProposals } from './library-proposals';
 import { useStudio } from './records';
 import { Snapshots } from './snapshots';
 import { useLiveStream, useStreamReady } from './stream-context';
+import { WorkVersions } from './work-versions';
 
 const choiceWords = { idea: 'Idea', agent: 'Agent' } as const;
 
@@ -169,53 +172,14 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
             </div>
             {shown.length ? (
               <div className="sd-card sd-cardlist" role="list" aria-label="The work">
-                {shown.map(row => {
-                  const versions = versionCount(row.file);
-                  return (
-                    <div key={row.key} role="listitem" className="sd-cardlist__row sd-cardlist__row--line">
-                      <span
-                        className="sd-cardlist__label"
-                        style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', padding: '10px 0' }}
-                      >
-                        <span
-                          style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-8)' }}
-                        >
-                          <span className="sd-chip sd-chip--inline sd-chip--outline">{row.kind}</span>
-                          <span title={row.file.path} style={{ overflowWrap: 'anywhere' }}>
-                            {row.name}
-                          </span>
-                        </span>
-                        <span className="sd-meta" style={{ fontWeight: 400 }}>
-                          {workLine(row)}
-                        </span>
-                      </span>
-                      <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-6)' }}>
-                        {versions && <span className="sd-meta">{versions}</span>}
-                        {row.file.libraryEntryId ? (
-                          <span className="sd-chip sd-chip--inline sd-chip--ok">In the library</span>
-                        ) : (
-                          <button
-                            type="button"
-                            className="sd-btn sd-btn--sm"
-                            aria-label={`Add ${row.file.path} to the library`}
-                            onClick={() => setAdding(acceptedFile(row.file))}
-                          >
-                            Add to the library
-                          </button>
-                        )}
-                        <a
-                          className="sd-btn sd-btn--sm"
-                          href={artifactUrl(projectId, newestAttemptId(row.file), row.file.path)}
-                          target="_blank"
-                          rel="noreferrer"
-                          aria-label={`Open ${row.file.path}`}
-                        >
-                          Open
-                        </a>
-                      </span>
-                    </div>
-                  );
-                })}
+                {shown.map(row => (
+                  <WorkItem
+                    key={row.key}
+                    projectId={projectId}
+                    row={row}
+                    onAdd={() => setAdding(acceptedFile(row.file))}
+                  />
+                ))}
               </div>
             ) : (
               <div className="sd-card sd-empty">No file matches these filters.</div>
@@ -234,5 +198,71 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
       {snapshots}
       <AddToLibrary projectId={projectId} file={adding} onClose={() => setAdding(null)} />
     </>
+  );
+}
+
+// One file of the work: its kind, readable name and line, then how many versions it has when it was made more than
+// once, which opens them under the row, In the library or Add to the library, and Open on its newest version.
+function WorkItem({ projectId, row, onAdd }: { projectId: string; row: WorkRow; onAdd: () => void }) {
+  const [open, setOpen] = useState(false),
+    versionsId = useId(),
+    versions = versionCount(row.file);
+  return (
+    <div role="listitem" className="sd-cardlist__row sd-cardlist__row--line" style={{ flexWrap: 'wrap' }}>
+      <span
+        className="sd-cardlist__label"
+        style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', padding: '10px 0' }}
+      >
+        <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-8)' }}>
+          <span className="sd-chip sd-chip--inline sd-chip--outline">{row.kind}</span>
+          <span title={row.file.path} style={{ overflowWrap: 'anywhere' }}>
+            {row.name}
+          </span>
+        </span>
+        <span className="sd-meta" style={{ fontWeight: 400 }}>
+          {workLine(row)}
+        </span>
+      </span>
+      <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-6)' }}>
+        {versions && (
+          <button
+            type="button"
+            className="sd-btn sd-btn--sm sd-btn--ghost"
+            aria-expanded={open}
+            aria-controls={versionsId}
+            aria-label={`${versions} of ${row.file.path}`}
+            onClick={() => setOpen(!open)}
+          >
+            {versions}
+          </button>
+        )}
+        {row.file.libraryEntryId ? (
+          <span className="sd-chip sd-chip--inline sd-chip--ok">In the library</span>
+        ) : (
+          <button
+            type="button"
+            className="sd-btn sd-btn--sm"
+            aria-label={`Add ${row.file.path} to the library`}
+            onClick={onAdd}
+          >
+            Add to the library
+          </button>
+        )}
+        <a
+          className="sd-btn sd-btn--sm"
+          href={artifactUrl(projectId, newestAttemptId(row.file), row.file.path)}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`Open ${row.file.path}`}
+        >
+          Open
+        </a>
+      </span>
+      {versions && (
+        <div id={versionsId} hidden={!open} style={{ flexBasis: '100%' }}>
+          {open && <WorkVersions projectId={projectId} file={row.file} />}
+        </div>
+      )}
+    </div>
   );
 }
