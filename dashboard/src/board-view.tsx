@@ -2,6 +2,7 @@
 // where its task stands and why, with a search, filters for open work, your calls, working and waiting, a filter by
 // person, lanes by idea or by person, and a list. Dragging a Planned card to Ready approves it. Open work comes from
 // the live set; done work a page at a time, its newest three shown until the rest is asked for, kept in the address.
+// An idea still planning has one card of its own, which opens the idea.
 import { notifyManager, useMutation } from '@tanstack/react-query';
 import { Link, useNavigate, useRouter } from '@tanstack/react-router';
 import { useMemo, useState, type DragEvent, type ReactNode } from 'react';
@@ -11,9 +12,11 @@ import {
   cardOf,
   finishedIdeas,
   found,
+  ideaCards,
   laneDetails,
   matches,
   newest,
+  unshown,
   type Card,
   type ColumnId,
   type Filter,
@@ -77,23 +80,28 @@ export function Board({
   // The React compiler memoizes this; the live set and every loaded page of settled work.
   const board = withSettled(state, [...(done.data?.pages ?? []), ...(closedPages.data?.pages ?? [])]),
     stories = liveSummary(state).stories,
-    cards = board.tasks
-      .map(task => cardOf(task, board, stories, closed, now))
-      .filter((card): card is Card => !!card)
-      .sort(newest(board));
+    cards = [
+      ...board.tasks.map(task => cardOf(task, board, stories, closed, now)).filter((card): card is Card => !!card),
+      ...ideaCards(board, stories, now),
+    ].sort(newest(board));
   const approve = useMutation({
     mutationFn: (taskId: string) => send(`/api/tasks/${encodeURIComponent(taskId)}/approve-work`, { projectId }),
     // With the records the answer carried (records.ts), which the page hears on the query client's next notice.
     onSuccess: () => notifyManager.schedule(() => toast('Approved. It joins Ready.')),
     onError: failure => toast(failure.message),
   });
-  // What the live set holds that is settled is counted with the settled lists, not twice.
+  // What the live set holds that is settled is counted with the settled lists, not twice; an idea's checks and plan
+  // the board has read, which have no cards, not at all.
   const liveSettled = new Set(state.tasks.filter(task => settled(task, state.attempts)).map(task => task.id)),
-    doneTotal =
+    hidden = unshown(board, stories),
+    doneTotal = Math.max(
+      0,
       (counts.data?.accepted ?? 0) +
-      state.tasks.filter(task => task.status === 'done' && !task.closed && !liveSettled.has(task.id)).length,
+        state.tasks.filter(task => task.status === 'done' && !task.closed && !liveSettled.has(task.id)).length -
+        hidden.accepted,
+    ),
     cancelled = state.tasks.filter(task => task.status === 'cancelled' && !task.closed),
-    closedCount = (counts.data?.closed ?? 0) + cancelled.length;
+    closedCount = Math.max(0, (counts.data?.closed ?? 0) + cancelled.length - hidden.closed);
   // Each source story's release (1.1): its own once moved, otherwise its idea's. Only a project with releases has them.
   const releases = useReleases(
       projectId,
@@ -482,14 +490,8 @@ function BoardCard({
             : '',
     draggable =
       card.column === 'planned' && (card.task.approval as { status?: string } | undefined)?.status === 'pending';
-  return (
-    <Link
-      className={`sd-kcard${variant}`}
-      to="/p/$projectId/tasks/$taskId"
-      params={{ projectId, taskId: card.task.id }}
-      draggable={draggable || undefined}
-      onDragStart={draggable ? event => event.dataTransfer.setData(taskType, card.task.id) : undefined}
-    >
+  const parts = (
+    <>
       <span className="sd-kcard__top">
         <span className="sd-eyebrow">{card.eyebrow}</span>
         {card.chip && !card.waits && card.column !== 'ready' ? (
@@ -501,7 +503,12 @@ function BoardCard({
           <span className="sd-mono sd-meta sd-kcard__id">{card.task.id}</span>
         )}
       </span>
-      <span className="sd-kcard__title">{card.task.title}</span>
+      <span className="sd-kcard__title">{card.title ?? card.task.title}</span>
+      {card.text && (
+        <span className="sd-meta" style={{ fontSize: '12.5px' }}>
+          {card.text}
+        </span>
+      )}
       {release && (
         <ReleaseChip
           projectId={projectId}
@@ -591,11 +598,27 @@ function BoardCard({
           {card.foot}
         </span>
       )}
+    </>
+  );
+  // An idea's card opens the idea, and is not dragged: approving its step is no part of it.
+  return card.runId ? (
+    <Link className={`sd-kcard${variant}`} to="/p/$projectId/runs/$runId" params={{ projectId, runId: card.runId }}>
+      {parts}
+    </Link>
+  ) : (
+    <Link
+      className={`sd-kcard${variant}`}
+      to="/p/$projectId/tasks/$taskId"
+      params={{ projectId, taskId: card.task.id }}
+      draggable={draggable || undefined}
+      onDragStart={draggable ? event => event.dataTransfer.setData(taskType, card.task.id) : undefined}
+    >
+      {parts}
     </Link>
   );
 }
 
-// The same work as a list, one row a task.
+// The same work as a list, one row a task, or an idea still planning.
 function BoardList({ projectId, cards, looks }: { projectId: string; cards: Card[]; looks: Map<string, AgentLook> }) {
   if (!cards.length) return <p className="sd-meta">Nothing matches.</p>;
   // Open work first, in the columns' order, each column's newest first.
@@ -625,9 +648,15 @@ function BoardList({ projectId, cards, looks }: { projectId: string; cards: Card
                   <span className="sd-eyebrow" style={{ display: 'block', fontSize: '11px' }}>
                     {card.eyebrow}
                   </span>
-                  <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: card.task.id }}>
-                    {card.task.title}
-                  </Link>
+                  {card.runId ? (
+                    <Link to="/p/$projectId/runs/$runId" params={{ projectId, runId: card.runId }}>
+                      {card.title ?? card.task.title}
+                    </Link>
+                  ) : (
+                    <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: card.task.id }}>
+                      {card.task.title}
+                    </Link>
+                  )}
                 </td>
                 <td>
                   <span

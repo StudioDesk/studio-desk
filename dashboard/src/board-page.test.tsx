@@ -1,5 +1,6 @@
 // The board (the canvas's Board, v1.0 item 23): open work from the live set in five columns, stopped work where it
 // stopped, done work's newest first and the rest a page at a time with the choice in the address, and its filters.
+// An idea still planning has one card of its own, in place of its checks' and plan's.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -521,4 +522,305 @@ test("a refused approval leaves the card in Planned and both counts as they were
   expect(controller.requests.filter(request => request.method === 'POST').map(request => request.url)).toEqual([
     '/api/tasks/T-plan/approve-work',
   ]);
+});
+
+// A code idea as the controller sends it while it plans: its checks, by Avery, then its plan, by Mara, in its run's
+// graph (src/core/graph.mjs runView), with the stories the plan proposed once it has.
+const ideaWords = 'Show where an idea’s planning stands on its own card';
+const planningIdea = (checks: Partial<Task>, plan: Partial<Task>, stories: Task[] = []) => {
+  const member = (id: string, extra: Partial<Task>) =>
+      taskFixture(id, {
+        workflowReference: { runId: 'run-1', key: id, id: 'workflow-1', name: 'Fixture flow' },
+        ...extra,
+      }),
+    steps = [
+      member('T-checks', { title: 'Check the source', kind: 'studio-development:checks', workerId: 'W-3', ...checks }),
+      member('T-breakdown', {
+        title: 'Plan the idea into stories',
+        kind: 'studio-development:breakdown',
+        workerId: 'W-4',
+        dependencies: ['T-checks'],
+        ...plan,
+      }),
+    ];
+  controller.shell.workers = [
+    { id: 'W-1', displayName: 'Eli', team: 'Engineering' },
+    { id: 'W-3', displayName: 'Avery', team: 'Engineering' },
+    { id: 'W-4', displayName: 'Mara', team: 'Engineering' },
+  ];
+  controller.tasks = [...steps, ...stories];
+  controller.runs = [
+    {
+      id: 'run-1',
+      createdAt: '2026-10-21T12:00:00Z',
+      brief: `${ideaWords}\nIts second line.`,
+      workflow: { id: 'workflow-1', name: 'Fixture flow', version: 3 },
+      revisions: [{ revision: 1, at: '2026-10-21T12:00:00Z', reason: 'created' }],
+      nodes: [...steps, ...stories].map(task => ({
+        taskId: task.id,
+        key: task.id,
+        kind: task.kind,
+        title: task.title,
+        workerId: task.workerId,
+        dependencies: task.dependencies ?? [],
+        revision: 1,
+      })),
+      archive: { archived: false },
+    },
+  ];
+  controller.settled = { accepted: [], closed: [] };
+  return steps;
+};
+const stepTitles = ['Check the source', 'Plan the idea into stories'];
+// Every card the board shows, in its columns or under any lanes, and every row of its list.
+const shownCards = () =>
+  [...document.querySelectorAll<HTMLElement>('a.sd-kcard, tbody tr')].map(item => ({
+    eyebrow: item.querySelector('.sd-eyebrow')?.textContent,
+    title: item.querySelector('.sd-kcard__title')?.textContent ?? item.querySelector('a')?.textContent,
+    href: item.getAttribute('href') ?? item.querySelector('a')?.getAttribute('href'),
+  }));
+// No card or row for the idea's checks or plan, and exactly one for the idea, which opens it.
+const onlyTheIdea = () => {
+  const shown = shownCards();
+  expect(shown.filter(item => stepTitles.includes(item.title ?? ''))).toEqual([]);
+  expect(shown.filter(item => ['Checks', 'Plan'].includes(item.eyebrow ?? ''))).toEqual([]);
+  expect(shown.filter(item => item.title === ideaWords)).toEqual([
+    { eyebrow: 'Idea', title: ideaWords, href: '/p/project-x/runs/run-1' },
+  ]);
+  for (const title of stepTitles) expect(document.querySelector('.sd-boardpage')!.textContent).not.toContain(title);
+};
+const ideaCard = async () => (await column('Planned')).getByRole('link', { name: new RegExp(ideaWords) });
+
+test('an idea whose checks run and whose plan is queued has one card of its own reading Planning, under any lanes and in the list', async () => {
+  const user = userEvent.setup();
+  planningIdea({ status: 'running', lastAttemptId: 'attempt-checks' }, { queued: true });
+  controller.tasks.push(taskFixture('T-alone', { title: 'Work in no idea', status: 'ready', queued: true }));
+  controller.attempts = [
+    {
+      id: 'attempt-checks',
+      taskId: 'T-checks',
+      status: 'running',
+      workerId: 'W-3',
+      startedAt: new Date(Date.now() - 6 * 60000).toISOString(),
+    },
+  ];
+  open();
+  await waitFor(async () => expect(titles(await column('Planned'))).toEqual([ideaWords]));
+  const card = await ideaCard();
+  expect(card.getAttribute('href')).toBe('/p/project-x/runs/run-1');
+  expect(card.querySelector('.sd-eyebrow')?.textContent).toBe('Idea');
+  expect(card.querySelector('.sd-kcard__top .sd-chip')?.textContent).toBe('Planning');
+  expect(card.classList.contains('sd-kcard--live')).toBe(true);
+  // The planner's name and the minutes since the checks started; no question or stop under the title.
+  expect(card.querySelector('.sd-kcard__foot')?.textContent).toBe('Mara · 6 min');
+  expect(card.querySelector('.sd-kcard__title + .sd-meta')).toBeNull();
+  // It opens the idea; it is not dragged.
+  expect(card.getAttribute('draggable')).toBeNull();
+  expect(titles(await column('In progress'))).toEqual([]);
+  expect(titles(await column('Ready'))).toEqual(['Work in no idea']);
+  onlyTheIdea();
+  // The step runs, so Working counts it.
+  await user.click(screen.getByRole('button', { name: /^Working 1/ }));
+  expect(titles(await column('Planned'))).toEqual([ideaWords]);
+  await user.click(screen.getByRole('button', { name: /^Open work 2/ }));
+  // A search finds it by the idea's words, its second line too, and not by its steps' titles.
+  const search = screen.getByRole('searchbox', { name: 'Find a task' });
+  await user.type(search, 'second line');
+  await waitFor(async () => expect(titles(await column('Ready'))).toEqual([]));
+  expect(titles(await column('Planned'))).toEqual([ideaWords]);
+  await user.clear(search);
+  await user.type(search, 'Check the source');
+  await waitFor(async () => expect(titles(await column('Planned'))).toEqual([]));
+  await user.clear(search);
+  // Lanes by idea put it in its idea's lane, with nothing of its checks or plan.
+  await user.click(screen.getByRole('button', { name: 'Lanes by idea' }));
+  const lane = await screen.findByRole('region', { name: ideaWords });
+  expect(titles(within(lane))).toEqual([ideaWords]);
+  expect(titles(within(screen.getByRole('region', { name: 'Not part of an idea' })))).toEqual(['Work in no idea']);
+  onlyTheIdea();
+  // Lanes by person put it with the planner.
+  await user.click(screen.getByRole('button', { name: 'Lanes by person' }));
+  const mara = await waitFor(() => {
+    const head = [...document.querySelectorAll<HTMLElement>('.sd-lanehead')].find(item =>
+      item.textContent?.includes('Mara'),
+    );
+    expect(head).toBeTruthy();
+    return head!.closest('section')!;
+  });
+  expect(titles(within(mara))).toEqual([ideaWords]);
+  onlyTheIdea();
+  // The list's row opens the idea too, and reads Planning.
+  await user.click(screen.getByRole('button', { name: 'List' }));
+  const row = (await screen.findByRole('link', { name: ideaWords })).closest('tr')!;
+  expect(within(row).getByRole('link', { name: ideaWords }).getAttribute('href')).toBe('/p/project-x/runs/run-1');
+  expect(row.querySelector('.sd-chip')?.textContent).toBe('Planning');
+  expect(within(row).getByText('Mara · 6 min')).toBeTruthy();
+  onlyTheIdea();
+});
+
+test("a plan blocked on an unanswered question: the idea card reads Waiting for you, the question's first line, and is a call", async () => {
+  const user = userEvent.setup();
+  planningIdea(
+    { status: 'done', lastAttemptId: 'attempt-checks', acceptedAttemptId: 'attempt-checks' },
+    { status: 'blocked', lastAttemptId: 'attempt-ask' },
+  );
+  controller.attempts = [
+    {
+      id: 'attempt-checks',
+      taskId: 'T-checks',
+      status: 'accepted',
+      workerId: 'W-3',
+      startedAt: '2026-10-21T12:01:00Z',
+      finishedAt: '2026-10-21T12:03:00Z',
+    },
+    {
+      id: 'attempt-ask',
+      taskId: 'T-breakdown',
+      status: 'blocked',
+      workerId: 'W-4',
+      startedAt: '2026-10-21T12:04:00Z',
+      finishedAt: '2026-10-21T12:05:00Z',
+      question: {
+        ask: 'Split the page part into two stories?\nTwo pages share it, so either way works.',
+        why: 'Two pages share it.',
+        options: [{ label: 'One story' }, { label: 'Two stories', detail: 'one a page' }],
+        recommended: 1,
+        choice: 'inside-story',
+        topics: [],
+      },
+    },
+  ];
+  open();
+  await user.click(await screen.findByRole('button', { name: /^Your calls 1/ }));
+  await waitFor(async () => expect(titles(await column('Planned'))).toEqual([ideaWords]));
+  const card = await ideaCard();
+  expect(card.querySelector('.sd-kcard__top .sd-chip')?.textContent).toBe('Waiting for you');
+  expect(card.classList.contains('sd-kcard--you')).toBe(true);
+  expect(card.querySelector('.sd-kcard__title + .sd-meta')?.textContent).toBe('Split the page part into two stories?');
+  expect(card.textContent).not.toContain('Two pages share it');
+  expect(card.querySelector('.sd-kcard__foot')?.textContent).toBe('Mara');
+  expect(card.getAttribute('href')).toBe('/p/project-x/runs/run-1');
+  onlyTheIdea();
+  // Its accepted checks have no Done card.
+  await user.click(screen.getByRole('button', { name: /^Open work/ }));
+  expect(titles(await column('Done'))).toEqual([]);
+  onlyTheIdea();
+});
+
+test("a failed plan: the idea card reads Stopped with the plan step's reason and what to do, not '<name> stopped'", async () => {
+  planningIdea(
+    { status: 'done', lastAttemptId: 'attempt-checks', acceptedAttemptId: 'attempt-checks' },
+    { status: 'failed', lastAttemptId: 'attempt-plan' },
+  );
+  controller.attempts = [
+    {
+      id: 'attempt-checks',
+      taskId: 'T-checks',
+      status: 'accepted',
+      workerId: 'W-3',
+      startedAt: '2026-10-21T12:01:00Z',
+      finishedAt: '2026-10-21T12:03:00Z',
+    },
+    {
+      id: 'attempt-plan',
+      taskId: 'T-breakdown',
+      status: 'failed',
+      workerId: 'W-4',
+      startedAt: '2026-10-21T12:04:00Z',
+      finishedAt: '2026-10-21T12:07:00Z',
+      error: 'The plan was not valid.',
+    },
+  ];
+  open();
+  await waitFor(async () => expect(titles(await column('Planned'))).toEqual([ideaWords]));
+  const card = await ideaCard(),
+    chip = card.querySelector('.sd-kcard__top .sd-chip')!;
+  expect(chip.textContent).toBe('Stopped');
+  expect(chip.classList.contains('sd-chip--bad')).toBe(true);
+  expect(card.querySelector('.sd-kcard__title + .sd-meta')?.textContent).toBe(
+    'The attempt stopped without a validated completed result. Inspect the validation detail, correct the output or scope, then use Start assignment.',
+  );
+  expect(card.textContent).not.toMatch(/Mara stopped|\w stopped:/);
+  expect(titles(await column('In progress'))).toEqual([]);
+  onlyTheIdea();
+});
+
+test('once the plan is official the idea has no card of its own, its stories stand in Planned, and its steps none in Done', async () => {
+  const story = (id: string, title: string) =>
+      taskFixture(id, {
+        title,
+        kind: 'studio-development:change',
+        status: 'backlog',
+        approval: { status: 'pending' },
+        proposalReference: { taskId: 'T-breakdown', attemptId: 'attempt-plan', key: id },
+      }),
+    steps = planningIdea(
+      { status: 'done', lastAttemptId: 'attempt-checks', acceptedAttemptId: 'attempt-checks' },
+      {
+        status: 'done',
+        lastAttemptId: 'attempt-plan',
+        acceptedAttemptId: 'attempt-plan',
+        proposedTaskIds: ['T-s1', 'T-s2'],
+      },
+      [story('T-s1', 'Story one'), story('T-s2', 'Story two')],
+    ),
+    attempts = [
+      {
+        id: 'attempt-checks',
+        taskId: 'T-checks',
+        status: 'accepted',
+        workerId: 'W-3',
+        startedAt: '2026-10-21T12:01:00Z',
+        finishedAt: '2026-10-21T12:03:00Z',
+      },
+      {
+        id: 'attempt-plan',
+        taskId: 'T-breakdown',
+        status: 'accepted',
+        workerId: 'W-4',
+        startedAt: '2026-10-21T12:04:00Z',
+        finishedAt: '2026-10-21T12:07:00Z',
+      },
+    ];
+  controller.attempts = attempts;
+  // A page of settled work holds the accepted checks and plan too, and names their idea, with other accepted work.
+  controller.settled = {
+    accepted: [
+      {
+        tasks: [...steps, taskFixture('T-other', { title: 'Other accepted work', status: 'done' })],
+        attempts,
+        next: null,
+        ideas: [
+          {
+            id: 'run-1',
+            brief: ideaWords,
+            createdAt: '2026-10-21T12:00:00Z',
+            taskIds: ['T-checks', 'T-breakdown', 'T-s1', 'T-s2'],
+          },
+        ],
+      },
+    ],
+    closed: [],
+  };
+  open();
+  const planned = await column('Planned');
+  await waitFor(() => expect(titles(planned)).toEqual(['Story one', 'Story two']));
+  const links = planned.getAllByRole('link');
+  expect(links.map(link => link.querySelector('.sd-eyebrow')?.textContent)).toEqual(['Story 1', 'Story 2']);
+  expect(links.map(link => link.getAttribute('href'))).toEqual(['/p/project-x/tasks/T-s1', '/p/project-x/tasks/T-s2']);
+  // Done shows the other work alone and counts only it, of the three the controller counts, so it has no more to ask
+  // for.
+  const done = await column('Done'),
+    doneHead = screen.getByRole('region', { name: 'Done' }).querySelector('.sd-colhead__count')!;
+  await waitFor(() => expect(titles(done)).toEqual(['Other accepted work']));
+  await waitFor(() => expect(controller.reads()).toContain('/api/projects/project-x/settled?kind=accepted&limit=0'));
+  await waitFor(() => expect(doneHead.textContent).toBe('1'));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(doneHead.textContent).toBe('1');
+  expect(screen.queryByRole('button', { name: /more done$/ })).toBeNull();
+  const shown = shownCards();
+  expect(shown.filter(item => item.eyebrow === 'Idea' || item.href === '/p/project-x/runs/run-1')).toEqual([]);
+  expect(
+    shown.filter(item => stepTitles.includes(item.title ?? '') || ['Checks', 'Plan'].includes(item.eyebrow ?? '')),
+  ).toEqual([]);
 });

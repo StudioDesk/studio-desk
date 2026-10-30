@@ -1,8 +1,10 @@
 // Where a task stands on the board and what its card says: stopped work stays where it stopped, a story past its
-// build is in review until it is integrated, and closed work shows only when asked for.
+// build is in review until it is integrated, and closed work shows only when asked for. An idea's checks and plan have
+// no cards: the idea's own card tells its planning until the plan is official.
 import { expect, test } from 'vitest';
 import type { AttemptSummary, Task } from './api';
-import { cardOf, columnOf, laneDetails, matches } from './board';
+import { cardOf, columnOf, found, ideaCards, laneDetails, matches, unshown } from './board';
+import { standing } from './story';
 import { explain, type RunStory, type StudioState } from './studio-runs';
 
 const stage = (fields: object) => ({ version: 'source-story-stages-v1', history: [], ...fields });
@@ -21,7 +23,11 @@ const state = (tasks: Task[], attempts: AttemptSummary[] = []) =>
   ({
     project: { id: 'project-x', name: 'Project X' },
     projects: [],
-    workers: [{ id: 'W-1', displayName: 'Eli' }],
+    workers: [
+      { id: 'W-1', displayName: 'Eli' },
+      { id: 'W-3', displayName: 'Avery' },
+      { id: 'W-4', displayName: 'Mara' },
+    ],
     taskKinds: {},
     workflows: [],
     tasks,
@@ -238,8 +244,205 @@ test("an idea lane's details count its stories done, running and waiting for the
   const proposed = work({ id: 'T-4', status: 'backlog', approval: { status: 'pending' } }),
     two = [proposed, ready];
   expect(laneDetails(idea(two), state(two))).toBe('0 of 2 done · waits for you');
-  // An idea whose checks run before any story is planned has no stories to count.
+  // An idea whose checks run before any story is planned has no stories to count; its idea card tells its planning.
   const checks = story({ id: 'T-c', kind: 'studio-development:checks', status: 'running', lastAttemptId: 'a-c' }),
-    checking: AttemptSummary = { ...attempts[1]!, id: 'a-c', taskId: 'T-c' };
-  expect(laneDetails(idea([checks]), state([checks], [checking]))).toBe('');
+    plan = story({ id: 'T-p', kind: 'studio-development:breakdown', dependencies: ['T-c'], queued: true }),
+    checking: AttemptSummary = { ...attempts[1]!, id: 'a-c', taskId: 'T-c' },
+    planning = [checks, plan];
+  expect(laneDetails(idea(planning), state(planning, [checking]))).toBe('');
+  expect(ideaCards(state(planning, [checking]), [idea(planning)]).map(card => card.chip?.label)).toEqual(['Planning']);
+});
+
+// A code idea's checks, by Avery, and its plan after them, by Mara (planning.ts reads them), in an idea of two lines.
+const at = (minute: number) => `2026-10-22T19:${String(minute).padStart(2, '0')}:00Z`;
+const checks = (fields: Partial<Task> = {}) =>
+  story({ id: 'T-checks', title: 'Check the source', kind: 'studio-development:checks', workerId: 'W-3', ...fields });
+const plan = (fields: Partial<Task> = {}) =>
+  story({
+    id: 'T-plan',
+    title: 'Plan the idea',
+    kind: 'studio-development:breakdown',
+    workerId: 'W-4',
+    dependencies: ['T-checks'],
+    ...fields,
+  });
+const step = (id: string, taskId: string, start: number, fields: Partial<AttemptSummary> = {}): AttemptSummary => ({
+  id,
+  taskId,
+  status: 'running',
+  workerId: taskId === 'T-checks' ? 'W-3' : 'W-4',
+  startedAt: at(start),
+  ...fields,
+});
+const checked = step('a-checks', 'T-checks', 1, { status: 'accepted', finishedAt: at(3) }),
+  passed = checks({ status: 'done', lastAttemptId: 'a-checks', acceptedAttemptId: 'a-checks' });
+const planning = (tasks: Task[]) => ({ ...idea(tasks), brief: 'Show planning on the idea card\nIts second line.' });
+
+test("an idea's checks and plan have no cards of their own in any column; a plan in no idea keeps its own", () => {
+  const steps = [
+    checks({ status: 'running', lastAttemptId: 'a-checks' }),
+    checks({ status: 'failed', lastAttemptId: 'a-checks' }),
+    passed,
+    plan({ queued: true }),
+    plan({ status: 'backlog', approval: { status: 'pending' } }),
+    plan({ status: 'review', lastAttemptId: 'a-plan' }),
+    plan({ status: 'done', lastAttemptId: 'a-plan', acceptedAttemptId: 'a-plan' }),
+    plan({ kind: 'general:plan', status: 'done', lastAttemptId: 'a-plan', acceptedAttemptId: 'a-plan' }),
+  ];
+  // Each would stand in a column of its own, Done among them.
+  expect(new Set(steps.map(task => columnOf(task)))).toEqual(
+    new Set(['progress', 'done', 'ready', 'planned', 'review']),
+  );
+  for (const task of steps) {
+    const records = state([task], [step('a-checks', 'T-checks', 1), step('a-plan', 'T-plan', 4)]);
+    // A live idea's.
+    expect(cardOf(task, records, [planning([task])])).toBeNull();
+    // A finished idea's, which the records name, and with closed work shown.
+    const named = {
+      ...records,
+      ideas: [{ id: 'run-old', brief: 'An older idea', createdAt: at(0), taskIds: [task.id] }],
+    } as StudioState;
+    expect(cardOf(task, named, [])).toBeNull();
+    expect(cardOf(task, named, [], true)).toBeNull();
+  }
+  // A plan in no idea is the director's own work: it keeps its card.
+  const loose = plan({ status: 'done', lastAttemptId: 'a-plan', acceptedAttemptId: 'a-plan' });
+  expect(cardOf(loose, state([loose]), [])).toMatchObject({ column: 'done', eyebrow: 'Plan' });
+});
+
+test('while the checks run and the plan is queued, one idea card in Planned reads Planning with the planner and minutes', () => {
+  const tasks = [checks({ status: 'running', lastAttemptId: 'a-checks' }), plan({ queued: true })],
+    records = state(tasks, [step('a-checks', 'T-checks', 1)]),
+    stories = [planning(tasks)],
+    now = Date.parse(at(7));
+  expect(tasks.map(task => cardOf(task, records, stories, false, now))).toEqual([null, null]);
+  const cards = ideaCards(records, stories, now);
+  expect(cards).toHaveLength(1);
+  const card = cards[0]!;
+  // Built on the step the idea is on, the checks, with the planner's name and the minutes since the checks started.
+  expect(card).toMatchObject({
+    task: tasks[0],
+    column: 'planned',
+    eyebrow: 'Idea',
+    runId: 'run-1',
+    title: 'Show planning on the idea card',
+    chip: { tone: 'live', label: 'Planning' },
+    idea: { runId: 'run-1', text: '“Show planning on the idea card…”', index: 0 },
+    workerId: 'W-4',
+    foot: 'Mara · 6 min',
+    calls: false,
+  });
+  expect(card.text).toBeUndefined();
+  expect(matches(card, 'working')).toBe(true);
+  expect(matches(card, 'calls')).toBe(false);
+  expect(matches(card, 'waiting')).toBe(false);
+  // A search finds it by the idea's words, its second line too, and not by its step's title.
+  expect(found(card, 'planning on the idea')).toBe(true);
+  expect(found(card, 'second line')).toBe(true);
+  expect(found(card, 'Check the source')).toBe(false);
+  // Nothing started yet: Planning in grey, with no minutes, and waiting.
+  const queued = [checks({ queued: true }), plan({ queued: true })],
+    waiting = ideaCards(state(queued), [planning(queued)], now)[0]!;
+  expect(waiting).toMatchObject({ chip: { tone: 'wait', label: 'Planning' }, foot: 'Mara' });
+  expect(matches(waiting, 'waiting')).toBe(true);
+  expect(matches(waiting, 'working')).toBe(false);
+});
+
+test("a plan's unanswered question makes the idea card read Waiting for you, its first line, and a call", () => {
+  const question = {
+      ask: 'Split the page part into two stories?\nTwo pages share it, so either way works.',
+      why: 'Two pages share it.',
+      options: [{ label: 'One story' }, { label: 'Two stories', detail: 'one a page' }],
+      recommended: 1,
+      choice: 'inside-story',
+      topics: [] as string[],
+    },
+    asked = step('a-ask', 'T-plan', 4, { status: 'blocked', finishedAt: at(5), question }),
+    tasks = [passed, plan({ status: 'blocked', lastAttemptId: 'a-ask' })],
+    records = state(tasks, [checked, asked]);
+  const card = ideaCards(records, [planning(tasks)], Date.parse(at(10)))[0]!;
+  expect(card).toMatchObject({
+    task: tasks[1],
+    column: 'planned',
+    eyebrow: 'Idea',
+    chip: { tone: 'you', label: 'Waiting for you' },
+    text: 'Split the page part into two stories?',
+    workerId: 'W-4',
+    foot: 'Mara',
+    calls: true,
+  });
+  expect(matches(card, 'calls')).toBe(true);
+  expect(matches(card, 'waiting')).toBe(false);
+});
+
+test("a failed plan makes the idea card read Stopped with the step's reason and what to do, never '<name> stopped'", () => {
+  const failed = step('a-plan', 'T-plan', 4, { status: 'failed', finishedAt: at(7), error: 'The plan was not valid.' }),
+    tasks = [passed, plan({ status: 'failed', lastAttemptId: 'a-plan' })],
+    records = state(tasks, [checked, failed]),
+    stand = standing(tasks[1]!, records);
+  const card = ideaCards(records, [planning(tasks)], Date.parse(at(10)))[0]!;
+  expect(card).toMatchObject({
+    task: tasks[1],
+    chip: { tone: 'bad', label: 'Stopped' },
+    text: `${stand.title} ${stand.detail}`,
+    foot: 'Mara',
+    calls: false,
+  });
+  expect(card.text).toContain('then use Start assignment.');
+  expect(card.text).not.toMatch(/Mara stopped|\w stopped:/);
+  expect(matches(card, 'waiting')).toBe(true);
+});
+
+test('once the plan is official the idea has no idea card, its stories stand in Planned, and its steps have no Done cards', () => {
+  const accepted = step('a-plan', 'T-plan', 4, { status: 'accepted', finishedAt: at(7) }),
+    official = plan({
+      status: 'done',
+      lastAttemptId: 'a-plan',
+      acceptedAttemptId: 'a-plan',
+      proposedTaskIds: ['T-s1', 'T-s2'],
+    }),
+    proposed = ['T-s1', 'T-s2'].map(id =>
+      story({ id, title: `Story ${id}`, status: 'backlog', approval: { status: 'pending' } }),
+    ),
+    tasks = [passed, official, ...proposed],
+    records = state(tasks, [checked, accepted]);
+  expect(ideaCards(records, [planning(tasks)])).toEqual([]);
+  expect(cardOf(passed, records, [planning(tasks)])).toBeNull();
+  expect(cardOf(official, records, [planning(tasks)])).toBeNull();
+  expect(proposed.map(task => cardOf(task, records, [planning(tasks)]))).toMatchObject([
+    { column: 'planned', eyebrow: 'Story 1', chip: { tone: 'you', label: 'Approve?' } },
+    { column: 'planned', eyebrow: 'Story 2', chip: { tone: 'you', label: 'Approve?' } },
+  ]);
+  // Another live idea, still planning, has its card, with its own place among the live ideas for its hue.
+  const others = [
+      checks({ id: 'T-c2', status: 'running', lastAttemptId: 'a-c2' }),
+      plan({ id: 'T-p2', dependencies: ['T-c2'], queued: true }),
+    ],
+    other = { ...idea(others), id: 'run-2', brief: 'Another idea' },
+    all = state([...tasks, ...others], [checked, accepted, step('a-c2', 'T-c2', 2)]);
+  expect(ideaCards(all, [planning(tasks), other])).toMatchObject([
+    { runId: 'run-2', title: 'Another idea', idea: { runId: 'run-2', text: '“Another idea”', index: 1 } },
+  ]);
+});
+
+test("Done counts none of the checks and plans the board has read of an idea's, accepted or closed", () => {
+  const official = plan({ status: 'done', lastAttemptId: 'a-plan', acceptedAttemptId: 'a-plan' }),
+    shut = [plan({ id: 'T-old', status: 'failed', closed: true }), plan({ id: 'T-no', status: 'denied' })],
+    gone = checks({ id: 'T-gone', status: 'cancelled' }),
+    // A finished idea's plan, which a page of settled work names.
+    older = plan({ id: 'T-older', status: 'done', lastAttemptId: 'a-old', acceptedAttemptId: 'a-old' }),
+    // Work the board draws: a story done, a plan in no idea, and a step still open.
+    drawn = [
+      story({ id: 'T-9', status: 'done' }),
+      plan({ id: 'T-loose', status: 'done' }),
+      plan({ id: 'T-next', queued: true }),
+    ],
+    live = [passed, official, ...shut, gone],
+    records = {
+      ...state([...live, older, ...drawn]),
+      ideas: [{ id: 'run-old', brief: 'An older idea', createdAt: at(0), taskIds: ['T-older'] }],
+    } as StudioState;
+  expect(unshown(records, [planning(live)])).toEqual({ accepted: 3, closed: 3 });
+  // Without the ideas, every one is drawn and counted.
+  expect(unshown(state([...live, older, ...drawn]), [])).toEqual({ accepted: 0, closed: 0 });
 });

@@ -1,13 +1,15 @@
 // The board's reading of the work (the canvas's Board, v1.0 item 23): which of five columns a task stands in, what
 // its card says, and the filters. A stopped or waiting task stays in the column where it stopped, with a chip that
-// says why. Nothing here sends anything.
+// says why. An idea's checks and plan have no cards of their own: until its plan is official, the idea's own card
+// tells its planning. Nothing here sends anything.
 import type { AttemptSummary, Task } from './api';
 import { decisionState, fileRequest, askedPaths } from './decisions';
 import type { AgentState } from './design/agent-kit.js';
 import { diffStatOf, openPhaseOf, testingPhases, took, totalsOf } from './evidence';
 import { agentState } from './faces';
-import { journeyStories } from './journey';
+import { checkKinds, journeyStories, planKinds } from './journey';
 import { workerName } from './names';
+import { planningOf } from './planning';
 import { isSourceStory, kindLabel, standing, storyPeople } from './story';
 import { active, type RunStory, type StudioState } from './studio-runs';
 import { placeIn, quoted } from './today';
@@ -78,6 +80,12 @@ export interface Card {
   column: ColumnId;
   // "Story 3", or the task type's short name.
   eyebrow: string;
+  // An idea's card (ideaCards): the idea it opens in place of a task, its own title in place of its step's, the
+  // line under the title, and the idea's whole words a search finds it by.
+  runId?: string;
+  title?: string;
+  text?: string;
+  words?: string;
   chip?: CardChip;
   // The chip that waits: "Waits for story 2".
   waits?: string;
@@ -118,7 +126,22 @@ export function finishedIdeas(state: StudioState, stories: RunStory[]) {
     .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
 }
 
-// Everything a card shows of its task.
+// An idea's checks or plan step: a live idea's, or one the records name.
+const planningStep = (task: Task, state: StudioState, stories: RunStory[]) =>
+  [...checkKinds, ...planKinds].includes(task.kind) &&
+  (!!placeIn(stories, task) || (state.ideas ?? []).some(idea => idea.taskIds.includes(task.id)));
+
+// The settled work the board knows of and draws no card for, an idea's checks and plan, so that Done counts only what
+// it can show: those accepted, and those closed, denied or cancelled. Those on pages not read yet it cannot know of.
+export function unshown(state: StudioState, stories: RunStory[]) {
+  const steps = state.tasks.filter(task => planningStep(task, state, stories));
+  return {
+    accepted: steps.filter(task => task.status === 'done' && !task.closed).length,
+    closed: steps.filter(task => task.closed || ['denied', 'cancelled'].includes(task.status)).length,
+  };
+}
+
+// Everything a card shows of its task. An idea's checks and plan have none, in any column.
 export function cardOf(
   task: Task,
   state: StudioState,
@@ -127,7 +150,7 @@ export function cardOf(
   now = Date.now(),
 ): Card | null {
   const column = columnOf(task, showClosed);
-  if (!column) return null;
+  if (!column || planningStep(task, state, stories)) return null;
   const place = placeIn(stories, task),
     stand = standing(task, state),
     decision = decisionState(task, state),
@@ -260,6 +283,41 @@ export function cardOf(
   return card;
 }
 
+// One card for each live idea whose plan is not official yet, telling its planning (planning.ts), in Planned where its
+// stories will land. It is built on the step the idea is on, so the filters, the sort and the person filter read it
+// as they would that step: your call while it waits for the director, working while the step runs, otherwise waiting.
+export function ideaCards(state: StudioState, stories: RunStory[], now = Date.now()): Card[] {
+  return stories.flatMap((run, index): Card[] => {
+    const planning = planningOf(run, state, now),
+      task = planning && state.tasks.find(item => item.id === planning.taskId);
+    if (!planning || !task) return [];
+    const words = (run.brief || run.title).trim(),
+      calls = planning.state === 'you';
+    return [
+      {
+        task,
+        column: 'planned',
+        eyebrow: 'Idea',
+        runId: run.id,
+        title: words.split('\n')[0]!,
+        ...(planning.text ? { text: planning.text } : {}),
+        words,
+        chip: {
+          tone: calls ? 'you' : planning.state === 'stopped' ? 'bad' : active(task) ? 'live' : 'wait',
+          label: planning.label,
+        },
+        idea: { runId: run.id, text: quoted(run.brief, 34), index },
+        workerId: planning.workerId,
+        face: agentState(state, planning.workerId, task),
+        foot: [workerName(state, planning.workerId), planning.minutes ? `${planning.minutes} min` : '']
+          .filter(Boolean)
+          .join(' · '),
+        calls,
+      },
+    ];
+  });
+}
+
 // A card's kind in a word, as the board draws it.
 const shortKinds: Record<string, string> = {
   'studio-development:change': 'Story',
@@ -283,11 +341,13 @@ export function matches(card: Card, filter: Filter) {
   return card.column !== 'done' && !card.calls && !active(card.task) && card.chip?.label !== 'Integrating';
 }
 
-// A search finds a task by its title, its ID or a file its story may change.
+// A search finds a task by its title, its ID or a file its story may change, and an idea's card by the idea's words.
 export function found(card: Card, search: string) {
   const text = search.trim().toLowerCase();
   if (!text) return true;
-  return [card.task.title, card.task.id, card.task.brief ?? ''].some(value => value.toLowerCase().includes(text));
+  return [card.title ?? card.task.title, card.task.id, card.words ?? card.task.brief ?? ''].some(value =>
+    value.toLowerCase().includes(text),
+  );
 }
 
 // An idea lane's quiet details, its stories counted as the Ideas list counts them: "1 of 3 done · 1 running · waits
