@@ -58,7 +58,7 @@ test('new Studio desk defaults add product-owner breakdown while configured proj
   assert.match(definition.executionNotice, /Edit the teams.*default owner/);
   assert.match(
     definition.executionNotice,
-    /wait for their prerequisites to be integrated.*up to two source stories on a line run at once/,
+    /wait for their prerequisites to be integrated.*as many source stories on a line build at once as the studio runs attempts/,
   );
   for (const provider of ['codex', 'claude']) {
     const worker = executionWorker({ provider: 'codex', model: '', enabled: true }, { execution: { provider } });

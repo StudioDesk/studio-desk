@@ -76,10 +76,11 @@ test('one dispatch pass measures the live source once until a story starts, stor
   const attempt = store.attempt(store.task(first).lastAttemptId);
   assert.equal(store.task(first).status, 'running');
   assert.deepEqual(attempt.sourceChange.allowedFiles, ['src/core/workflows.mjs']);
-  // The second and third stories wait for a slot; the second stays queued.
+  // The second and third stories wait for the first to finish building, in a studio of one attempt at once; the second
+  // stays queued.
   for (const id of [second, third]) {
     assert.equal(store.task(id).status, 'blocked');
-    assert.equal(store.task(id).reason, 'Waiting for a studio execution slot.');
+    assert.match(store.task(id).reason, /to finish building: one source story builds at once/);
   }
   assert.equal(store.task(second).queued, true);
   await waitFor(
@@ -95,7 +96,7 @@ test('one dispatch pass measures the live source once until a story starts, stor
   measured.count = 0;
   runner.dispatchQueued();
   assert.equal(measured.count, 0, 'A pass with no free slot measured nothing.');
-  assert.equal(store.task(third).reason, 'Waiting for a studio execution slot.');
+  assert.match(store.task(third).reason, /to finish building: one source story builds at once/);
   assert.deepEqual(startedAfter, [1], 'Nothing else started.');
   // Let the first story finish with nothing queued after it.
   runner.pipeline('remove', [second], 'project-legacy');

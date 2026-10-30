@@ -1599,7 +1599,7 @@ test('a tier set on a story applies to its edit; its independent review keeps th
   assert.equal(review.requestedTier, 'standard');
 });
 
-test('closing a story that will not be integrated keeps its records and lets the next story have the source', async t => {
+test('closing a story that will not be integrated keeps its records, and the next story starts as before', async t => {
   const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),
     store = c.app.store,
     registries = c.app.runner.registries,
@@ -1610,11 +1610,6 @@ test('closing a story that will not be integrated keeps its records and lets the
   for (const id of ids) approveWork(store, registries, store.task(id));
   c.app.runner.start(ids[0]);
   const { review } = await c.toReview(ids[0]);
-  // Two stories hold the line (1.1 step 3), so the next one waits for a place.
-  const other = await c.propose('other');
-  c.app.runner.start(other);
-  await c.toReview(other);
-  assert.equal(c.app.runner.queueStart(ids[1]).queued, true);
   // A recorded integration must be reconciled before the story can be closed.
   const recorded = store.attempt(review.id);
   recorded.sourceIntegration = { id: 'source-integration:' + review.id, state: 'needs-reconciliation' };
@@ -1641,7 +1636,8 @@ test('closing a story that will not be integrated keeps its records and lets the
     () => sourceIntegrationTarget(store, story, review.id, review.artifacts[0].hash),
     /exact accepted passing current candidate review/,
   );
-  c.app.runner.schedule();
+  // A story waiting for its review or merge holds no place on its line (October 29), so the next starts as it would.
+  c.app.runner.start(ids[1]);
   const second = await c.wait(ids[1]);
   assert.deepEqual(second.sourceChange.allowedFiles, ['src/core/projects.mjs']);
   // An integrated story is finished; closing it is refused.

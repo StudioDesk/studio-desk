@@ -497,8 +497,8 @@ export const studioDevelopmentPack = {
       requiresIsolation: true,
       requiredCapabilities: ['source-change'],
       // A story builds in its own worktree from its base commit, so it holds none of its project's source resources:
-      // up to two stories on a line build at once (storiesPerLine, validateInputs below), and one integrates while
-      // another builds. Integration, carries and releases still hold the source (October 29). The computer's turns
+      // as many stories on a line build at once as the studio runs attempts (storiesPerLine, validateInputs below),
+      // and one integrates while others build. Integration, carries and releases still hold the source (October 29). The computer's turns
       // pace the heavy steps: one full test suite and one visual check at a time (core/test-turn.mjs).
       requiredResources: [],
       // Every edited or created file a story lists, plus the controller's six evidence files, and the visual check's
@@ -551,12 +551,14 @@ export const studioDevelopmentPack = {
         },
       },
       validateInputs({ store, task, runtime, verifyAuth, quick }) {
-        // Two source stories at a time on each release line, each from its first edit until it is integrated.
-        const holders = sourceStoriesInFlight(store, task);
-        if (holders.length >= storiesPerLine) {
-          const line = storyLine(store, task);
+        // As many source stories build at once on each release line as the studio runs attempts, each while it is built.
+        const holders = sourceStoriesInFlight(store, task),
+          places = storiesPerLine(store);
+        if (holders.length >= places) {
+          const line = storyLine(store, task),
+            names = holders.map(holder => `${holder.id} (“${holder.title}”)`);
           throw new Error(
-            `Waiting for ${holders.map(holder => `${holder.id} (“${holder.title}”)`).join(' and ')} to be integrated: source stories${line === undefined ? '' : ` on ${line}`} run two at a time.`,
+            `Waiting for ${names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names.at(-1)}` : names[0]} to finish building: ${places === 1 ? 'one source story builds' : `${places} source stories build`}${line === undefined ? '' : ` on ${line}`} at once, as many as Attempts at the same time.`,
           );
         }
         // The scope is measured against the source with git; a story that cannot start yet is measured once it can.
@@ -733,7 +735,7 @@ export const studioDevelopmentPack = {
       exactProposals: true,
       autonomy: { recommended: { accept: 'auto' } },
       executionNotice:
-        'Uses the assigned employee’s subscription CLI. For an existing project, explicitly enable Product-owner breakdown, Source improvement and Candidate review in Edit the teams (Agents, then Teams), and select an enabled product owner as the breakdown default owner. Linked stories wait for their prerequisites to be integrated, and up to two source stories on a line run at once, each from its first edit until it is integrated. A story may build on files any integrated story changed; other drift needs fresh measured checks and a new breakdown.',
+        'Uses the assigned employee’s subscription CLI. For an existing project, explicitly enable Product-owner breakdown, Source improvement and Candidate review in Edit the teams (Agents, then Teams), and select an enabled product owner as the breakdown default owner. Linked stories wait for their prerequisites to be integrated, and as many source stories on a line build at once as the studio runs attempts, each holding its place only while it is built. A story may build on files any integrated story changed; other drift needs fresh measured checks and a new breakdown.',
       validateInputs({ store, task, runtime }) {
         breakdownSource(store, task);
         const worker = runtime.effectiveWorker(projectOrganization(store, recordProject(task)), task),

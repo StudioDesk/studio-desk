@@ -196,24 +196,29 @@ test('each line holds its own story, so a fix on an older release does not wait 
   c.taskId = feature;
   await c.start();
   await c.wait(feature);
-  // The feature holds main from its first edit until it is integrated; the release line is free.
+  // A story waiting for its review holds no place (October 29).
   assert.equal(sourceStoryInFlight(store, store.task(fix)), undefined);
   c.taskId = fix;
   await c.start();
   await c.wait(fix);
-  assert.deepEqual([store.task(feature).status, store.task(fix).status], ['review', 'review'], 'Both are in flight.');
-  // Two stories hold a line at once (1.1 step 3): the next fix starts too, and one more on that line waits.
-  assert.equal(sourceStoryInFlight(store, store.task(next)), undefined);
   c.taskId = next;
   await c.start();
   await c.wait(next);
   const last = await c.propose('last', { branch: 'release/1.0', files: ['src/core/projects.mjs'] });
+  for (const id of [feature, fix, next]) assert.equal(store.task(id).status, 'review');
+  assert.deepEqual(sourceStoriesInFlight(store, store.task(last)), []);
+  // While two are built on release/1.0 in a studio of two attempts at once, one more on that line waits for one of
+  // them, and main counts its own builds.
+  const org = store.organization();
+  org.maxParallel = 2;
+  store.setOrganization(org);
+  for (const id of [feature, fix, next]) store.putTask({ ...store.task(id), status: 'running' });
   assert.equal(sourceStoryInFlight(store, store.task(last))?.id, fix);
   assert.equal(
     c.app.runner.blockReason(store.task(last)),
-    `Waiting for ${fix} (“Improve fix”) and ${next} (“Improve next”) to be integrated: source stories on release/1.0 run two at a time.`,
+    `Waiting for ${fix} (“Improve fix”) or ${next} (“Improve next”) to finish building: 2 source stories build on release/1.0 at once, as many as Attempts at the same time.`,
   );
-  // A story whose checks recorded no line works on the newest one, where only the feature holds it.
+  // A story whose checks recorded no line works on the newest one, where only the feature is built.
   assert.deepEqual(
     sourceStoriesInFlight(store, store.task(seeded)).map(item => item.id),
     [feature],

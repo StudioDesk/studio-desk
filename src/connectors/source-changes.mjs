@@ -814,15 +814,15 @@ function integratedChanges(store, storyIds, seen = new Set(), files = new Map())
   }
   return files;
 }
-// A started story holds the live source from its first edit until it is integrated, so its
-// candidate stays buildable on the source it will be integrated into (MP-014 slice 4). It
-// lets go when it is denied, cancelled, failed, or its review sent it back without a retry.
-// A project with release lines (1.1 step 1) holds each line separately, so a fix on an older
-// release does not wait for a feature story on the newest line. Up to two stories hold a line at
-// once (1.1 step 3, MP-016 step (d)): the second edits while the first waits for review or
-// integration, and a conflict between them is merged onto the current source (mergeSourceStory).
-export const storiesPerLine = 2;
-// The other stories holding this story's line.
+// A story holds a place on its line only while its agent builds it, the candidate's own tests included: waiting for
+// its review, being reviewed, waiting to merge and merging hold none, and a story sent back holds one again when it is
+// built again (the director, October 29: "I do think stories should only hold their spot when it's neccessary"). A
+// line has as many places as the studio runs attempts at once (Attempts at the same time), so one setting says how
+// many build at once. A project with release lines (1.1 step 1) counts each line separately. Before October 29 a
+// story held one of two places from its first edit until it was integrated (1.1 step 3). Each candidate is retested
+// merged onto the current source before it lands, and a conflict is merged onto it (mergeSourceStory).
+export const storiesPerLine = store => Math.max(1, store.organization().maxParallel || 1);
+// The other stories building on this story's line.
 export function sourceStoriesInFlight(store, task) {
   const line = storyLine(store, task);
   return store.tasks().filter(other => {
@@ -835,15 +835,16 @@ export function sourceStoriesInFlight(store, task) {
       (line !== undefined && storyLine(store, other) !== line)
     )
       return false;
-    // A live edit holds the source, including a story from before stages.
-    if (['running', 'stopping', 'review'].includes(other.status)) return true;
-    return !!other.sourceStage?.candidate && other.sourceStage.current !== 'failed';
+    // Its agent builds it now, a story from before stages included.
+    return (
+      ['running', 'stopping'].includes(other.status) && (other.sourceStage?.phase ?? 'implementing') === 'implementing'
+    );
   });
 }
 // The first story this one waits for when its line is full, or undefined when it may start.
 export function sourceStoryInFlight(store, task) {
   const holders = sourceStoriesInFlight(store, task);
-  return holders.length >= storiesPerLine ? holders[0] : undefined;
+  return holders.length >= storiesPerLine(store) ? holders[0] : undefined;
 }
 // An accepted story that is not integrated may be closed without integrating it, which lets
 // go of the source for the next story; its candidate and review stay recorded. A recorded

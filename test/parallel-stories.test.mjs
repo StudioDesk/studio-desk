@@ -13,7 +13,7 @@ import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
 import { git, landedSince } from '../src/connectors/source-integration.mjs';
-import { mergeSourceStory, sourceStoryInFlight } from '../src/connectors/source-changes.mjs';
+import { mergeSourceStory, sourceStoriesInFlight, sourceStoryInFlight } from '../src/connectors/source-changes.mjs';
 import { autonomyPolicy, saveAutonomyPolicy } from '../src/core/autonomy.mjs';
 import { approveWork } from '../src/core/proposals.mjs';
 
@@ -66,12 +66,17 @@ test('two stories of one project build at the same time, each in its own worktre
   );
   const queued = runner.queueStart(third);
   assert.equal(queued.queued, true);
-  assert.match(queued.reason, /to be integrated: source stories run two at a time\.$/);
+  assert.match(
+    queued.reason,
+    /to finish building: 2 source stories build at once, as many as Attempts at the same time\.$/,
+  );
   fs.rmSync(hold);
   for (const id of ids) await c.toReview(id);
 });
 
-test('two stories hold a line at once from their first edit until each is integrated, and a third waits', async t => {
+// A story holds its place only while it is built (the director, October 29: "I do think stories should only hold their
+// spot when it's neccessary"): two that wait for their review or merge let a third start at once.
+test('a story holds its place on its line only while it builds, so stories waiting for review or merge let the next start', async t => {
   const c = await setup(t, 'pass', [target], {}, true),
     store = c.app.store,
     { ids } = await c.breakdown([
@@ -81,20 +86,14 @@ test('two stories hold a line at once from their first edit until each is integr
     third = await c.propose('third', { files: [target] });
   for (const id of ids) approveWork(store, c.app.runner.registries, store.task(id));
   c.app.runner.start(ids[0]);
-  const { review } = await c.toReview(ids[0]);
-  // The second story edits while the first waits for integration.
-  assert.equal(sourceStoryInFlight(store, store.task(ids[1])), undefined);
+  await c.toReview(ids[0]);
+  // The first waits for its review and merge, which hold no place.
+  assert.deepEqual(sourceStoriesInFlight(store, store.task(ids[1])), []);
   c.app.runner.start(ids[1]);
   await c.toReview(ids[1]);
+  assert.equal(sourceStoryInFlight(store, store.task(third)), undefined);
   const queued = c.app.runner.queueStart(third);
-  assert.equal(queued.queued, true);
-  assert.equal(
-    queued.reason,
-    `Waiting for ${ids[0]} (“Refine workflow fixture”) and ${ids[1]} (“Refine project fixture”) to be integrated: source stories run two at a time.`,
-  );
-  assert.equal(store.attempts(third).length, 0);
-  c.integrated(ids[0], review, target, '// Integrated\n');
-  c.app.runner.schedule();
+  assert.equal(queued.queued, undefined, queued.reason);
   const started = await c.wait(third);
   assert.deepEqual(started.sourceChange.allowedFiles, [target]);
 });
