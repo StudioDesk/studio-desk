@@ -4134,6 +4134,56 @@ button.sd-row[aria-pressed='true'] {
   object-fit: cover;
   object-position: top;
 }
+/* A visual check's picture over the page (picture-viewer.tsx): its dialog nearly as wide as the screen, the picture
+   as wide as it was taken or as the area allows, with no cap on its height, in an area that scrolls inside the dialog
+   however long its page is, and the review's note in a column beside it, under it on a narrow screen */
+.sd-dialog:has(.sd-shotview) {
+  width: min(1280px, calc(100vw - 2 * var(--space-16)));
+}
+.sd-shotview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: var(--space-16);
+  align-items: start;
+}
+.sd-shotview__picture {
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-lg);
+  border: 1.5px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-2);
+}
+.sd-shotview__picture img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+.sd-shotview__picture .sd-picture__pending {
+  display: block;
+  padding: var(--space-28);
+}
+.sd-shotview__note {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sd-shotview__steps {
+  align-items: center;
+}
+@media (max-width: 860px) {
+  .sd-shotview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sd-shotview__picture {
+    max-height: 60vh;
+  }
+}
 .sd-picture__expand {
   position: absolute;
   right: var(--space-10);

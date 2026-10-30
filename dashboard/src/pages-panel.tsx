@@ -3,22 +3,15 @@
 // planned with the story or changed by the director, and while they may still change, Add a page and Edit. The
 // controller checks and saves the pages (src/connectors/story-pages.mjs) for the next check; only the director's Save
 // or Remove this page sends anything. Below them, what the check of the story's candidate captured, from its recorded
-// visual-check.json, with the review's note on each image, or why nothing was; and The pages tile, which opens the tab.
+// visual-check.json, with the review's note on each image, each opening full size in a viewer that steps through its
+// page's images (picture-viewer.tsx), or why nothing was; and The pages tile, which opens the tab.
 import { Link } from '@tanstack/react-router';
 import { useId, useState } from 'react';
-import type {
-  AttemptSummary,
-  StoryPage,
-  StoryPageStep,
-  Task,
-  VisualCheckRecord,
-  VisualImage,
-  VisualNote,
-  VisualTheme,
-} from './api';
+import type { AttemptSummary, StoryPage, StoryPageStep, Task, VisualCheckRecord, VisualImage, VisualNote } from './api';
 import { Dialog } from './design/dialog';
 import { plural } from './evidence';
-import { FileDialog, Preview } from './files';
+import { Preview } from './files';
+import { PictureViewer, ReviewMark, ShotLines, pictureLabel, savedFile, stop } from './picture-viewer';
 import { storyPeople } from './story';
 import type { StudioState } from './studio-runs';
 import { useToast } from './toast';
@@ -386,10 +379,7 @@ function PageForm({
   );
 }
 
-const themeNames: Record<VisualTheme, string> = { light: 'Light', dark: 'Dark' };
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-// A recorded reason as the end of a sentence, with one full stop.
-const stop = (text: string) => (/[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`);
 
 // The tile's value and the line under it: how many images the check took and with which browser, or that it did not
 // run, failed or has not run yet.
@@ -509,7 +499,8 @@ const shotRow = {
   gap: 'var(--space-14)',
 } as const;
 
-// One page's images under its name and path, in one row per width named by it, desktops before phones.
+// One page's images under its name and path, in one row per width named by it, desktops before phones, and the one
+// open full size, by its place in that order, or none.
 function PageShots({
   projectId,
   attempt,
@@ -525,7 +516,10 @@ function PageShots({
   images: VisualImage[];
   notes: Map<string, VisualNote>;
 }) {
-  const heading = useId();
+  const heading = useId(),
+    rows = imagesByWidth(images),
+    pictures = rows.flatMap(row => row.images),
+    [showing, setShowing] = useState<number | null>(null);
   return (
     <section aria-labelledby={heading} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
       <h3
@@ -542,21 +536,34 @@ function PageShots({
         <span className="sd-file sd-file--path">{path}</span>
       </h3>
       {images.length ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)' }}>
-          {imagesByWidth(images).map(row => (
-            <ul key={row.width} aria-label={widthLabel(row.width)} style={shotRow}>
-              {row.images.map(image => (
-                <Shot
-                  key={image.path}
-                  projectId={projectId}
-                  attempt={attempt}
-                  image={image}
-                  note={notes.get(image.path)}
-                />
-              ))}
-            </ul>
-          ))}
-        </div>
+        <>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)' }}>
+            {rows.map(row => (
+              <ul key={row.width} aria-label={widthLabel(row.width)} style={shotRow}>
+                {row.images.map(image => (
+                  <Shot
+                    key={image.path}
+                    projectId={projectId}
+                    attempt={attempt}
+                    image={image}
+                    note={notes.get(image.path)}
+                    onView={() => setShowing(pictures.indexOf(image))}
+                  />
+                ))}
+              </ul>
+            ))}
+          </div>
+          <PictureViewer
+            projectId={projectId}
+            attempt={attempt}
+            page={name}
+            pictures={pictures}
+            index={showing}
+            notes={notes}
+            onShow={setShowing}
+            onClose={() => setShowing(null)}
+          />
+        </>
       ) : (
         <span className="sd-meta">No image of this page was taken.</span>
       )}
@@ -564,23 +571,24 @@ function PageShots({
   );
 }
 
-// An image by its width and theme, a thumbnail of the top of its page at the same height as every other, opening over
-// the page, with the review's note and mark, and what went wrong as it was taken: a step that found nothing or a page
-// that did not open, or a page too long to keep whole.
+// An image by its width and theme, a thumbnail of the top of its page at the same height as every other, opening in
+// the page's viewer, with the review's note and mark, and what went wrong as it was taken: a step that found nothing or
+// a page that did not open, or a page too long to keep whole. An image whose file was not saved does not open.
 function Shot({
   projectId,
   attempt,
   image,
   note,
+  onView,
 }: {
   projectId: string;
   attempt: AttemptSummary;
   image: VisualImage;
   note?: VisualNote;
+  onView: () => void;
 }) {
-  const [open, setOpen] = useState(false),
-    item = attempt.artifacts?.find(file => file.path === image.path),
-    label = `${widthLabel(image.width)} · ${themeNames[image.theme] ?? image.theme}`;
+  const item = savedFile(attempt, image),
+    label = pictureLabel(image);
   return (
     <li>
       <figure className="sd-picture" style={{ margin: 0 }} aria-label={label}>
@@ -589,7 +597,7 @@ function Shot({
             type="button"
             className="sd-picture__frame sd-picture__frame--thumb"
             aria-label={`View ${image.page}, ${label}`}
-            onClick={() => setOpen(true)}
+            onClick={onView}
           >
             <Preview projectId={projectId} attemptId={attempt.id} item={item} />
             <span className="sd-picture__expand" aria-hidden="true">
@@ -604,35 +612,11 @@ function Shot({
         <figcaption style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
           <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)', alignItems: 'center' }}>
             <b>{label}</b>
-            {note && (
-              <span className={`sd-chip sd-chip--${note.verdict === 'match' ? 'ok' : 'bad'}`}>
-                <span className="sd-chip__dot"></span>
-                {note.verdict === 'match' ? 'Match' : 'Problem'}
-              </span>
-            )}
+            <ReviewMark note={note} />
           </span>
-          {note ? (
-            <span>{note.note}</span>
-          ) : (
-            <span className="sd-meta">The review has not described this image yet.</span>
-          )}
-          {image.problem && <span style={{ color: 'var(--bad)' }}>Taken with a problem: {stop(image.problem)}</span>}
-          {image.trimmed && (
-            <span className="sd-meta">
-              Trimmed: the whole page made too large an image, so only its first screen was kept.
-            </span>
-          )}
+          <ShotLines image={image} note={note} />
         </figcaption>
       </figure>
-      {item && (
-        <FileDialog
-          projectId={projectId}
-          attemptId={attempt.id}
-          item={item}
-          open={open}
-          onClose={() => setOpen(false)}
-        />
-      )}
     </li>
   );
 }

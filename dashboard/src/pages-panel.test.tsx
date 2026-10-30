@@ -6,7 +6,7 @@
 // with the review's note on each image, or why nothing was, and The pages tile, which opens the tab. Model-free.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { StoryPage, StoryPagesView, VisualCheckRecord, VisualImage, VisualNote, VisualTheme } from './api';
@@ -466,11 +466,11 @@ test("the tab shows the candidate's images by page, each with its width, theme, 
   expect(wide.queryByText(/^Trimmed: /)).toBeNull();
   expect(wide.queryByText(/^Taken with a problem/)).toBeNull();
   // Each image is read from the candidate through the recorded-file route, once its record is, and opens over the
-  // page.
+  // page, named by its page, width and theme.
   await waitFor(() => expect(controller.reads()).toEqual(expect.arrayContaining(shots.map(imageRead))));
   expect(controller.reads().filter(url => url === recordRead)).toHaveLength(1);
   await user.click(within(boardRegion).getByRole('button', { name: 'View Board, Desktop · 1440 px · Light' }));
-  expect(await screen.findByRole('dialog', { name: 'visual/01-board-1440-light.png' })).toBeTruthy();
+  expect(await screen.findByRole('dialog', { name: 'Board · Desktop · 1440 px · Light' })).toBeTruthy();
 });
 
 test("a page's images sit in one row per width, desktop then phone, light then dark, each a thumbnail with its own note", async () => {
@@ -525,7 +525,170 @@ test("a page's images sit in one row per width, desktop then phone, light then d
   expect(phoneDark.queryByRole('button')).toBeNull();
   // A thumbnail still opens its picture over the page.
   await user.click(phoneLight.getByRole('button', { name: 'View Board, Phone · 390 px · Light' }));
-  expect(await screen.findByRole('dialog', { name: 'visual/01-board-390-light.png' })).toBeTruthy();
+  expect(await screen.findByRole('dialog', { name: 'Board · Phone · 390 px · Light' })).toBeTruthy();
+});
+
+// The stand-in serves a file as its text; a PNG's own first bytes for each image let its picture show, as it does
+// from a real capture. The request is still the stand-in's to record.
+function servePngs() {
+  const served = globalThis.fetch;
+  vi.stubGlobal('fetch', async (url: string, options?: RequestInit) => {
+    const response = await served(url, options);
+    return url.endsWith('.png')
+      ? { ...response, arrayBuffer: async () => new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]).buffer }
+      : response;
+  });
+}
+// One page at a desktop and a phone width, light and dark, listed phone first as a check may; the review describes
+// three of them.
+const board4 = [
+  shot(1, board, 390, 'light', { trimmed: true }),
+  shot(2, board, 390, 'dark'),
+  shot(3, board, 1440, 'light'),
+  shot(4, board, 1440, 'dark', { problem: 'nothing to click shows "Menu"' }),
+];
+const board4Notes: VisualNote[] = [
+  { image: '../inputs/T-1/5-03-board-1440-light.png', note: 'The board shows three columns.', verdict: 'match' },
+  { image: '../inputs/T-1/6-04-board-1440-dark.png', note: 'The menu is missing.', verdict: 'problem' },
+  { image: '../inputs/T-1/7-01-board-390-light.png', note: 'The columns stack on a phone.', verdict: 'match' },
+];
+const unnoted = 'The review has not described this image yet.';
+// Each picture of the page in the tab's order, desktop light, desktop dark, phone light, phone dark, as the viewer
+// names it, with its own note, mark and the lines on how it was taken.
+const boardViews = [
+  { title: 'Board · Desktop · 1440 px · Light', image: board4[2]!, note: board4Notes[0]!.note, mark: 'Match' },
+  {
+    title: 'Board · Desktop · 1440 px · Dark',
+    image: board4[3]!,
+    note: board4Notes[1]!.note,
+    mark: 'Problem',
+    problem: 'Taken with a problem: nothing to click shows "Menu".',
+  },
+  {
+    title: 'Board · Phone · 390 px · Light',
+    image: board4[0]!,
+    note: board4Notes[2]!.note,
+    mark: 'Match',
+    trimmed: true,
+  },
+  { title: 'Board · Phone · 390 px · Dark', image: board4[1]!, note: unnoted, mark: null },
+];
+const openDialogs = () => [...document.querySelectorAll('dialog')].filter(dialog => dialog.hasAttribute('open'));
+// The one open dialog shows the picture, by its title, its own image, note, mark and lines, and its place.
+function viewing(view: (typeof boardViews)[number], position: string) {
+  expect(openDialogs()).toHaveLength(1);
+  const dialog = within(screen.getByRole('dialog', { name: view.title }));
+  expect(dialog.getAllByRole('img').map(image => image.getAttribute('alt'))).toEqual([view.image.path]);
+  expect(dialog.getByText(view.note)).toBeTruthy();
+  const others = [...board4Notes.map(note => note.note), unnoted].filter(note => note !== view.note);
+  expect(others.filter(note => dialog.queryByText(note))).toEqual([]);
+  expect(['Match', 'Problem'].filter(mark => dialog.queryByText(mark))).toEqual(view.mark ? [view.mark] : []);
+  expect(dialog.queryByText(/^Taken with a problem/)?.textContent ?? null).toBe(view.problem ?? null);
+  expect(!!dialog.queryByText(/^Trimmed: /)).toBe(!!view.trimmed);
+  expect(dialog.getByText(position)).toBeTruthy();
+  return dialog;
+}
+const stepButtons = (dialog: ReturnType<typeof within>) =>
+  ['Previous', 'Next'].map(name => (dialog.getByRole('button', { name }) as HTMLButtonElement).disabled);
+// Opens the Pages tab and gives the board's region once each of its saved thumbnails shows its picture.
+async function boardShown(user: ReturnType<typeof userEvent.setup>, saved: number) {
+  const captured = await capturedIn(user),
+    region = await captured.findByRole('region', { name: 'Board' });
+  await waitFor(() => expect(within(region).getAllByRole('img')).toHaveLength(saved));
+  expect(await within(region).findByText(board4Notes[0]!.note)).toBeTruthy();
+  return within(region);
+}
+
+test("a thumbnail opens its picture full size with its own note, and Next, Previous and the arrows step in the tab's order", async () => {
+  const user = userEvent.setup();
+  checkOn();
+  pages([board]);
+  recorded({ pages: [board], widths: [390, 1440], images: board4 });
+  reviewed(board4Notes);
+  servePngs();
+  open();
+  const region = await boardShown(user, 4);
+  expect(openDialogs()).toEqual([]);
+  await user.click(region.getByRole('button', { name: 'View Board, Desktop · 1440 px · Light' }));
+  let dialog = viewing(boardViews[0]!, '1 of 4');
+  expect(stepButtons(dialog)).toEqual([true, false]);
+  // Next, then the Right arrow key, move on in the tab's order; each picture keeps its own note.
+  await user.click(dialog.getByRole('button', { name: 'Next' }));
+  dialog = viewing(boardViews[1]!, '2 of 4');
+  expect(stepButtons(dialog)).toEqual([false, false]);
+  await user.keyboard('{ArrowRight}');
+  dialog = viewing(boardViews[2]!, '3 of 4');
+  await user.click(dialog.getByRole('button', { name: 'Next' }));
+  dialog = viewing(boardViews[3]!, '4 of 4');
+  // Next stops at the last picture, and so does the key: nothing wraps around.
+  expect(stepButtons(dialog)).toEqual([false, true]);
+  await user.keyboard('{ArrowRight}');
+  dialog = viewing(boardViews[3]!, '4 of 4');
+  // Previous, then the Left arrow key, go back, and stop at the first.
+  await user.click(dialog.getByRole('button', { name: 'Previous' }));
+  viewing(boardViews[2]!, '3 of 4');
+  await user.keyboard('{ArrowLeft}');
+  viewing(boardViews[1]!, '2 of 4');
+  await user.keyboard('{ArrowLeft}');
+  dialog = viewing(boardViews[0]!, '1 of 4');
+  expect(stepButtons(dialog)).toEqual([true, false]);
+  await user.keyboard('{ArrowLeft}');
+  viewing(boardViews[0]!, '1 of 4');
+  // Each picture was read once through the recorded-file route, by its thumbnail; the viewer shows the same read.
+  expect(board4.map(image => controller.reads().filter(url => url === imageRead(image)).length)).toEqual([1, 1, 1, 1]);
+  // Escape sends the dialog a keydown and then a cancel event, which a browser follows with its close unless they are
+  // prevented; the test DOM only reports whether they were, so removing the open attribute and firing the close event
+  // stands for that close. The viewer leaves, sending nothing.
+  const sent = controller.requests.length,
+    element = screen.getByRole('dialog', { name: boardViews[0]!.title });
+  expect(fireEvent.keyDown(element, { key: 'Escape' })).toBe(true);
+  expect(fireEvent(element, new Event('cancel', { cancelable: true }))).toBe(true);
+  element.removeAttribute('open');
+  fireEvent(element, new Event('close'));
+  expect(screen.queryByRole('dialog', { name: boardViews[0]!.title })).toBeNull();
+  expect(openDialogs()).toEqual([]);
+  // A thumbnail opens it again at its own picture, and the × Close leaves too.
+  await user.click(region.getByRole('button', { name: 'View Board, Phone · 390 px · Light' }));
+  dialog = viewing(boardViews[2]!, '3 of 4');
+  await user.click(dialog.getByRole('button', { name: 'Close' }));
+  expect(screen.queryByRole('dialog', { name: boardViews[2]!.title })).toBeNull();
+  expect(openDialogs()).toEqual([]);
+  // The arrow keys step nothing once it has closed.
+  await user.keyboard('{ArrowRight}');
+  expect(openDialogs()).toEqual([]);
+  expect(controller.requests.slice(sent)).toEqual([]);
+});
+
+test('a picture with no saved file has no View button, and the viewer steps past it', async () => {
+  const user = userEvent.setup();
+  checkOn();
+  pages([board]);
+  recorded({ pages: [board], widths: [390, 1440], images: board4 });
+  // The desktop's dark image was not saved among the candidate's files.
+  controller.attempts[0]!.artifacts = controller.attempts[0]!.artifacts!.filter(file => file.path !== board4[3]!.path);
+  reviewed(board4Notes);
+  servePngs();
+  open();
+  const region = await boardShown(user, 3),
+    unsaved = within(region.getByRole('figure', { name: 'Desktop · 1440 px · Dark' }));
+  expect(unsaved.getByText('No image was saved.')).toBeTruthy();
+  expect(unsaved.queryByRole('button')).toBeNull();
+  expect(region.queryByRole('button', { name: 'View Board, Desktop · 1440 px · Dark' })).toBeNull();
+  await user.click(region.getByRole('button', { name: 'View Board, Desktop · 1440 px · Light' }));
+  let dialog = viewing(boardViews[0]!, '1 of 3');
+  // Next goes from the desktop's light picture to the phone's, past the one with no file.
+  await user.click(dialog.getByRole('button', { name: 'Next' }));
+  viewing(boardViews[2]!, '2 of 3');
+  await user.keyboard('{ArrowRight}');
+  dialog = viewing(boardViews[3]!, '3 of 3');
+  expect(stepButtons(dialog)).toEqual([false, true]);
+  await user.keyboard('{ArrowLeft}');
+  dialog = viewing(boardViews[2]!, '2 of 3');
+  await user.click(dialog.getByRole('button', { name: 'Previous' }));
+  dialog = viewing(boardViews[0]!, '1 of 3');
+  expect(stepButtons(dialog)).toEqual([true, false]);
+  // The picture with no file is never read.
+  expect(controller.reads()).not.toContain(imageRead(board4[3]!));
 });
 
 test('The pages tile reads the images taken with the browser, beside Tried by you, and opens the Pages tab', async () => {
