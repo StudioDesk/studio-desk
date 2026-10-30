@@ -90,6 +90,7 @@ import {
   reviseLibraryEntry,
 } from './core/library.mjs';
 import { createSnapshot, projectArtifacts, snapshotView, snapshotZip } from './core/snapshots.mjs';
+import { projectWork } from './core/project-work.mjs';
 import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/project-templates.mjs';
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
@@ -647,6 +648,9 @@ export function createStudio({
         if (parts[3] === 'library') return json(res, libraryOf(store, projectId));
         // Every file the project's accepted work handed back, and its snapshots (1.2 step 6).
         if (parts[3] === 'artifacts') return json(res, projectArtifacts(store, projectId));
+        // What the work made, one row per file with its versions, the visual check's pictures, and the records counted
+        // (the Artifacts redesign, October 29).
+        if (parts[3] === 'work') return json(res, projectWork(store, projectId));
         if (parts[3] === 'snapshots') return json(res, snapshotView(store, projectId));
         // The project's try copy, its settings and where Run runs (1.2 step 7).
         if (parts[3] === 'try') return json(res, tryView(store, projectId, runner));
