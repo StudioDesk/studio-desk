@@ -29,6 +29,7 @@ import type { AgentLook } from './design/agent-kit.js';
 import { Clapper, Icon } from './design/icons';
 import { diffStatOf, effortWords, plural, reviewOf, sandboxed, spoken, testTime, totalsOf } from './evidence';
 import { cleanExecution, ExecutionFields } from './execution-fields';
+import { NewUpdates, useFollow } from './follow';
 import { isCodeProject } from './frame';
 import { workerName } from './names';
 import { PagesPanel, PagesTile } from './pages-panel';
@@ -1761,13 +1762,17 @@ function RawActivity({
     [lines, setLines] = useState<LogEvent[] | null>(null),
     [failure, setFailure] = useState(''),
     lastSeq = useRef(0),
-    view = useRef<HTMLPreElement>(null),
-    following = useRef(true),
+    // The lines the stream added, which New updates counts. The 300 lines shown stop growing, and a line's seq
+    // numbers every event in the studio, other attempts' lines among them.
+    [arrived, setArrived] = useState(0),
     // The whole log replaces the last 300 lines when the director asks for it, a page of 500 at a time.
     [whole, setWhole] = useState<{ count: number; total: number | null; loading: boolean; error: string } | null>(null),
     limit = whole && !whole.loading && !whole.error ? Infinity : lineLimit,
     loaded = lines !== null,
     live = running(attempt.status),
+    // A reader at the end follows new lines; one reading further up keeps their place, with New updates.
+    [attach, follow] = useFollow({ mode: 'box', count: arrived, live }),
+    { jump } = follow,
     look = looks.get(attempt.workerId ?? ''),
     model = (attempt.reportedModel ?? attempt.requestedModel) as string | undefined,
     provider = cliName(studio, attempt);
@@ -1819,6 +1824,7 @@ function RawActivity({
         if (event.attempt_id !== attempt.id || event.seq <= lastSeq.current) return;
         lastSeq.current = event.seq;
         setLines(current => [...(current ?? []), event].slice(-limit));
+        setArrived(count => count + 1);
       },
     });
     stream.watchLog(attempt.id, lastSeq.current);
@@ -1827,11 +1833,10 @@ function RawActivity({
       stream.watchLog(null);
     };
   }, [loaded, live, stream, attempt.id, limit]);
-  // A reader scrolled to the end follows new lines; one reading further up keeps their place.
+  // A running attempt's log opens at its newest lines; a finished one opens at its start and never moves.
   useLayoutEffect(() => {
-    const element = view.current;
-    if (element && following.current) element.scrollTop = element.scrollHeight;
-  }, [lines]);
+    if (loaded && live) jump();
+  }, [loaded, live, jump]);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
       <div className="sd-divider">
@@ -1866,17 +1871,12 @@ function RawActivity({
           Loading recent activity…
         </p>
       ) : (
-        <pre
-          ref={view}
-          className="sd-code sd-code--block"
-          aria-label="Raw log"
-          onScroll={event => {
-            const element = event.currentTarget;
-            following.current = element.scrollTop + element.clientHeight >= element.scrollHeight - 2;
-          }}
-        >
-          {lines.map(line => `${line.time} ${line.message}`).join('\n')}
-        </pre>
+        <div className="sd-follow">
+          <pre ref={attach} className="sd-code sd-code--block" aria-label="Raw log">
+            {lines.map(line => `${line.time} ${line.message}`).join('\n')}
+          </pre>
+          <NewUpdates follow={follow} />
+        </div>
       )}
       {handoff && attempt.result?.summary && (
         <div

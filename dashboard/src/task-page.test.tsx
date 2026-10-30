@@ -3,7 +3,7 @@
 // refresh, and streams the activity only while its tab is shown.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary } from './api';
@@ -14,6 +14,8 @@ import { FakeSource, createStream, fakeController, latest, taskFixture, type Con
 
 let controller: Controller;
 const taskUrl = '/api/tasks/T-1?projectId=project-x';
+// What a test stubbed on the page's elements, put back after it.
+const restores: (() => void)[] = [];
 
 beforeEach(() => {
   controller = fakeController();
@@ -42,6 +44,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  for (const restore of restores.splice(0).reverse()) restore();
   vi.unstubAllGlobals();
 });
 
@@ -308,6 +311,128 @@ test('a running attempt whose first step is still pending reads its trace whole 
   expect(panel.getByText(/^ran · /)).toBeTruthy();
   expect(panel.queryByText('running')).toBeNull();
   expect(traceReads()).toEqual([wholeTrace, wholeTrace]);
+});
+
+// The raw log's scroll geometry, a stand-in where nothing lays out or scrolls: each line is 20px tall and the log's
+// box shows ten of them. Only the box labelled Raw log takes it; afterEach puts the elements' own back.
+const isRawLog = (element: Element) => element.getAttribute('aria-label') === 'Raw log',
+  logHeight = (log: Element) => (log.textContent ?? '').split('\n').length * 20,
+  // Where the box shows the newest line at its bottom.
+  logEnd = (log: Element) => Math.max(0, logHeight(log) - 200);
+function stubRawLog() {
+  const tops = new WeakMap<Element, number>();
+  const stub = (name: string, get: (log: Element) => number, set?: (log: Element, value: number) => void) => {
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, name);
+    Object.defineProperty(Element.prototype, name, {
+      configurable: true,
+      get(this: Element) {
+        return isRawLog(this) ? get(this) : original?.get?.call(this);
+      },
+      ...(set && {
+        set(this: Element, value: number) {
+          if (isRawLog(this)) set(this, value);
+          else original?.set?.call(this, value);
+        },
+      }),
+    });
+    restores.push(() =>
+      original
+        ? Object.defineProperty(Element.prototype, name, original)
+        : Reflect.deleteProperty(Element.prototype, name),
+    );
+  };
+  stub('scrollHeight', logHeight);
+  stub('clientHeight', () => 200);
+  stub(
+    'scrollTop',
+    log => tops.get(log) ?? 0,
+    (log, value) => tops.set(log, Math.min(Math.max(0, value), logEnd(log))),
+  );
+}
+// The reader scrolling the log, as the browser tells it.
+const scrollLog = (log: HTMLElement, to: number) => {
+  log.scrollTop = to;
+  fireEvent.scroll(log);
+};
+const newUpdates = () => screen.queryByRole('button', { name: /^New updates/ });
+const lineCount = (log: HTMLElement) => log.textContent!.split('\n').length;
+// The attempt's chapter in Activity, showing its raw log of 30 lines, taller than the log's box. A running one
+// watches the stream for its lines after them.
+const openRawLog = async (status: string) => {
+  stubRawLog();
+  const user = userEvent.setup();
+  controller.attempts = [{ ...controller.attempts[0]!, status }];
+  controller.logs['attempt-1'] = Array.from({ length: 30 }, (_, index) => ({
+    seq: index + 1,
+    time: '2026-10-21T20:00:00Z',
+    kind: 'log',
+    message: `stdout: line ${index + 1}`,
+    task_id: 'T-1',
+    attempt_id: 'attempt-1',
+  }));
+  open();
+  await screen.findByRole('heading', { name: 'Show finished results' });
+  await user.click(screen.getByRole('tab', { name: 'Activity' }));
+  const log = await screen.findByLabelText('Raw log');
+  if (status === 'running') await waitFor(() => expect(latest().url).toContain('log=attempt-1&after=30'));
+  return { user, log };
+};
+
+test("a running attempt's raw log opens at its newest lines and keeps them in view as lines arrive, with no New updates", async () => {
+  const { log } = await openRawLog('running');
+  expect(log.scrollTop).toBe(400);
+  logLine(31);
+  logLine(32);
+  expect(lineCount(log)).toBe(32);
+  expect(log.scrollTop).toBe(440);
+  expect(log.scrollTop).toBe(logEnd(log));
+  expect(newUpdates()).toBeNull();
+});
+
+test('a reader scrolled up the running raw log keeps their place, New updates counts the lines below, and pressing it goes to the newest and follows again', async () => {
+  const { user, log } = await openRawLog('running');
+  scrollLog(log, 200);
+  expect(newUpdates()).toBeNull();
+  // A line's seq numbers every event in the studio, so other attempts' lines leave gaps between this one's.
+  logLine(31);
+  expect(log.scrollTop).toBe(200);
+  screen.getByRole('button', { name: 'New updates: 1' });
+  logLine(36);
+  expect(lineCount(log)).toBe(32);
+  expect(log.scrollTop).toBe(200);
+  await user.click(screen.getByRole('button', { name: 'New updates: 2' }));
+  expect(log.scrollTop).toBe(logEnd(log));
+  expect(newUpdates()).toBeNull();
+  logLine(37);
+  expect(lineCount(log)).toBe(33);
+  expect(log.scrollTop).toBe(logEnd(log));
+  expect(newUpdates()).toBeNull();
+});
+
+test('scrolling the running raw log back to its bottom clears New updates, and the next line follows', async () => {
+  const { log } = await openRawLog('running');
+  scrollLog(log, 200);
+  logLine(31);
+  logLine(32);
+  screen.getByRole('button', { name: 'New updates: 2' });
+  scrollLog(log, logEnd(log));
+  expect(newUpdates()).toBeNull();
+  logLine(33);
+  expect(log.scrollTop).toBe(logEnd(log));
+  expect(newUpdates()).toBeNull();
+});
+
+test("a finished attempt's raw log opens at its start, streams nothing, and never moves on its own", async () => {
+  const { log } = await openRawLog('succeeded');
+  expect(lineCount(log)).toBe(30);
+  expect(log.scrollTop).toBe(0);
+  expect(latest().url).not.toContain('log=');
+  scrollLog(log, 120);
+  scrollLog(log, 60);
+  logLine(31);
+  expect(lineCount(log)).toBe(30);
+  expect(log.scrollTop).toBe(60);
+  expect(newUpdates()).toBeNull();
 });
 
 test('an attempt says what earlier work it continued, or why it started fresh', async () => {
