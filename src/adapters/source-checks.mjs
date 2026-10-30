@@ -118,16 +118,14 @@ function runTests(runtime, entry, a, command, snapshot, environment) {
     command.executable,
     command.args,
     '',
-    (exitCode, signal) => {
-      // The test process has closed; a stop or a failed start releases the turn with the attempt's other leases.
-      releaseTestTurn(runtime.store, a.id);
-      return { exitCode, signal, pid: a.pid, finishedAt: new Date().toISOString() };
-    },
+    (exitCode, signal) => ({ exitCode, signal, pid: a.pid, finishedAt: new Date().toISOString() }),
     {
       cwd: snapshot,
       environment,
       resultOnFailure: true,
-      // The tests must have left the copy as it was, which is checked in a process of its own; then the report.
+      // The tests must have left the copy as it was, which is checked in a process of its own; then the report. The
+      // turn is given back once the test phase is recorded, so the next run's tests follow it; a stop or a failure
+      // releases it with the attempt's other leases.
       onComplete: closed =>
         inSnapshotProcess(
           runtime,
@@ -140,6 +138,8 @@ function runTests(runtime, entry, a, command, snapshot, environment) {
               result = checkResult(closed);
             } catch (error) {
               throw new Error(`CLI result rejected: ${error.message}`);
+            } finally {
+              releaseTestTurn(runtime.store, a.id);
             }
             runtime.finish(entry, result);
           },

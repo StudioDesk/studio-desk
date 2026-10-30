@@ -226,7 +226,8 @@ test("waiting for the turn never counts toward a check's time limit", async t =>
   store.claim([testTurnResource], 'held-suite');
   const id = addChecks(c, 'T-check-limit', { projectId, maxSeconds: 2 }),
     attempt = runner.start(id).attemptId,
-    waiting = store.attempt(attempt).testTurn;
+    // Its copy is made in a process of its own first (src/adapters/source-snapshot.mjs).
+    waiting = await waitFor(() => store.attempt(attempt).testTurn, 'the checks to wait for the turn');
   assert.equal(waiting.reason, turnSentence('another full test suite'));
   assert.equal(waiting.holder, 'held-suite');
   await new Promise(resolve => setTimeout(resolve, 2500));
@@ -248,7 +249,8 @@ test("two projects' runs take turns too, one on its own repository", async t => 
     gate = path.join(c.directory, 'field-gate');
   runner.sourceCheckCommand = gated(gate);
   const field = runner.start(addChecks(c, 'T-check-field', { projectId })).attemptId;
-  assert.equal(holder(store), field, 'Its checks install nothing and take the turn as they start.');
+  // Its checks install nothing and take the turn once their copy is made.
+  await waitFor(() => holder(store) === field, 'the field checks to take the turn');
   runner.sourceCheckCommand = command('pass');
   const studio = runner.start(addChecks(c, 'T-check-studio', { workerId: 'W-07' })).attemptId;
   const waiting = await waitFor(() => store.attempt(studio).testTurn, "the other project's checks to wait");
