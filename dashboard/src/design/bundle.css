@@ -79,6 +79,51 @@ a:hover {
   color: var(--ink-3);
 }
 
+/* Decorative file kind, at the library card and work row sizes. Colors belong to the existing palette. */
+.sd-kindtile {
+  flex: none;
+  display: inline-flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 40px;
+  height: 46px;
+  padding-bottom: 6px;
+  border-radius: 9px;
+  background: var(--wait-soft);
+  color: var(--wait);
+  font: 700 10px var(--font-mono);
+}
+.sd-kindtile--documents {
+  background: var(--agent-avery);
+  color: var(--sticker-ink);
+}
+.sd-kindtile--pictures {
+  background: var(--agent-juno);
+  color: var(--sticker-ink);
+}
+.sd-kindtile--pdfs {
+  background: var(--agent-morgan);
+  color: var(--sticker-ink);
+}
+.sd-kindtile--data {
+  background: var(--agent-mara);
+  color: var(--sticker-ink);
+}
+.sd-kindtile--code {
+  background: var(--agent-eli);
+  color: var(--sticker-ink);
+}
+.sd-kindtile--other {
+  background: var(--wait-soft);
+  color: var(--wait);
+}
+.sd-kindtile--sm {
+  width: 30px;
+  height: 34px;
+  padding-bottom: 4px;
+  font-size: 9px;
+}
+
 /* Card */
 .sd-card {
   background: var(--surface);

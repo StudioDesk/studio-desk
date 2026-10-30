@@ -37,6 +37,53 @@ export function readableName(path: string) {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+// Only the file's extension counts: dots in folders and a leading dot in a hidden file are not extensions.
+function extension(path: string) {
+  const file = path.split(/[\\/]/).at(-1) ?? '',
+    dot = file.lastIndexOf('.');
+  return dot > 0 ? file.slice(dot + 1).toLowerCase() : '';
+}
+
+const kindAliases = new Map([
+  ['markdown', 'MD'],
+  ['jpeg', 'JPG'],
+  ['yml', 'YAML'],
+  ['htm', 'HTML'],
+]);
+export function kindLabel(path: string) {
+  const ext = extension(path);
+  return kindAliases.get(ext) ?? (ext.toUpperCase() || 'FILE');
+}
+
+const documentExtensions = new Set('md markdown txt log rst doc docx odt rtf ppt pptx odp'.split(' '));
+const dataExtensions = new Set('csv tsv json jsonl ndjson yaml yml xml toml ini xls xlsx ods'.split(' '));
+const codeExtensions = new Set(
+  'html htm css scss sass less js mjs cjs jsx ts mts cts tsx py rb php sh bash zsh ps1 bat cmd c h cc cpp cxx hpp cs java kt swift go rs sql lua r vue svelte'.split(
+    ' ',
+  ),
+);
+const readableTextExtensions = new Set(
+  'md markdown txt log rst csv tsv json jsonl ndjson yaml yml xml toml ini'.split(' '),
+);
+
+export type KindTone = 'documents' | 'pictures' | 'pdfs' | 'data' | 'code' | 'other';
+export function kindTone(path: string): KindTone {
+  const ext = extension(path);
+  if (imageFile(path)) return 'pictures';
+  if (ext === 'pdf') return 'pdfs';
+  if (documentExtensions.has(ext)) return 'documents';
+  if (dataExtensions.has(ext)) return 'data';
+  if (codeExtensions.has(ext)) return 'code';
+  return 'other';
+}
+
+// A kind can have a tile without being readable here (PDFs, office documents and archives need Download).
+export function readsInPlace(path: string) {
+  const ext = extension(path);
+  return imageFile(path) || readableTextExtensions.has(ext) || codeExtensions.has(ext);
+}
+export const openWord = (path: string) => (readsInPlace(path) ? 'Open' : 'Download');
+
 // A file is an Image when it is one of the pictures the dashboard shows (files.tsx imageFile), otherwise a Document.
 export type WorkKind = 'Document' | 'Image';
 export const workKind = (path: string): WorkKind => (imageFile(path) ? 'Image' : 'Document');

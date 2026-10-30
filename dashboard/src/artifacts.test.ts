@@ -5,9 +5,13 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { getJSON, workUrl, type ProjectWork, type WorkFile, type WorkPictures, type WorkVersion } from './api';
 import {
+  kindLabel,
+  kindTone,
   matchingWork,
+  openWord,
   picturesLine,
   readableName,
+  readsInPlace,
   recordsSentence,
   versionCount,
   versionWhy,
@@ -98,6 +102,100 @@ test('a picture the dashboard shows is an Image and every other file a Document'
   expect(['copy/launch-page.md', 'pricing.csv', 'layout.json', 'NOTES', 'scene.blend'].map(workKind)).toEqual(
     Array(5).fill('Document'),
   );
+});
+
+test.each([
+  ['copy/launch.MD', 'MD'],
+  ['docs\\brand.Markdown', 'MD'],
+  ['art/hero.PNG', 'PNG'],
+  ['pictures/shop.JPEG', 'JPG'],
+  ['shop.jpg', 'JPG'],
+  ['docs/reference.PdF', 'PDF'],
+  ['data/prices.CsV', 'CSV'],
+  ['data/layout.JSON', 'JSON'],
+  ['notes.txt', 'TXT'],
+  ['settings.yml', 'YAML'],
+  ['settings.yaml', 'YAML'],
+  ['logo.svg', 'SVG'],
+  ['index.htm', 'HTML'],
+  ['src/main.js', 'JS'],
+  ['src/main.ts', 'TS'],
+  ['src/view.tsx', 'TSX'],
+  ['archive.zip', 'ZIP'],
+  ['NOTES', 'FILE'],
+  ['folder.with.dots/README', 'FILE'],
+  ['folder.with.dots\\README', 'FILE'],
+  ['.gitignore', 'FILE'],
+  ['notes.', 'FILE'],
+  ['', 'FILE'],
+])('the kind label for %s reads %s', (path, label) => {
+  expect(kindLabel(path)).toBe(label);
+});
+
+test.each([
+  ['docs/brand.MARKDOWN', 'documents'],
+  ['notes.txt', 'documents'],
+  ['docs/brief.docx', 'documents'],
+  ['art/logo.SVG', 'pictures'],
+  ['art/photo.jpeg', 'pictures'],
+  ['docs/reference.PDF', 'pdfs'],
+  ['data/prices.csv', 'data'],
+  ['settings.yaml', 'data'],
+  ['data/prices.xlsx', 'data'],
+  ['src/main.tsx', 'code'],
+  ['index.html', 'code'],
+  ['archive.zip', 'other'],
+  ['unknown.kind', 'other'],
+  ['NOTES', 'other'],
+])('the tile for %s uses the %s family', (path, tone) => {
+  expect(kindTone(path)).toBe(tone);
+});
+
+test.each([
+  'copy/launch.md',
+  'docs/Brand.MARKDOWN',
+  'notes.txt',
+  'data/prices.csv',
+  'data/layout.json',
+  'settings.yaml',
+  'settings.YML',
+  'data/feed.xml',
+  'index.html',
+  'styles.css',
+  'src/main.js',
+  'src/main.mjs',
+  'src/main.ts',
+  'src/view.tsx',
+  'art/hero.png',
+  'photo.jpg',
+  'photo.JPEG',
+  'art/logo.SVG',
+  'art/still.webp',
+  'art/loop.gif',
+])('%s reads in place and offers Open', path => {
+  expect(readsInPlace(path)).toBe(true);
+  expect(openWord(path)).toBe('Open');
+});
+
+test.each([
+  'docs/reference.pdf',
+  'docs/brief.DOCX',
+  'data/prices.xlsx',
+  'slides.pptx',
+  'archive.zip',
+  'scene.blend',
+  'unknown.kind',
+  'photo.avif',
+  'photo.bmp',
+  'NOTES',
+  'folder.md/README',
+  'folder.png\\README',
+  '.gitignore',
+  'notes.',
+  '',
+])('%s needs Download instead of reading in place', path => {
+  expect(readsInPlace(path)).toBe(false);
+  expect(openWord(path)).toBe('Download');
 });
 
 test("each row reads its agent, its idea's words or its step's title, quoted, and its latest date", () => {
