@@ -58,8 +58,12 @@ const types: Record<string, string> = {
 export const libraryAccept = Object.keys(types)
   .map(extension => `.${extension}`)
   .join(',');
-export const libraryMediaType = (file: File) =>
-  types[file.name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() ?? ''] ?? file.type;
+const extensionOf = (name: string) => name.match(/\.([^.]+)$/)?.[1]?.toLowerCase() ?? '';
+export const libraryMediaType = (file: File) => types[extensionOf(file.name)] ?? file.type;
+// The kinds a file's own view edits in place as text (library-entry.tsx): Markdown, plain text, JSON, CSV and YAML.
+// The rest, such as pictures, HTML, SVG and code, take a newer revision only as a file.
+const textKinds = new Set(['md', 'markdown', 'txt', 'csv', 'json', 'yaml', 'yml']);
+export const libraryEditable = (name: string) => textKinds.has(extensionOf(name));
 
 export const libraryKey = (projectId: string) => [projectId, 'library'] as const;
 // The entries later work follows: those not removed, each at its newest revision, in the library's order.

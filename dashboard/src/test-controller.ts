@@ -210,6 +210,9 @@ export interface Controller {
   projectArtifacts: ProjectArtifact[];
   library: LibraryIndex;
   libraryReaders: Record<string, LibraryReader[]>;
+  // Library revisions' text, as `<entry>/<revision>`, which the revision's route answers as plain text; a revision not
+  // listed answers as one the library does not hold.
+  libraryTexts: Record<string, string>;
   snapshots: Snapshot[];
   // The release an idea's words name, by the words; words not listed name none.
   requests: { url: string; method: string; body?: unknown }[];
@@ -282,6 +285,7 @@ export function fakeController(projectId = 'project-x'): Controller {
     projectArtifacts: [],
     library: { entries: [], proposals: [] },
     libraryReaders: {},
+    libraryTexts: {},
     snapshots: [],
     requests: [],
     command: () => ({}),
@@ -392,6 +396,12 @@ export function fakeController(projectId = 'project-x'): Controller {
       if (path === `/api/projects/${projectId}/snapshots`) return respond(controller.snapshots);
       const readers = path.match(new RegExp(`^/api/projects/${projectId}/library/([^/]+)/readers$`))?.[1];
       if (readers) return respond(controller.libraryReaders[decodeURIComponent(readers)] ?? []);
+      const [, revised, number] =
+        path.match(new RegExp(`^/api/projects/${projectId}/library/([^/]+)/revisions/([0-9]+)$`)) ?? [];
+      if (revised) {
+        const text = controller.libraryTexts[`${decodeURIComponent(revised)}/${number}`];
+        return text === undefined ? respond({ error: 'Library revision not found.' }, false, 404) : respond(text);
+      }
       if (path === `/api/projects/${projectId}/releases`)
         return respond(
           controller.releases ?? { available: false, reason: 'Only a project on the source workflow has releases.' },

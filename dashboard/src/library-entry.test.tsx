@@ -1,7 +1,8 @@
 // A library file's own view (1.2 step 6), opened by picking its card on the Artifacts page: its revisions newest first,
 // each with when it was added, where it came from and how many attempts read it, Open in a new tab, the ideas that
-// left it out among the runs the page holds, and Add a newer revision, Copy to another project and Remove from the
-// library, each reading the library again afterwards with the controller's refusal shown in place.
+// left it out among the runs the page holds, and Add a newer revision, Edit on a text file (its newest revision's text
+// in place, a preview beside Markdown, What changed before saving it as the next revision), Copy to another project
+// and Remove from the library, each reading the library again afterwards with the controller's refusal shown in place.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -17,6 +18,7 @@ import type {
   Task,
 } from './api';
 import { App } from './app';
+import { libraryEditable } from './library';
 import { createAppRouter } from './router';
 import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
 import { when } from './today';
@@ -150,6 +152,40 @@ const refused =
   () => {
     throw Object.assign(new Error(message), { status });
   };
+const revisionRows = (view: ReturnType<typeof within>) =>
+  within(view.getByRole('list', { name: 'Revisions' }))
+    .getAllByRole('listitem')
+    .map(row => within(row).getByText(/^Revision \d+$/).textContent);
+// A text's UTF-8 bytes in base64, as the dashboard sends an upload.
+const base64 = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+// The brand guide's newest revision, and an edit of its third line.
+const brandText = '# Brand\n\n- Use blue.\n- Set type in Inter.\n';
+const brandEdited = '# Brand\n\n- Use deep blue — #1d4ed8.\n- Set type in Inter.\n';
+// The view's Edit panel once the newest revision's text is in its editor.
+const editPanel = async (user: ReturnType<typeof userEvent.setup>, view: ReturnType<typeof within>, name: string) => {
+  await user.click(view.getByRole('button', { name: 'Edit' }));
+  const panel = within(view.getByRole('region', { name: `Edit ${name}` }));
+  return { panel, editor: (await panel.findByLabelText('Text')) as HTMLTextAreaElement };
+};
+const whatChanged = (panel: ReturnType<typeof within>) => within(panel.getByRole('region', { name: 'What changed' }));
+const changedLines = (panel: ReturnType<typeof within>) =>
+  within(whatChanged(panel).getByRole('list', { name: 'Lines added and removed' }))
+    .getAllByRole('listitem')
+    .map(item => item.getAttribute('aria-label'));
+// Adds the next revision to an entry, as the controller does when it accepts one.
+const addsRevision = (entryId: string) => (url: string) => {
+  if (url !== `/api/projects/project-x/library/${entryId}/revisions`) return {};
+  const entries = controller.library.entries.map(item => {
+    if (item.id !== entryId) return item;
+    const last = item.revisions.at(-1)!;
+    return {
+      ...item,
+      revisions: [...item.revisions, { ...last, revision: last.revision + 1, at: '2026-10-30T12:00:00Z' }],
+    };
+  });
+  controller.library = { ...controller.library, entries };
+  return entries.find(item => item.id === entryId);
+};
 
 test('picking a card shows its purpose and revisions newest first, each with when, where from and its readers', async () => {
   const user = userEvent.setup();
@@ -377,6 +413,248 @@ test("a refused revision shows the controller's reason in place, the library is 
   await user.click(panel.getByRole('button', { name: 'An accepted file' }));
   expect(panel.queryByRole('alert')).toBeNull();
   expect(posted()).toHaveLength(1);
+});
+
+test("Edit shows a Markdown file's newest text beside its preview and What changed, and saves the edit as its next revision", async () => {
+  const user = userEvent.setup();
+  controller.libraryTexts = { 'lib-brand/3': brandText, 'lib-brand/2': 'An older text.\n' };
+  controller.command = addsRevision('lib-brand');
+  open();
+  const view = await pick(user, 'Brand guide');
+  // Edit sits beside Add a newer revision.
+  const toolbar = view.getByRole('button', { name: 'Add a newer revision' }).parentElement!;
+  expect(
+    within(toolbar)
+      .getAllByRole('button')
+      .map(button => button.textContent),
+  ).toEqual(['Add a newer revision', 'Edit', 'Copy to another project', 'Remove from the library']);
+  const { panel, editor } = await editPanel(user, view, 'Brand guide');
+  expect(view.getByRole('button', { name: 'Edit' }).getAttribute('aria-expanded')).toBe('true');
+  // The editor holds the newest revision's text, read from that revision alone.
+  expect(editor.value).toBe(brandText);
+  expect(controller.reads().filter(url => url.startsWith(`${entryUrl}/revisions/`))).toEqual([
+    `${entryUrl}/revisions/3`,
+  ]);
+  const preview = within(panel.getByRole('region', { name: 'Preview' }));
+  expect(preview.getByRole('heading', { name: 'Brand' })).toBeTruthy();
+  expect(preview.getByText('Use blue.')).toBeTruthy();
+  // Unchanged, it cannot be saved and nothing changed.
+  const save = panel.getByRole('button', { name: 'Save as revision 4' }) as HTMLButtonElement;
+  expect(save.disabled).toBe(true);
+  expect(whatChanged(panel).getByText('Nothing changed yet.')).toBeTruthy();
+  // One line edited: What changed shows it removed and its replacement added before anything is sent, and the
+  // preview follows the edit.
+  await user.clear(editor);
+  await user.paste(brandEdited);
+  expect(editor.value).toBe(brandEdited);
+  expect(whatChanged(panel).getByText('1 line added, 1 line removed')).toBeTruthy();
+  expect(changedLines(panel)).toEqual(['Line 3 removed: - Use blue.', 'Line 3 added: - Use deep blue — #1d4ed8.']);
+  expect(
+    within(whatChanged(panel).getByRole('list', { name: 'Lines added and removed' }))
+      .getAllByRole('listitem')
+      .map(item => item.querySelector('.sd-code__sign')?.textContent),
+  ).toEqual(['−', '+']);
+  expect(whatChanged(panel).queryByText('Nothing changed yet.')).toBeNull();
+  expect(preview.getByText('Use deep blue — #1d4ed8.')).toBeTruthy();
+  expect(preview.queryByText('Use blue.')).toBeNull();
+  expect(posted()).toEqual([]);
+  // Saved, the edit goes as a file under the newest revision's name, its UTF-8 bytes in base64.
+  expect(save.disabled).toBe(false);
+  const before = libraryReads();
+  await user.click(save);
+  expect(await screen.findByText('Saved revision 4 of Brand guide.')).toBeTruthy();
+  expect(posted()).toEqual([
+    {
+      url: `${entryUrl}/revisions`,
+      method: 'POST',
+      body: {
+        projectId: 'project-x',
+        file: { name: 'brand-r3.md', mediaType: 'text/markdown', data: base64(brandEdited) },
+      },
+    },
+  ]);
+  expect(view.queryByRole('region', { name: 'Edit Brand guide' })).toBeNull();
+  // The library is read again, and the new revision shows first.
+  await waitFor(() => expect(revisionRows(view)).toEqual(['Revision 4', 'Revision 3', 'Revision 2', 'Revision 1']));
+  expect(libraryReads()).toBe(before + 1);
+});
+
+test.each([
+  ['notes.txt', 'text/plain', 'First line.\nSecond line.\n', 'First line.\nThe second line.\n'],
+  ['settings.json', 'application/json', '{\n  "size": 12\n}\n', '{\n  "size": 14\n}\n'],
+  ['prices.csv', 'text/csv', 'item,price\ntea,3\n', 'item,price\ntea,4\n'],
+  ['config.yaml', 'text/yaml', 'theme: light\nwidth: 1440\n', 'theme: dark\nwidth: 1440\n'],
+  ['config.yml', 'text/yaml', 'theme: light\nwidth: 1440\n', 'theme: light\nwidth: 390\n'],
+])('Edit on %s shows no preview and saves the edit as %s', async (fileName, mediaType, text, edited) => {
+  const user = userEvent.setup();
+  controller.library = {
+    entries: [
+      entry('lib-text', 'Settings', 'What the tests edit.', [
+        { ...revision(1, '2026-01-10T12:00:00Z', text.length, { type: 'upload' }), file: fileName, mediaType },
+      ]),
+    ],
+    proposals: [],
+  };
+  controller.libraryTexts = { 'lib-text/1': text };
+  controller.command = addsRevision('lib-text');
+  open();
+  const view = await pick(user, 'Settings');
+  expect(view.getByRole('button', { name: 'Add a newer revision' })).toBeTruthy();
+  const { panel, editor } = await editPanel(user, view, 'Settings');
+  expect(editor.value).toBe(text);
+  expect(panel.queryByRole('region', { name: 'Preview' })).toBeNull();
+  expect(whatChanged(panel).getByText('Nothing changed yet.')).toBeTruthy();
+  await user.clear(editor);
+  await user.paste(edited);
+  expect(whatChanged(panel).getByText('1 line added, 1 line removed')).toBeTruthy();
+  expect(changedLines(panel)).toHaveLength(2);
+  await user.click(panel.getByRole('button', { name: 'Save as revision 2' }));
+  expect(await screen.findByText('Saved revision 2 of Settings.')).toBeTruthy();
+  expect(posted()).toEqual([
+    {
+      url: '/api/projects/project-x/library/lib-text/revisions',
+      method: 'POST',
+      body: { projectId: 'project-x', file: { name: fileName, mediaType, data: base64(edited) } },
+    },
+  ]);
+  await waitFor(() => expect(revisionRows(view)).toEqual(['Revision 2', 'Revision 1']));
+});
+
+test('a file whose newest revision is not text offers Add a newer revision and no Edit', async () => {
+  const user = userEvent.setup();
+  // The logo was a Markdown sketch once; its newest revision is a picture.
+  controller.library = {
+    entries: [
+      entry('lib-logo', 'Logo', 'The mark every page shows.', [
+        revision(1, '2026-01-10T12:00:00Z', 40, { type: 'upload' }),
+        { ...revision(2, '2026-02-10T12:00:00Z', 4096, { type: 'upload' }), file: 'logo.png', mediaType: 'image/png' },
+      ]),
+    ],
+    proposals: [],
+  };
+  open();
+  const view = await pick(user, 'Logo');
+  expect(view.getByRole('button', { name: 'Add a newer revision' })).toBeTruthy();
+  expect(view.queryByRole('button', { name: 'Edit' })).toBeNull();
+  // Only Markdown, plain text, JSON, CSV and YAML are edited as text, by the file name's extension in any case.
+  expect(['a.md', 'a.MARKDOWN', 'a.txt', 'a.json', 'a.csv', 'a.yaml', 'a.Yml'].every(libraryEditable)).toBe(true);
+  expect(
+    ['a.png', 'a.html', 'a.svg', 'a.css', 'a.xml', 'a.js', 'a.ts', 'a.md.png', 'md', 'README'].some(libraryEditable),
+  ).toBe(false);
+  expect(controller.reads().filter(url => url.includes('/revisions/'))).toEqual([]);
+});
+
+test('an unchanged edit cannot be saved, even once typing is undone', async () => {
+  const user = userEvent.setup();
+  controller.libraryTexts = { 'lib-brand/3': brandText };
+  open();
+  const view = await pick(user, 'Brand guide');
+  const { panel, editor } = await editPanel(user, view, 'Brand guide');
+  const save = panel.getByRole('button', { name: 'Save as revision 4' }) as HTMLButtonElement;
+  expect(save.disabled).toBe(true);
+  await user.click(save);
+  await user.type(editor, 'More.');
+  expect(editor.value).toBe(`${brandText}More.`);
+  expect(save.disabled).toBe(false);
+  expect(changedLines(panel)).toEqual(['Line 5 added: More.']);
+  // Typing undone, the text is the revision's again.
+  await user.type(editor, '{Backspace>5/}');
+  expect(editor.value).toBe(brandText);
+  expect(save.disabled).toBe(true);
+  expect(whatChanged(panel).getByText('Nothing changed yet.')).toBeTruthy();
+  await user.click(save);
+  expect(posted()).toEqual([]);
+});
+
+test('Cancel sends nothing and drops the edit, and Edit again shows the newest text', async () => {
+  const user = userEvent.setup();
+  controller.libraryTexts = { 'lib-brand/3': brandText };
+  open();
+  const view = await pick(user, 'Brand guide');
+  let { panel, editor } = await editPanel(user, view, 'Brand guide');
+  await user.clear(editor);
+  await user.paste(brandEdited);
+  await user.click(panel.getByRole('button', { name: 'Cancel' }));
+  expect(view.queryByRole('region', { name: 'Edit Brand guide' })).toBeNull();
+  expect(posted()).toEqual([]);
+  expect(revisionRows(view)).toEqual(['Revision 3', 'Revision 2', 'Revision 1']);
+  ({ panel, editor } = await editPanel(user, view, 'Brand guide'));
+  expect(editor.value).toBe(brandText);
+  expect(whatChanged(panel).getByText('Nothing changed yet.')).toBeTruthy();
+  expect((panel.getByRole('button', { name: 'Save as revision 4' }) as HTMLButtonElement).disabled).toBe(true);
+  // Edit again closes it, as the other panels do.
+  await user.click(view.getByRole('button', { name: 'Edit' }));
+  expect(view.queryByRole('region', { name: 'Edit Brand guide' })).toBeNull();
+  expect(posted()).toEqual([]);
+});
+
+test('the Edit panel says work already done keeps the revision it read and later work receives the new one', async () => {
+  const user = userEvent.setup();
+  controller.libraryTexts = { 'lib-brand/3': brandText };
+  open();
+  const view = await pick(user, 'Brand guide');
+  const { panel } = await editPanel(user, view, 'Brand guide');
+  expect(
+    panel.getByText(
+      'Saved, the edit becomes revision 4. Work already done keeps the revision it read, and work that starts afterwards receives the new one.',
+    ),
+  ).toBeTruthy();
+});
+
+test("a refused edit shows the controller's reason in the panel and keeps the edit, and a change clears it", async () => {
+  const user = userEvent.setup();
+  controller.libraryTexts = { 'lib-brand/3': brandText };
+  controller.command = refused('That file is the same as the newest revision.');
+  open();
+  const view = await pick(user, 'Brand guide');
+  const { panel, editor } = await editPanel(user, view, 'Brand guide');
+  await user.clear(editor);
+  await user.paste(brandEdited);
+  const before = libraryReads();
+  await user.click(panel.getByRole('button', { name: 'Save as revision 4' }));
+  expect((await panel.findByRole('alert')).textContent).toBe('That file is the same as the newest revision.');
+  // The panel stays open with the edit, and the library is read again.
+  expect(view.getByRole('region', { name: 'Edit Brand guide' })).toBeTruthy();
+  expect(editor.value).toBe(brandEdited);
+  await waitFor(() => expect(libraryReads()).toBe(before + 1));
+  expect(revisionRows(view)).toEqual(['Revision 3', 'Revision 2', 'Revision 1']);
+  await user.type(editor, '!');
+  expect(panel.queryByRole('alert')).toBeNull();
+  expect(posted()).toHaveLength(1);
+});
+
+test('a revision that cannot be read shows why in the panel, and there is nothing to save', async () => {
+  const user = userEvent.setup();
+  open();
+  const view = await pick(user, 'Brand guide');
+  await user.click(view.getByRole('button', { name: 'Edit' }));
+  const panel = within(view.getByRole('region', { name: 'Edit Brand guide' }));
+  expect((await panel.findByRole('alert')).textContent).toBe(
+    'Revision 3 could not be read: Library revision not found.',
+  );
+  expect(panel.queryByLabelText('Text')).toBeNull();
+  expect((panel.getByRole('button', { name: 'Save as revision 4' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(posted()).toEqual([]);
+});
+
+test('an edit of a file written with Windows line endings is saved with them', async () => {
+  const user = userEvent.setup();
+  controller.libraryTexts = { 'lib-brand/3': brandText.replace(/\n/g, '\r\n') };
+  open();
+  const view = await pick(user, 'Brand guide');
+  const { panel, editor } = await editPanel(user, view, 'Brand guide');
+  expect(whatChanged(panel).getByText('Nothing changed yet.')).toBeTruthy();
+  // A textarea reads its line breaks as \n.
+  await user.clear(editor);
+  await user.paste(brandText);
+  expect(whatChanged(panel).getByText('Nothing changed yet.')).toBeTruthy();
+  expect((panel.getByRole('button', { name: 'Save as revision 4' }) as HTMLButtonElement).disabled).toBe(true);
+  await user.clear(editor);
+  await user.paste(brandEdited);
+  expect(changedLines(panel)).toEqual(['Line 3 removed: - Use blue.', 'Line 3 added: - Use deep blue — #1d4ed8.']);
+  await user.click(panel.getByRole('button', { name: 'Save as revision 4' }));
+  expect(await screen.findByText('Saved revision 4 of Brand guide.')).toBeTruthy();
+  expect((posted()[0]!.body as { file: { data: string } }).file.data).toBe(base64(brandEdited.replace(/\n/g, '\r\n')));
 });
 
 test('Copy to another project offers the other projects and posts the chosen one', async () => {

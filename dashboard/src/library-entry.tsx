@@ -2,9 +2,12 @@
 // is for and its revisions, newest first, each with when it was added, where it came from, how many attempts read that
 // revision and Open, which opens its bytes in a new tab; then the ideas that left it out, among the runs the page's
 // records already hold (the live set's and every finished-ideas page read so far; none is read for this view). Add a
-// newer revision takes an upload or one of the accepted files, Copy to another project sends the newest revision to
-// another project's library, and Remove from the library, once confirmed, stops later work receiving the file while
-// its record stays. Each command reads the library again afterwards, and a refusal shows where it was asked.
+// newer revision takes an upload or one of the accepted files. Edit, on a file whose newest revision is Markdown, plain
+// text, JSON, CSV or YAML, opens that revision's text in place, with a preview beside Markdown and What changed against
+// it before anything is sent, and saves the edit as the next revision under the same file name. Copy to another
+// project sends the newest revision to another project's library, and Remove from the library, once confirmed, stops
+// later work receiving the file while its record stays. Each command reads the library again afterwards, and a
+// refusal shows where it was asked.
 import {
   useIsMutating,
   useMutation,
@@ -14,9 +17,10 @@ import {
   type QueryClient,
 } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useId, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import {
   getJSON,
+  getText,
   libraryReadersUrl,
   libraryRevisionUrl,
   libraryUrl,
@@ -32,9 +36,11 @@ import {
   type RunRecord,
 } from './api';
 import { Modal } from './dialog';
+import { TextReader } from './files';
 import { encoded, fileSize } from './idea-composer';
 import {
   libraryAccept,
+  libraryEditable,
   libraryKey,
   libraryMediaType,
   projectName,
@@ -42,6 +48,7 @@ import {
   storyTitle,
   type LibraryNames,
 } from './library';
+import { lineDiff, type LineDiff } from './line-diff';
 import { queryKeys } from './records';
 import { useToast } from './toast';
 import { quoted, when } from './today';
@@ -53,7 +60,7 @@ interface Command {
   body: () => Promise<Record<string, unknown>>;
   done: string;
 }
-type Panel = 'revision' | 'copy' | null;
+type Panel = 'revision' | 'edit' | 'copy' | null;
 const commandKey = (projectId: string) => [...libraryKey(projectId), 'command'] as const;
 const fileKey = (file: ProjectArtifact) => `${file.attemptId}/${file.path}`;
 const refusalStyle = { margin: 0, color: 'var(--bad)' };
@@ -164,6 +171,8 @@ function EntryView({
   const read = new Map<number, number>();
   for (const reader of readers.data ?? []) read.set(reader.revision, (read.get(reader.revision) ?? 0) + 1);
   const revisions = [...entry.revisions].sort((a, b) => b.revision - a.revision),
+    newest = revisions[0],
+    editable = !!newest && libraryEditable(newest.file),
     held = heldRuns(client, projectId, names.records?.runs ?? []),
     ideas = held.runs.filter(run => leavesOut(run, entry.id));
   return (
@@ -179,6 +188,17 @@ function EntryView({
         >
           Add a newer revision
         </button>
+        {editable && (
+          <button
+            type="button"
+            className="sd-btn sd-btn--sm"
+            aria-expanded={panel === 'edit'}
+            disabled={busy}
+            onClick={() => toggle('edit')}
+          >
+            Edit
+          </button>
+        )}
         <button
           type="button"
           className="sd-btn sd-btn--sm"
@@ -206,6 +226,28 @@ function EntryView({
           onCancel={() => setPanel(null)}
           onAdd={body =>
             command.mutate({ action: 'revisions', body, done: `Added a newer revision of ${entry.name}.` })
+          }
+        />
+      )}
+      {panel === 'edit' && editable && (
+        <EditText
+          projectId={projectId}
+          entry={entry}
+          revision={newest}
+          busy={busy}
+          refusal={refusal('revisions')}
+          onEdit={edit}
+          onCancel={() => setPanel(null)}
+          onSave={text =>
+            command.mutate({
+              action: 'revisions',
+              // The edit as a file under the newest revision's name, sent as an upload is: its UTF-8 bytes in base64.
+              body: async () => {
+                const file = new File([text], newest.file);
+                return { file: await encoded({ id: 0, file, mediaType: libraryMediaType(file) }) };
+              },
+              done: `Saved revision ${newest.revision + 1} of ${entry.name}.`,
+            })
           }
         />
       )}
@@ -444,6 +486,191 @@ function NewRevision({
           Cancel
         </button>
       </span>
+    </section>
+  );
+}
+
+const markdownFile = (name: string) => /\.(md|markdown)$/i.test(name);
+// A textarea reads every line break as \n, so an edit of a file written with \r\n is saved with \r\n again.
+const withBreaks = (original: string, text: string) =>
+  original.includes('\r\n') ? text.replace(/\r?\n/g, '\r\n') : text;
+const linesCounted = (count: number) => `${count} line${count === 1 ? '' : 's'}`;
+// What changed lists at most this many lines, so a large edit does not slow the page as the director types.
+const changesShown = 400;
+
+// Edit: the newest revision's text in place, with a preview beside a Markdown file and what the edit changes against
+// that revision, saved as the next revision under the same file name. Cancel, or closing, drops the edit.
+function EditText({
+  projectId,
+  entry,
+  revision,
+  busy,
+  refusal,
+  onEdit,
+  onSave,
+  onCancel,
+}: {
+  projectId: string;
+  entry: LibraryEntry;
+  revision: LibraryRevision;
+  busy: boolean;
+  refusal: string | null;
+  onEdit: () => void;
+  onSave: (text: string) => void;
+  onCancel: () => void;
+}) {
+  // The edit, or null while it is the revision's text as read.
+  const [draft, setDraft] = useState<string | null>(null),
+    textId = useId(),
+    previewId = useId();
+  const read = useQuery({
+    queryKey: [...libraryKey(projectId), entry.id, 'revisions', revision.revision],
+    queryFn: ({ signal }) => getText(libraryRevisionUrl(projectId, entry.id, revision.revision), signal),
+    // A revision's bytes never change.
+    staleTime: Infinity,
+  });
+  const original = read.data,
+    text = draft ?? original ?? '',
+    saved = original === undefined || draft === null ? original : withBreaks(original, draft),
+    changed = original !== undefined && saved !== undefined && saved !== original,
+    next = revision.revision + 1;
+  const diff = useMemo(
+    () => (original === undefined || saved === undefined ? null : lineDiff(original, saved)),
+    [original, saved],
+  );
+  return (
+    <section aria-label={`Edit ${entry.name}`} className="sd-card" style={panelStyle}>
+      <p style={{ margin: 0 }}>
+        {`Saved, the edit becomes revision ${next}. Work already done keeps the revision it read, and work that starts afterwards receives the new one.`}
+      </p>
+      {original === undefined ? (
+        read.error ? (
+          <p role="alert" className="sd-meta" style={refusalStyle}>
+            {`Revision ${revision.revision} could not be read: ${read.error.message}`}
+          </p>
+        ) : (
+          <p role="status" className="sd-meta" style={{ margin: 0 }}>
+            {`Loading revision ${revision.revision}…`}
+          </p>
+        )
+      ) : (
+        <>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+              gap: 'var(--space-10)',
+              alignItems: 'start',
+            }}
+          >
+            <div className="sd-field">
+              <label className="sd-field__label" htmlFor={textId}>
+                Text
+              </label>
+              <textarea
+                id={textId}
+                className="sd-textarea"
+                style={{ fontFamily: 'var(--font-mono)', fontSize: '13px' }}
+                rows={14}
+                spellCheck={false}
+                value={text}
+                disabled={busy}
+                onChange={event => {
+                  setDraft(event.target.value);
+                  onEdit();
+                }}
+              />
+            </div>
+            {markdownFile(revision.file) && (
+              <section aria-labelledby={previewId} className="sd-field" style={{ minWidth: 0 }}>
+                <span id={previewId} className="sd-field__label">
+                  Preview
+                </span>
+                <TextReader text={text} markdown />
+              </section>
+            )}
+          </div>
+          {diff && <Changes diff={diff} />}
+        </>
+      )}
+      {refusal && (
+        <p role="alert" className="sd-meta" style={refusalStyle}>
+          {refusal}
+        </p>
+      )}
+      <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-6)' }}>
+        <button
+          type="button"
+          className="sd-btn sd-btn--sm sd-btn--primary"
+          disabled={!changed || busy}
+          onClick={() => saved !== undefined && onSave(saved)}
+        >
+          {busy ? 'Saving…' : `Save as revision ${next}`}
+        </button>
+        <button type="button" className="sd-btn sd-btn--sm sd-btn--ghost" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+      </span>
+    </section>
+  );
+}
+
+// What changed: the lines the edit removes and adds, each with its line number in the revision or in the edit, in
+// reading order, as the source diff marks them.
+function Changes({ diff }: { diff: LineDiff }) {
+  const titleId = useId();
+  let before = 0,
+    after = 0;
+  const lines = diff.rows.flatMap(row => {
+    if (row.type !== 'added') before++;
+    if (row.type !== 'removed') after++;
+    return row.type === 'same' ? [] : [{ row, line: row.type === 'added' ? after : before }];
+  });
+  return (
+    <section aria-labelledby={titleId} style={sectionStyle}>
+      <h4 id={titleId} className="sd-eyebrow" style={{ margin: 0 }}>
+        What changed
+      </h4>
+      {lines.length === 0 ? (
+        <p className="sd-meta" style={{ margin: 0 }}>
+          Nothing changed yet.
+        </p>
+      ) : (
+        <>
+          <span className="sd-meta">{`${linesCounted(diff.added)} added, ${linesCounted(diff.removed)} removed`}</span>
+          {!diff.exact && (
+            <span className="sd-meta">
+              Too much changed to match line by line, so the changed part reads as removed, then added.
+            </span>
+          )}
+          <div
+            className="sd-code"
+            role="list"
+            aria-label="Lines added and removed"
+            style={{ maxHeight: '320px', overflow: 'auto' }}
+          >
+            {lines.slice(0, changesShown).map(({ row, line }, index) => (
+              <div
+                key={index}
+                role="listitem"
+                aria-label={`Line ${line} ${row.type}: ${row.text}`}
+                className={`sd-code__line ${row.type === 'added' ? 'sd-code__line--add' : 'sd-code__line--del'}`}
+              >
+                <span className="sd-code__num">{row.type === 'removed' ? line : ''}</span>
+                <span className="sd-code__num">{row.type === 'added' ? line : ''}</span>
+                <span className="sd-code__sign">{row.type === 'added' ? '+' : '−'}</span>
+                <span>
+                  {row.text}
+                  {row.noNewlineAtEnd && <span className="sd-code__cm"> No newline at the end of the file</span>}
+                </span>
+              </div>
+            ))}
+          </div>
+          {lines.length > changesShown && (
+            <span className="sd-meta">{`Showing the first ${changesShown} of ${lines.length} changed lines.`}</span>
+          )}
+        </>
+      )}
     </section>
   );
 }
