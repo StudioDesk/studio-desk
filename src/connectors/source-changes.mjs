@@ -53,10 +53,10 @@ const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const measureParent = store => path.join(store.directory, 'wt');
 // The measurements of the open measuring pass, by root, line and profile, or null outside one.
 let pass = null;
-// Runs fn as one measuring pass (a scheduler pass, or a director's start): every story checked in it reuses the first
-// measurement of the same root, line and profile, and which of the same files are committed, instead of reading and
-// hashing the whole live source and asking git again for each check. A pass opened inside one joins it. Outside a pass
-// every check measures.
+// Runs fn as one measuring pass (a scheduler pass, a readiness refresh, or a director's start): every story checked in
+// it reuses the first measurement of the same root, line and profile, which of the same files are committed, ignored or
+// deleted, and the commit a story would start from, instead of reading and hashing the whole live source and asking git
+// again for each check. A pass opened inside one joins it. Outside a pass every check measures.
 export function measuringPass(fn) {
   if (pass) return fn();
   pass = new Map();
@@ -70,20 +70,34 @@ export function measuringPass(fn) {
 export function measureAgain() {
   pass?.clear();
 }
-// One measurement of a line for the rest of the pass, asking git once for each list of files whose commits it checks.
+// One measurement of a line for the rest of the pass, asking git once for each list of files whose commits, ignore
+// rules or deletions it checks.
 function passMeasurement({ current, files }) {
-  const committed = new Map();
+  const asked = { committed: new Map(), ignored: new Map(), gone: new Map() },
+    once = name => paths => {
+      const key = JSON.stringify(paths);
+      if (!asked[name].has(key)) asked[name].set(key, files[name](paths));
+      return [...asked[name].get(key)];
+    };
   return {
     current,
-    files: {
-      ...files,
-      committed: paths => {
-        const key = JSON.stringify(paths);
-        if (!committed.has(key)) committed.set(key, files.committed(paths));
-        return [...committed.get(key)];
-      },
-    },
+    files: { ...files, committed: once('committed'), ignored: once('ignored'), gone: once('gone') },
   };
+}
+// The commit a story on the line would start from, asked of git once in a pass; a source that cannot start a story
+// says why to each story that asks.
+function passBase(root, line, profile) {
+  if (!pass) return lineBase(root, line, profile);
+  const key = JSON.stringify(['base', root, line ?? null, profile]);
+  if (!pass.has(key))
+    try {
+      pass.set(key, { base: lineBase(root, line, profile) });
+    } catch (error) {
+      pass.set(key, { error });
+    }
+  const { base, error } = pass.get(key);
+  if (error) throw error;
+  return structuredClone(base);
 }
 // The source a story's scope is checked against: its project's line as its measured checks recorded it, or the one the
 // director moved the story to before it started (1.1 step 2a). In a measuring pass, as the pass first measured it.
@@ -762,7 +776,7 @@ function breakdownChangeScope(store, task, root, dryRun) {
     reviewedSourceHash: evidence.sourceHash,
     proposal: structuredClone(story),
     source: current,
-    ...(dryRun ? {} : { base: lineBase(root, line, profile) }),
+    ...(dryRun ? {} : { base: passBase(root, line, profile) }),
     ...paths,
     acceptedInputs: [ref, checkedReference, ...siblingInputs],
     ...storyScopeExtras(store, task, paths, current),
@@ -1136,7 +1150,7 @@ export function changeScope(store, task, root, { dryRun = false } = {}) {
     reviewedSourceHash: checked.sourceCheck.sourceHash,
     proposal: structuredClone(proposal),
     source,
-    ...(dryRun ? {} : { base: lineBase(root, line, profile) }),
+    ...(dryRun ? {} : { base: passBase(root, line, profile) }),
     ...paths,
     ...storyScopeExtras(store, task, paths, source),
   };

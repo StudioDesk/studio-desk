@@ -548,7 +548,7 @@ export const studioDevelopmentPack = {
           ready: ({ store, task }) => sourceStoryIntegrable(store, task),
         },
       },
-      validateInputs({ store, task, runtime, verifyAuth }) {
+      validateInputs({ store, task, runtime, verifyAuth, quick }) {
         // Two source stories at a time on each release line, each from its first edit until it is integrated.
         const holders = sourceStoriesInFlight(store, task);
         if (holders.length >= storiesPerLine) {
@@ -557,7 +557,8 @@ export const studioDevelopmentPack = {
             `Waiting for ${holders.map(holder => `${holder.id} (“${holder.title}”)`).join(' and ')} to be integrated: source stories${line === undefined ? '' : ` on ${line}`} run two at a time.`,
           );
         }
-        changeScope(store, task, sourceRoot(store, task, runtime));
+        // The scope is measured against the source with git; a story that cannot start yet is measured once it can.
+        if (!quick) changeScope(store, task, sourceRoot(store, task, runtime));
         // Scope remains a project choice; new registrations never expand an
         // existing project's configured catalog automatically.
         if (

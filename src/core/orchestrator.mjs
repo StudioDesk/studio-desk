@@ -355,7 +355,8 @@ export class Runner {
       { tiers: org.tiers, tier: this.tierOf(task) },
     );
   }
-  blockReason(task, verifyAuth = false) {
+  // `quick` when the work cannot start yet anyway: its inputs' validators may then skip measuring its source.
+  blockReason(task, verifyAuth = false, { quick = false } = {}) {
     task = this.workflows.stageView(task);
     const org = projectOrganization(this.store, recordProject(task)),
       w = this.effectiveWorker(org, task);
@@ -425,6 +426,7 @@ export class Runner {
         task: structuredClone(task),
         runtime: this,
         verifyAuth,
+        quick,
       });
       if (validation?.then) throw new Error('Workflow input validators must complete synchronously.');
     } catch (error) {
@@ -540,24 +542,35 @@ export class Runner {
       attempt[field] = structuredClone(value);
     }
   }
+  // Runs after every recorded change, for every waiting task, so it measures each source once (measuringPass), and work
+  // that cannot start yet, with every slot or one of its resources taken, skips the checks that measure its source
+  // (`quick`): a story's scope took six git calls, and twenty waiting stories held the controller for seconds on each
+  // pass (October 29).
   refreshReadiness() {
+    measuringPass(() => this.refreshEach());
+  }
+  refreshEach() {
     for (const t of this.store
       .tasks()
       .filter(t => t.status === 'ready' || (t.status === 'blocked' && t.controllerWait))) {
-      let reason = this.blockReason(t),
+      // The live attempts only, through the status index: this runs for every waiting task on every pass.
+      const slotsTaken = this.store.liveAttempts().length >= this.store.organization().maxParallel;
+      let resources = null;
+      try {
+        resources = this.workflows.requirements(this.workflows.stageView(t), { store: this.store }).resources;
+      } catch {} // blockReason says why
+      const taken = slotsTaken || (!!resources && this.store.leases().some(l => resources.includes(l.resource)));
+      let reason = this.blockReason(t, false, { quick: taken }),
         conflict;
       // Queued work whose own prerequisites are met waits for the director to resume its project,
       // before any slot, resource or integration it would wait for next.
       if (!reason && t.queued && this.store.project(recordProject(t)).dispatchPaused) reason = projectPaused;
       if (!reason) {
-        // The live attempts only, through the status index: this runs for every waiting task on every pass.
-        const count = this.store.liveAttempts().length;
-        if (count >= this.store.organization().maxParallel) reason = 'Waiting for a studio execution slot.';
+        if (slotsTaken) reason = 'Waiting for a studio execution slot.';
         // An agent is not reserved (MP-033): it runs as many attempts at once as the limits allow, so only the
         // work's own resources can make it wait.
-        const execution = this.workflows.stageView(t),
-          resources = this.workflows.requirements(execution, { store: this.store }).resources;
-        const held = this.store.leases().find(l => resources.includes(l.resource));
+        const execution = this.workflows.stageView(t);
+        const held = this.store.leases().find(l => resources?.includes(l.resource));
         if (held) {
           conflict = this.store.resourceConflict(held.resource, held.attemptId);
           reason = conflict.reason;
