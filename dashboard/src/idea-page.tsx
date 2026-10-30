@@ -4,7 +4,9 @@
 // project, archiving a finished idea and closing what is left of one, and bringing an idea whose stories landed back
 // to an older line (1.1). An agent's question in What happened leads to its Answer box on Today, and auto mode's answer
 // may be changed in place (1.2 step 2). The checks and the plan have no cards of their own, so What happened, and on a
-// phone the stops, link each one's own page.
+// phone the stops, link each one's own page. While the idea is in planning, its conversation with the planner is the
+// page's main part, under the journey; once the plan is official, it stays at the foot of the page under Talk to <the
+// planner>.
 import { notifyManager, useMutation, useQueries } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -15,6 +17,7 @@ import { agentState } from './faces';
 import { Icon, type IconName } from './design/icons';
 import { artifactUrl, FileViewer, TextReader, type ViewerEntry } from './files';
 import { fileSize } from './idea-composer';
+import { IdeaConversation, planStepOf } from './idea-conversation';
 import {
   clockOf,
   firstSentence,
@@ -116,6 +119,10 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
     backable =
       sourceStories.some(landed) &&
       sourceStories.every(task => landed(task) || !!task.closed || ['cancelled', 'denied'].includes(task.status)),
+    // The plan step: in planning until it is done or closed, then official.
+    plan = planStepOf(planning),
+    talking = !!plan && plan.status !== 'done' && !plan.closed && plan.status !== 'denied',
+    official = plan?.status === 'done',
     sent = `You sent this at ${clockOf(run.startedAt)}`,
     attached = inputs.length ? `${inputs.length} ${plural(inputs.length, 'file')} attached` : 'no files attached';
   const cards = (inside = false) =>
@@ -215,6 +222,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
           ))}
         </ol>
       </section>
+      {talking && <IdeaConversation projectId={projectId} run={run} state={state} plan={plan} looks={looks} />}
       {!narrow && stories.length > 0 && (
         <section aria-labelledby="idea-stories" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 'var(--space-10)' }}>
@@ -299,6 +307,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
           </aside>
         </div>
       )}
+      {official && <IdeaConversation projectId={projectId} run={run} state={state} plan={plan} looks={looks} />}
     </article>
   );
 }

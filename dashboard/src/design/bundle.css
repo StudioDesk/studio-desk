@@ -1485,6 +1485,20 @@ button.sd-row[aria-pressed='true'] {
   color: #fff;
   font-size: 13px;
 }
+/* The director's idea read as Markdown in their own bubble, as an idea's conversation shows it: white on the brand */
+.sd-bubble--mine .sd-reader__text,
+.sd-bubble--mine .sd-reader__text a,
+.sd-bubble--mine .sd-reader__text a:hover,
+.sd-bubble--mine .sd-reader__text blockquote {
+  color: #fff;
+}
+.sd-bubble--mine .sd-reader__text :is(code, pre, th) {
+  background: rgb(255 255 255 / 0.16);
+}
+.sd-bubble--mine .sd-reader__text :is(pre, th, td, hr),
+.sd-bubble--mine .sd-reader__text blockquote {
+  border-color: rgb(255 255 255 / 0.4);
+}
 .sd-typing {
   display: inline-flex;
   gap: var(--space-4);
