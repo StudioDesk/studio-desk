@@ -43,7 +43,25 @@ export type Tone = 'you' | 'live' | 'ok' | 'bad' | 'wait';
 export interface CardChip {
   tone: Tone;
   label: string;
+  // The controller's own words for a wait, shown when the chip is pointed at.
+  title?: string;
 }
+
+// The shared rules' passive waits (public/runs.js taskExplanation): the controller holds the work, and nothing is
+// needed from the director. Mirrors the rules' wait kinds.
+const controllerWaits = [
+  'queued',
+  'retry-queued',
+  'slot-wait',
+  'resource-wait',
+  'test-turn-wait',
+  'prerequisite-wait',
+  'prerequisite-acceptance',
+  'subscription-wait',
+  'integration-pending',
+];
+// The rules' calls whose action is Accept result: a completed result, or a review that asked for changes.
+const acceptKinds = ['result-approval', 'review-result'];
 
 // The prerequisite a ready task waits for, named as the board names it: "story 2", or its title.
 function waitsFor(task: Task, state: StudioState, stories: RunStory[]) {
@@ -182,9 +200,14 @@ export function cardOf(
     return card;
   }
   if (column === 'review') {
+    // Only the shared rules' explanation says whether a card in review waits for the director: the chip in the
+    // director's color and the Your calls filter both follow it.
     const review = people.review,
-      reviewer = people.reviewer;
-    if (decision.integrable) {
+      reviewer = people.reviewer,
+      { explanation } = decision,
+      yours = !!explanation.requiresDirector;
+    card.calls = yours;
+    if (yours && decision.integrable) {
       const stat = diffStatOf(people.candidate),
         totals = totalsOf(people.candidate);
       card.chip = { tone: 'you', label: 'Integrate?' };
@@ -192,15 +215,21 @@ export function cardOf(
         ...(stat ? { added: stat.added, removed: stat.removed } : {}),
         ...(totals?.tests ? { tests: `${totals.pass}/${totals.tests}` } : {}),
       };
-    } else if (decision.returnable) {
+    } else if (yours && decision.returnable) {
       const findings = (review?.candidateReviewFindings as string[] | undefined) ?? [],
         place = /^([\w@./-]+\.\w+(?::\d+)?)/.exec(String(findings[0] ?? ''))?.[1];
       card.chip = { tone: 'you', label: 'Changes asked' };
       card.blocking = { count: findings.length, place };
-    } else if (calls) card.chip = { tone: 'you', label: stand.chip ?? 'Your call' };
+    } else if (yours)
+      card.chip = {
+        tone: 'you',
+        label: stand.chip ?? (acceptKinds.includes(explanation.kind) ? 'Accept?' : 'Your call'),
+      };
     else if (active(task)) card.chip = { tone: 'live', label: 'Reviewing' };
     else if (decision.progress?.busy) card.chip = { tone: 'live', label: 'Integrating' };
-    else if (task.status === 'review') card.chip = { tone: 'you', label: 'Accept?' };
+    // The controller holds it: the chip says so in grey, with the controller's own reason.
+    else if (task.controllerWait || task.queued || controllerWaits.includes(explanation.kind))
+      card.chip = { tone: 'wait', label: 'Waiting', title: explanation.reason };
     card.foot = review?.finishedAt ? `${reviewer} reviewed` : active(task) ? `${reviewer} reviewing` : who;
     card.workerId = review?.workerId ?? people.reviewerId ?? task.workerId;
     return card;

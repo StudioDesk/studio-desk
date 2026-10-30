@@ -126,6 +126,68 @@ test('closed and cancelled work joins what is done when shown, from its address'
   expect(screen.getByRole('button', { name: 'Hide 2 closed or cancelled' })).toBeTruthy();
 });
 
+test('a Review card the controller holds reads Waiting with its reason; a result for the director reads Accept?', async () => {
+  const user = userEvent.setup(),
+    reason = 'Waiting for a studio execution slot.';
+  controller.tasks = [
+    // A built candidate the controller moved on to its review, queued for a free slot.
+    taskFixture('T-held', {
+      title: 'Held story',
+      kind: 'studio-development:change',
+      status: 'ready',
+      queued: true,
+      controllerWait: true,
+      reason,
+      lastAttemptId: 'attempt-built',
+      acceptedAttemptId: 'attempt-built',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        history: [],
+        phase: 'candidate-review',
+        current: 'candidate-review',
+        candidate: { taskId: 'T-held', attemptId: 'attempt-built' },
+      },
+    }),
+    // A completed result that waits for the director's acceptance.
+    taskFixture('T-result', { title: 'Finished work', status: 'review', lastAttemptId: 'attempt-result' }),
+  ];
+  controller.attempts = [
+    {
+      id: 'attempt-built',
+      taskId: 'T-held',
+      status: 'accepted',
+      workerId: 'W-1',
+      startedAt: '2026-10-21T12:01:00Z',
+      finishedAt: '2026-10-21T12:20:00Z',
+      assignment: { kind: 'studio-development:change' },
+    },
+    {
+      id: 'attempt-result',
+      taskId: 'T-result',
+      status: 'review',
+      workerId: 'W-1',
+      startedAt: '2026-10-21T12:01:00Z',
+      finishedAt: '2026-10-21T12:20:00Z',
+      result: { outcome: 'completed', summary: 'Done.' },
+    },
+  ];
+  controller.settled = { accepted: [], closed: [] };
+  open();
+  const review = await column('Review');
+  await waitFor(() => expect(titles(review).sort()).toEqual(['Finished work', 'Held story']));
+  const chip = (title: string) =>
+    review.getByRole('link', { name: new RegExp(title) }).querySelector('.sd-kcard__top .sd-chip')!;
+  expect(chip('Held story').textContent).toBe('Waiting');
+  expect(chip('Held story').getAttribute('title')).toBe(reason);
+  expect(chip('Finished work').textContent).toBe('Accept?');
+  expect(chip('Finished work').getAttribute('title')).toBeNull();
+  // The list's chip says the same, with the same reason.
+  await user.click(screen.getByRole('button', { name: 'List' }));
+  const row = (await screen.findByRole('link', { name: 'Held story' })).closest('tr')!;
+  expect(row.querySelector('.sd-chip')?.textContent).toBe('Waiting');
+  expect(row.querySelector('.sd-chip')?.getAttribute('title')).toBe(reason);
+});
+
 test("lanes by idea head each idea's lane with its dot, its words and its details, the whole head opening it", async () => {
   const user = userEvent.setup(),
     words =

@@ -3,7 +3,7 @@
 import { expect, test } from 'vitest';
 import type { AttemptSummary, Task } from './api';
 import { cardOf, columnOf, laneDetails, matches } from './board';
-import type { RunStory, StudioState } from './studio-runs';
+import { explain, type RunStory, type StudioState } from './studio-runs';
 
 const stage = (fields: object) => ({ version: 'source-story-stages-v1', history: [], ...fields });
 const story = (fields: Partial<Task>): Task => ({
@@ -124,6 +124,73 @@ test('work the controller holds after an attempt waits in grey; a stop is red', 
   });
   const stopped = { ...held, controllerWait: false };
   expect(cardOf(stopped, state([stopped]), [])).toMatchObject({ chip: { tone: 'bad' } });
+});
+
+// Review cards follow the shared rules' explanation: the director's color only for a call the rules give the
+// director, grey with the controller's own words while it holds the work, and no chip otherwise.
+test("a review the controller holds for a slot waits in grey with the controller's reason, and is no call", () => {
+  // A built candidate the controller moved on to its review, queued for a free slot (src/connectors/source-changes.mjs).
+  const built: AttemptSummary = {
+      id: 'a-1',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      startedAt: '2026-10-22T19:01:00Z',
+      finishedAt: '2026-10-22T19:20:00Z',
+      assignment: { kind: 'studio-development:change' },
+    },
+    held = story({
+      status: 'ready',
+      queued: true,
+      controllerWait: true,
+      reason: 'Waiting for a studio execution slot.',
+      lastAttemptId: 'a-1',
+      acceptedAttemptId: 'a-1',
+      sourceStage: stage({
+        phase: 'candidate-review',
+        current: 'candidate-review',
+        candidate: { taskId: 'T-1', attemptId: 'a-1' },
+      }),
+    }),
+    board = state([held], [built]),
+    explanation = explain(held, board);
+  expect(explanation).toMatchObject({ kind: 'slot-wait', requiresDirector: false });
+  const card = cardOf(held, board, [])!;
+  expect(card).toMatchObject({ column: 'review', foot: 'Eli' });
+  expect(card.chip).toEqual({ tone: 'wait', label: 'Waiting', title: explanation.reason });
+  expect(JSON.stringify(card)).not.toContain('Accept?');
+  expect(matches(card, 'calls')).toBe(false);
+  expect(matches(card, 'waiting')).toBe(true);
+});
+
+test('a completed result the director accepts reads Accept? and is a call; one the controller accepts has no chip', () => {
+  const work = story({ kind: 'general:work', status: 'review', lastAttemptId: 'a-1' }),
+    attempt: AttemptSummary = {
+      id: 'a-1',
+      taskId: 'T-1',
+      status: 'review',
+      workerId: 'W-1',
+      startedAt: '2026-10-22T19:01:00Z',
+      finishedAt: '2026-10-22T19:20:00Z',
+      result: { outcome: 'completed', summary: 'Done.' },
+    },
+    board = state([work], [attempt]);
+  expect(explain(work, board)).toMatchObject({ kind: 'result-approval', requiresDirector: true });
+  const yours = cardOf(work, board, [])!;
+  expect(yours).toMatchObject({ column: 'review', chip: { tone: 'you', label: 'Accept?' } });
+  expect(matches(yours, 'calls')).toBe(true);
+  // With the house rules accepting results, the same result only waits for the controller, which is not queued: the
+  // card has no chip, and its foot names who has it.
+  const auto = {
+    ...board,
+    autonomy: { policy: { enabled: true, kinds: { 'general:work': { accept: 'auto' } } } },
+  } as unknown as StudioState;
+  expect(explain(work, auto)).toMatchObject({ kind: 'result-auto', requiresDirector: false });
+  const theirs = cardOf(work, auto, [])!;
+  expect(theirs.column).toBe('review');
+  expect(theirs.chip).toBeUndefined();
+  expect(theirs.foot).toBe('Eli');
+  expect(matches(theirs, 'calls')).toBe(false);
 });
 
 test('a settled card keeps the finished idea the records name; work in no idea has none', () => {

@@ -493,7 +493,7 @@ function BoardCard({
       <span className="sd-kcard__top">
         <span className="sd-eyebrow">{card.eyebrow}</span>
         {card.chip && !card.waits && card.column !== 'ready' ? (
-          <span className={`sd-chip${tone === 'wait' ? '' : ` sd-chip--${tone}`}`}>
+          <span className={`sd-chip${tone === 'wait' ? '' : ` sd-chip--${tone}`}`} title={card.chip.title}>
             <span className="sd-chip__dot"></span>
             {card.chip.label}
           </span>
@@ -642,6 +642,7 @@ function BoardList({ projectId, cards, looks }: { projectId: string; cards: Card
                     {card.chip && (
                       <span
                         className={`sd-chip sd-chip--inline${card.chip.tone === 'wait' ? '' : ` sd-chip--${card.chip.tone}`}`}
+                        title={card.chip.title}
                       >
                         <span className="sd-chip__dot"></span>
                         {card.waits ?? card.chip.label}
