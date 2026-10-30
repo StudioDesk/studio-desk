@@ -1236,6 +1236,17 @@ button.sd-row[aria-pressed='true'] {
 .sd-code__line > span {
   padding: 0 var(--space-8);
 }
+/* What changed stays inside its card, including an unbroken changed line. */
+.sd-code--wrap .sd-code__line {
+  grid-template-columns: 42px 42px 20px minmax(0, 1fr);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* The work row and its full-width versions wrapper must also be allowed to shrink. */
+.sd-cardlist__row:has(> div > .sd-work-versions),
+.sd-cardlist__row > div:has(> .sd-work-versions) {
+  min-width: 0;
+}
 .sd-code__num {
   color: var(--ink-3);
   text-align: right;

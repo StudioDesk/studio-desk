@@ -2,7 +2,7 @@
 // first with its number, date and why, Open on that version's file, and What changed against the version before, read
 // through the artifact route and compared line by line. A picture's versions have Open and no comparison, and a file
 // made once has no versions to open.
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -12,6 +12,7 @@ import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, type Controller } from './test-controller';
 import { when } from './today';
+import { VersionComparison } from './work-versions';
 
 let controller: Controller;
 const version = (taskId: string, n: number, extra: Partial<WorkVersion> = {}): WorkVersion => ({
@@ -193,6 +194,82 @@ test('What changed on version 2 reads both versions and shows the lines added an
   ).toEqual(['Line 3 removed: Sign up today.', 'Line 4 removed: It runs on your computer.']);
   expect(artifactReads().filter(url => url.includes('attempt-T-copy-2'))).toHaveLength(1);
   expect(artifactReads().filter(url => url.includes('attempt-T-copy-3'))).toHaveLength(1);
+});
+
+test('What changed wraps long lines and lets every container inside the version item shrink', async () => {
+  const longLine = `A changed line with spaces and ${'unbroken'.repeat(150)}`;
+  controller.artifacts['attempt-T-copy-2/copy/launch-page.md'] = `# Launch\n${longLine}\n`;
+  const user = userEvent.setup();
+  open();
+  await user.click((await row('copy/launch-page.md')).getByRole('button', { name: /^3 versions/ }));
+  const second = versionsOf('copy/launch-page.md')[1]!;
+  await user.click(within(second).getByRole('button', { name: 'What changed in version 2' }));
+  const lines = await within(second).findByRole('list', { name: 'Lines added and removed in version 2' });
+  expect(within(lines).getByRole('listitem', { name: `Line 2 added: ${longLine}` })).toBeTruthy();
+  expect(lines.closest('.sd-code--wrap')).toBeTruthy();
+  expect(lines.style.maxHeight).toBe('320px');
+  expect(lines.style.overflow).toBe('auto');
+  // The list, comparison column, disclosure wrapper, version card and versions list all shrink.
+  const versions = screen.getByRole('list', { name: 'Versions of copy/launch-page.md' });
+  for (let element: HTMLElement | null = lines; element; element = element.parentElement) {
+    expect(element.style.minWidth).toBe('0px');
+    if (element === versions) break;
+  }
+  expect((second.firstElementChild as HTMLElement).style.minWidth).toBe('0px');
+});
+
+// The comparison can read any two text sources without a work file, project or attempt record.
+const compareRevisions = () =>
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <VersionComparison
+        earlier={{ url: '/revision-one', queryKey: ['library', 'entry-a', 1], label: 'Revision 1' }}
+        later={{ url: '/revision-two', queryKey: ['library', 'entry-a', 2], label: 'Revision 2' }}
+      />
+    </QueryClientProvider>,
+  );
+
+test('the exported comparison reads Revision sources and shows added and removed lines with their numbers', async () => {
+  const read = vi.fn((url: string) =>
+    Promise.resolve(
+      new Response(url === '/revision-one' ? '# Heading\nOld wording\nKeep\n' : '# Heading\nKeep\nNew wording'),
+    ),
+  );
+  vi.stubGlobal('fetch', read);
+  compareRevisions();
+  expect(screen.getByRole('status').textContent).toBe('Reading revisions 2 and 1…');
+  const lines = await screen.findByRole('list', { name: 'Lines added and removed in revision 2' });
+  expect(screen.getByText('Against revision 1: 1 line added, 1 line removed')).toBeTruthy();
+  const removed = within(lines).getByRole('listitem', { name: 'Line 2 removed: Old wording' });
+  const added = within(lines).getByRole('listitem', { name: 'Line 3 added: New wording' });
+  expect([...removed.children].slice(0, 3).map(cell => cell.textContent)).toEqual(['2', '', '−']);
+  expect([...added.children].slice(0, 3).map(cell => cell.textContent)).toEqual(['', '3', '+']);
+  expect(within(added).getByText('No newline at the end of the file')).toBeTruthy();
+  expect(read.mock.calls.map(([url]) => url).sort()).toEqual(['/revision-one', '/revision-two']);
+});
+
+test('the reusable comparison reports identical lines with the earlier label', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => Promise.resolve(new Response('The same text\n'))),
+  );
+  compareRevisions();
+  expect(await screen.findByText('The same lines as revision 1.')).toBeTruthy();
+  expect(screen.queryByRole('list')).toBeNull();
+});
+
+test('the reusable comparison still caps a large change at 400 lines', async () => {
+  const text = Array.from({ length: 401 }, (_, index) => `New line ${index + 1}\n`).join('');
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) => Promise.resolve(new Response(url === '/revision-one' ? '' : text))),
+  );
+  compareRevisions();
+  const lines = await screen.findByRole('list', { name: 'Lines added and removed in revision 2' });
+  expect(within(lines).getAllByRole('listitem')).toHaveLength(400);
+  expect(screen.getByText('Showing the first 400 of 401 changed lines.')).toBeTruthy();
+  expect(within(lines).getByRole('listitem', { name: 'Line 400 added: New line 400' })).toBeTruthy();
+  expect(within(lines).queryByRole('listitem', { name: 'Line 401 added: New line 401' })).toBeNull();
 });
 
 test('a version the controller will not serve says which one could not be read, in its words', async () => {
