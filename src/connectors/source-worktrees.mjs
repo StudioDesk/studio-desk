@@ -53,6 +53,20 @@ export function committedPaths(root, files) {
     return [];
   }
 }
+// Every file committedPaths would answer for, listed once for the whole repository: a measurement that checks many
+// stories' files asks git four times in all instead of four times for each story (October 29). Empty when the source
+// is not the root of a git repository on a branch.
+export function committedFiles(root) {
+  try {
+    if (git(root, ['rev-parse', '--show-prefix'])) return new Set();
+    git(root, ['symbolic-ref', '--quiet', 'HEAD']);
+    const list = args => git(root, args, { raw: true }).split('\0').filter(Boolean),
+      edited = new Set(list(['diff', '-z', '--name-only', 'HEAD']));
+    return new Set(list(['ls-files', '-z']).filter(file => !edited.has(file)));
+  } catch {
+    return new Set();
+  }
+}
 
 // Worktrees sit at a short path (default <data>/wt) so deep test paths stay under Windows limits.
 export const sourceWorktreeRoot = runtime => runtime.sourceWorktreeRoot || path.join(runtime.store.directory, 'wt');
