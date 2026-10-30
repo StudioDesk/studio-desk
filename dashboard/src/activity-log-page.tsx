@@ -50,6 +50,29 @@ function toneOf({ kind, message }: LogEvent): ['ok' | 'bad' | 'live' | '', IconN
   if (began.includes(kind)) return ['live', 'play'];
   return ['', 'dash'];
 }
+// How an event reads: its tone, icon, words and chip. An agent's question and the answers to it are the director's,
+// in their color and told to them; a question recorded before the controller named it one (a blocked event,
+// "Asks: …") reads as one too. Every other event reads as recorded.
+interface Reading {
+  tone: ReturnType<typeof toneOf>[0] | 'you';
+  icon: IconName;
+  text: string;
+  chip?: string;
+}
+function readingOf(event: LogEvent): Reading {
+  const { kind, message } = event,
+    yours = (text: string, chip?: string): Reading => ({ tone: 'you', icon: 'note', text, ...(chip ? { chip } : {}) });
+  if (kind === 'question_asked' || (kind === 'blocked' && message.startsWith('Asks: ')))
+    return yours(message.replace(/^Asks: /, 'Asked you: '), 'Question');
+  if (kind === 'question_answered')
+    return message.startsWith('Auto mode answered for the director:')
+      ? yours(message.replace(/^Auto mode answered for the director:/, 'Auto mode answered for you:'), 'Auto mode')
+      : yours(message.replace(/^The director answered:/, 'You answered:'));
+  if (kind === 'answer_changed')
+    return yours(message.replace(/^The director changed auto mode's answer:/, "You changed auto mode's answer:"));
+  const [tone, icon] = toneOf(event);
+  return { tone, icon, text: message };
+}
 // Structured records (an attempt's phases and checkpoints) belong to its trace, never to a list of sentences.
 const sentence = (event: LogEvent) => !event.message.trimStart().startsWith('{');
 const dayOf = (time: string) => {
@@ -111,7 +134,7 @@ export function ActivityLogPage({ projectId }: { projectId: string }) {
               </div>
               <ol className="sd-timeline">
                 {list.map(event => {
-                  const [tone, icon] = toneOf(event);
+                  const { tone, icon, text, chip } = readingOf(event);
                   return (
                     <li key={event.seq}>
                       <span className="sd-timeline__time">
@@ -121,12 +144,22 @@ export function ActivityLogPage({ projectId }: { projectId: string }) {
                         <Icon name={icon} size={14} weight={2.4} />
                       </span>
                       <span className="sd-timeline__body">
-                        <span>{event.message}</span>
-                        {event.task_id && (
+                        <span>{text}</span>
+                        {(chip || event.task_id) && (
                           <span className="sd-meta">
-                            <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: event.task_id }}>
-                              {event.task_id}
-                            </Link>
+                            {chip && (
+                              <>
+                                <span className="sd-chip sd-chip--you sd-chip--inline">
+                                  <span className="sd-chip__dot"></span>
+                                  {chip}
+                                </span>{' '}
+                              </>
+                            )}
+                            {event.task_id && (
+                              <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: event.task_id }}>
+                                {event.task_id}
+                              </Link>
+                            )}
                           </span>
                         )}
                       </span>
