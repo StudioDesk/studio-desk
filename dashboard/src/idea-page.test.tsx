@@ -1,6 +1,7 @@
 // Bringing an idea back to an older line from its page (1.1, October 27): once every one of its source stories landed
 // or was closed, and one landed, the page offers each older line the controller answers with, confirmed first; before
-// then it never asks the controller.
+// then it never asks the controller. And an agent's question in What happened (1.2 step 2), with its options, its
+// answers, Answer while it waits and Change the answer for auto mode's.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -8,6 +9,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary, RunRecord, Task } from './api';
 import { App } from './app';
+import type { Answer } from './questions';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
 
@@ -299,4 +301,227 @@ test("a refused Close what is left leaves the idea's stories as they were and sh
   expect(await seen).toEqual(before);
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(page()).toEqual(before);
+});
+
+// The idea's plan step, whose first attempt stopped to ask the director a question (1.2 step 2), as the controller
+// records it: the attempt blocked with its question and each answer on the task. Then the plan step planned once more
+// and finished (`planned`), is planning again (`planning`), or still waits for its answer (`waiting`).
+const question = {
+    ask: 'Split the page part into two stories?',
+    why: 'Two pages share it.',
+    options: [{ label: 'One story' }, { label: 'Two stories', detail: 'one a page' }],
+    recommended: 1,
+    choice: 'inside-story',
+    topics: [],
+  },
+  autoAnswer: Answer = {
+    attemptId: 'attempt-ask',
+    option: 1,
+    label: 'Two stories',
+    by: { type: 'auto-mode', at: '2026-10-27T09:06:00Z' },
+  },
+  yourAnswer: Answer = {
+    attemptId: 'attempt-ask',
+    option: 1,
+    label: 'Two stories',
+    text: 'Keep the shared part in the first.',
+    by: { type: 'director', at: '2026-10-27T09:06:00Z' },
+    at: '2026-10-27T09:06:00Z',
+  };
+const planStep = (next: 'planned' | 'planning' | 'waiting', extra: Partial<Task> = {}) => {
+  controller.attempts.push({
+    id: 'attempt-ask',
+    taskId: 'T-plan',
+    status: 'blocked',
+    workerId: 'W-1',
+    startedAt: '2026-10-27T09:01:00Z',
+    finishedAt: '2026-10-27T09:05:00Z',
+    error: 'Needs a call from the director.',
+    question,
+  });
+  if (next !== 'waiting')
+    controller.attempts.push({
+      id: 'attempt-plan',
+      taskId: 'T-plan',
+      status: next === 'planned' ? 'accepted' : 'running',
+      workerId: 'W-1',
+      startedAt: '2026-10-27T09:07:00Z',
+      ...(next === 'planned' ? { finishedAt: '2026-10-27T09:09:00Z', result: { summary: 'One story.' } } : {}),
+    });
+  return taskFixture('T-plan', {
+    title: 'Plan the idea',
+    kind: 'studio-development:breakdown',
+    status: next === 'planned' ? 'done' : next === 'planning' ? 'running' : 'blocked',
+    lastAttemptId: next === 'waiting' ? 'attempt-ask' : 'attempt-plan',
+    ...(next === 'planned' ? { acceptedAttemptId: 'attempt-plan' } : {}),
+    workflowReference: { runId: 'run-1', key: 'plan' },
+    ...extra,
+  });
+};
+// A source story of run-1 whose only attempt failed.
+const failed = (id: string, title: string) => {
+  controller.attempts.push({
+    id: `attempt-${id}`,
+    taskId: id,
+    status: 'failed',
+    workerId: 'W-1',
+    startedAt: '2026-10-27T09:10:00Z',
+    finishedAt: '2026-10-27T09:15:00Z',
+    error: 'The tests failed.',
+    assignment: { kind: change },
+  });
+  return taskFixture(id, {
+    title,
+    kind: change,
+    status: 'failed',
+    lastAttemptId: `attempt-${id}`,
+    workflowReference: { runId: 'run-1', key: id },
+    sourceStage: { version: 'source-story-stages-v1', phase: 'editing', current: 'editing' },
+  });
+};
+const whatHappened = () => screen.findByRole('region', { name: 'What happened' }, { timeout: 5000 });
+// What happened as the director reads it: each group's title, then each line's sentence.
+const told = (region: HTMLElement) =>
+  [...region.querySelectorAll('.sd-timeline')].map(list => [
+    list.previousElementSibling?.querySelector('.sd-eyebrow')?.textContent,
+    ...[...list.children].map(item => item.querySelector('.sd-timeline__body > span')?.textContent?.trim()),
+  ]);
+// The line that tells Eli's question.
+const asking = (region: HTMLElement) =>
+  [...region.querySelectorAll<HTMLElement>('.sd-timeline > li')].find(item =>
+    item.textContent?.includes('Eli asked you:'),
+  )!;
+
+test("a plan step's question reads as Eli asking you, with its options and your answer; a failed attempt stopped", async () => {
+  open([planStep('planned', { answers: [yourAnswer] }), failed('T-1', 'First')]);
+  const region = await whatHappened();
+  expect(told(region)).toEqual([
+    [
+      'Checks and plan',
+      'You sent the idea.',
+      'Eli asked you: Split the page part into two stories?',
+      'You answered: Two stories — Keep the shared part in the first.',
+      'Eli planned it as 1 story in 2 min.',
+    ],
+    ['Story 1', 'Attempt 1 stopped: The tests failed.'],
+  ]);
+  // The ask in the director's color, then the options, the recommended one marked and no other.
+  const asked = within(asking(region));
+  expect(asked.getByText('Split the page part into two stories?').getAttribute('style')).toContain('var(--you)');
+  const options = within(asked.getByRole('list', { name: "Eli's options" })).getAllByRole('listitem');
+  expect(options.map(option => option.textContent)).toEqual(['One story', 'Two stories one a page Recommended']);
+  expect(within(options[0]!).queryByText('Recommended')).toBeNull();
+  expect(within(options[1]!).getByText('Recommended')).toBeTruthy();
+  // It was answered: nothing to answer or change, and only the failed attempt stopped.
+  expect(within(region).queryByRole('link', { name: 'Answer' })).toBeNull();
+  expect(within(region).queryByRole('button', { name: 'Change the answer' })).toBeNull();
+  expect(told(region)[0]!.filter(line => line?.includes('stopped:'))).toEqual([]);
+});
+
+test("auto mode's answer may be changed while the plan step runs: Change the answer opens the Answer box", async () => {
+  const user = userEvent.setup();
+  controller.command = url => {
+    if (url !== '/api/tasks/T-plan/change-answer') return {};
+    // The director's answer replaces auto mode's (src/core/questions.mjs changeAnswer).
+    const given: Answer = {
+      attemptId: 'attempt-ask',
+      option: 0,
+      label: 'One story',
+      replaces: 'auto-mode',
+      by: { type: 'director', at: '2026-10-27T09:08:00Z' },
+      at: '2026-10-27T09:08:00Z',
+    };
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-plan' ? { ...task, answers: [...(task.answers as Answer[]), given] } : task,
+    );
+    return { answer: given, start: null, records: controller.records(['T-plan']) };
+  };
+  open([planStep('planning', { answers: [autoAnswer] })]);
+  const section = await whatHappened(),
+    region = within(section);
+  expect(told(section)[0]).toEqual([
+    'Checks and plan',
+    'You sent the idea.',
+    'Eli asked you: Split the page part into two stories?',
+    'Auto mode answered for you: Two stories',
+    'Eli is working on it now.',
+  ]);
+  expect(region.queryByRole('form', { name: 'Answer Eli' })).toBeNull();
+  // Cancel closes the box and sends nothing.
+  await user.click(region.getByRole('button', { name: 'Change the answer' }));
+  expect(region.getByRole('form', { name: 'Answer Eli' })).toBeTruthy();
+  await user.click(region.getByRole('button', { name: 'Cancel' }));
+  expect(region.queryByRole('form', { name: 'Answer Eli' })).toBeNull();
+  expect(posted()).toEqual([]);
+  await user.click(region.getByRole('button', { name: 'Change the answer' }));
+  const form = within(region.getByRole('form', { name: 'Answer Eli' }));
+  expect(form.getByText("Your answer replaces auto mode's, and Eli reworks from its saved work.")).toBeTruthy();
+  await user.click(form.getByRole('button', { name: /^One story/ }));
+  await user.click(form.getByRole('button', { name: 'Change the answer' }));
+  expect(await screen.findByText('Answer changed. Eli reworks from its saved work with yours.')).toBeTruthy();
+  expect(posted()).toEqual([
+    {
+      url: '/api/tasks/T-plan/change-answer',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'attempt-ask', option: 0 },
+    },
+  ]);
+  // The answer's records show the director's after auto mode's, which can no longer be changed.
+  await waitFor(() => expect(told(section)[0]).toContain("You changed auto mode's answer: One story"));
+  expect(region.queryByRole('button', { name: 'Change the answer' })).toBeNull();
+  expect(region.queryByRole('form', { name: 'Answer Eli' })).toBeNull();
+  cleanup();
+  // Once the plan step is done, auto mode's answer stays as it is.
+  controller.requests = [];
+  controller.attempts = [];
+  open([planStep('planned', { answers: [autoAnswer] })]);
+  const done = await whatHappened();
+  expect(told(done)[0]).toContain('Auto mode answered for you: Two stories');
+  expect(within(done).queryByRole('button', { name: 'Change the answer' })).toBeNull();
+});
+
+test('a question still waiting has Answer, which opens Today at Your calls, and no answer yet', async () => {
+  open([planStep('waiting')]);
+  const region = await whatHappened(),
+    answer = within(asking(region)).getByRole('link', { name: 'Answer' });
+  expect(answer.getAttribute('href')).toBe('/p/project-x#calls');
+  expect(told(region)[0]).toEqual([
+    'Checks and plan',
+    'You sent the idea.',
+    'Eli asked you: Split the page part into two stories?',
+  ]);
+  expect(within(region).queryByRole('button', { name: 'Change the answer' })).toBeNull();
+});
+
+test('Only stops and decisions keeps the question and its answer; on a phone, only the stop is a stop', async () => {
+  const user = userEvent.setup();
+  open([planStep('planned', { answers: [yourAnswer] }), failed('T-1', 'First')]);
+  const region = await whatHappened();
+  await user.click(within(region).getByRole('button', { name: 'Only stops and decisions' }));
+  expect(told(region)).toEqual([
+    [
+      'Checks and plan',
+      'Eli asked you: Split the page part into two stories?',
+      'You answered: Two stories — Keep the shared part in the first.',
+    ],
+    ['Story 1', 'Attempt 1 stopped: The tests failed.'],
+  ]);
+  expect(within(asking(region)).getByRole('list', { name: "Eli's options" })).toBeTruthy();
+  cleanup();
+  // On a phone, Stops along the way lists only what stopped; Everything has the question and its answer too.
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: query === '(max-width: 860px)',
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }));
+  controller.requests = [];
+  controller.attempts = [];
+  open([planStep('planned', { answers: [yourAnswer] }), failed('T-1', 'First')]);
+  const stops = await screen.findByRole('region', { name: 'Stops along the way' }, { timeout: 5000 }),
+    rows = () => [...stops.querySelectorAll('.sd-row')].map(row => row.lastElementChild?.textContent?.trim());
+  expect(rows()).toEqual(['Attempt 1 stopped: The tests failed.']);
+  await user.click(within(stops).getByRole('button', { name: 'Everything' }));
+  expect(rows()).toContain('Eli asked you: Split the page part into two stories?');
+  expect(rows()).toContain('You answered: Two stories — Keep the shared part in the first.');
 });

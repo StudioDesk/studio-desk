@@ -2,7 +2,8 @@
 // stages from Sent to Shipped, its stories in order, what happened in plain sentences with a view of only the stops
 // and decisions, the idea in full, who worked on it and what landed. Its actions are the run page's: pausing the
 // project, archiving a finished idea and closing what is left of one, and bringing an idea whose stories landed back
-// to an older line (1.1).
+// to an older line (1.1). An agent's question in What happened leads to its Answer box on Today, and auto mode's answer
+// may be changed in place (1.2 step 2).
 import { notifyManager, useMutation, useQueries } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -27,7 +28,9 @@ import {
   type JourneyStory,
 } from './journey';
 import { plural } from './evidence';
+import { workerName } from './names';
 import { produced } from './produced';
+import { AnswerBox } from './question-card';
 import { integratesController } from './story';
 import {
   newestBranch,
@@ -256,7 +259,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
         </>
       ) : (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '28px', alignItems: 'flex-start' }}>
-          <Happened projectId={projectId} groups={groups} />
+          <Happened projectId={projectId} state={state} groups={groups} />
           <aside
             style={{ flex: '2 1 320px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-16)' }}
           >
@@ -409,8 +412,20 @@ const entryIcons: Record<HappenedEntry['icon'], IconName> = {
   note: 'note',
 };
 
-function Entry({ projectId, entry }: { projectId: string; entry: HappenedEntry }) {
-  const plain = ['send', 'play'].includes(entry.icon);
+// The agent that asked, as its Answer box names it: the asking attempt's, or else its task's.
+const askerOf = (state: StudioState, entry: HappenedEntry) =>
+  workerName(
+    state,
+    state.attempts.find(attempt => attempt.id === entry.question?.attemptId)?.workerId ??
+      state.tasks.find(task => task.id === entry.taskId)?.workerId,
+  );
+
+// One line of What happened. An agent's question reads in the director's color, with its options and the one it
+// recommends marked, and while it still waits, Answer, which opens Today at Your calls, where its card holds the Answer
+// box. Auto mode's answer the director may still change has Change the answer under it.
+function Entry({ projectId, state, entry }: { projectId: string; state: StudioState; entry: HappenedEntry }) {
+  const plain = ['send', 'play'].includes(entry.icon),
+    question = entry.question;
   return (
     <li>
       <span className="sd-timeline__time">{clockOf(entry.at)}</span>
@@ -429,7 +444,7 @@ function Entry({ projectId, entry }: { projectId: string; entry: HappenedEntry }
           {entry.text && (
             <span
               className={entry.commit ? 'sd-meta' : undefined}
-              style={entry.commit ? undefined : { color: 'var(--ink-2)' }}
+              style={entry.commit ? undefined : { color: question ? 'var(--you)' : 'var(--ink-2)' }}
             >
               {entry.text}
             </span>
@@ -441,6 +456,36 @@ function Entry({ projectId, entry }: { projectId: string; entry: HappenedEntry }
             {failure}
           </span>
         ))}
+        {question && question.options.length > 0 && (
+          <ul aria-label={`${askerOf(state, entry)}'s options`} style={{ margin: 0, paddingLeft: '20px' }}>
+            {question.options.map((option, index) => (
+              <li key={index}>
+                <b>{option.label}</b>
+                {option.detail && ` ${option.detail}`}
+                {option.recommended && (
+                  <>
+                    {' '}
+                    <span className="sd-chip sd-chip--brand sd-chip--inline">Recommended</span>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {question?.waiting && (
+          <Link
+            className="sd-btn sd-btn--sm"
+            style={{ alignSelf: 'flex-start' }}
+            to="/p/$projectId"
+            params={{ projectId }}
+            hash="calls"
+          >
+            Answer
+          </Link>
+        )}
+        {entry.answer?.changeable && entry.taskId && (
+          <ChangeAnswer projectId={projectId} state={state} taskId={entry.taskId} attemptId={entry.answer.attemptId} />
+        )}
         {entry.links && entry.links.length > 0 && (
           <span style={{ display: 'flex', gap: 'var(--space-6)', flexWrap: 'wrap' }}>
             {entry.links.map((link, index) => (
@@ -470,8 +515,73 @@ function Entry({ projectId, entry }: { projectId: string; entry: HappenedEntry }
   );
 }
 
-// What happened, everything or only the stops and decisions.
-function Happened({ projectId, groups }: { projectId: string; groups: ReturnType<typeof happened> }) {
+// The toast once the director's answer replaced auto mode's, as Today's says it: what the work does now, or why it did
+// not start.
+function changedToast(sent: Record<string, unknown>, name: string) {
+  const start = sent.start as { ok?: boolean; reason?: string } | null | undefined;
+  return start?.ok === false
+    ? `Answer changed. It did not start: ${start.reason}`
+    : `Answer changed. ${name} reworks from its saved work with yours.`;
+}
+
+// Auto mode's answer the director may still change, as Today's fold offers it: Change the answer opens the Answer box
+// in change mode under it, for the task and the attempt that asked, and Cancel closes it. Its records come with the
+// answer, and the line loses the button with them.
+function ChangeAnswer({
+  projectId,
+  state,
+  taskId,
+  attemptId,
+}: {
+  projectId: string;
+  state: StudioState;
+  taskId: string;
+  attemptId: string;
+}) {
+  const toast = useToast(),
+    [changing, setChanging] = useState(false),
+    task = state.tasks.find(item => item.id === taskId),
+    asking = state.attempts.find(attempt => attempt.id === attemptId && attempt.taskId === taskId);
+  if (!task || !asking?.question?.ask) return null;
+  const name = workerName(state, asking.workerId ?? task.workerId);
+  return (
+    <>
+      <button
+        type="button"
+        className="sd-btn sd-btn--sm"
+        style={{ alignSelf: 'flex-start' }}
+        aria-expanded={changing}
+        onClick={() => setChanging(open => !open)}
+      >
+        {changing ? 'Cancel' : 'Change the answer'}
+      </button>
+      {changing && (
+        <AnswerBox
+          projectId={projectId}
+          state={state}
+          task={task}
+          attempt={asking}
+          change
+          onSent={sent => {
+            setChanging(false);
+            notifyManager.schedule(() => toast(changedToast(sent, name)));
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+// What happened, everything or only the stops and decisions (an agent's question and its answers are decisions).
+function Happened({
+  projectId,
+  state,
+  groups,
+}: {
+  projectId: string;
+  state: StudioState;
+  groups: ReturnType<typeof happened>;
+}) {
   const [only, setOnly] = useState(false),
     id = useId();
   return (
@@ -507,7 +617,7 @@ function Happened({ projectId, groups }: { projectId: string; groups: ReturnType
             </div>
             <ol className="sd-timeline">
               {entries.map((entry, index) => (
-                <Entry key={index} projectId={projectId} entry={entry} />
+                <Entry key={index} projectId={projectId} state={state} entry={entry} />
               ))}
             </ol>
           </Fragment>
@@ -522,7 +632,7 @@ function Happened({ projectId, groups }: { projectId: string; groups: ReturnType
   );
 }
 
-// On a phone: the stops along the way, or everything.
+// On a phone: the stops along the way, or everything. An agent's question and its answers are not stops.
 function Stops({ groups }: { groups: ReturnType<typeof happened> }) {
   const [all, setAll] = useState(false),
     entries = groups.flatMap(group => group.entries).filter(entry => all || entry.stop);
