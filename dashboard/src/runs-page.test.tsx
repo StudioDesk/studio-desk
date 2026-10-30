@@ -131,6 +131,158 @@ test('Ideas lists the ideas newest first, each opening its page; filters, Find a
   expect(screen.queryByRole('button', { name: 'Show older ideas' })).toBeNull();
 });
 
+// The open idea as a code idea starts (planning.ts): its graph holds its checks, which passed, then its plan by Mara,
+// before any story. The plan is planning, asks the director a question, stops, or is accepted with the two stories it
+// proposed added to the graph. Times count back from now, so the minutes read as written.
+const ago = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();
+const planned = (next: 'planning' | 'asking' | 'failed' | 'accepted') => {
+  controller.shell.workers = [...controller.shell.workers, { id: 'W-2', displayName: 'Mara', team: 'Engineering' }];
+  const checks = member('T-checks', 'run-open', {
+      title: 'Check the source',
+      kind: 'studio-development:checks',
+      status: 'done',
+      lastAttemptId: 'attempt-checks',
+      acceptedAttemptId: 'attempt-checks',
+    }),
+    plan = member('T-plan', 'run-open', {
+      title: 'Plan the idea',
+      kind: 'studio-development:breakdown',
+      workerId: 'W-2',
+      dependencies: ['T-checks'],
+      status: { planning: 'running', asking: 'blocked', failed: 'failed', accepted: 'done' }[next] as Task['status'],
+      lastAttemptId: next === 'asking' ? 'attempt-ask' : 'attempt-plan',
+      ...(next === 'accepted' ? { acceptedAttemptId: 'attempt-plan' } : {}),
+    }),
+    stories =
+      next === 'accepted'
+        ? ['T-s1', 'T-s2'].map(id =>
+            taskFixture(id, {
+              title: `Story ${id}`,
+              status: 'backlog',
+              approval: { status: 'pending' },
+              proposalReference: { taskId: 'T-plan' },
+            }),
+          )
+        : [];
+  controller.tasks = [checks, plan, ...stories];
+  controller.attempts = [
+    {
+      id: 'attempt-checks',
+      taskId: 'T-checks',
+      status: 'accepted',
+      workerId: 'W-1',
+      startedAt: ago(9),
+      finishedAt: ago(8),
+      acceptedAt: ago(8),
+    },
+    next === 'asking'
+      ? {
+          id: 'attempt-ask',
+          taskId: 'T-plan',
+          status: 'blocked',
+          workerId: 'W-2',
+          startedAt: ago(7),
+          finishedAt: ago(5),
+          error: 'Needs a call from the director.',
+          question: {
+            ask: 'Split the page part into two stories?\nTwo pages share it, so either way works.',
+            why: 'Two pages share it.',
+            options: [{ label: 'One story' }, { label: 'Two stories', detail: 'one a page' }],
+            recommended: 1,
+            choice: 'inside-story',
+            topics: [],
+          },
+        }
+      : {
+          id: 'attempt-plan',
+          taskId: 'T-plan',
+          status: { planning: 'running', failed: 'failed', accepted: 'accepted' }[next],
+          workerId: 'W-2',
+          startedAt: ago(7),
+          ...(next === 'failed' ? { finishedAt: ago(5), error: 'The plan was not valid.' } : {}),
+          ...(next === 'accepted'
+            ? { finishedAt: ago(5), acceptedAt: ago(4), result: { outcome: 'completed', summary: 'Two stories.' } }
+            : {}),
+        },
+  ];
+  controller.runs = [run('run-open', '2026-10-21T12:00:00Z', [checks, plan, ...stories])];
+};
+// The idea's row on the Ideas list: its chip, and its meta line.
+const ideaRow = async (id: string) => {
+  await screen.findByRole('heading', { level: 1, name: 'Ideas' });
+  const row = await waitFor(() => {
+    const link = screen.getAllByRole('link').find(item => item.getAttribute('href') === `/p/project-x/runs/${id}`);
+    expect(link).toBeTruthy();
+    return link!;
+  });
+  return { row, chip: row.querySelector('.sd-chip')!, meta: row.querySelector('.sd-meta')!.textContent ?? '' };
+};
+const filterCount = (name: string) => screen.getByRole('button', { name: new RegExp(`^${name}`) }).textContent;
+
+test("an open idea planning shows one row reading Planning with the planner's face, name and minutes", async () => {
+  planned('planning');
+  open();
+  const { row, chip, meta } = await ideaRow('run-open');
+  expect(chip.textContent).toBe('Planning');
+  expect(chip.className).toBe('sd-chip sd-chip--live');
+  expect(row.className).toContain('sd-idearow--live');
+  expect(meta).toMatch(/^Sent .+ · Mara · 9 min$/);
+  expect(row.querySelector('.sd-meta .sd-avatar')).toBeTruthy();
+  expect(row.querySelector('.sd-rundots')).toBeNull();
+  // One row for the idea, opening its page, and none for its checks or plan.
+  expect(ideaLinks()).toEqual(['/p/project-x/runs/run-open', '/p/project-x/runs/run-done']);
+  const hrefs = screen.getAllByRole('link').map(link => link.getAttribute('href') ?? '');
+  expect(hrefs.filter(href => href.includes('T-plan') || href.includes('T-checks'))).toEqual([]);
+  expect(screen.queryByText('Plan the idea')).toBeNull();
+  expect(screen.queryByText('Check the source')).toBeNull();
+  expect(filterCount('Open')).toBe('Open 1');
+  expect(filterCount('Your calls')).toBe('Your calls 0');
+});
+
+test("an idea whose planner asks reads Waiting for you with the question's first line, and Your calls counts it", async () => {
+  const user = userEvent.setup();
+  planned('asking');
+  open();
+  const { row, chip, meta } = await ideaRow('run-open');
+  expect(chip.textContent).toBe('Waiting for you');
+  expect(chip.className).toBe('sd-chip sd-chip--you');
+  expect(row.className).toContain('sd-idearow--you');
+  expect(meta).toMatch(/^Sent .+ · Split the page part into two stories\?$/);
+  expect(meta).not.toContain('Two pages share it');
+  expect(filterCount('Your calls')).toBe('Your calls 1');
+  await user.click(screen.getByRole('button', { name: /^Your calls/ }));
+  expect(ideaLinks()).toEqual(['/p/project-x/runs/run-open']);
+  // Find still narrows it by the idea's words.
+  await user.type(screen.getByRole('searchbox', { name: 'Find an idea' }), 'run-done');
+  expect(ideaLinks()).toEqual([]);
+});
+
+test('an idea whose plan step failed reads Stopped with the reason and what to do', async () => {
+  planned('failed');
+  open();
+  const { row, chip, meta } = await ideaRow('run-open');
+  expect(chip.textContent).toBe('Stopped');
+  expect(chip.className).toBe('sd-chip sd-chip--bad');
+  expect(row.className).not.toMatch(/sd-idearow--(you|live)/);
+  expect(meta).toMatch(/^Sent .+ · \S/);
+  expect(meta).toContain('The attempt stopped without a validated completed result.');
+  expect(meta).toContain('then use Start assignment.');
+  expect(meta).not.toMatch(/(Mara|Eli) stopped/);
+});
+
+test('once the plan is accepted and its stories proposed, the row shows its stories and dots as before', async () => {
+  planned('accepted');
+  open();
+  const { row, chip, meta } = await ideaRow('run-open');
+  expect(meta).toMatch(/^Sent .+ · 2 stories · 0 of 2 accepted$/);
+  expect(chip.textContent).toBe('Your call · story 1 of 2');
+  expect(chip.className).toBe('sd-chip sd-chip--you');
+  expect(row.querySelector('.sd-rundots')?.getAttribute('aria-label')).toMatch(/^Story 1: .+, Story 2: .+$/);
+  expect(row.querySelectorAll('.sd-rundots i')).toHaveLength(2);
+  expect(row.textContent).not.toMatch(/Planning|Waiting for you|Stopped/);
+  expect(row.querySelector('.sd-meta .sd-avatar')).toBeNull();
+});
+
 test("an idea's page tells how it ended, its journey, its stories and what happened, each story opening its task", async () => {
   const user = userEvent.setup();
   open('/p/project-x/runs/run-done');

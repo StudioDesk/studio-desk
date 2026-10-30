@@ -1,15 +1,29 @@
 // Ideas (v1.0 item 23, area 6; the canvas draws no board for it, so this is the redesign's language applied to the
 // list): every idea sent to the project, newest first, each with where its journey stands and its stories as dots,
 // opening its own page. Find narrows by the idea's words; the filters show what is open, what waits for the
-// director and what finished; archived ideas are behind their own toggle.
+// director and what finished; archived ideas are behind their own toggle. Until an idea's plan is official, its row
+// tells where the planning stands instead (planning.ts): Planning, Waiting for you, or the stop.
 import { Link } from '@tanstack/react-router';
-import { useState } from 'react';
+import { Fragment, useState, type ReactNode } from 'react';
+import { AgentAvatar } from './design/avatar';
 import { plural } from './evidence';
+import { agentState } from './faces';
 import { journeyChip, journeyStories } from './journey';
+import { workerName } from './names';
 import { requestNewIdea } from './new-idea';
+import { planningOf, type Planning } from './planning';
 import type { RunStory, StudioState } from './studio-runs';
+import { agentLooks } from './today';
+import { useNow } from './use-now';
 
 const finishedLabels = ['Integrated', 'Finished', 'Stopped', 'Cancelled', 'Closed'];
+const planningTones = { planning: 'live', you: 'you', stopped: 'bad' } as const;
+// Where an open idea's planning stands. An idea stopped on its plan goes on once the director acts, so its row
+// tells that stop's reason and what to do too.
+const planningFor = (entry: IdeaEntry, now: number) =>
+  !finishedLabels.includes(entry.run.outcome.label) || entry.run.outcome.label === 'Stopped'
+    ? planningOf(entry.run, entry.state, now)
+    : null;
 const day = (value: string) =>
   new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const words = (run: RunStory) => {
@@ -24,13 +38,40 @@ export interface IdeaEntry {
   state: StudioState;
 }
 
-function IdeaRow({ projectId, entry }: { projectId: string; entry: IdeaEntry }) {
+// The planning's words on the row: the planner's face and name with the minutes so far, or the question's first line,
+// or the stop's reason and what to do.
+function PlanningWords({ projectId, state, planning }: { projectId: string; state: StudioState; planning: Planning }) {
+  if (planning.state !== 'planning') return <>{planning.text}</>;
+  const looks = agentLooks(projectId, [...state.workers, ...(state.employeeDirectory ?? [])]),
+    look = looks.get(planning.workerId ?? ''),
+    step = state.tasks.find(task => task.id === planning.taskId);
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-6)', verticalAlign: 'middle' }}>
+      {look && <AgentAvatar look={look} size={22} state={agentState(state, planning.workerId, step)} ring={false} />}
+      {[workerName(state, planning.workerId), planning.minutes ? `${planning.minutes} min` : '']
+        .filter(Boolean)
+        .join(' · ')}
+    </span>
+  );
+}
+
+function IdeaRow({ projectId, entry, planning }: { projectId: string; entry: IdeaEntry; planning: Planning | null }) {
   const { run, state } = entry,
     open = !finishedLabels.includes(run.outcome.label),
-    chip = journeyChip(run, state),
+    chip = planning ? { tone: planningTones[planning.state], label: planning.label } : journeyChip(run, state),
     stories = journeyStories(run, state),
     done = stories.filter(story => story.chip.tone === 'ok').length,
-    source = stories.some(story => story.task.kind === 'studio-development:change');
+    source = stories.some(story => story.task.kind === 'studio-development:change'),
+    meta: ReactNode[] = [
+      `Sent ${day(run.startedAt)}`,
+      ...(planning
+        ? [<PlanningWords key="planning" projectId={projectId} state={state} planning={planning} />]
+        : [
+            stories.length ? `${stories.length} ${plural(stories.length, 'story', 'stories')}` : run.name,
+            stories.length ? `${done} of ${stories.length} ${source ? 'integrated' : 'accepted'}` : '',
+          ]),
+      run.archive?.archived ? 'archived' : '',
+    ].filter(Boolean);
   return (
     <Link
       className={`sd-card sd-idearow${chip.tone === 'you' ? ' sd-idearow--you' : chip.tone === 'live' ? ' sd-idearow--live' : ''}${run.archive?.archived ? ' sd-idearow--muted' : ''}`}
@@ -40,22 +81,20 @@ function IdeaRow({ projectId, entry }: { projectId: string; entry: IdeaEntry }) 
       <span className="sd-idearow__main">
         <span className="sd-idearow__title">“{words(run)}”</span>
         <span className="sd-meta">
-          {[
-            `Sent ${day(run.startedAt)}`,
-            stories.length ? `${stories.length} ${plural(stories.length, 'story', 'stories')}` : run.name,
-            stories.length ? `${done} of ${stories.length} ${source ? 'integrated' : 'accepted'}` : '',
-            run.archive?.archived ? 'archived' : '',
-          ]
-            .filter(Boolean)
-            .join(' · ')}
+          {meta.map((part, index) => (
+            <Fragment key={index}>
+              {index > 0 && ' · '}
+              {part}
+            </Fragment>
+          ))}
         </span>
       </span>
       <span className="sd-idearow__side">
         <span
-          className={`sd-chip sd-chip--${open ? chip.tone : run.outcome.tone === 'ok' ? 'ok' : run.outcome.tone === 'bad' ? 'bad' : 'wait'}`}
+          className={`sd-chip sd-chip--${open || planning ? chip.tone : run.outcome.tone === 'ok' ? 'ok' : run.outcome.tone === 'bad' ? 'bad' : 'wait'}`}
         >
           <span className="sd-chip__dot"></span>
-          {open ? chip.label : run.outcome.label}
+          {open || planning ? chip.label : run.outcome.label}
         </span>
         {stories.length > 0 && (
           <span
@@ -99,10 +138,16 @@ export function IdeasList({
 }) {
   const [filter, setFilter] = useState<Filter>('all'),
     [search, setSearch] = useState(''),
-    [showArchived, setShowArchived] = useState(false);
+    [showArchived, setShowArchived] = useState(false),
+    // The clock for a planning idea's minutes, ticking only while work runs.
+    now = useNow(
+      ideas.some(entry => entry.state.attempts.some(attempt => ['running', 'stopping'].includes(attempt.status))),
+    ),
+    planning = new Map([...ideas, ...archived].map(entry => [entry.run.id, planningFor(entry, now)]));
   const kind = (entry: IdeaEntry): Filter[] => {
     const open = !finishedLabels.includes(entry.run.outcome.label),
-      calls = entry.run.needsYou.some(item => item.requiresDirector);
+      // An idea whose planning waits for the director is a call, whether or not its run names it.
+      calls = entry.run.needsYou.some(item => item.requiresDirector) || planning.get(entry.run.id)?.state === 'you';
     return ['all', open ? 'open' : 'finished', ...(calls ? (['calls'] as const) : [])];
   };
   const found = (entry: IdeaEntry) =>
@@ -155,7 +200,14 @@ export function IdeasList({
       </div>
       <div className="sd-idealist">
         {shown.length ? (
-          shown.map(entry => <IdeaRow key={entry.run.id} projectId={projectId} entry={entry} />)
+          shown.map(entry => (
+            <IdeaRow
+              key={entry.run.id}
+              projectId={projectId}
+              entry={entry}
+              planning={planning.get(entry.run.id) ?? null}
+            />
+          ))
         ) : (
           <div className="sd-card sd-empty">
             {ideas.length || archived.length

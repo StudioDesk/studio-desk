@@ -894,6 +894,80 @@ test('a question auto mode answers is not a call: it moves on its own with the a
   expect(within(moving).queryByRole('button', { name: 'Change the answer' })).toBeNull();
 });
 
+test("a plan step's waiting question is still a call on Today while its idea reads Waiting for you", async () => {
+  // An idea's checks passed, and its plan step stopped with the question (planning.ts reads it on the Ideas list).
+  const checks = taskFixture('T-checks', {
+      title: 'Check the source',
+      kind: 'studio-development:checks',
+      status: 'done',
+      lastAttemptId: 'attempt-checks',
+      acceptedAttemptId: 'attempt-checks',
+      workflowReference: { runId: 'run-1', key: 'checks' },
+    }),
+    plan = taskFixture('T-plan', {
+      title: 'Plan the idea',
+      kind: 'studio-development:breakdown',
+      status: 'blocked',
+      lastAttemptId: 'attempt-asked',
+      dependencies: ['T-checks'],
+      workflowReference: { runId: 'run-1', key: 'plan' },
+    });
+  controller.tasks = [checks, plan];
+  controller.attempts = [
+    {
+      id: 'attempt-checks',
+      taskId: 'T-checks',
+      status: 'accepted',
+      workerId: 'W-1',
+      startedAt: '2026-10-28T11:30:00.000Z',
+      finishedAt: '2026-10-28T11:35:00.000Z',
+      acceptedAt: '2026-10-28T11:35:00.000Z',
+    },
+    asking('attempt-asked', 'T-plan'),
+  ];
+  controller.runs = [
+    {
+      id: 'run-1',
+      createdAt: '2026-10-28T11:29:00.000Z',
+      brief: 'Retire the old route.',
+      workflow: { id: 'workflow-1', name: 'Source checks and review', version: 3 },
+      revisions: [{ revision: 1, at: '2026-10-28T11:29:00.000Z', reason: 'created' }],
+      nodes: [checks, plan].map(task => ({
+        taskId: task.id,
+        key: task.id,
+        kind: task.kind,
+        title: task.title,
+        workerId: 'W-1',
+        dependencies: task.dependencies,
+        revision: 1,
+      })),
+      archive: { archived: false },
+    },
+  ];
+  const router = open();
+  const region = await calls();
+  await waitFor(() => expect(callsShown(region)).toEqual({ cards: ['Plan the idea'], count: '1 waiting on you' }));
+  const card = await questionCard();
+  expect(card.getByText('Asked you a question')).toBeTruthy();
+  expect(card.getByRole('heading', { level: 3, name: 'Plan the idea' })).toBeTruthy();
+  expect(card.getByText('Eli asks')).toBeTruthy();
+  expect(card.getByText(when(askedAt))).toBeTruthy();
+  expect(card.getByText('Keep the old route for one release?')).toBeTruthy();
+  expect(card.getByText('Two pages still call it.')).toBeTruthy();
+  expect(card.getByRole('form', { name: 'Answer Eli' })).toBeTruthy();
+  expect(within(card.getByRole('button', { name: /^Remove it/ })).getByText('Recommended')).toBeTruthy();
+  expect(fold()).toBeNull();
+  // The same idea on the Ideas list reads Waiting for you, with the question.
+  await router.navigate({ to: '/p/$projectId/runs', params: { projectId: 'project-x' } });
+  const row = await waitFor(() => {
+    const link = screen.getAllByRole('link').find(item => item.getAttribute('href') === '/p/project-x/runs/run-1');
+    expect(link).toBeTruthy();
+    return link!;
+  });
+  expect(row.querySelector('.sd-chip')?.textContent).toBe('Waiting for you');
+  expect(row.querySelector('.sd-meta')?.textContent).toMatch(/· Keep the old route for one release\?$/);
+});
+
 // Work auto mode answered the question of (src/core/questions.mjs answerQuestion by auto mode), in each state the
 // answer can be in: still running, in review, accepted, and closed. The running work waits on the accepted and the
 // closed work, so the live set holds them too.
