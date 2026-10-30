@@ -2640,7 +2640,14 @@ test('source change cancellation and candidate-phase cancellation retain reserva
   for (let i = 0; i < 200 && !c.app.store.events().some(event => event.kind === 'candidate_checks'); i++)
     await new Promise(resolve => setTimeout(resolve, 15));
   assert.ok(c.app.store.events().some(event => event.kind === 'candidate_checks'));
-  assert.equal(c.app.store.leases().length, 3);
+  // The attempt keeps its own reservation until its process closes; a story holds none of its project's source
+  // (October 29: two build at once).
+  const held = c.app.store.leases().map(lease => lease.resource);
+  assert.ok(held.includes(`attempt:${c.app.store.task(c.taskId).lastAttemptId}`), held.join(', '));
+  assert.equal(
+    held.some(resource => resource.startsWith('source:')),
+    false,
+  );
   assert.equal((await c.request(`/api/tasks/${c.taskId}/cancel`)).status, 202);
   await c.wait(c.taskId, 'cancelled');
   assert.equal(c.app.store.leases().length, 0);
