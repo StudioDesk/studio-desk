@@ -101,7 +101,8 @@ export function withPage(state: StudioState, page: TaskPage): StudioState {
   };
 }
 
-export function TaskView({ projectId, taskId }: { projectId: string; taskId: string }) {
+// `tab` is the tab the story's address names, which it opens on once the story shows that tab.
+export function TaskView({ projectId, taskId, tab }: { projectId: string; taskId: string; tab?: TabId }) {
   const { data, error, isPending } = useQuery({
       enabled: useStreamReady(),
       queryKey: queryKeys.task(projectId, taskId),
@@ -126,7 +127,16 @@ export function TaskView({ projectId, taskId }: { projectId: string; taskId: str
         </p>
       </article>
     );
-  return <Story projectId={projectId} task={data.task} attempts={data.attempts} studio={studio} live={state} />;
+  return (
+    <Story
+      projectId={projectId}
+      task={data.task}
+      attempts={data.attempts}
+      studio={studio}
+      live={state}
+      initialTab={tab}
+    />
+  );
 }
 
 // "Ideas / “the idea” / Story 3 of 4", or "Ideas / T-1" for work outside any idea; with `story`, a page under the
@@ -169,7 +179,7 @@ export function Crumbs({
   );
 }
 
-type TabId = 'changes' | 'checks' | 'pages' | 'try' | 'activity' | 'overview' | 'details';
+export type TabId = 'changes' | 'checks' | 'pages' | 'try' | 'activity' | 'overview' | 'details';
 interface Tab {
   id: TabId;
   label: string;
@@ -182,17 +192,19 @@ function Story({
   attempts,
   studio,
   live: liveState,
+  initialTab,
 }: {
   projectId: string;
   task: Task;
   attempts: AttemptSummary[];
   studio: StudioState;
   live: StudioState;
+  initialTab?: TabId;
 }) {
   const narrow = useNarrow(),
     [draft, setDraft] = useState<string | null>(null),
     [chosen, setChosen] = useState<string | null>(null),
-    [picked, setPicked] = useState<TabId | null>(null),
+    [picked, setPicked] = useState<TabId | null>(initialTab ?? null),
     // Each use of the notice's link to its full account, which brings that account into view once its tab shows.
     [reading, setReading] = useState(0),
     // Each use of the notice's Edit the file list, which brings the brief's file form into view.

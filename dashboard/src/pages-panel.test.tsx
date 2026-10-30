@@ -3,7 +3,8 @@
 // words, whether they were planned with the story or changed by the director, and while they may still change, Add a
 // page and Edit, which send the whole list to the controller. A story with no pages, no capture and the check off
 // keeps its tabs. Below them, what the check of the story's candidate captured, from its recorded visual-check.json,
-// with the review's note on each image, or why nothing was, and The pages tile, which opens the tab. Model-free.
+// with the review's note on each image, or why nothing was, and The pages tile, which opens the tab. A story's address
+// can open it on its Pages tab (`?tab=pages`), once that tab shows. Model-free.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -28,10 +29,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const open = () =>
+const open = (address = '/p/project-x/tasks/T-1') =>
   render(
     <App
-      router={createAppRouter(createMemoryHistory({ initialEntries: ['/p/project-x/tasks/T-1'] }))}
+      router={createAppRouter(createMemoryHistory({ initialEntries: [address] }))}
       queryClient={new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })}
       createStream={createStream}
     />,
@@ -788,4 +789,60 @@ test('a story without the Pages tab has no The pages tile', async () => {
   expect(tiles()).toHaveLength(4);
   expect(tiles().map(eyebrow)).not.toContain('The pagesPages');
   expect(screen.queryByText('The pages')).toBeNull();
+});
+
+// The label of the tab the story is on.
+const selectedTab = () =>
+  screen
+    .getAllByRole('tab')
+    .filter(tab => tab.getAttribute('aria-selected') === 'true')
+    .map(tab => tab.firstChild?.textContent);
+
+test("a story's address with ?tab=pages opens it on its Pages tab, with the tab's panel", async () => {
+  pages([settings]);
+  open('/p/project-x/tasks/T-1?tab=pages');
+  expect(await tabsWithPages()).toEqual(['Changes', 'Checks', 'Pages', 'Try it', 'Activity']);
+  expect(selectedTab()).toEqual(['Pages']);
+  const panel = within(screen.getByRole('tabpanel'));
+  await panel.findByRole('region', { name: "This story's pages" });
+  expect(pageRow(panel, 'Settings').getByText('/settings')).toBeTruthy();
+  cleanup();
+  // Another tab the story shows opens the same way.
+  open('/p/project-x/tasks/T-1?tab=activity');
+  await tabsWithPages();
+  expect(selectedTab()).toEqual(['Activity']);
+});
+
+test('without a tab in its address the story opens on its change, as it does today', async () => {
+  pages([settings]);
+  open();
+  expect(await tabsWithPages()).toEqual(['Changes', 'Checks', 'Pages', 'Try it', 'Activity']);
+  expect(selectedTab()).toEqual(['Changes']);
+});
+
+test('?tab=pages on a story that does not show Pages opens on the tab it opens on today', async () => {
+  open('/p/project-x/tasks/T-1?tab=pages');
+  expect(await tabNames()).toEqual(['Changes', 'Checks', 'Try it', 'Activity']);
+  await waitFor(() => expect(pageReads()).toBe(1));
+  await waitFor(() => expect(controller.reads()).toContain('/api/projects/project-x/visual-check'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(await tabNames()).toEqual(['Changes', 'Checks', 'Try it', 'Activity']);
+  expect(selectedTab()).toEqual(['Changes']);
+  cleanup();
+  // Work that is not a code story has no Pages tab, and opens on what happened to it.
+  controller.tasks = [taskFixture('T-1', { title: 'Write the notes', status: 'ready' })];
+  controller.attempts = [];
+  open('/p/project-x/tasks/T-1?tab=pages');
+  expect(await tabNames()).toEqual(['Overview', 'Activity']);
+  expect(selectedTab()).toEqual(['Activity']);
+});
+
+test('a tab value the story route does not know is ignored', async () => {
+  pages([settings]);
+  for (const value of ['files', 'Pages', '3', '']) {
+    open(`/p/project-x/tasks/T-1?tab=${value}`);
+    expect(await tabsWithPages()).toEqual(['Changes', 'Checks', 'Pages', 'Try it', 'Activity']);
+    expect(selectedTab()).toEqual(['Changes']);
+    cleanup();
+  }
 });

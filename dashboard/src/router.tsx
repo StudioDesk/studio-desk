@@ -17,6 +17,7 @@ import { BoardPage } from './board-page';
 import { ProjectFrame, rememberedProject } from './frame';
 import { Heading } from './layout';
 import { ProjectLive } from './live-context';
+import type { TabId } from './task-page';
 import { TodayPage } from './today-page';
 import { TracePage } from './trace-page';
 
@@ -349,12 +350,20 @@ const movedRoute = createRoute({
   },
 });
 
+// A story's address may name the tab it opens on (`?tab=pages`), which it shows once the story has that tab; any
+// other value is dropped.
+const storyTabs: readonly TabId[] = ['changes', 'checks', 'pages', 'try', 'activity', 'overview', 'details'];
 const taskRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: '/tasks/$taskId',
+  validateSearch: (search: Record<string, unknown>): { tab?: TabId } => {
+    const tab = storyTabs.find(id => id === search.tab);
+    return tab ? { tab } : {};
+  },
   component: function Task() {
-    const { projectId, taskId } = taskRoute.useParams();
-    return <TaskView key={taskId} projectId={projectId} taskId={taskId} />;
+    const { projectId, taskId } = taskRoute.useParams(),
+      { tab } = taskRoute.useSearch();
+    return <TaskView key={taskId} projectId={projectId} taskId={taskId} tab={tab} />;
   },
 });
 
