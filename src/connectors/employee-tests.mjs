@@ -13,10 +13,11 @@ import { fileURLToPath } from 'node:url';
 import { subscriptionEnvironment, command as nativeCommand } from '../adapters/process.mjs';
 import { jobDirectory } from '../core/projects.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
-import { copySource, failedTestReader, sourcePlan, sourceTestArgs, testPhaseEvidence } from './source-checks.mjs';
+import { failedTestReader, sourceTestArgs, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, profileOf } from './source-profile.mjs';
 import { installStep } from './package-installs.mjs';
 import { installTimeoutMs, testTimeoutMs } from './source-integration.mjs';
+import { makeTestCopy } from './test-copy.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/studio-tests.mjs', import.meta.url))
   .split(path.sep)
@@ -43,6 +44,7 @@ export function closeEmployeeTests(entry) {
   const tests = entry.employeeTests;
   if (!tests) return;
   delete entry.employeeTests;
+  tests.copying?.kill();
   tests.child?.kill();
 }
 
@@ -50,28 +52,6 @@ export function employeeTestsAllowed(entry, token) {
   const expected = Buffer.from(entry?.employeeTests?.token || ''),
     given = Buffer.from(typeof token === 'string' ? token : '');
   return expected.length > 0 && given.length === expected.length && timingSafeEqual(expected, given);
-}
-
-// The story's source with the staged edits applied: approved files and new files as they are under changes/,
-// deleted files removed unless the employee kept them. Only plain files are read.
-function composeCopy(runtime, a, output, directory) {
-  const scope = a.sourceChange,
-    worktree = fs.realpathSync(a.sourceWorktree.path);
-  copySource({ ...scope.source, root: worktree }, directory);
-  for (const file of [...scope.allowedFiles, ...(scope.newFiles || []), ...(scope.deleteFiles || [])]) {
-    const staged = path.join(output, 'changes', file),
-      target = path.join(directory, file);
-    let stat = null;
-    try {
-      stat = fs.lstatSync(staged);
-    } catch {}
-    if (stat && !stat.isFile()) throw new Error(`changes/${file} is not a plain file.`);
-    if (stat) {
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(staged, target);
-    } else if ((scope.deleteFiles || []).includes(file)) fs.rmSync(target, { force: true });
-  }
-  return sourcePlan(directory, profileOf(scope.source));
 }
 
 // Each test run's whole output and errors are saved in the attempt's job folder, outside output/, so the editor
@@ -228,8 +208,20 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
   tests.busy = true;
   const directory = path.join(runtime.store.directory, 'tests', a.id.slice(-8));
   try {
-    fs.rmSync(directory, { recursive: true, force: true });
-    const plan = composeCopy(runtime, a, entry.output, directory),
+    // The copy is made in a process of its own, so the controller keeps answering while it is made.
+    const scope = a.sourceChange,
+      plan = await makeTestCopy(
+        {
+          source: scope.source,
+          worktree: fs.realpathSync(a.sourceWorktree.path),
+          output: entry.output,
+          directory,
+          allowedFiles: scope.allowedFiles,
+          newFiles: scope.newFiles || [],
+          deleteFiles: scope.deleteFiles || [],
+        },
+        tests,
+      ),
       suite = plan.command.args.slice(sourceTestArgs([]).length),
       wanted = files.map(file => file.trim().replaceAll('\\', '/').replace(/^\.\//, ''));
     const unknown = wanted.filter(file => !suite.includes(file));
@@ -321,10 +313,9 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
       errors: result.stderr.slice(-errorLimit),
     };
   } finally {
+    // A stopped run's files may still be held for a moment on Windows; the next run clears them first. Removed
+    // in the background, so the controller keeps answering, and before the next run may start.
+    await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
     tests.busy = false;
-    // A stopped run's files may still be held for a moment on Windows; the next run clears them first.
-    try {
-      fs.rmSync(directory, { recursive: true, force: true });
-    } catch {}
   }
 }
