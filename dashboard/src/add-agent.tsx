@@ -2,7 +2,7 @@
 // under the page's buttons. The agent joins one of the project's teams, the first one chosen until the director picks
 // another: an agent the studio has, found in a list it searches, or a new one made here. Either way it is saved at
 // once as the organization's next revision, and its editor opens; Cancel goes back to the agents and sends nothing.
-// The new-agent form is the team editor's too (team-editor.tsx).
+// The two choices are a team editor's Add an agent too (team-editor.tsx), where an agent picked joins the team's draft.
 import { useMutation } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useId, useRef, useState } from 'react';
@@ -16,6 +16,7 @@ import type { StudioState } from './studio-runs';
 import { useToast } from './toast';
 
 const agentName = (worker: Worker) => worker.displayName ?? worker.id;
+const jobOf = (worker: Worker) => worker.jobTitle || worker.role || '';
 // Staffing roles as typed, "reviewer, engineer", as the list the controller takes.
 const roleList = (text: string) => [
   ...new Set(
@@ -58,7 +59,6 @@ export function AddAgent({
     teams = state.teams ?? [],
     [teamId, setTeamId] = useState(teams[0]?.id ?? ''),
     team = teams.find(item => item.id === teamId) ?? teams[0],
-    [words, setWords] = useState(''),
     id = useId(),
     panel = useRef<HTMLElement>(null),
     heading = useRef<HTMLHeadingElement>(null);
@@ -69,14 +69,8 @@ export function AddAgent({
   }, [phone]);
   // The agents the studio has, without deleted ones and any already in the project's organization.
   const others = (state.employeeDirectory?.length ? state.employeeDirectory : state.workers).filter(
-      worker => !worker.deletedAt && !body.members.some(member => member.workerId === worker.id),
-    ),
-    jobOf = (worker: Worker) => worker.jobTitle || worker.role || '',
-    terms = words.toLowerCase().split(/\s+/).filter(Boolean),
-    shown = others.filter(worker => {
-      const text = [agentName(worker), jobOf(worker), worker.responsibility ?? ''].join(' ').toLowerCase();
-      return terms.every(term => text.includes(term));
-    });
+    worker => !worker.deletedAt && !body.members.some(member => member.workerId === worker.id),
+  );
   const joined = (worker: Worker, to: Team) => {
     toast(`${agentName(worker)} joined ${to.name}`);
     void navigate({ to: '/p/$projectId/agents/$workerId', params: { projectId, workerId: worker.id } });
@@ -170,84 +164,154 @@ export function AddAgent({
         </div>
       </div>
       {team && (
-        <div className="sd-addagent">
-          <section className="sd-card sd-sidecard sd-sidecard--roomy" aria-labelledby={`${id}-has`}>
-            <h3 id={`${id}-has`} className="sd-sidecard__title">
-              An agent the studio has
-            </h3>
-            {others.length ? (
-              <>
-                <div className="sd-field">
-                  <label className="sd-field__label" htmlFor={`${id}-find`}>
-                    Find an agent
-                  </label>
-                  <span className="sd-agentfind">
-                    <Icon name="search" size={18} />
-                    <input
-                      id={`${id}-find`}
-                      type="search"
-                      className="sd-input"
-                      placeholder="A name, a job or what it does"
-                      value={words}
-                      autoComplete="off"
-                      onChange={event => setWords(event.target.value)}
-                    />
-                  </span>
-                </div>
-                {save.error && (
-                  <p role="alert" className="sd-meta" style={{ margin: 0, color: 'var(--bad)' }}>
-                    {save.error.message}
-                  </p>
-                )}
-                {shown.length ? (
-                  <ul aria-label="Agents the studio has" className="sd-agentpick" style={listStyle}>
-                    {shown.map(worker => {
-                      const look = looks.get(worker.id),
-                        job = jobOf(worker);
-                      return (
-                        <li key={worker.id}>
-                          <button
-                            type="button"
-                            className="sd-agentrow"
-                            disabled={save.isPending}
-                            onClick={() => pick(worker)}
-                          >
-                            {look && <AgentAvatar look={look} size={40} ring={false} />}
-                            <span className="sd-agentrow__text">
-                              <b>{agentName(worker)}</b>
-                              {job && <span className="sd-meta">{job}</span>}
-                              {worker.responsibility && <span className="sd-meta">{worker.responsibility}</span>}
-                            </span>
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : (
-                  <p role="status" className="sd-meta" style={{ margin: 0 }}>
-                    No agent the studio has matches “{words.trim()}”.
-                  </p>
-                )}
-              </>
-            ) : (
-              <span className="sd-meta">Every agent the studio has is already in {state.project.name}.</span>
-            )}
-          </section>
-          <section className="sd-card sd-sidecard sd-sidecard--roomy" aria-labelledby={`${id}-new`}>
-            <h3 id={`${id}-new`} className="sd-sidecard__title">
-              Make a new one
-            </h3>
+        <AddChoices
+          projectId={projectId}
+          state={state}
+          team={team}
+          agents={others}
+          looks={looks}
+          onPick={pick}
+          everyone={`Every agent the studio has is already in ${state.project.name}.`}
+          busy={save.isPending}
+          error={save.error}
+          expectedRevision={body.expectedRevision}
+          onMade={({ worker }) => joined(worker, team)}
+        />
+      )}
+    </section>
+  );
+}
+
+// The two ways to add an agent to a team, side by side: an agent the studio has, from the agents given, found by a
+// name, a job or what it does and handed to onPick; or a new one for the team, saved at once as the organization's
+// next revision and handed to onMade. A team not saved yet gets a new agent once it is. With onCancel, the choices
+// have a Cancel of their own.
+export function AddChoices({
+  projectId,
+  state,
+  team,
+  agents,
+  looks,
+  onPick,
+  from,
+  everyone,
+  busy = false,
+  error = null,
+  unsaved = false,
+  expectedRevision,
+  onMade,
+  onCancel,
+}: {
+  projectId: string;
+  state: StudioState;
+  team: Team;
+  agents: Worker[];
+  looks: Map<string, AgentLook>;
+  onPick: (worker: Worker) => void;
+  // A line under an agent's job saying where it comes from.
+  from?: (worker: Worker) => string;
+  // What shows when there is no agent to give.
+  everyone: string;
+  busy?: boolean;
+  error?: Error | null;
+  unsaved?: boolean;
+  expectedRevision: number;
+  onMade: (made: { worker: Worker; revision: number }, roles: string[]) => void;
+  onCancel?: () => void;
+}) {
+  const [words, setWords] = useState(''),
+    id = useId(),
+    terms = words.toLowerCase().split(/\s+/).filter(Boolean),
+    shown = agents.filter(worker => {
+      const text = [agentName(worker), jobOf(worker), worker.responsibility ?? ''].join(' ').toLowerCase();
+      return terms.every(term => text.includes(term));
+    });
+  return (
+    <>
+      <div className="sd-addagent">
+        <section className="sd-card sd-sidecard sd-sidecard--roomy" aria-labelledby={`${id}-has`}>
+          <h3 id={`${id}-has`} className="sd-sidecard__title">
+            An agent the studio has
+          </h3>
+          {agents.length ? (
+            <>
+              <div className="sd-field">
+                <label className="sd-field__label" htmlFor={`${id}-find`}>
+                  Find an agent
+                </label>
+                <span className="sd-agentfind">
+                  <Icon name="search" size={18} />
+                  <input
+                    id={`${id}-find`}
+                    type="search"
+                    className="sd-input"
+                    placeholder="A name, a job or what it does"
+                    value={words}
+                    autoComplete="off"
+                    onChange={event => setWords(event.target.value)}
+                  />
+                </span>
+              </div>
+              {error && (
+                <p role="alert" className="sd-meta" style={{ margin: 0, color: 'var(--bad)' }}>
+                  {error.message}
+                </p>
+              )}
+              {shown.length ? (
+                <ul aria-label="Agents the studio has" className="sd-agentpick" style={listStyle}>
+                  {shown.map(worker => {
+                    const look = looks.get(worker.id),
+                      job = jobOf(worker);
+                    return (
+                      <li key={worker.id}>
+                        <button type="button" className="sd-agentrow" disabled={busy} onClick={() => onPick(worker)}>
+                          {look && <AgentAvatar look={look} size={40} ring={false} />}
+                          <span className="sd-agentrow__text">
+                            <b>{agentName(worker)}</b>
+                            {job && <span className="sd-meta">{job}</span>}
+                            {worker.responsibility && <span className="sd-meta">{worker.responsibility}</span>}
+                            {from && <span className="sd-meta">{from(worker)}</span>}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p role="status" className="sd-meta" style={{ margin: 0 }}>
+                  No agent the studio has matches “{words.trim()}”.
+                </p>
+              )}
+            </>
+          ) : (
+            <span className="sd-meta">{everyone}</span>
+          )}
+        </section>
+        <section className="sd-card sd-sidecard sd-sidecard--roomy" aria-labelledby={`${id}-new`}>
+          <h3 id={`${id}-new`} className="sd-sidecard__title">
+            Make a new one
+          </h3>
+          {unsaved ? (
+            <span className="sd-meta">Save the team first, then make a new agent for it.</span>
+          ) : (
             <NewAgent
               projectId={projectId}
               state={state}
               team={team}
-              expectedRevision={body.expectedRevision}
-              onMade={({ worker }) => joined(worker, team)}
+              expectedRevision={expectedRevision}
+              onMade={onMade}
             />
-          </section>
-        </div>
+          )}
+        </section>
+      </div>
+      {onCancel && (
+        <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
+          <button type="button" className="sd-btn sd-btn--sm sd-btn--ghost" disabled={busy} onClick={onCancel}>
+            Cancel
+          </button>
+        </span>
       )}
-    </section>
+    </>
   );
 }
 
@@ -270,21 +334,19 @@ function usualProvider(state: StudioState) {
 
 // A new agent for a saved team: its name, its job here, the CLI it runs on and what it is told. It is saved at once as
 // the organization's next revision and belongs to this project; its face is the agent kit's until one is chosen on its
-// page. Without onClose it has no Cancel of its own, as in Add an agent, whose panel has one.
-export function NewAgent({
+// page. It has no Cancel of its own: the panel or the choices it is in have one.
+function NewAgent({
   projectId,
   state,
   team,
   expectedRevision,
   onMade,
-  onClose,
 }: {
   projectId: string;
   state: StudioState;
   team: Team;
   expectedRevision: number;
   onMade: (made: { worker: Worker; revision: number }, roles: string[]) => void;
-  onClose?: () => void;
 }) {
   const adapters = state.adapters ?? {},
     [name, setName] = useState(''),
@@ -415,11 +477,6 @@ export function NewAgent({
         <button type="submit" className="sd-btn sd-btn--primary" disabled={make.isPending}>
           {make.isPending ? 'Making…' : 'Make the agent'}
         </button>
-        {onClose && (
-          <button type="button" className="sd-btn sd-btn--ghost" disabled={make.isPending} onClick={onClose}>
-            Cancel
-          </button>
-        )}
       </span>
     </form>
   );

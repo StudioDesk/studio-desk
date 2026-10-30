@@ -114,12 +114,18 @@ test("a new agent made in the team's editor is saved at once and kept in the dra
   const flow = within(await screen.findByRole('list', { name: 'How the work flows' }));
   await user.click(within(flow.getByRole('region', { name: 'Writing' })).getByRole('link', { name: 'Edit the team' }));
   const editor = within(await screen.findByRole('region', { name: 'Edit Writing' }));
+  // Add an agent opens both choices for the team, with no separate Make a new one button.
+  expect(editor.queryByRole('button', { name: 'Make a new one' })).toBeNull();
   await user.click(editor.getByRole('button', { name: 'Add an agent' }));
   // A deleted agent is never offered.
-  expect(editor.getByText('Every agent the studio has is already on this team.')).toBeTruthy();
+  const has = within(editor.getByRole('region', { name: 'An agent the studio has' }));
+  expect(has.getByText('Every agent the studio has is already on this team.')).toBeTruthy();
   expect(editor.queryByText('Old')).toBeNull();
-  await user.click(editor.getByRole('button', { name: 'Make a new one' }));
-  const form = within(editor.getByRole('form', { name: 'A new agent for Writing' }));
+  const form = within(
+    within(editor.getByRole('region', { name: 'Make a new one' })).getByRole('form', {
+      name: 'A new agent for Writing',
+    }),
+  );
   await user.type(form.getByLabelText('Name'), 'Iris');
   await user.type(form.getByLabelText('Job title'), 'Social writer');
   await user.type(form.getByLabelText('What it is responsible for'), 'Writes the threads.');
@@ -166,11 +172,11 @@ test('a team added in the flow is saved before it can have a new agent', async (
   );
   const editor = within(await screen.findByRole('region', { name: 'A new team' }));
   await user.type(editor.getByLabelText('Team name'), 'Social');
-  const make = editor.getByRole('button', { name: 'Make a new one' }) as HTMLButtonElement;
-  expect(make.disabled).toBe(true);
-  expect(editor.getByText('Save the team first, then make a new agent for it.')).toBeTruthy();
-  // An agent the studio has can still join it before it is saved.
   await user.click(editor.getByRole('button', { name: 'Add an agent' }));
+  const make = within(editor.getByRole('region', { name: 'Make a new one' }));
+  expect(make.getByText('Save the team first, then make a new agent for it.')).toBeTruthy();
+  expect(make.queryByRole('form')).toBeNull();
+  // An agent the studio has can still join it before it is saved.
   expect(
     within(editor.getByRole('list', { name: 'Agents the studio has' })).getByRole('button', { name: /Nova/ }),
   ).toBeTruthy();

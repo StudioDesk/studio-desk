@@ -50,7 +50,15 @@ beforeEach(() => {
       { id: 'W-1', displayName: 'Eli', provider: 'codex', enabled: true },
       { id: 'W-2', displayName: 'Ana', provider: 'codex', enabled: true },
       { id: 'W-3', displayName: 'Mo', provider: 'codex', enabled: true },
-      { id: 'W-4', displayName: 'Kit', provider: 'codex', enabled: true, projectId: 'project-x' },
+      {
+        id: 'W-4',
+        displayName: 'Kit',
+        jobTitle: 'Copywriter',
+        responsibility: 'Writes the launch posts.',
+        provider: 'codex',
+        enabled: true,
+        projectId: 'project-x',
+      },
       { id: 'W-gone', displayName: 'Old', provider: 'codex', enabled: false, projectId: 'project-x', deletedAt: 'x' },
     ],
     adapters: {
@@ -106,6 +114,11 @@ const retype = async (user: ReturnType<typeof userEvent.setup>, element: HTMLEle
   await user.clear(element);
   await user.type(element, text);
 };
+// The agents on the team, by name, as Who's on it lists them.
+const members = (who: ReturnType<typeof within>) =>
+  within(who.getByRole('list', { name: /'s agents$/ }))
+    .getAllByRole('listitem')
+    .map(item => item.querySelector('b')?.textContent);
 
 test('Edit the team opens its editor beside the flow, and Save the team sends only that team and its members', async () => {
   const user = userEvent.setup();
@@ -136,21 +149,35 @@ test('Edit the team opens its editor beside the flow, and Save the team sends on
   await retype(user, field(editor, 'Done when'), 'The release is out.');
   // Who's on it: each agent with its role, who leads, Remove and Add an agent.
   const who = within(editor.getByRole('region', { name: "Who's on it" }));
-  expect(
-    within(who.getByRole('list', { name: "Engineering's agents" }))
-      .getAllByRole('listitem')
-      .map(item => item.querySelector('b')?.textContent),
-  ).toEqual(['Eli', 'Mo']);
+  expect(members(who)).toEqual(['Eli', 'Mo']);
   expect(field(who, "Mo's role").value).toBe('Engineer');
   await user.selectOptions(field(who, 'Who leads'), 'W-3');
   await user.click(who.getByRole('button', { name: 'Remove Eli from Engineering' }));
-  await user.click(who.getByRole('button', { name: 'Add an agent' }));
+  // One Add an agent, which opens the two choices for the team inside Who's on it.
+  expect(who.getAllByRole('button', { name: 'Add an agent' })).toHaveLength(1);
+  expect(who.queryByRole('button', { name: 'Make a new one' })).toBeNull();
+  const add = who.getByRole('button', { name: 'Add an agent' });
+  expect(add.getAttribute('aria-expanded')).toBe('false');
+  await user.click(add);
+  expect(add.getAttribute('aria-expanded')).toBe('true');
+  expect(who.getByRole('region', { name: 'An agent the studio has' })).toBeTruthy();
+  expect(
+    within(who.getByRole('region', { name: 'Make a new one' })).getByRole('form', {
+      name: 'A new agent for Engineering',
+    }),
+  ).toBeTruthy();
   const studio = within(who.getByRole('list', { name: 'Agents the studio has' }));
-  // A deleted agent is never offered; an agent on another team moves from it.
+  // A deleted agent is never offered; an agent on another team moves from it, and each says what it does.
   expect(studio.queryByText('Old')).toBeNull();
   expect(studio.getByRole('button', { name: /Ana/ }).textContent).toContain('Moves from Review');
-  expect(studio.getByRole('button', { name: /Kit/ }).textContent).toContain('Not on a team');
+  expect(
+    [...studio.getByRole('button', { name: /Kit/ }).querySelectorAll('b, .sd-meta')].map(line => line.textContent),
+  ).toEqual(['Kit', 'Copywriter', 'Writes the launch posts.', 'Not on a team']);
   await user.click(studio.getByRole('button', { name: /Kit/ }));
+  // Kit joins the draft and the choices close; nothing is sent until the team is saved.
+  expect(who.getByRole('button', { name: 'Remove Kit from Engineering' })).toBeTruthy();
+  expect(who.queryByRole('region', { name: 'An agent the studio has' })).toBeNull();
+  expect(add.getAttribute('aria-expanded')).toBe('false');
   expect(commands()).toEqual([]);
   await user.click(editor.getByRole('button', { name: 'Save the team' }));
   await waitFor(() => expect(commands()).toHaveLength(1));
@@ -249,8 +276,12 @@ test("Make a new one saves the agent at once and keeps it in the team's draft", 
       : {};
   open('/p/project-x/agents?team=engineering');
   const editor = within(await screen.findByRole('region', { name: 'Edit Engineering' }));
-  await user.click(editor.getByRole('button', { name: 'Make a new one' }));
-  const form = within(editor.getByRole('form', { name: 'A new agent for Engineering' }));
+  await user.click(editor.getByRole('button', { name: 'Add an agent' }));
+  const form = within(
+    within(editor.getByRole('region', { name: 'Make a new one' })).getByRole('form', {
+      name: 'A new agent for Engineering',
+    }),
+  );
   await user.type(form.getByLabelText('Name'), 'Iris');
   await user.type(form.getByLabelText('Job title'), 'Tester');
   await user.type(form.getByLabelText('What it is responsible for'), 'Tests the product.');
@@ -275,9 +306,14 @@ test("Make a new one saves the agent at once and keeps it in the team's draft", 
       instructions: '',
     },
   });
-  // Iris is on the team in the draft before the state lists her, and the team saves at the new revision with her.
+  // Iris is on the team in the draft before the state lists her, the choices close, and the team saves at the new
+  // revision with her.
   expect(await editor.findByRole('button', { name: 'Remove Iris from Engineering' })).toBeTruthy();
   expect(field(editor, "Iris's role").value).toBe('Tester');
+  expect(
+    await screen.findByText('Iris joined Engineering. Your other changes still wait for you to save.'),
+  ).toBeTruthy();
+  expect(editor.queryByRole('region', { name: 'Make a new one' })).toBeNull();
   await user.click(editor.getByRole('button', { name: 'Save the team' }));
   await waitFor(() => expect(commands()).toHaveLength(2));
   const saved = commands()[1]!.body as { expectedRevision: number; members: { workerId: string; roles: string[] }[] };
@@ -293,13 +329,16 @@ test('Add a team opens a new team, which takes an agent the studio has and is ad
   await user.click(page.getByRole('link', { name: 'Add a team' }));
   await waitFor(() => expect(router.state.location.search).toEqual({ team: 'new' }));
   const editor = within(await screen.findByRole('region', { name: 'A new team' }));
-  // A new agent joins a saved team, so a new team is saved first.
-  expect((editor.getByRole('button', { name: 'Make a new one' }) as HTMLButtonElement).disabled).toBe(true);
-  expect(editor.getByText('Save the team first, then make a new agent for it.')).toBeTruthy();
+  expect(editor.queryByRole('button', { name: 'Make a new one' })).toBeNull();
   expect(editor.queryByRole('button', { name: 'Remove the team' })).toBeNull();
   await user.type(field(editor, 'Team name'), 'Docs');
   await user.type(field(editor, 'Purpose'), 'Write the docs.');
   await user.click(editor.getByRole('button', { name: 'Add an agent' }));
+  // A new agent joins a saved team, so a new team is saved first; an agent the studio has can join it now.
+  const make = within(editor.getByRole('region', { name: 'Make a new one' }));
+  expect(make.getByText('Save the team first, then make a new agent for it.')).toBeTruthy();
+  expect(make.queryByRole('form')).toBeNull();
+  expect(make.queryByLabelText('Job title')).toBeNull();
   await user.click(
     within(editor.getByRole('list', { name: 'Agents the studio has' })).getByRole('button', { name: /Kit/ }),
   );
@@ -326,6 +365,58 @@ test('Add a team opens a new team, which takes an agent the studio has and is ad
   ]);
   expect(body).not.toHaveProperty('tiers');
   expect(await screen.findByText('Docs added. Work that starts from now on follows it.')).toBeTruthy();
+});
+
+test("Cancel in Add an agent's choices closes them with the draft as it was and sends nothing", async () => {
+  const user = userEvent.setup();
+  open('/p/project-x/agents?team=engineering');
+  const editor = within(await screen.findByRole('region', { name: 'Edit Engineering' })),
+    who = within(editor.getByRole('region', { name: "Who's on it" }));
+  await user.click(who.getByRole('button', { name: 'Remove Eli from Engineering' }));
+  const add = who.getByRole('button', { name: 'Add an agent' });
+  await user.click(add);
+  // The studio's agents not on the team, found by a name, a job or what it does.
+  const has = within(who.getByRole('region', { name: 'An agent the studio has' })),
+    names = () =>
+      within(has.getByRole('list', { name: 'Agents the studio has' }))
+        .getAllByRole('button')
+        .map(row => row.querySelector('b')?.textContent);
+  expect(names()).toEqual(['Eli', 'Ana', 'Kit']);
+  await user.type(has.getByLabelText('Find an agent'), 'launch');
+  expect(names()).toEqual(['Kit']);
+  await user.type(within(who.getByRole('form', { name: 'A new agent for Engineering' })).getByLabelText('Name'), 'Zed');
+  // The choices have the only Cancel.
+  expect(who.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1);
+  await user.click(who.getByRole('button', { name: 'Cancel' }));
+  expect(who.queryByRole('region', { name: 'An agent the studio has' })).toBeNull();
+  expect(who.queryByRole('region', { name: 'Make a new one' })).toBeNull();
+  expect(add.getAttribute('aria-expanded')).toBe('false');
+  // Eli stays off the team, and no one joins it.
+  expect(members(who)).toEqual(['Mo']);
+  expect((editor.getByRole('button', { name: 'Save the team' }) as HTMLButtonElement).disabled).toBe(false);
+  expect(commands()).toEqual([]);
+});
+
+test("the team's address with add=true opens its editor with Add an agent's choices open", async () => {
+  const router = open('/p/project-x/agents?team=engineering&add=true');
+  const who = within(
+    within(await screen.findByRole('region', { name: 'Edit Engineering' })).getByRole('region', {
+      name: "Who's on it",
+    }),
+  );
+  expect(router.state.location.search).toEqual({ team: 'engineering', add: true });
+  expect(who.getByRole('button', { name: 'Add an agent' }).getAttribute('aria-expanded')).toBe('true');
+  expect(
+    within(who.getByRole('region', { name: 'An agent the studio has' })).getByRole('list', {
+      name: 'Agents the studio has',
+    }),
+  ).toBeTruthy();
+  expect(
+    within(who.getByRole('region', { name: 'Make a new one' })).getByRole('form', {
+      name: 'A new agent for Engineering',
+    }),
+  ).toBeTruthy();
+  expect(commands()).toEqual([]);
 });
 
 test('Remove the team asks in place, then sends the organization without the team or its agents', async () => {

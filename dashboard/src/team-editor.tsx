@@ -3,10 +3,12 @@
 // told. Save the team sends the project's whole organization with only this team and its agents changed
 // (organization.ts); Undo puts back the saved team without sending anything; Remove the team asks in place first. A
 // team groups agents and grants them nothing. A change reaches work that starts after the save, and recorded attempts
-// keep what they ran with. Kinds of work are given from an agent's Does list.
+// keep what they ran with. Kinds of work are given from an agent's Does list. Who's on it's Add an agent opens the
+// Agents page panel's two choices for this team (add-agent.tsx): an agent the studio has joins the draft, and a new
+// one is saved at once and joins it too.
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useId, useState } from 'react';
-import { contributor, NewAgent } from './add-agent';
+import { AddChoices, contributor } from './add-agent';
 import type { Team, Worker } from './api';
 import type { AgentLook } from './design/agent-kit.js';
 import { AgentAvatar } from './design/avatar';
@@ -84,8 +86,8 @@ export function TeamEditor({
     waiting = sent !== null && revision === sent,
     value = sent !== null && !waiting ? saved : (draft ?? saved),
     changed = JSON.stringify(value) !== JSON.stringify(saved),
-    [picking, setPicking] = useState(adding),
-    [making, setMaking] = useState(false),
+    // Add an agent's two choices, open from the address's add=true.
+    [choosing, setChoosing] = useState(adding),
     [removing, setRemoving] = useState(false),
     name = teamName(value.team),
     field = useId();
@@ -96,6 +98,12 @@ export function TeamEditor({
     directory = [...listed, ...made.workers.filter(worker => !listed.some(item => item.id === worker.id))],
     agent = (workerId: string) => directory.find(worker => worker.id === workerId) ?? { id: workerId },
     others = directory.filter(worker => !value.members.some(member => member.workerId === worker.id)),
+    comesFrom = (worker: Worker) => {
+      const from = body.teams.find(
+        team => team.id === body.members.find(member => member.workerId === worker.id)?.teamId,
+      );
+      return from ? `Moves from ${from.name}` : worker.projectId ? 'Not on a team' : 'Not in this project yet';
+    },
     // The saved organization a save starts from, at the revision an agent made here was saved at.
     start = () => ({ ...body, expectedRevision: Math.max(revision, made.revision) });
   // Saved, a new team opens under its own address once the saved organization holds it.
@@ -128,7 +136,7 @@ export function TeamEditor({
           : { workerId, ...contributor, roles: [] },
       ],
     }));
-    setPicking(false);
+    setChoosing(false);
   };
   const takeOff = (workerId: string) =>
     edit(current => ({
@@ -361,65 +369,24 @@ export function TeamEditor({
             <button
               type="button"
               className="sd-btn sd-btn--sm"
-              aria-expanded={picking}
-              onClick={() => {
-                setMaking(false);
-                setPicking(!picking);
-              }}
+              aria-expanded={choosing}
+              onClick={() => setChoosing(!choosing)}
             >
               <Icon name="plus" size={16} />
               Add an agent
             </button>
-            <button
-              type="button"
-              className="sd-btn sd-btn--sm"
-              aria-expanded={making}
-              disabled={isNew}
-              onClick={() => {
-                setPicking(false);
-                setMaking(!making);
-              }}
-            >
-              <Icon name="plus" size={16} />
-              Make a new one
-            </button>
           </span>
-          {isNew && <span className="sd-meta">Save the team first, then make a new agent for it.</span>}
-          {picking &&
-            (others.length ? (
-              <ul aria-label="Agents the studio has" className="sd-agentpick" style={listStyle}>
-                {others.map(worker => {
-                  const look = looks.get(worker.id),
-                    from = body.teams.find(
-                      team => team.id === body.members.find(member => member.workerId === worker.id)?.teamId,
-                    );
-                  return (
-                    <li key={worker.id}>
-                      <button type="button" className="sd-agentrow" onClick={() => bringIn(worker.id)}>
-                        {look && <AgentAvatar look={look} size={40} ring={false} />}
-                        <span className="sd-agentrow__text">
-                          <b>{agentName(worker)}</b>
-                          <span className="sd-meta">
-                            {from
-                              ? `Moves from ${from.name}`
-                              : worker.projectId
-                                ? 'Not on a team'
-                                : 'Not in this project yet'}
-                          </span>
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : (
-              <span className="sd-meta">Every agent the studio has is already on this team.</span>
-            ))}
-          {making && !isNew && (
-            <NewAgent
+          {choosing && (
+            <AddChoices
               projectId={projectId}
               state={state}
               team={saved.team}
+              agents={others}
+              looks={looks}
+              onPick={worker => bringIn(worker.id)}
+              from={comesFrom}
+              everyone="Every agent the studio has is already on this team."
+              unsaved={isNew}
               expectedRevision={Math.max(revision, made.revision)}
               onMade={({ worker, revision: next }, roles) => {
                 // The agent is saved as the organization's next revision; the rest of the draft still waits.
@@ -436,10 +403,10 @@ export function TeamEditor({
                     },
                   ],
                 }));
-                setMaking(false);
+                setChoosing(false);
                 toast(`${agentName(worker)} joined ${saved.team.name}. Your other changes still wait for you to save.`);
               }}
-              onClose={() => setMaking(false)}
+              onCancel={() => setChoosing(false)}
             />
           )}
         </section>
