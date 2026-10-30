@@ -2,15 +2,18 @@
 // tool calls, thinking, blocked commands and usage, every step in chapters with the agent's own words, and beside
 // them the story's attempts, how the attempt was set up, what it touched and its usage. A running attempt's trace
 // follows its log: each line it writes asks the controller for the steps after the last one shown, or for the whole
-// trace while it has no step to read after.
+// trace while it has no step to read after. Its page opens at the newest steps and keeps them in view while the
+// reader is there, with New updates for a reader who scrolled up; a finished attempt's page opens at the top and
+// holds still.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { getJSON, taskUrl, type AttemptSummary, type Task, type TaskPage } from './api';
 import { AgentAvatar } from './design/avatar';
 import { Icon, type IconName } from './design/icons';
 import { effortWords, plural } from './evidence';
 import { agentState } from './faces';
+import { NewUpdates, useFollow } from './follow';
 import { workerName } from './names';
 import { queryKeys, useStudio } from './records';
 import { cliName, isSourceStory } from './story';
@@ -269,6 +272,21 @@ function Trace({
     weekly = trace?.usage?.windows?.seven_day,
     tokens = trace?.usage?.tokens,
     changed = trace ? touched(trace) : { changed: [], read: [] };
+  // The steps follow in the page while the attempt runs. A step or phase read from its log is an update; a filter
+  // or a toggle only changes what shows, so it is not one.
+  const [attach, follow] = useFollow({
+      mode: 'page',
+      count: (trace?.steps.length ?? 0) + phases.length,
+      live: running(attempt.status),
+    }),
+    { jump } = follow,
+    // The attempt whose page has opened: it jumps once, as its trace first shows.
+    opened = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (!trace || opened.current === attempt.id) return;
+    opened.current = attempt.id;
+    if (running(attempt.status)) jump();
+  }, [trace, attempt.id, attempt.status, jump]);
   const statCount = (kind: 'shell' | 'read' | 'search' | 'edit', one: string, many: string) =>
     counts[kind] ? `${counts[kind]} ${plural(counts[kind]!, one, many)}` : '';
   const filterCount = (id: (typeof filters)[number]['id']) =>
@@ -467,33 +485,35 @@ function Trace({
                   </button>
                 ))}
               </div>
-              {chapters.length ? (
-                chapters.map(chapter => (
-                  <section key={chapter.key} className="sd-chapter" aria-label={chapter.title}>
-                    <div className="sd-chapter__head">
-                      <h2 className="sd-chapter__title">{chapter.title}</h2>
-                      <span className="sd-meta">
-                        {seconds(chapter.from)} to {seconds(chapter.to)}
-                        {Date.parse(chapter.to) - Date.parse(chapter.from) >= 1000
-                          ? ` · ${span(Date.parse(chapter.to) - Date.parse(chapter.from))}`
-                          : ''}
-                      </span>
-                    </div>
-                    {chapter.rows.map(row => (
-                      <Step
-                        key={row.key}
-                        row={row}
-                        output={output}
-                        face={look && <AgentAvatar look={look} size={30} ring={false} />}
-                      />
-                    ))}
-                  </section>
-                ))
-              ) : (
-                <p className="sd-meta" style={{ padding: '18px' }}>
-                  {rows.length ? 'Nothing of this kind.' : 'No steps recorded yet.'}
-                </p>
-              )}
+              <div ref={attach}>
+                {chapters.length ? (
+                  chapters.map(chapter => (
+                    <section key={chapter.key} className="sd-chapter" aria-label={chapter.title}>
+                      <div className="sd-chapter__head">
+                        <h2 className="sd-chapter__title">{chapter.title}</h2>
+                        <span className="sd-meta">
+                          {seconds(chapter.from)} to {seconds(chapter.to)}
+                          {Date.parse(chapter.to) - Date.parse(chapter.from) >= 1000
+                            ? ` · ${span(Date.parse(chapter.to) - Date.parse(chapter.from))}`
+                            : ''}
+                        </span>
+                      </div>
+                      {chapter.rows.map(row => (
+                        <Step
+                          key={row.key}
+                          row={row}
+                          output={output}
+                          face={look && <AgentAvatar look={look} size={30} ring={false} />}
+                        />
+                      ))}
+                    </section>
+                  ))
+                ) : (
+                  <p className="sd-meta" style={{ padding: '18px' }}>
+                    {rows.length ? 'Nothing of this kind.' : 'No steps recorded yet.'}
+                  </p>
+                )}
+              </div>
               {trace.handoff?.handoff && (
                 <details className="sd-disclosure" style={{ padding: '0 18px 12px' }}>
                   <summary>Read the whole handoff</summary>
@@ -685,6 +705,7 @@ function Trace({
               )}
             </aside>
           </div>
+          <NewUpdates follow={follow} />
         </>
       )}
     </div>
