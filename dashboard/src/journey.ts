@@ -9,8 +9,9 @@ import { cliName, isSourceStory, standing, storySteps } from './story';
 import { active, type GraphNode, type RunStory, type StudioState } from './studio-runs';
 
 export type Tone = 'ok' | 'live' | 'you' | 'bad' | 'wait';
-const checkKinds = ['studio-development:checks'];
-const planKinds = ['studio-development:breakdown', 'general:plan'];
+// The idea's planning steps, which planning.ts reads too.
+export const checkKinds = ['studio-development:checks'];
+export const planKinds = ['studio-development:breakdown', 'general:plan'];
 // Every step but the checks and the plan is one of the idea's stories: a source story, a work item, or any
 // workflow's step.
 const isStory = (kind?: string) => !checkKinds.includes(kind ?? '') && !planKinds.includes(kind ?? '');
