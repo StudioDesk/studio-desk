@@ -1,7 +1,8 @@
 // Trying a story yourself from its "Where it stands" banner (try-actions.tsx): Try it in its own strip under the
-// decision row once the story's tests passed, what the try copy then holds, Run and Open folder, Open and Stop while
-// its app runs, and the two asks, the director's own edits in the copy and a Run outside the sandbox, as they reach the
-// stand-in controller. Model-free; nothing here runs an app.
+// decision row once the story's tests passed, the strip's one line on where trying the story stands with only that
+// state's buttons (Try it; Run and Open folder; Open and Stop while its app runs), how its last Run ended, and the two
+// asks, the director's own edits in the copy and a Run outside the sandbox, as they reach the stand-in controller.
+// Model-free; nothing here runs an app.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -18,6 +19,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -39,6 +41,16 @@ const names = (region: ReturnType<typeof within>) =>
 // The banner's decision row, and Try it's strip under it.
 const row = (region: ReturnType<typeof within>) => within(region.getByRole('group', { name: 'Decisions' }));
 const strip = (region: ReturnType<typeof within>) => within(region.getByRole('region', { name: 'Try it yourself' }));
+// What the strip offers: its links, then its buttons, each by its name.
+const offered = (region: ReturnType<typeof within>) => [
+  ...strip(region)
+    .queryAllByRole('link')
+    .map((link: HTMLElement) => link.textContent),
+  ...names(strip(region)),
+];
+// The strip's line on where trying the story stands.
+const stands = (region: ReturnType<typeof within>) =>
+  region.getByRole('region', { name: 'Try it yourself' }).querySelector('.sd-stands__try-state')?.textContent;
 const decided = ['Integrate', 'Send back to Eli', 'More actions'];
 const tryReads = () => controller.reads().filter(url => url === '/api/projects/project-x/try');
 const toast = () => document.querySelector('.sd-toast')?.textContent;
@@ -153,14 +165,16 @@ const view = (held: TryCopy | null): TryView => ({
 const refusal = (message: string, fields: Record<string, unknown> = {}) =>
   Object.assign(new Error(message), { status: 409, fields });
 
-test('a story whose candidate passed offers Try it in its own strip; one still implementing or whose tests failed offers none', async () => {
+test('a story whose candidate passed offers Try it in its own strip, not tried yet; one still implementing or whose tests failed offers none', async () => {
   open(story());
   let region = await banner();
   expect(names(row(region))).toEqual(decided);
   expect(names(strip(region))).toEqual(['Try it']);
-  // Try it waits for the try view, which holds nothing yet, and says nothing more.
+  // Try it waits for the try view, which holds nothing yet: the strip says so, with only Try it, and nothing more.
   await tryIt(region);
   expect(tryReads()).toEqual(['/api/projects/project-x/try']);
+  expect(stands(region)).toBe('Not tried yet.');
+  expect(offered(region)).toEqual(['Try it']);
   expect(region.queryByText(/try copy/)).toBeNull();
   expect(posted()).toEqual([]);
   cleanup();
@@ -201,7 +215,7 @@ test('a story whose candidate passed offers Try it in its own strip; one still i
   expect(tryReads()).toEqual([]);
 });
 
-test('Try it moves the copy to the story, and the banner says its change is merged onto the line', async () => {
+test('Try it moves the copy to the story, and the strip says it is in the try copy, merged onto the line at its tip', async () => {
   const user = userEvent.setup();
   controller.command = url => {
     if (url !== '/api/tasks/T-1/try') return {};
@@ -211,26 +225,27 @@ test('Try it moves the copy to the story, and the banner says its change is merg
   open(story());
   const region = await banner();
   await user.click(await tryIt(region));
-  // The tip's short commit is set apart in the line.
-  expect((await region.findByText(/^The try copy holds this story's change merged onto main at/)).textContent).toBe(
-    "The try copy holds this story's change merged onto main at a1b2c3d, as integrating it would merge it.",
+  // The state is said once, the tip's short commit set apart in it.
+  expect((await strip(region).findByText(/^In the try copy, merged onto main at/)).textContent).toBe(
+    'In the try copy, merged onto main at a1b2c3d.',
   );
+  expect(stands(region)).toBe('In the try copy, merged onto main at a1b2c3d.');
+  expect(strip(region).getByText('a1b2c3d').className).toBe('sd-mono');
   expect(posted()).toEqual([{ url: '/api/tasks/T-1/try', method: 'POST', body: { projectId: 'project-x' } }]);
-  // Run and Open folder take Try it's place in its strip; nothing has started.
+  // Run and Open folder take Try it's place in its strip; nothing has started or ended.
   expect(names(row(region))).toEqual(decided);
-  expect(names(strip(region))).toEqual(['Run', 'Open folder']);
-  expect(region.queryByText(/The app/)).toBeNull();
+  expect(offered(region)).toEqual(['Run', 'Open folder']);
+  expect(strip(region).queryByText(/Running|Starting|The last Run/)).toBeNull();
 });
 
-test('a candidate that conflicts with its line is held as built, naming the conflicting files', async () => {
+test('a candidate that conflicts with its line is held as built, naming the conflicting files, with Run and Open folder', async () => {
   controller.tryView = view(copy({ merged: false, conflicts: ['lib/greeting.js', 'README.md'], commit: 'c4nd1da7e' }));
   open(story());
   const region = await banner();
-  expect((await region.findByText(/as built/)).textContent).toBe(
-    'The try copy holds the candidate as built: its change conflicts with main in lib/greeting.js and README.md.',
+  expect((await strip(region).findByText(/as built/)).textContent).toBe(
+    'In the try copy, held as built: its change conflicts with main in lib/greeting.js and README.md.',
   );
-  expect(region.getByRole('button', { name: 'Run' })).toBeTruthy();
-  expect(region.queryByRole('button', { name: 'Try it' })).toBeNull();
+  expect(offered(region)).toEqual(['Run', 'Open folder']);
 });
 
 test('a copy holding an earlier candidate of the story, from before it was sent back, offers Try it again', async () => {
@@ -238,20 +253,26 @@ test('a copy holding an earlier candidate of the story, from before it was sent 
   open(story());
   const region = await banner();
   expect(
-    await region.findByText('The try copy holds an earlier candidate of this story. Try it moves it to this one.'),
+    await strip(region).findByText(
+      'The try copy holds an earlier candidate of this story. Try it moves it to this one.',
+    ),
   ).toBeTruthy();
   await tryIt(region);
-  expect(region.queryByRole('button', { name: 'Run' })).toBeNull();
+  expect(offered(region)).toEqual(['Try it']);
   cleanup();
-  // While its app runs, it is stopped first.
+  // While its app runs, it is stopped first: the line says it runs the earlier candidate, with Open and Stop.
   controller.tryView = view(
     copy({ candidateAttemptId: 'attempt-old', run: run({ address: 'http://localhost:5173/' }) }),
   );
   open(story());
   const running = await banner();
-  expect(await running.findByText('The try copy holds an earlier candidate of this story.')).toBeTruthy();
+  await waitFor(() =>
+    expect(stands(running)).toMatch(
+      /^Running an earlier candidate of this story at http:\/\/localhost:5173\/, in the built-in sandbox, for /,
+    ),
+  );
   expect(names(row(running))).toEqual(decided);
-  expect(names(strip(running))).toEqual(['Stop']);
+  expect(offered(running)).toEqual(['Open', 'Stop']);
 });
 
 test('with the copy on the story it offers Run and Open folder; while the app starts, Stop and no Open yet', async () => {
@@ -266,18 +287,44 @@ test('with the copy on the story it offers Run and Open folder; while the app st
   const region = await banner();
   await user.click(await region.findByRole('button', { name: 'Open folder' }));
   await waitFor(() => expect(toast()).toBe("Opened the try copy's folder."));
+  expect(stands(region)).toBe('In the try copy, merged onto main at a1b2c3d.');
   await user.click(region.getByRole('button', { name: 'Run' }));
-  expect((await region.findByText(/^The app is starting/)).textContent).toBe(
-    'The app is starting in the built-in sandbox, its packages installed first.',
+  // Starting replaces the copy's line: the state is said once.
+  expect((await strip(region).findByText(/^Starting/)).textContent).toBe(
+    'Starting in the built-in sandbox, its packages installed first.',
   );
+  expect(stands(region)).toBe('Starting in the built-in sandbox, its packages installed first.');
   expect(posted()).toEqual([
     { url: '/api/projects/project-x/try/open', method: 'POST', body: { projectId: 'project-x' } },
     { url: '/api/projects/project-x/try/run', method: 'POST', body: { projectId: 'project-x' } },
   ]);
   // Until the app prints its address there is nothing to open.
   expect(names(row(region))).toEqual(decided);
-  expect(names(strip(region))).toEqual(['Stop']);
+  expect(offered(region)).toEqual(['Stop']);
   expect(region.queryByRole('link', { name: 'Open' })).toBeNull();
+});
+
+test('a running app says where it runs and for how long by the page clock, with only Open and Stop', async () => {
+  // The test's clock reads two minutes after the Run started.
+  vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+  vi.setSystemTime(Date.parse('2026-10-29T09:03:00Z'));
+  controller.tryView = view(copy({ run: run({ address: 'http://127.0.0.1:5173/' }) }));
+  open(story());
+  const region = await banner();
+  await waitFor(() =>
+    expect(stands(region)).toBe('Running at http://127.0.0.1:5173/, in the built-in sandbox, for 2 minutes.'),
+  );
+  expect(strip(region).getByText('http://127.0.0.1:5173/').className).toBe('sd-mono');
+  expect(names(row(region))).toEqual(decided);
+  expect(offered(region)).toEqual(['Open', 'Stop']);
+  expect(strip(region).queryByText(/The last Run|In the try copy/)).toBeNull();
+  // The minutes follow the clock while it runs.
+  vi.setSystemTime(Date.parse('2026-10-29T09:04:00Z'));
+  await waitFor(
+    () => expect(stands(region)).toBe('Running at http://127.0.0.1:5173/, in the built-in sandbox, for 3 minutes.'),
+    { timeout: 3000 },
+  );
+  expect(posted()).toEqual([]);
 });
 
 test('a running app offers Open at the address it printed and Stop in the Try it strip, not the decisions, and says where it runs', async () => {
@@ -299,22 +346,42 @@ test('a running app offers Open at the address it printed and Stop in the Try it
     link = await strip(region).findByRole('link', { name: 'Open' });
   expect(link.getAttribute('href')).toBe('http://localhost:5173/');
   expect(link.getAttribute('target')).toBe('_blank');
-  expect(region.getByText('The app runs on this computer at http://localhost:5173/.')).toBeTruthy();
-  expect(region.queryByText(/starting/)).toBeNull();
+  expect(stands(region)).toMatch(/^Running at http:\/\/localhost:5173\/, on this computer, for /);
+  expect(strip(region).queryByText(/Starting/)).toBeNull();
   // Open and Stop are in the strip, not among the decisions.
   expect(names(row(region))).toEqual(decided);
-  expect(names(strip(region))).toEqual(['Stop']);
+  expect(offered(region)).toEqual(['Open', 'Stop']);
   expect(row(region).queryByRole('link', { name: 'Open' })).toBeNull();
-  expect(strip(region).getByText('The app runs on this computer at http://localhost:5173/.')).toBeTruthy();
   await user.click(strip(region).getByRole('button', { name: 'Stop' }));
-  // The ended Run still says where it ran, and Run is offered again.
-  expect(await region.findByText('The last Run, on this computer, was stopped: You stopped it.')).toBeTruthy();
+  // After the copy's line, the ended Run says where it ran and how it ended, and Run is offered again.
+  expect(await strip(region).findByText('The last Run, on this computer, was stopped: You stopped it.')).toBeTruthy();
+  expect(stands(region)).toBe('In the try copy, merged onto main at a1b2c3d.');
   expect(posted()).toEqual([
     { url: '/api/projects/project-x/try/stop', method: 'POST', body: { projectId: 'project-x' } },
   ]);
-  expect(region.queryByRole('link', { name: 'Open' })).toBeNull();
   expect(names(row(region))).toEqual(decided);
-  expect(names(strip(region))).toEqual(['Run', 'Open folder']);
+  expect(offered(region)).toEqual(['Run', 'Open folder']);
+});
+
+test('an ended Run says after the state line that it could not run, or the exit code it ended with', async () => {
+  controller.tryView = view(
+    copy({ run: run({ state: 'ended', error: 'npm was not found.', endedAt: '2026-10-29T09:01:02Z' }) }),
+  );
+  open(story());
+  let region = await banner();
+  expect(
+    await strip(region).findByText('The last Run, in the built-in sandbox, could not run: npm was not found.'),
+  ).toBeTruthy();
+  expect(stands(region)).toBe('In the try copy, merged onto main at a1b2c3d.');
+  expect(offered(region)).toEqual(['Run', 'Open folder']);
+  cleanup();
+  controller.tryView = view(
+    copy({ run: run({ state: 'ended', place: 'computer', exitCode: 1, endedAt: '2026-10-29T09:05:00Z' }) }),
+  );
+  open(story());
+  region = await banner();
+  expect(await strip(region).findByText('The last Run, on this computer, ended with exit code 1.')).toBeTruthy();
+  expect(offered(region)).toEqual(['Run', 'Open folder']);
 });
 
 test('a copy holding your own edits names them; Keep them sends nothing, and Discard tries the story with discard', async () => {
@@ -387,7 +454,7 @@ test('a Run not confirmed outside the sandbox asks once; Cancel sends nothing an
   await user.click(region.getByRole('button', { name: 'Run' }));
   ask = within(await screen.findByRole('dialog', { name: 'Run outside the sandbox?' }));
   await user.click(ask.getByRole('button', { name: 'Confirm' }));
-  expect(await region.findByText('The app is starting on this computer.')).toBeTruthy();
+  expect(await region.findByText('Starting on this computer.')).toBeTruthy();
   expect(posted()).toEqual([
     { url: '/api/projects/project-x/try/run', method: 'POST', body: { projectId: 'project-x' } },
     { url: '/api/projects/project-x/try/run', method: 'POST', body: { projectId: 'project-x' } },

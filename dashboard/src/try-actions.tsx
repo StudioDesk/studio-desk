@@ -1,15 +1,18 @@
-// Trying a story yourself from its "Where it stands" banner (1.2 step 7): Try it beside Send back once the story's
-// tests passed, what the try copy then holds, Run and Open folder while it holds the story, and Open and Stop while its
-// app runs. A copy holding the director's own edits, and a Run outside the sandbox not yet confirmed for the project,
-// each ask before anything more is sent. Only the director's click sends anything; the controller owns the copy and
-// its Run (src/connectors/try-copy.mjs).
+// Trying a story yourself from its "Where it stands" banner (1.2 step 7), in its "Try it yourself" strip once the
+// story's tests passed: one line saying where trying the story stands, then only that state's buttons: Try it, Run
+// and Open folder while the copy holds the story, and Open and Stop while its app runs. A copy holding the director's
+// own edits, and a Run outside the sandbox not yet confirmed for the project, each ask before anything more is sent.
+// Only the director's click sends anything; the controller owns the copy and its Run (src/connectors/try-copy.mjs).
+import type { ReactNode } from 'react';
 import { Refusal, type Task, type TryPlace, type TryRun } from './api';
 import { named } from './bring-back';
 import { Modal } from './dialog';
+import { plural } from './evidence';
 import { storyPeople } from './story';
 import type { StudioState } from './studio-runs';
 import { useToast } from './toast';
 import { triedState, tryOffered, useTryAction, useTryView, type TryRequest } from './try-it';
+import { useNow } from './use-now';
 
 const places: Record<TryPlace, string> = { 'built-in': 'in the built-in sandbox', computer: 'on this computer' };
 // The director's edited files are named as the controller's message names them: the first 20, then how many more.
@@ -71,9 +74,83 @@ export function useTry(projectId: string, task: Task, studio: StudioState) {
 }
 export type TryState = NonNullable<ReturnType<typeof useTry>>;
 
-// The story's Try it buttons, in the decisions' row: Try it, then Run and Open folder while the copy holds the story,
-// and Open (once the app printed its address) and Stop while it runs.
+// How long a Run has run: whole minutes, and hours past the hour.
+const ranFor = (ms: number) => {
+  const minutes = Math.floor(ms / 60000),
+    hours = Math.floor(minutes / 60),
+    rest = minutes % 60;
+  if (minutes < 1) return 'less than a minute';
+  if (!hours) return `${minutes} ${plural(minutes, 'minute')}`;
+  return `${hours} ${plural(hours, 'hour')}${rest ? ` ${rest} ${plural(rest, 'minute')}` : ''}`;
+};
+
+// How the story's last Run ended, as the controller records it.
+const ending = (run: TryRun) =>
+  run.stopped
+    ? `was stopped: ${run.stopped}`
+    : run.error
+      ? `could not run: ${run.error}`
+      : `ended${run.exitCode !== null && run.exitCode !== undefined ? ` with exit code ${run.exitCode}` : ''}.`;
+
+// Where trying the story stands, said once at the head of its strip: not tried yet, in the try copy (merged onto its
+// line at the tip, or held as built with the files that conflicted), an earlier candidate there, or its app starting
+// or running, where and for how long; then how its last Run ended. Nothing until the try view is read.
+function TryLine({ state }: { state: TryState }) {
+  const { copy, tried, earlier, run, reading } = state,
+    running = tried.state === 'running' && run?.state === 'running' ? run : null,
+    // The clock ticks only while the running time is said.
+    now = useNow(!!running?.address);
+  if (reading) return null;
+  const which = earlier ? ' an earlier candidate of this story' : '',
+    started = Date.parse(running?.startedAt ?? '');
+  let said: ReactNode;
+  if (!copy || tried.state === 'not-tried') said = 'Not tried yet.';
+  else if (running?.address)
+    said = (
+      <>
+        Running{which} at <span className="sd-mono">{running.address}</span>, {places[running.place]}
+        {Number.isFinite(started) && `, for ${ranFor(Math.max(0, now - started))}`}.
+      </>
+    );
+  else if (running)
+    said = `Starting${which} ${places[running.place]}${running.installing ? ', its packages installed first' : ''}.`;
+  else if (earlier) said = 'The try copy holds an earlier candidate of this story. Try it moves it to this one.';
+  else if (copy.merged)
+    said = (
+      <>
+        In the try copy, merged onto {copy.branch} at <span className="sd-mono">{copy.tip.slice(0, 7)}</span>.
+      </>
+    );
+  else
+    said = `In the try copy, held as built: its change conflicts with ${copy.branch}${
+      copy.conflicts.length ? ` in ${named(copy.conflicts)}` : ''
+    }.`;
+  return (
+    <div style={{ flex: '1 1 100%' }}>
+      <p className="sd-stands__try-state" style={{ margin: 0 }}>
+        {said}
+      </p>
+      {run && run.state !== 'running' && (
+        <p className="sd-meta" style={{ margin: 0 }}>
+          The last Run, {places[run.place]}, {ending(run)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// The strip's line on where trying the story stands, then only that state's buttons: Try it, Run and Open folder
+// while the copy holds the story, and Open (once the app printed its address) and Stop while it runs.
 export function TryButtons({ state }: { state: TryState }) {
+  return (
+    <>
+      <TryLine state={state} />
+      <TryActions state={state} />
+    </>
+  );
+}
+
+function TryActions({ state }: { state: TryState }) {
   const { task, tried, earlier, reading, busy, send } = state;
   if (tried.state === 'running')
     return (
@@ -111,50 +188,13 @@ export function TryButtons({ state }: { state: TryState }) {
   );
 }
 
-// How the story's last Run ended, as the controller records it.
-const ending = (run: TryRun) =>
-  run.stopped
-    ? `was stopped: ${run.stopped}`
-    : run.error
-      ? `could not run: ${run.error}`
-      : `ended${run.exitCode !== null && run.exitCode !== undefined ? ` with exit code ${run.exitCode}` : ''}.`;
-
-// The lines under the decisions: what the copy holds for this story, where its app runs or how its last Run ended,
-// the director's own edits with Keep them and Discard, a refusal's message, and the one ask to run outside the
-// sandbox.
+// The notes under the strip's buttons: the director's own edits with Keep them and Discard, a refusal's message, and
+// the one ask to run outside the sandbox.
 export function TryNotes({ state }: { state: TryState }) {
-  const { task, copy, tried, earlier, run, edits, outside, failure, busy, send, dismiss } = state,
+  const { task, edits, outside, failure, busy, send, dismiss } = state,
     line = { margin: 0, flex: '1 1 100%' };
   return (
     <>
-      {copy && tried.state !== 'not-tried' && (
-        <p className="sd-stands__detail" style={line}>
-          {earlier ? (
-            <>
-              The try copy holds an earlier candidate of this story.
-              {tried.state !== 'running' && ' Try it moves it to this one.'}
-            </>
-          ) : copy.merged ? (
-            <>
-              The try copy holds this story's change merged onto {copy.branch} at{' '}
-              <span className="sd-mono">{copy.tip.slice(0, 7)}</span>, as integrating it would merge it.
-            </>
-          ) : (
-            `The try copy holds the candidate as built: its change conflicts with ${copy.branch}${
-              copy.conflicts.length ? ` in ${named(copy.conflicts)}` : ''
-            }.`
-          )}
-        </p>
-      )}
-      {run && (
-        <p className="sd-stands__detail" style={line}>
-          {run.state === 'running'
-            ? run.address
-              ? `The app runs ${places[run.place]} at ${run.address}.`
-              : `The app is starting ${places[run.place]}${run.installing ? ', its packages installed first' : ''}.`
-            : `The last Run, ${places[run.place]}, ${ending(run)}`}
-        </p>
-      )}
       {edits && (
         <div
           style={{ ...line, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-8)' }}
