@@ -332,19 +332,57 @@ test("the project's color is chosen from the palette and saved with the section"
   expect(commands()[0]).toMatchObject({ url: '/api/projects/project-x', method: 'PATCH', body: { color: 'sky' } });
 });
 
-test('attempts at the same time step between one and the agents on this computer', async () => {
+test('attempts at the same time step between one and the controller’s most of 16, past the agents on this computer', async () => {
   const user = userEvent.setup();
-  controller.shell = { ...controller.shell, maxParallel: 2 };
-  open('/p/project-x/settings');
-  const stepper = within(await screen.findByRole('group', { name: 'Attempts at the same time' }));
-  // Two agents on this computer, each one attempt at a time: two is the most.
-  expect((stepper.getByRole('button', { name: 'More' }) as HTMLButtonElement).disabled).toBe(true);
-  await user.click(stepper.getByRole('button', { name: 'Fewer' }));
+  const stepper = async (maxParallel: number) => {
+    cleanup();
+    controller.requests = [];
+    controller.shell = { ...controller.shell, maxParallel };
+    open('/p/project-x/settings');
+    const group = within(await screen.findByRole('group', { name: 'Attempts at the same time' }));
+    return {
+      more: group.getByRole('button', { name: 'More' }) as HTMLButtonElement,
+      fewer: group.getByRole('button', { name: 'Fewer' }) as HTMLButtonElement,
+    };
+  };
+  // Two agents on this computer, and an agent can run several attempts at once: two is not the most.
+  const two = await stepper(2);
+  expect(two.more.disabled).toBe(false);
+  await user.click(two.more);
   await waitFor(() =>
     expect(commands()).toEqual([
-      { url: '/api/control', method: 'POST', body: { projectId: 'project-x', maxParallel: 1 } },
+      { url: '/api/control', method: 'POST', body: { projectId: 'project-x', maxParallel: 3 } },
     ]),
   );
+  // Sixteen is the controller's own most.
+  const sixteen = await stepper(16);
+  expect(sixteen.more.disabled).toBe(true);
+  expect(sixteen.fewer.disabled).toBe(false);
+  await user.click(sixteen.fewer);
+  await waitFor(() =>
+    expect(commands()).toEqual([
+      { url: '/api/control', method: 'POST', body: { projectId: 'project-x', maxParallel: 15 } },
+    ]),
+  );
+  // One is the fewest.
+  const one = await stepper(1);
+  expect(one.fewer.disabled).toBe(true);
+  expect(one.more.disabled).toBe(false);
+});
+
+test('Running work says the limit caps attempts across every project, and not that an agent runs one at a time', async () => {
+  open('/p/project-x/settings');
+  await screen.findByRole('group', { name: 'Attempts at the same time' });
+  const running = screen.getByRole('region', { name: 'Running work' });
+  expect(
+    within(running).getByText(
+      "Caps how many attempts run at once across every project, an agent's own included: an agent can run several at once. Limits for each kind of resource come later.",
+    ),
+  ).toBeTruthy();
+  expect(running.textContent).toMatch(/every project/);
+  expect(running.textContent).toMatch(/limits for each kind of resource/i);
+  expect(running.textContent).not.toMatch(/one attempt at a time/i);
+  expect(running.textContent).not.toMatch(/reserves it/i);
 });
 
 test("a repository's settings are checked again and edited, and saving runs its tests", async () => {

@@ -1092,12 +1092,14 @@ function Records({ projectId }: { projectId: string }) {
   );
 }
 
+// The most attempts at the same time: the controller's own most (mostAttemptsAtOnce in src/server.mjs), which
+// refuses more than 16.
+const mostAttemptsAtOnce = 16;
+
 function RunningWork({ projectId, state }: { projectId: string; state: StudioState }) {
   const toast = useToast(),
     holds = usageHolds(state),
-    limit = state.maxParallel ?? 1,
-    // Each agent runs one attempt at a time, so the limit goes no higher than the agents on this computer.
-    most = Math.max(1, (state.employeeDirectory ?? state.workers).filter(worker => !worker.deletedAt).length);
+    limit = state.maxParallel ?? 1;
   const control = useMutation({
     mutationFn: (body: Record<string, unknown>) => send('/api/control', { projectId, ...body }),
     onError: error => toast(error.message),
@@ -1107,7 +1109,7 @@ function RunningWork({ projectId, state }: { projectId: string; state: StudioSta
       <Row
         first
         title="Attempts at the same time"
-        note="Each agent runs one attempt at a time, as the controller reserves it; this caps how many run at once across every project."
+        note="Caps how many attempts run at once across every project, an agent's own included: an agent can run several at once. Limits for each kind of resource come later."
       >
         <span className="sd-stepper" role="group" aria-label="Attempts at the same time">
           <button
@@ -1124,7 +1126,7 @@ function RunningWork({ projectId, state }: { projectId: string; state: StudioSta
             type="button"
             className="sd-btn sd-btn--sm sd-btn--ghost"
             aria-label="More"
-            disabled={limit >= most || control.isPending}
+            disabled={limit >= mostAttemptsAtOnce || control.isPending}
             onClick={() => control.mutate({ maxParallel: limit + 1 })}
           >
             +
