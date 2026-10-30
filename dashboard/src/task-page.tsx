@@ -366,6 +366,7 @@ function Story({
         looks={looks}
         opened={opened}
         onToggle={(id, open) => setOpened(current => ({ ...current, [id]: open }))}
+        focus={revealing?.attemptId}
       />
     ),
     // Other work's Overview: what the latest attempt, or the one chosen, returned, under where it stands in full. A
@@ -409,14 +410,16 @@ function Story({
     setReading(count => count + 1);
   };
   // The chapter showChapter or the strip opened comes into view once Activity shows it: at once, or when the director
-  // next opens Activity after choosing an attempt on another tab, and once for each use.
+  // next opens Activity after choosing an attempt on another tab, and once for each use. A finished chapter shows from
+  // its start; a running one ends at its newest lines, which it then follows.
   useEffect(() => {
     if (!revealing || revealing.count === revealed.current || tab !== 'activity') return;
     const chapter = document.getElementById(chapterId(revealing.attemptId));
     if (!chapter) return;
     revealed.current = revealing.count;
-    chapter.scrollIntoView?.({ block: 'start' });
-  }, [revealing, tab]);
+    const live = attempts.some(attempt => attempt.id === revealing.attemptId && running(attempt.status));
+    chapter.scrollIntoView?.({ block: live ? 'end' : 'start' });
+  }, [revealing, tab, attempts]);
   // The brief's file form, opened and brought into view where the brief shows: beside the tabs, which stay as they
   // are, or under Details on a phone.
   useEffect(() => {
@@ -1229,6 +1232,8 @@ function Conversation({
   trace,
   looks,
   onRaw,
+  follows,
+  opens,
 }: {
   projectId: string;
   task: Task;
@@ -1238,6 +1243,8 @@ function Conversation({
   trace?: AttemptTrace;
   looks: Map<string, AgentLook>;
   onRaw: () => void;
+  follows: boolean;
+  opens: boolean;
 }) {
   const live = running(attempt.status),
     look = looks.get(attempt.workerId ?? ''),
@@ -1269,6 +1276,8 @@ function Conversation({
       face={look && <AgentAvatar look={look} size={34} state={live ? 'working' : 'idle'} ring={false} />}
       heading={heading}
       cli={provider || 'The CLI'}
+      follows={follows}
+      opens={opens}
       actions={
         <button type="button" className="sd-btn sd-btn--ghost" style={{ flex: '1 1 160px' }} onClick={onRaw}>
           Raw log
@@ -1315,6 +1324,8 @@ function Chapter({
   attempts: AttemptSummary[];
   attempt: AttemptSummary;
   looks: Map<string, AgentLook>;
+  follows: boolean;
+  opens: boolean;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -1344,8 +1355,9 @@ function Chapter({
 
 // An open chapter: what the attempt ran on, when and for how long, as its chip's title says, then what the agent did
 // and said (its raw log when no trace was recorded), ending with what it handed back, or a review with its verdict.
-// A running attempt's chapter is its live activity under the line that the agent is working on it now. The attempt's
-// full record is read only here.
+// A running attempt's chapter is its live activity under the line that the agent is working on it now, which follows
+// its newest moments in the page when it is the running chapter that follows (`follows`), and starts at them when
+// it shows (`opens`). The attempt's full record is read only here.
 function ChapterBody({
   projectId,
   task,
@@ -1353,6 +1365,8 @@ function ChapterBody({
   attempts,
   attempt,
   looks,
+  follows,
+  opens,
 }: {
   projectId: string;
   task: Task;
@@ -1360,6 +1374,8 @@ function ChapterBody({
   attempts: AttemptSummary[];
   attempt: AttemptSummary;
   looks: Map<string, AgentLook>;
+  follows: boolean;
+  opens: boolean;
 }) {
   const live = running(attempt.status),
     verdict = isReview(attempt) && !!attempt.finishedAt && !!reviewOf(attempt).verdict,
@@ -1418,6 +1434,8 @@ function ChapterBody({
           trace={trace.data && handedBack ? { ...trace.data, handoff: null } : trace.data}
           looks={looks}
           onRaw={() => setRaw(true)}
+          follows={follows}
+          opens={opens}
         />
       )}
       {!live && (
@@ -1608,7 +1626,9 @@ function QuestionExchange({
 // your part between them (build plan area 16), and for a source story where its integration stands and where its fix
 // went from there (1.1). The director (October 24): it showed one step at a time and felt like it was missing a lot.
 // The latest attempt's chapter and a running one's open, the earlier ones folded, until the director opens or folds
-// one (`opened`, the page's own state, so a refresh keeps it).
+// one (`opened`, the page's own state, so a refresh keeps it). One open running chapter follows its newest moments:
+// the one the page last brought into view (`focus`), or else the newest. It starts at them as Activity shows it,
+// unless the page brought another chapter into view.
 function StoryActivity({
   projectId,
   task,
@@ -1617,6 +1637,7 @@ function StoryActivity({
   looks,
   opened,
   onToggle,
+  focus,
 }: {
   projectId: string;
   task: Task;
@@ -1625,9 +1646,13 @@ function StoryActivity({
   looks: Map<string, AgentLook>;
   opened: Record<string, boolean>;
   onToggle: (attemptId: string, open: boolean) => void;
+  focus?: string;
 }) {
   const startOf = (attempt: AttemptSummary) => Date.parse(String(attempt.startedAt ?? '')) || Infinity,
     ordered = [...attempts].sort((a, b) => startOf(a) - startOf(b)),
+    isOpen = (attempt: AttemptSummary) => opened[attempt.id] ?? (attempt === ordered.at(-1) || running(attempt.status)),
+    runningOpen = ordered.filter(attempt => running(attempt.status) && isOpen(attempt)),
+    follower = runningOpen.find(attempt => attempt.id === focus) ?? runningOpen.at(-1),
     stage = task.sourceStage,
     // A controller without the route, or one that failed to read it, leaves only the attempts.
     record = useQuery({
@@ -1657,7 +1682,7 @@ function StoryActivity({
     blocks: ReactNode[] = [];
   let next = 0;
   for (const attempt of ordered) {
-    const open = opened[attempt.id] ?? (attempt === ordered.at(-1) || running(attempt.status));
+    const open = isOpen(attempt);
     for (
       ;
       next < between.length &&
@@ -1674,6 +1699,8 @@ function StoryActivity({
         attempts={attempts}
         attempt={attempt}
         looks={looks}
+        follows={attempt === follower}
+        opens={attempt === follower && (!focus || focus === attempt.id)}
         open={open}
         onToggle={() => onToggle(attempt.id, !open)}
       />,

@@ -3,13 +3,13 @@
 // verdict, and a folded one reads nothing. The review tile opens the review's chapter; there is no Review tab.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
+import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
 
 let controller: Controller;
 beforeEach(() => {
@@ -263,7 +263,14 @@ test("a review's chapter ends with its verdict, findings and notes", async () =>
   expect(review.queryByText('What it handed back')).toBeNull();
 });
 
-test("a running attempt's chapter is open and shows its live activity", async () => {
+// The story with attempt 1 failed and attempt 3 running, whose trace so far is these steps.
+const say = (seq: number, text = `Step ${seq + 1}.`) => ({
+  seq,
+  at: `2026-10-28T12:${String(seq + 1).padStart(2, '0')}:00.000Z`,
+  kind: 'say',
+  text,
+});
+const runningStory = (steps: object[]) => {
   reviewed();
   controller.tasks[0] = {
     ...controller.tasks[0]!,
@@ -286,12 +293,16 @@ test("a running attempt's chapter is open and shows its live activity", async ()
     provider: 'claude',
     status: 'running',
     source: 'activity-file',
-    lines: 1,
-    counts: { say: 1 },
-    steps: [{ seq: 0, at: '2026-10-28T12:01:00.000Z', kind: 'say', text: 'Folding the chapters now.' }],
+    lines: steps.length,
+    counts: { say: steps.length },
+    steps,
     phases: [],
     handoff: null,
   };
+};
+
+test("a running attempt's chapter is open and shows its live activity", async () => {
+  runningStory([say(0, 'Folding the chapters now.')]);
   const user = userEvent.setup();
   open();
   await user.click(await screen.findByRole('tab', { name: 'Activity' }, { timeout: 5000 }));
@@ -305,6 +316,145 @@ test("a running attempt's chapter is open and shows its live activity", async ()
   expect(await chapter.findByText('Folding the chapters now.')).toBeTruthy();
   expect(chapter.getByLabelText('Working')).toBeTruthy();
   expect(chapter.queryByText('What it handed back')).toBeNull();
+});
+
+// The page's scroll geometry, a stand-in where nothing lays out or scrolls: each part of an open chapter is 40px
+// tall, the first 200px down the page, in a window 600px tall. Only the conversation's end, its typing dots, which
+// the follower watches, takes it. window.scrollTo moves the page at once; the reader's scrolls fire a scroll event.
+const part = 40,
+  bodyTop = 200,
+  windowHeight = 600;
+let y = 0;
+const restores: (() => void)[] = [];
+afterEach(() => {
+  for (const restore of restores.splice(0).reverse()) restore();
+});
+const place = (to: number) => {
+  y = to;
+  vi.stubGlobal('scrollY', to);
+};
+const dotsBottom = (dots: Element) => {
+  let index = 0;
+  for (let item = dots.previousElementSibling; item; item = item.previousElementSibling) index++;
+  return bodyTop + (index + 1) * part;
+};
+// Where the page shows the newest moments at the window's bottom.
+const newest = () => Math.max(0, dotsBottom(screen.getByLabelText('Working')) - windowHeight);
+function stubPage() {
+  place(0);
+  vi.stubGlobal('innerHeight', windowHeight);
+  const scrollTo = vi.fn((options: ScrollToOptions) => place(options.top ?? y));
+  vi.stubGlobal('scrollTo', scrollTo);
+  const rect = Element.prototype.getBoundingClientRect;
+  Element.prototype.getBoundingClientRect = function (this: Element) {
+    if (this.getAttribute('aria-label') !== 'Working') return rect.call(this);
+    const bottom = dotsBottom(this) - y;
+    return { x: 0, y: bottom - part, top: bottom - part, bottom, left: 0, right: 0, width: 0, height: part } as DOMRect;
+  };
+  restores.push(() => (Element.prototype.getBoundingClientRect = rect));
+  return scrollTo;
+}
+const readerScrolls = (to: number) => {
+  place(to);
+  fireEvent.scroll(window);
+};
+const newUpdates = () => screen.queryByRole('button', { name: /^New updates/ });
+// The running story with twelve moments, taller than the window, its Activity open and its trace following the log.
+const followRunning = async () => {
+  const scrollTo = stubPage();
+  runningStory(Array.from({ length: 12 }, (_, seq) => say(seq)));
+  const user = userEvent.setup();
+  open();
+  await user.click(await screen.findByRole('tab', { name: 'Activity' }, { timeout: 5000 }));
+  const chapter = within(await screen.findByRole('region', { name: 'Build, attempt 2 of 3' }, { timeout: 5000 }));
+  expect(await chapter.findByText('Step 12.', {}, { timeout: 5000 })).toBeTruthy();
+  await waitFor(() => expect(latest().url).toContain('log=attempt-3'));
+  let version = 10;
+  // New steps from the stream: the attempt's record changed, and the trace reads the steps after the last one shown.
+  const arrive = async (...seqs: number[]) => {
+    controller.traces['attempt-3'] = {
+      ...(controller.traces['attempt-3'] as object),
+      steps: seqs.map(seq => say(seq)),
+    };
+    version++;
+    latest().emit('change', {
+      version,
+      start: 'start-a',
+      changes: [{ seq: version, type: 'attempt', id: 'attempt-3', taskId: 'T-1', projectId: 'project-x' }],
+    });
+    expect(await chapter.findByText(`Step ${seqs.at(-1)! + 1}.`, {}, { timeout: 5000 })).toBeTruthy();
+  };
+  return { user, scrollTo, arrive };
+};
+
+test('opening Activity on a running chapter scrolls to its newest lines, and new steps keep the newest in view with no New updates', async () => {
+  const { scrollTo, arrive } = await followRunning();
+  expect(newest()).toBeGreaterThan(0);
+  expect(y).toBe(newest());
+  expect(scrollTo.mock.calls).toContainEqual([{ top: newest(), behavior: 'auto' }]);
+  await arrive(12, 13);
+  expect(y).toBe(newest());
+  expect(newUpdates()).toBeNull();
+});
+
+test('a reader scrolled up a running chapter keeps their place, and New updates counts the new moments and goes to the newest', async () => {
+  const { user, scrollTo, arrive } = await followRunning();
+  const reading = newest() - 200;
+  readerScrolls(reading);
+  const calls = scrollTo.mock.calls.length;
+  await arrive(12, 13);
+  expect(y).toBe(reading);
+  expect(scrollTo.mock.calls.length).toBe(calls);
+  await user.click(screen.getByRole('button', { name: 'New updates: 2' }));
+  expect(y).toBe(newest());
+  expect(newUpdates()).toBeNull();
+  // Following again: the next step keeps the newest in view.
+  await arrive(14);
+  expect(y).toBe(newest());
+  expect(newUpdates()).toBeNull();
+});
+
+test('scrolling a running chapter back to its newest clears New updates, and the next step follows', async () => {
+  const { arrive } = await followRunning();
+  readerScrolls(newest() - 200);
+  await arrive(12);
+  screen.getByRole('button', { name: 'New updates: 1' });
+  readerScrolls(newest());
+  expect(newUpdates()).toBeNull();
+  await arrive(13);
+  expect(y).toBe(newest());
+  expect(newUpdates()).toBeNull();
+});
+
+test("a finished attempt's chapter never scrolls the page on its own and shows no New updates", async () => {
+  const scrollTo = stubPage(),
+    scrolled = vi.fn();
+  Element.prototype.scrollIntoView = scrolled;
+  restores.push(() => delete (Element.prototype as Partial<Element>).scrollIntoView);
+  runningStory(Array.from({ length: 12 }, (_, seq) => say(seq)));
+  controller.tasks[0] = { ...controller.tasks[0]!, status: 'failed' };
+  controller.attempts[1] = { ...controller.attempts[1]!, status: 'failed', finishedAt: '2026-10-28T12:30:00.000Z' };
+  controller.traces['attempt-3'] = { ...(controller.traces['attempt-3'] as object), status: 'failed' };
+  const user = userEvent.setup();
+  open();
+  await user.click(await screen.findByRole('tab', { name: 'Activity' }, { timeout: 5000 }));
+  const chapter = within(await screen.findByRole('region', { name: 'Build, attempt 2 of 3' }, { timeout: 5000 }));
+  expect(await chapter.findByText('Step 12.', {}, { timeout: 5000 })).toBeTruthy();
+  // The page opening may set its own scroll; the chapter, once shown, moves nothing.
+  expect(y).toBe(0);
+  const before = [scrollTo.mock.calls.length, scrolled.mock.calls.length];
+  readerScrolls(120);
+  readerScrolls(60);
+  latest().emit('change', {
+    version: 20,
+    start: 'start-a',
+    changes: [{ seq: 20, type: 'attempt', id: 'attempt-3', taskId: 'T-1', projectId: 'project-x' }],
+  });
+  await new Promise(resolve => setTimeout(resolve, 700));
+  expect(y).toBe(60);
+  expect([scrollTo.mock.calls.length, scrolled.mock.calls.length]).toEqual(before);
+  expect((scrolled.mock.contexts as Element[]).some(element => element.closest('section.sd-attemptfold'))).toBe(false);
+  expect(newUpdates()).toBeNull();
 });
 
 for (const phone of [false, true])
@@ -332,6 +482,8 @@ for (const phone of [false, true])
       expect(lineOf(review).getAttribute('aria-expanded')).toBe('true');
       expect(within(review).getByText('Morgan passed it')).toBeTruthy();
       await waitFor(() => expect(scrolled.mock.contexts).toContain(review));
+      // A finished chapter comes into view at its start.
+      expect(scrolled.mock.calls[scrolled.mock.contexts.indexOf(review)]).toEqual([{ block: 'start' }]);
     } finally {
       delete (Element.prototype as Partial<Element>).scrollIntoView;
     }

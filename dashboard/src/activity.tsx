@@ -3,9 +3,10 @@
 // controller's phases, are short lines with their times; a running attempt ends in typing dots. Thinking, reads and
 // searches stay in the full trace, which this links to.
 import { Link } from '@tanstack/react-router';
-import type { ReactNode } from 'react';
+import { useLayoutEffect, type ReactNode } from 'react';
 import type { AttemptSummary } from './api';
 import { plural } from './evidence';
+import { NewUpdates, useFollow } from './follow';
 import { refusal, span, type AttemptTrace, type TraceStep } from './trace';
 
 const clock = (value?: string | null) =>
@@ -226,6 +227,8 @@ export function TraceActivity({
   before,
   onBefore,
   actions,
+  follows = false,
+  opens = false,
 }: {
   projectId: string;
   taskId: string;
@@ -240,8 +243,16 @@ export function TraceActivity({
   before?: string;
   onBefore?: () => void;
   actions?: ReactNode;
+  // Whether this running conversation keeps its newest moments in view in the page as they arrive, and whether it
+  // starts at them when it shows. One conversation at a time follows.
+  follows?: boolean;
+  opens?: boolean;
 }) {
   const shown = moments(trace, attempt, face, cli),
+    // A reader at the newest moments stays with them; one who scrolled up keeps their place, and New updates counts
+    // the moments that arrived below. The typing dots end the conversation, so the follower watches them.
+    [attach, follow] = useFollow({ mode: 'page', count: shown.length, live: live && follows }),
+    { jump } = follow,
     // What the conversation leaves to the full trace, so its gaps are not mistaken for nothing done.
     looked = trace.steps.filter(looking).length,
     left = [
@@ -252,6 +263,10 @@ export function TraceActivity({
         ? `${trace.counts.think} ${plural(trace.counts.think, 'stretch', 'stretches')} of thinking`
         : '',
     ].filter(Boolean);
+  // Brought into view, the running conversation starts at its newest moments, once they show.
+  useLayoutEffect(() => {
+    if (opens) jump();
+  }, [opens, jump]);
   return (
     <>
       {before && (
@@ -282,7 +297,7 @@ export function TraceActivity({
         </p>
       )}
       {live && (
-        <div className="sd-say" aria-label="Working">
+        <div ref={attach} className="sd-say" aria-label="Working">
           {face}
           <span className="sd-typing" aria-hidden="true">
             <i></i>
@@ -291,6 +306,7 @@ export function TraceActivity({
           </span>
         </div>
       )}
+      <NewUpdates follow={follow} />
       {trace.handoff?.summary && (
         <div className="sd-handoff">
           <span className="sd-eyebrow" style={{ color: 'var(--brand-text)' }}>

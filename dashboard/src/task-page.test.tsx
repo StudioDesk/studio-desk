@@ -150,12 +150,13 @@ test("a running step's Overview names who is working on it now, and Open Activit
     expect(await overview.findByText(/^Eli is working on it now\./)).toBeTruthy();
     expect(overview.queryByLabelText('Raw log')).toBeNull();
     await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x'));
-    // Open Activity: the running chapter, open and in view, with its live lines.
+    // Open Activity: the running chapter, open and in view at its newest lines, with its live lines.
     await user.click(overview.getByRole('button', { name: 'Open Activity' }));
     expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
     const chapter = await screen.findByRole('region', { name: /^Attempt 1 of / });
     expect(lineOf(chapter).getAttribute('aria-expanded')).toBe('true');
     await waitFor(() => expect(scrolled.mock.contexts).toContain(chapter));
+    expect(scrolled.mock.calls[scrolled.mock.contexts.indexOf(chapter)]).toEqual([{ block: 'end' }]);
     expect(await within(chapter).findByLabelText('Raw log')).toBeTruthy();
     expect(screen.getByLabelText('Raw log').textContent).toContain('stdout: line 3');
     await waitFor(() => expect(latest().url).toBe('/api/events?projectId=project-x&log=attempt-1&after=3'));
