@@ -4,9 +4,10 @@
 // project, archiving a finished idea and closing what is left of one, and bringing an idea whose stories landed back
 // to an older line (1.1). An agent's question in What happened leads to its Answer box on Today, and auto mode's answer
 // may be changed in place (1.2 step 2). The checks and the plan have no cards of their own, so What happened, and on a
-// phone the stops, link each one's own page. While the idea is in planning, its conversation with the planner is the
-// page's main part, under the journey; once the plan is official, it stays at the foot of the page under Talk to <the
-// planner>.
+// phone the stops, link each one's own page. While the idea is in planning, and once its plan is accepted while every
+// step it proposed waits for the director's approval (plan-talk.ts), its conversation with the planner is the page's
+// main part, under the journey; once the plan is official and a step has started or been decided, it stays at the foot
+// of the page under Talk to <the planner>.
 import { notifyManager, useMutation, useQueries } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -34,6 +35,7 @@ import {
 } from './journey';
 import { plural } from './evidence';
 import { workerName } from './names';
+import { talkingThrough } from './plan-talk';
 import { produced } from './produced';
 import { AnswerBox } from './question-card';
 import { integratesController, storySteps } from './story';
@@ -119,10 +121,11 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
     backable =
       sourceStories.some(landed) &&
       sourceStories.every(task => landed(task) || !!task.closed || ['cancelled', 'denied'].includes(task.status)),
-    // The plan step: in planning until it is done or closed, then official.
+    // The plan step: talked through until it is done or closed, or while its accepted plan's steps all wait, then
+    // official. Its conversation shows in one place.
     plan = planStepOf(planning),
-    talking = !!plan && plan.status !== 'done' && !plan.closed && plan.status !== 'denied',
-    official = plan?.status === 'done',
+    talking = talkingThrough(plan, [...runTasks.values()]),
+    official = plan?.status === 'done' && !talking,
     sent = `You sent this at ${clockOf(run.startedAt)}`,
     attached = inputs.length ? `${inputs.length} ${plural(inputs.length, 'file')} attached` : 'no files attached';
   const cards = (inside = false) =>
@@ -222,7 +225,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
           ))}
         </ol>
       </section>
-      {talking && <IdeaConversation projectId={projectId} run={run} state={state} plan={plan} looks={looks} />}
+      {talking && plan && <IdeaConversation projectId={projectId} run={run} state={state} plan={plan} looks={looks} />}
       {!narrow && stories.length > 0 && (
         <section aria-labelledby="idea-stories" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 'var(--space-10)' }}>

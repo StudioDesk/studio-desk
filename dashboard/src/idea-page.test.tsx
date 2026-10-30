@@ -2,7 +2,8 @@
 // or was closed, and one landed, the page offers each older line the controller answers with, confirmed first; before
 // then it never asks the controller. And an agent's question in What happened (1.2 step 2), with its options, its
 // answers, Answer while it waits and Change the answer for auto mode's. And the checks' and the plan's own pages,
-// linked under Checks and plan and, on a phone, under the stops.
+// linked under Checks and plan and, on a phone, under the stops. And where the conversation with the planner shows
+// once the plan is accepted: before the stories while they all wait for approval, at the page's foot once one moves.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -634,4 +635,52 @@ test('on a phone, the stops end with the planning steps’ own pages, a failed p
     'Open the checks → /p/project-x/tasks/T-checks · Done',
     'Open the plan → /p/project-x/tasks/T-plan · Stopped',
   ]);
+});
+
+// A story the accepted plan proposed, pinned to the plan step and its accepted attempt as src/core/proposals.mjs
+// records it.
+const proposedBy = (id: string, extra: Partial<Task> = {}): Partial<Task> => ({
+  proposalReference: { taskId: 'T-plan', attemptId: 'attempt-plan', path: 'source-breakdown.json', hash: 'h', key: id },
+  dependencies: ['T-plan'],
+  ...extra,
+});
+const acceptedIdea = (second: () => Task) => [
+  checksStep(),
+  planStep('planned', { dependencies: ['T-checks'] }),
+  planned('T-1', 'First', proposedBy('T-1')),
+  second(),
+];
+const talkTo = () => screen.findByRole('region', { name: 'Talk to Eli' }, { timeout: 5000 });
+const follows = (first: Element, second: Element) =>
+  !!(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+test("an accepted plan's talk shows before its stories while they all wait, at the page's foot once one moves", async () => {
+  open(acceptedIdea(() => planned('T-2', 'Second', proposedBy('T-2', { dependencies: ['T-1'] }))));
+  const waiting = await talkTo();
+  expect(screen.getAllByRole('region', { name: 'Talk to Eli' })).toEqual([waiting]);
+  // Under the journey, before the stories lane and What happened.
+  const lane = document.querySelector('.sd-lane')!;
+  expect([...lane.querySelectorAll('.sd-storycard__title')].map(title => title.textContent)).toEqual([
+    'First',
+    'Second',
+  ]);
+  expect(follows(screen.getByRole('region', { name: 'Journey' }), waiting)).toBe(true);
+  expect(follows(waiting, lane)).toBe(true);
+  expect(follows(waiting, screen.getByRole('region', { name: 'What happened' }))).toBe(true);
+  expect(waiting.parentElement?.lastElementChild).not.toBe(waiting);
+  // Once the second story is approved, or has started, the conversation shows only at the page's foot.
+  for (const second of [
+    () => planned('T-2', 'Second', proposedBy('T-2', { status: 'ready', approval: { status: 'approved' } })),
+    () => working('T-2', 'Second', proposedBy('T-2', { approval: { status: 'approved' }, dependencies: ['T-1'] })),
+  ]) {
+    cleanup();
+    controller.requests = [];
+    controller.attempts = [];
+    open(acceptedIdea(second));
+    const region = await talkTo();
+    expect(screen.getAllByRole('region', { name: 'Talk to Eli' })).toEqual([region]);
+    expect(region.parentElement?.lastElementChild).toBe(region);
+    expect(follows(document.querySelector('.sd-lane')!, region)).toBe(true);
+    expect(follows(screen.getByRole('region', { name: 'What happened' }), region)).toBe(true);
+  }
 });
