@@ -4,12 +4,14 @@
 // one recorded step; the change it records refreshes the page. A note or a reason is asked for in a dialog.
 import { useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useId, useRef, useState } from 'react';
 import { send, type Task } from './api';
 import { BringBack } from './bring-back';
 import { decisionState, fileRequest } from './decisions';
+import { Icon } from './design/icons';
 import { NoteDialog, overReview } from './note-dialog';
 import { waitingQuestion } from './questions';
+import { reviewWait, storyFacts } from './stands';
 import { attemptsUsed, storyPeople } from './story';
 import { useToast } from './toast';
 import { integrationAction, statusLabels, type StudioState } from './studio-runs';
@@ -46,6 +48,8 @@ interface Action {
   onClick?: () => void;
   // A link to another task instead of a step.
   taskId?: string;
+  // A closing action's line of what it does, under it in the More actions menu.
+  does?: string;
 }
 const order: Record<Emphasis, number> = { primary: 0, default: 1, quiet: 2 };
 const buttonClass = (emphasis: Emphasis, small = false) =>
@@ -62,7 +66,8 @@ interface Asking {
   send: (note: string) => void;
 }
 
-// The decisions "Where it stands" offers, primary first as the design orders them.
+// The decisions "Where it stands" offers, on their own row, primary first as the design orders them; the closing
+// actions behind More actions, each saying what it does; and Try it in its own strip under them.
 export function TaskDecisions({
   projectId,
   task,
@@ -86,7 +91,9 @@ export function TaskDecisions({
   const request = useRequest(projectId),
     [asking, setAsking] = useState<Asking | null>(null),
     // Trying the story yourself, once its tests passed (try-actions.tsx).
-    tryIt = useTry(projectId, task, studio);
+    tryIt = useTry(projectId, task, studio),
+    // The More actions menu's, and the Try it strip's, element ids.
+    domId = useId();
   const id = encodeURIComponent(task.id),
     act = (step: string, body?: Record<string, unknown>, done?: Request['done']) =>
       request.mutate({ path: `/api/tasks/${id}/${step}`, body, done }),
@@ -146,7 +153,11 @@ export function TaskDecisions({
   if (approval?.status === 'approved' && !task.lastAttemptId)
     actions.push(deny('Withdraw approval and deny', 'Withdraw the approval and deny this work?'));
   if (!approval && !task.lastAttemptId && ['ready', 'blocked'].includes(task.status))
-    actions.push({ ...deny('Close this step', 'Close this step?', 'Note (optional)'), emphasis: 'quiet' });
+    actions.push({
+      ...deny('Close this step', 'Close this step?', 'Note (optional)'),
+      emphasis: 'quiet',
+      does: 'It will not run; a note you add is kept with the decision.',
+    });
   // A blocked editor's file request, approved as asked in one step as Today approves it (MP-021).
   if (filesAsked.request && filesAsked.requested) {
     const { requested, offered, worked } = filesAsked;
@@ -438,6 +449,12 @@ export function TaskDecisions({
             ? 'Close without accepting'
             : 'Close',
       emphasis: 'quiet',
+      does:
+        task.status === 'done'
+          ? 'Keeps its attempts and frees the source for the next story; it cannot run again.'
+          : task.status === 'review'
+            ? 'Keeps its attempts without accepting a result; it cannot run again.'
+            : 'Keeps its attempts; it cannot run again.',
       onClick: () => {
         const done = task.status === 'done';
         if (
@@ -452,11 +469,12 @@ export function TaskDecisions({
           );
       },
     });
-  const sorted = [...actions].sort((a, b) => order[a.emphasis] - order[b.emphasis]);
-  // Try it sits beside Send back, or without one before the quiet decisions, the others keeping their order.
-  const sentBack = sorted.findIndex(action => action.key === 'send-back' || action.key === 'send-back-passed'),
-    quiet = sorted.findIndex(action => action.emphasis === 'quiet'),
-    tryAt = sentBack >= 0 ? sentBack + 1 : quiet >= 0 ? quiet : sorted.length;
+  // The decisions keep their row, primary first; the closing actions go behind More actions. While a candidate that
+  // passed its tests is reviewed, the row says when Integrate and Send back come.
+  const sorted = actions.filter(action => !action.does).sort((a, b) => order[a.emphasis] - order[b.emphasis]),
+    closing = actions.filter(action => action.does),
+    waiting = reviewWait(storyFacts(task, studio)),
+    menu = `${domId}-more`;
   const decision = (action: Action) =>
     action.taskId ? (
       <Link
@@ -495,11 +513,46 @@ export function TaskDecisions({
       : [];
   return (
     <>
-      {(sorted.length > 0 || tryIt) && (
-        <div className="sd-stands__actions">
-          {sorted.slice(0, tryAt).map(decision)}
-          {tryIt && <TryButtons state={tryIt} />}
-          {sorted.slice(tryAt).map(decision)}
+      {(sorted.length > 0 || closing.length > 0 || waiting) && (
+        <div className="sd-stands__actions" role="group" aria-label="Decisions">
+          {waiting && <span className="sd-stands__wait">{waiting}</span>}
+          {sorted.map(decision)}
+          {closing.length > 0 && (
+            <button
+              type="button"
+              className="sd-btn sd-btn--ghost sd-stands__more"
+              aria-label="More actions"
+              popoverTarget={menu}
+            >
+              <Icon name="more" size={20} />
+            </button>
+          )}
+        </div>
+      )}
+      {closing.length > 0 && (
+        <div id={menu} popover="auto" className="sd-menu" role="menu" aria-label="More actions">
+          <div className="sd-menu__list">
+            {closing.map((action, index) => (
+              <button
+                key={action.key}
+                type="button"
+                role="menuitem"
+                className="sd-btn sd-btn--ghost sd-menu__item"
+                aria-labelledby={`${menu}-${index}`}
+                aria-describedby={`${menu}-${index}-does`}
+                disabled={busy}
+                onClick={() => {
+                  document.getElementById(menu)?.hidePopover?.();
+                  action.onClick?.();
+                }}
+              >
+                <span id={`${menu}-${index}`}>{action.label}</span>
+                <span id={`${menu}-${index}-does`} className="sd-meta">
+                  {action.does}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
       {mergeable && landed && (
@@ -515,7 +568,19 @@ export function TaskDecisions({
           .
         </p>
       )}
-      {tryIt && <TryNotes state={tryIt} />}
+      {tryIt && (
+        <section className="sd-stands__try" aria-labelledby={`${domId}-try`}>
+          <div className="sd-stands__try-head">
+            <span id={`${domId}-try`} className="sd-eyebrow">
+              Try it yourself
+            </span>
+          </div>
+          <div className="sd-stands__try-actions">
+            <TryButtons state={tryIt} />
+          </div>
+          <TryNotes state={tryIt} />
+        </section>
+      )}
       {backable && (
         <BringBack
           projectId={projectId}

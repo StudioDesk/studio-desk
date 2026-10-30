@@ -38,6 +38,7 @@ import { changeableAnswer, exchange, waitingQuestion, type Answer, type Exchange
 import { queryKeys, useStudio } from './records';
 import { StoryReleaseChip } from './release-chip';
 import { SourceDiff } from './source-story';
+import { factsLine, storyFacts } from './stands';
 import {
   attemptsUsed,
   cliName,
@@ -625,8 +626,9 @@ function Steps({ steps }: { steps: Step[] }) {
   );
 }
 
-// Where it stands: the director's call or the work moving, in the agents' words, with the decisions it offers. A
-// shortened notice links to its full account under Checks, or other work's Overview.
+// Where it stands: the director's call or the work moving in one sentence, in the agents' words, with a line of the
+// facts under it (its tests, its review and the attempts it used), then the decisions it offers. A shortened notice
+// links to its full account under Checks, or other work's Overview.
 function Stands({
   projectId,
   task,
@@ -662,7 +664,7 @@ function Stands({
     started = Date.parse(String(attempt?.startedAt ?? '')),
     limit = (task.maxSeconds ?? 0) * 1000,
     elapsed = live && Number.isFinite(started) ? Math.max(0, now - started) : null,
-    { left } = attemptsUsed(task, attempts),
+    facts = factsLine(storyFacts(task, studio, phase)),
     icon = (size: number) =>
       stand.tone === 'you' ? (
         <Clapper size={size} />
@@ -681,6 +683,7 @@ function Stands({
           {narrow && icon(36) && <span className="sd-stands__icon">{icon(36)}</span>}
           <div className="sd-stands__title">{stand.title}</div>
         </div>
+        <div className="sd-stands__facts">{facts}</div>
         {(stand.detail || stand.shortened) && (
           <div className="sd-stands__detail">
             {stand.detail}
@@ -702,16 +705,8 @@ function Stands({
                 style={{ width: `${Math.min(100, (elapsed / limit) * 100)}%` }}
               ></span>
             </span>
-            <span
-              className="sd-meta"
-              style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--space-8)' }}
-            >
-              <span>
-                {spoken(elapsed)} of {spoken(limit)}
-              </span>
-              <span>
-                {left} {plural(left, 'attempt')} left
-              </span>
+            <span className="sd-meta">
+              {spoken(elapsed)} of {spoken(limit)}
             </span>
           </div>
         )}

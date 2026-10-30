@@ -1,7 +1,7 @@
-// Trying a story yourself from its "Where it stands" banner (try-actions.tsx): Try it beside Send back once the
-// story's tests passed, what the try copy then holds, Run and Open folder, Open and Stop while its app runs, and the
-// two asks, the director's own edits in the copy and a Run outside the sandbox, as they reach the stand-in controller.
-// Model-free; nothing here runs an app.
+// Trying a story yourself from its "Where it stands" banner (try-actions.tsx): Try it in its own strip under the
+// decision row once the story's tests passed, what the try copy then holds, Run and Open folder, Open and Stop while
+// its app runs, and the two asks, the director's own edits in the copy and a Run outside the sandbox, as they reach the
+// stand-in controller. Model-free; nothing here runs an app.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -33,8 +33,13 @@ const open = (task: Task) => {
 };
 const banner = async () => within(await screen.findByRole('region', { name: 'Where it stands' }));
 const posted = () => controller.requests.filter(request => request.method !== 'GET');
+// Each button by its name: its label, or else its words.
 const names = (region: ReturnType<typeof within>) =>
-  region.getAllByRole('button').map((button: HTMLElement) => button.textContent);
+  region.getAllByRole('button').map((button: HTMLElement) => button.getAttribute('aria-label') ?? button.textContent);
+// The banner's decision row, and Try it's strip under it.
+const row = (region: ReturnType<typeof within>) => within(region.getByRole('group', { name: 'Decisions' }));
+const strip = (region: ReturnType<typeof within>) => within(region.getByRole('region', { name: 'Try it yourself' }));
+const decided = ['Integrate', 'Send back to Eli', 'More actions'];
 const tryReads = () => controller.reads().filter(url => url === '/api/projects/project-x/try');
 const toast = () => document.querySelector('.sd-toast')?.textContent;
 // Try it, once the try view is read and it can be sent.
@@ -148,10 +153,11 @@ const view = (held: TryCopy | null): TryView => ({
 const refusal = (message: string, fields: Record<string, unknown> = {}) =>
   Object.assign(new Error(message), { status: 409, fields });
 
-test('a story whose candidate passed offers Try it beside Send back; one still implementing or whose tests failed offers none', async () => {
+test('a story whose candidate passed offers Try it in its own strip; one still implementing or whose tests failed offers none', async () => {
   open(story());
   let region = await banner();
-  expect(names(region)).toEqual(['Integrate', 'Send back to Eli', 'Try it', 'Close without integrating']);
+  expect(names(row(region))).toEqual(decided);
+  expect(names(strip(region))).toEqual(['Try it']);
   // Try it waits for the try view, which holds nothing yet, and says nothing more.
   await tryIt(region);
   expect(tryReads()).toEqual(['/api/projects/project-x/try']);
@@ -175,6 +181,7 @@ test('a story whose candidate passed offers Try it beside Send back; one still i
   expect(await region.findByRole('button', { name: 'Request cancellation' })).toBeTruthy();
   await new Promise(resolve => setTimeout(resolve, 50));
   expect(region.queryByRole('button', { name: 'Try it' })).toBeNull();
+  expect(region.queryByRole('region', { name: 'Try it yourself' })).toBeNull();
   cleanup();
   // A candidate that failed its tests.
   open(
@@ -189,6 +196,7 @@ test('a story whose candidate passed offers Try it beside Send back; one still i
   await new Promise(resolve => setTimeout(resolve, 50));
   expect(region.queryByRole('button', { name: 'Try it' })).toBeNull();
   expect(region.queryByRole('button', { name: 'Run' })).toBeNull();
+  expect(region.queryByRole('region', { name: 'Try it yourself' })).toBeNull();
   // Neither story reads the try view.
   expect(tryReads()).toEqual([]);
 });
@@ -208,8 +216,9 @@ test('Try it moves the copy to the story, and the banner says its change is merg
     "The try copy holds this story's change merged onto main at a1b2c3d, as integrating it would merge it.",
   );
   expect(posted()).toEqual([{ url: '/api/tasks/T-1/try', method: 'POST', body: { projectId: 'project-x' } }]);
-  // Run and Open folder take Try it's place beside Send back; nothing has started.
-  expect(names(region)).toEqual(['Integrate', 'Send back to Eli', 'Run', 'Open folder', 'Close without integrating']);
+  // Run and Open folder take Try it's place in its strip; nothing has started.
+  expect(names(row(region))).toEqual(decided);
+  expect(names(strip(region))).toEqual(['Run', 'Open folder']);
   expect(region.queryByText(/The app/)).toBeNull();
 });
 
@@ -241,7 +250,8 @@ test('a copy holding an earlier candidate of the story, from before it was sent 
   open(story());
   const running = await banner();
   expect(await running.findByText('The try copy holds an earlier candidate of this story.')).toBeTruthy();
-  expect(names(running)).toEqual(['Integrate', 'Send back to Eli', 'Stop', 'Close without integrating']);
+  expect(names(row(running))).toEqual(decided);
+  expect(names(strip(running))).toEqual(['Stop']);
 });
 
 test('with the copy on the story it offers Run and Open folder; while the app starts, Stop and no Open yet', async () => {
@@ -265,11 +275,12 @@ test('with the copy on the story it offers Run and Open folder; while the app st
     { url: '/api/projects/project-x/try/run', method: 'POST', body: { projectId: 'project-x' } },
   ]);
   // Until the app prints its address there is nothing to open.
-  expect(names(region)).toEqual(['Integrate', 'Send back to Eli', 'Stop', 'Close without integrating']);
+  expect(names(row(region))).toEqual(decided);
+  expect(names(strip(region))).toEqual(['Stop']);
   expect(region.queryByRole('link', { name: 'Open' })).toBeNull();
 });
 
-test('a running app offers Open at the address it printed and Stop, and says where it runs', async () => {
+test('a running app offers Open at the address it printed and Stop in the Try it strip, not the decisions, and says where it runs', async () => {
   const user = userEvent.setup();
   controller.tryView = view(copy({ run: run({ place: 'computer', address: 'http://localhost:5173/' }) }));
   controller.command = url => {
@@ -285,20 +296,25 @@ test('a running app offers Open at the address it printed and Stop, and says whe
   };
   open(story());
   const region = await banner(),
-    link = await region.findByRole('link', { name: 'Open' });
+    link = await strip(region).findByRole('link', { name: 'Open' });
   expect(link.getAttribute('href')).toBe('http://localhost:5173/');
   expect(link.getAttribute('target')).toBe('_blank');
   expect(region.getByText('The app runs on this computer at http://localhost:5173/.')).toBeTruthy();
   expect(region.queryByText(/starting/)).toBeNull();
-  expect(names(region)).toEqual(['Integrate', 'Send back to Eli', 'Stop', 'Close without integrating']);
-  await user.click(region.getByRole('button', { name: 'Stop' }));
+  // Open and Stop are in the strip, not among the decisions.
+  expect(names(row(region))).toEqual(decided);
+  expect(names(strip(region))).toEqual(['Stop']);
+  expect(row(region).queryByRole('link', { name: 'Open' })).toBeNull();
+  expect(strip(region).getByText('The app runs on this computer at http://localhost:5173/.')).toBeTruthy();
+  await user.click(strip(region).getByRole('button', { name: 'Stop' }));
   // The ended Run still says where it ran, and Run is offered again.
   expect(await region.findByText('The last Run, on this computer, was stopped: You stopped it.')).toBeTruthy();
   expect(posted()).toEqual([
     { url: '/api/projects/project-x/try/stop', method: 'POST', body: { projectId: 'project-x' } },
   ]);
   expect(region.queryByRole('link', { name: 'Open' })).toBeNull();
-  expect(names(region)).toEqual(['Integrate', 'Send back to Eli', 'Run', 'Open folder', 'Close without integrating']);
+  expect(names(row(region))).toEqual(decided);
+  expect(names(strip(region))).toEqual(['Run', 'Open folder']);
 });
 
 test('a copy holding your own edits names them; Keep them sends nothing, and Discard tries the story with discard', async () => {

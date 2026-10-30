@@ -1,6 +1,6 @@
 // What the director can decide on a story's page: the buttons the current dashboard offers in the same states,
-// under "Where it stands", each asking the controller for one recorded step; a note or a reason is asked for in a
-// dialog.
+// under "Where it stands" on their own row with the closing actions behind More actions, each asking the controller
+// for one recorded step; a note or a reason is asked for in a dialog, and closing is confirmed first.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -36,8 +36,23 @@ const details = () => within(screen.getByRole('region', { name: 'Details' }));
 // The brief beside the tabs, whose last part is the direction for the next attempt.
 const brief = () => within(screen.getByRole('region', { name: 'The brief' }));
 const posted = () => controller.requests.filter(request => request.method !== 'GET');
+// Each button by its name: its label, or else its words.
 const names = (region: ReturnType<typeof within>) =>
-  region.getAllByRole('button').map((button: HTMLElement) => button.textContent);
+  region.getAllByRole('button').map((button: HTMLElement) => button.getAttribute('aria-label') ?? button.textContent);
+// The banner's decision row, and Try it's strip under it.
+const row = (region: ReturnType<typeof within>) => within(region.getByRole('group', { name: 'Decisions' }));
+const strip = (region: ReturnType<typeof within>) => within(region.getByRole('region', { name: 'Try it yourself' }));
+// The closing actions behind More actions, each with its line of what it does. A closed popover is hidden.
+const closing = () =>
+  screen
+    .queryAllByRole('menuitem', { hidden: true })
+    .map(
+      item =>
+        `${document.getElementById(item.getAttribute('aria-labelledby') ?? '')?.textContent}: ${
+          document.getElementById(item.getAttribute('aria-describedby') ?? '')?.textContent
+        }`,
+    );
+const isPrimary = (button: HTMLElement) => button.className.includes('sd-btn--primary');
 
 test('ready work starts, and the controller says when it queued it instead', async () => {
   const user = userEvent.setup();
@@ -45,9 +60,10 @@ test('ready work starts, and the controller says when it queued it instead', asy
     url.endsWith('/start') ? { queued: true, reason: 'Waiting for T-0 to be accepted.' } : {};
   open(taskFixture('T-1'));
   const region = await decisions();
-  // An unstarted step outside any approval can also be closed, as in the current dashboard; previewing its
-  // instructions is a detail of the next attempt, behind Change.
-  expect(names(region)).toEqual(['Start assignment', 'Close this step']);
+  // An unstarted step outside any approval can also be closed, as in the current dashboard, behind More actions;
+  // previewing its instructions is a detail of the next attempt, behind Change.
+  expect(names(region)).toEqual(['Start assignment', 'More actions']);
+  expect(closing()).toEqual(['Close this step: It will not run; a note you add is kept with the decision.']);
   await user.click(details().getByRole('button', { name: 'Change' }));
   expect(details().getByRole('button', { name: 'Preview next instructions' })).toBeTruthy();
   await user.click(region.getByRole('button', { name: 'Start assignment' }));
@@ -112,9 +128,10 @@ test("a result in review is accepted, or sent for revision with a note that star
   const user = userEvent.setup();
   inReview();
   const region = await decisions();
-  expect(names(region)).toEqual(
-    expect.arrayContaining(['Accept result', 'Request revision', 'Close without accepting']),
-  );
+  expect(names(row(region))).toEqual(['Accept result', 'Request revision', 'More actions']);
+  expect(closing()).toEqual([
+    'Close without accepting: Keeps its attempts without accepting a result; it cannot run again.',
+  ]);
   const box = brief().getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
   await user.clear(box);
   await user.type(box, 'Say which test fails.');
@@ -268,7 +285,9 @@ test('running work can only be cancelled, and the next instructions can be previ
   controller.command = url => (url === '/api/preview' ? { text: 'Composed instructions for the next attempt.' } : {});
   open(taskFixture('T-1', { status: 'running', lastAttemptId: 'attempt-1' }));
   const region = await decisions();
+  // Nothing can be closed while it runs, so there is no More actions.
   expect(names(region)).toEqual(['Request cancellation']);
+  expect(screen.queryByRole('menu', { hidden: true })).toBeNull();
   await user.click(details().getByRole('button', { name: 'Change' }));
   await user.click(details().getByRole('button', { name: 'Preview next instructions' }));
   expect(await screen.findByText('Composed instructions for the next attempt.')).toBeTruthy();
@@ -342,9 +361,9 @@ test('a story whose review passed may still be sent back; with nothing noted, th
   const user = userEvent.setup();
   open(passedStory());
   const region = await decisions();
-  // As the canvas's Story board draws it: Integrate, then Send back with Try it beside it, its tests having passed,
-  // then Close without integrating.
-  expect(names(region)).toEqual(['Integrate', 'Send back to Eli', 'Try it', 'Close without integrating']);
+  // Integrate, then Send back beside it on their own row; Try it in its own strip, its tests having passed.
+  expect(names(row(region))).toEqual(['Integrate', 'Send back to Eli', 'More actions']);
+  expect(names(strip(region))).toEqual(['Try it']);
   await user.click(region.getByRole('button', { name: 'Send back to Eli' }));
   const back = within(await screen.findByRole('dialog', { name: 'Send it back to Eli?' }));
   // A pass has no blocking findings, and this one noted nothing, so the note is required.
@@ -376,6 +395,90 @@ test("a passing review's notes go back with the story, so the director's note is
   );
 });
 
+test('a story whose review passed offers Integrate first, and closing it is behind More actions, confirmed first', async () => {
+  const user = userEvent.setup(),
+    confirmed = vi.fn(() => true);
+  vi.stubGlobal('confirm', confirmed);
+  open(passedStory());
+  const region = await decisions(),
+    decided = row(region);
+  expect(names(decided)).toEqual(['Integrate', 'Send back to Eli', 'More actions']);
+  expect(isPrimary(decided.getByRole('button', { name: 'Integrate' }))).toBe(true);
+  expect(isPrimary(decided.getByRole('button', { name: 'Send back to Eli' }))).toBe(false);
+  expect(region.queryByRole('button', { name: 'Close without integrating' })).toBeNull();
+  // Under the headline, the facts it rests on.
+  expect(region.getByText('Tests passed · Review passed · 1 of 3 attempts used')).toBeTruthy();
+  await user.click(decided.getByRole('button', { name: 'More actions' }));
+  const item = screen.getByRole('menuitem', { name: 'Close without integrating', hidden: true });
+  expect(closing()).toEqual([
+    'Close without integrating: Keeps its attempts and frees the source for the next story; it cannot run again.',
+  ]);
+  await user.click(item);
+  // The same confirmation and close request as before it moved.
+  expect(confirmed).toHaveBeenCalledWith(
+    'Close T-1 without integrating it? Its recorded attempts are kept, and the source is free for the next story. It cannot run again.',
+  );
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-1/close',
+        method: 'POST',
+        body: { projectId: 'project-x', reason: 'Closed without integrating.' },
+      },
+    ]),
+  );
+});
+
+test('closing sends nothing when the confirmation is declined', async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal('confirm', () => false);
+  open(passedStory());
+  await decisions();
+  await user.click(screen.getByRole('menuitem', { name: 'Close without integrating', hidden: true }));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(posted()).toEqual([]);
+});
+
+// The review of a candidate that passed its tests is running.
+const reviewingStory = () => {
+  const story = passedStory();
+  controller.attempts = [
+    controller.attempts[0]!,
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'running',
+      workerId: 'W-2',
+      startedAt: new Date().toISOString(),
+      assignment: { kind: 'studio-development:change-review' },
+    },
+  ];
+  return {
+    ...story,
+    status: 'running',
+    acceptedAttemptId: 'attempt-edit',
+    sourceStage: {
+      ...story.sourceStage,
+      current: 'candidate-review',
+      review: { taskId: 'T-1', attemptId: 'attempt-review', workerId: 'W-2' },
+    },
+  };
+};
+
+test('while the review runs, the row says Integrate and Send back come when it is done, and Try it is offered already', async () => {
+  open(reviewingStory());
+  const region = await decisions(),
+    decided = row(region);
+  expect(decided.queryByRole('button', { name: /^Integrate/ })).toBeNull();
+  expect(decided.queryByRole('button', { name: /^Send back/ })).toBeNull();
+  expect(decided.getByText('Integrate and Send back come when the review is done.')).toBeTruthy();
+  // The review may still be cancelled; nothing can be closed while it runs.
+  expect(names(decided)).toEqual(['Request cancellation']);
+  expect(screen.queryByRole('menu', { hidden: true })).toBeNull();
+  expect(await strip(region).findByRole('button', { name: 'Try it' })).toBeTruthy();
+  expect(region.getByText('Tests passed · Review running · 1 of 3 attempts used')).toBeTruthy();
+});
+
 test('a story whose review asked for changes is sent back, or integrated over the review with a reason', async () => {
   const user = userEvent.setup();
   controller.attempts = [
@@ -395,8 +498,16 @@ test('a story whose review asked for changes is sent back, or integrated over th
       },
     }),
   );
-  const region = await decisions();
-  expect(names(region)).toEqual(['Send back to Eli', 'Integrate over the review', 'Close without integrating']);
+  const region = await decisions(),
+    decided = row(region);
+  // Send back stays the main action, with Integrate over the review beside it; closing is only behind More actions.
+  expect(names(decided)).toEqual(['Send back to Eli', 'Integrate over the review', 'More actions']);
+  expect(isPrimary(decided.getByRole('button', { name: 'Send back to Eli' }))).toBe(true);
+  expect(isPrimary(decided.getByRole('button', { name: 'Integrate over the review' }))).toBe(false);
+  expect(region.queryByRole('button', { name: /^Close/ })).toBeNull();
+  expect(closing()).toEqual([
+    'Close without integrating: Keeps its attempts and frees the source for the next story; it cannot run again.',
+  ]);
   await user.click(region.getByRole('button', { name: 'Send back to Eli' }));
   const back = within(await screen.findByRole('dialog', { name: 'Send it back to Eli?' }));
   await user.type(back.getByLabelText('Your note (optional)'), 'Fix the test name.');
@@ -448,13 +559,13 @@ test('a story stopped by a conflict offers to merge its change onto the current 
   open(stoppedStory({ conflicts: ['src/core/store.mjs'] }));
   const region = await decisions();
   // Integrating again as it is stops on the same conflict, so it is the second choice.
-  expect(names(region)).toEqual([
+  expect(names(row(region))).toEqual([
     'Merge onto the current source',
     'Integrate again',
     'Send back to Eli',
-    'Try it',
-    'Close without integrating',
+    'More actions',
   ]);
+  expect(names(strip(region))).toEqual(['Try it']);
   await user.click(region.getByRole('button', { name: 'Merge onto the current source' }));
   await merged();
 });
@@ -465,13 +576,13 @@ test('a story that fails only with what landed since says so, links what landed 
   controller.tasks = [taskFixture('T-2', { title: 'Name the stage in plain words' })];
   open(stoppedStory({ landedSince: { commits: 2, stories: ['T-2'] } }));
   const region = await decisions();
-  expect(names(region)).toEqual([
+  expect(names(row(region))).toEqual([
     'Merge onto the current source',
     'Integrate again',
     'Send back to Eli',
-    'Try it',
-    'Close without integrating',
+    'More actions',
   ]);
+  expect(names(strip(region))).toEqual(['Try it']);
   expect(region.getByRole('button', { name: 'Merge onto the current source' }).className).toMatch(/sd-btn--primary/);
   expect(region.getByRole('button', { name: 'Integrate again' }).className).not.toMatch(/sd-btn--primary/);
   expect(
@@ -502,7 +613,8 @@ test('an integration that failed with nothing landed and no conflict offers Inte
   open(stoppedStory({ conflicts: [] }));
   const region = await decisions();
   // Nothing landed and nothing conflicted: Integrate again stays the main action, and nothing offers a merge.
-  expect(names(region)).toEqual(['Integrate again', 'Send back to Eli', 'Try it', 'Close without integrating']);
+  expect(names(row(region))).toEqual(['Integrate again', 'Send back to Eli', 'More actions']);
+  expect(names(strip(region))).toEqual(['Try it']);
   expect(region.getByRole('button', { name: 'Integrate again' }).className).toMatch(/sd-btn--primary/);
   expect(region.queryByText(/landed after it was tested/)).toBeNull();
 });
@@ -664,7 +776,9 @@ test('a project with one line offers no Bring back, and a story that has not lan
   controller.requests = [];
   controller.bringBack['T-1'] = targets;
   open(passedStory());
-  expect(names(await decisions())).toEqual(['Integrate', 'Send back to Eli', 'Try it', 'Close without integrating']);
+  const passed = await decisions();
+  expect(names(row(passed))).toEqual(['Integrate', 'Send back to Eli', 'More actions']);
+  expect(names(strip(passed))).toEqual(['Try it']);
   cleanup();
   open(
     landedStory({ carryOf: { storyId: 'T-0', line: 'release/1.1', reviewAttemptId: 'attempt-0', carryId: 'carry-0' } }),

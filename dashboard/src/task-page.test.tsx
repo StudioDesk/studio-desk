@@ -1004,6 +1004,102 @@ for (const [source, tab, shows] of [
     expect(document.getElementById('stands-in-full')).toBeNull();
   });
 
+// Under the banner's headline, the facts it rests on from the story's records: its tests, its review and the attempts
+// it used.
+const facts = (notice: HTMLElement) => {
+  const line = notice.querySelector('.sd-stands__facts');
+  // The line follows the headline.
+  expect(notice.querySelector('.sd-stands__head')?.nextElementSibling).toBe(line);
+  return line?.textContent;
+};
+
+test("a stopped story's facts say its tests failed and its review is not yet, with the attempts it used", async () => {
+  stopped(true);
+  open();
+  const notice = await screen.findByRole('region', { name: 'Where it stands' }, { timeout: 5000 });
+  expect(await within(notice).findByText("The attempt's tests did not pass: 751 of 752.")).toBeTruthy();
+  expect(facts(notice)).toBe('Tests failed · Review not yet · 1 of 3 attempts used');
+});
+
+test('a story whose review passed says so in one sentence, its facts its tests and review passed', async () => {
+  const pin = {
+    taskId: 'T-1',
+    attemptId: 'attempt-edit',
+    workerId: 'W-1',
+    path: 'source-change.json',
+    hash: 'change-hash',
+    candidateHash: 'candidate-hash',
+  };
+  controller.tasks = [
+    taskFixture('T-1', {
+      title: 'Show finished results',
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'candidate-review',
+        current: 'waiting-for-integration',
+        candidate: pin,
+        review: {
+          taskId: 'T-1',
+          attemptId: 'attempt-review',
+          workerId: 'W-2',
+          path: 'source-change-review.json',
+          hash: 'review-hash',
+          verdict: 'pass',
+        },
+      },
+    }),
+  ];
+  controller.attempts = [
+    {
+      id: 'attempt-edit',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change' },
+      result: { outcome: 'completed' },
+      testEvidence: { totals: { tests: 534, pass: 534, fail: 0 } },
+      sourceCandidate: { sourceHash: 'candidate-hash' },
+      artifacts: [{ path: 'source-change.json', hash: 'change-hash', kind: 'source-change' }],
+    },
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-2',
+      assignment: { kind: 'studio-development:change-review' },
+      result: { outcome: 'completed' },
+      candidateReviewVerdict: 'pass',
+      candidateReviewNotes: [],
+      candidateReview: { ...pin, passed: true },
+      inputReferences: [
+        { taskId: 'T-1', attemptId: 'attempt-edit', artifacts: [{ kind: 'source-change', hash: 'change-hash' }] },
+      ],
+      artifacts: [{ path: 'source-change-review.json', hash: 'review-hash', kind: 'source-change-review' }],
+    },
+  ];
+  open();
+  const notice = await screen.findByRole('region', { name: 'Where it stands' }, { timeout: 5000 });
+  // Its reviewer, independent of its editor, passed it.
+  expect(await within(notice).findByText(/ passed it\. It's ready to integrate\.$/)).toBeTruthy();
+  expect(facts(notice)).toBe('Tests passed · Review passed · 1 of 3 attempts used');
+});
+
+test('while the work runs, the banner keeps its elapsed bar, and its facts say the attempts used instead of left', async () => {
+  edit({ status: 'running' });
+  controller.attempts = [{ ...controller.attempts[0]!, startedAt: new Date(Date.now() - 90000).toISOString() }];
+  open();
+  const notice = await screen.findByRole('region', { name: 'Where it stands' }, { timeout: 5000 });
+  expect(await within(notice).findByText(/^1 min \d+ s of 10 min$/)).toBeTruthy();
+  expect(notice.querySelector('.sd-bar')).toBeTruthy();
+  // Other work's facts are the attempts it used.
+  expect(facts(notice)).toBe('1 of 3 attempts used');
+  expect(notice.textContent).not.toMatch(/attempts? left/);
+});
+
 // A code story, or other work, whose attempt failed, with a brief in Markdown and the plan an earlier step handed it.
 const handed = (source: boolean) => {
   controller.tasks = [
@@ -1252,7 +1348,10 @@ const decisions = () => {
   return {
     status: document.querySelector('.sd-storyhead__kind.sd-narrow-only .sd-chip')?.textContent,
     title: stands.querySelector('.sd-stands__title')?.textContent,
-    buttons: [...stands.querySelectorAll('.sd-stands__actions button')].map(button => button.textContent),
+    // The decision row's buttons by name; More actions, when there is something to close, is last.
+    buttons: [...stands.querySelectorAll('.sd-stands__actions button')].map(
+      button => button.getAttribute('aria-label') ?? button.textContent,
+    ),
   };
 };
 const proposedWork = {
