@@ -7,7 +7,7 @@ import { projectOrganization, organizationConfiguration } from './project-organi
 import { directoryFor } from './project-agents.mjs';
 import { assertUnchangedDirectorInputs, directorInputsOf } from './idea-inputs.mjs';
 import { dashboardAttempt, dashboardOpenPhases, dashboardTimings } from './dashboard-state.mjs';
-import { testTurnResource } from './test-turn.mjs';
+import { testTurnResource, visualTurnResource } from './test-turn.mjs';
 
 const attemptChange = a => ({ type: 'attempt', id: a.id, taskId: a.taskId, projectId: recordProject(a) });
 // A setting's change names a run or workflow as its own record, and its project when the setting has one:
@@ -405,6 +405,22 @@ export class Store {
       }
       return {
         reason: `Waiting for ${suite} to finish: this computer runs one full test suite at a time.`,
+        resource,
+        ownerAttemptId,
+      };
+    }
+    // The visual check's turn names whose pages are being photographed.
+    if (resource === visualTurnResource) {
+      let check = 'another visual check';
+      try {
+        const task = this.task(this.attempt(ownerAttemptId).taskId);
+        if (task.id && typeof task.title === 'string' && task.title.trim())
+          check = `the visual check of ${task.id} (${task.title})`;
+      } catch {
+        // A holder whose records are missing is still named by its lease.
+      }
+      return {
+        reason: `Waiting for ${check} to finish: this computer photographs one app at a time.`,
         resource,
         ownerAttemptId,
       };

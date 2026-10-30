@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
@@ -29,6 +30,46 @@ const policyOn = c =>
     kinds: {},
     retries: 0,
   });
+
+// A story builds in its own worktree and holds none of its project's source (October 29), so two build at the same
+// time: here both are held in their setup together, and a third waits for one of them to be integrated.
+test('two stories of one project build at the same time, each in its own worktree, and a third waits', async t => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-two-hold-')),
+    hold = path.join(folder, 'hold');
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  fs.writeFileSync(hold, '');
+  const c = await setup(t, 'pass', [target], { sourceSetupHold: hold }, true),
+    { store, runner } = c.app,
+    { ids } = await c.breakdown([
+      { files: [target], dependencies: [] },
+      { files: ['src/core/projects.mjs'], dependencies: [] },
+    ]),
+    third = await c.propose('third', { files: [target] });
+  for (const id of ids) approveWork(store, runner.registries, store.task(id));
+  for (const id of ids) runner.start(id);
+  const attempts = ids.map(id => store.attempt(store.task(id).lastAttemptId));
+  for (const id of ids) assert.equal(store.task(id).status, 'running', store.task(id).reason);
+  assert.notEqual(attempts[0].sourceWorktree.path, attempts[1].sourceWorktree.path);
+  assert.deepEqual(
+    store.leases().filter(lease => lease.resource.startsWith('source:')),
+    [],
+    'No story holds its project’s source.',
+  );
+  await waitFor(
+    () =>
+      attempts.every(a =>
+        store
+          .phaseEvents(a.id)
+          .some(event => event.payload.phaseId === 'setup.snapshot' && event.payload.boundary === 'start'),
+      ),
+    'both setups to be held at once',
+  );
+  const queued = runner.queueStart(third);
+  assert.equal(queued.queued, true);
+  assert.match(queued.reason, /to be integrated: source stories run two at a time\.$/);
+  fs.rmSync(hold);
+  for (const id of ids) await c.toReview(id);
+});
 
 test('two stories hold a line at once from their first edit until each is integrated, and a third waits', async t => {
   const c = await setup(t, 'pass', [target], {}, true),

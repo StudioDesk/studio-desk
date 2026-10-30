@@ -18,6 +18,8 @@ import {
   validateVisualSettings,
   visualPlan,
 } from '../src/connectors/visual-check.mjs';
+import { visualTurnResource } from '../src/core/test-turn.mjs';
+import { waitFor } from './wait-for.mjs';
 
 const capture = fileURLToPath(new URL('./fixture-visual-capture.mjs', import.meta.url));
 
@@ -146,6 +148,32 @@ test('a passing candidate whose story names pages is captured in the sandbox, an
   );
   assert.ok(store.events().some(event => event.kind === 'visual_check' && event.attempt_id === a.id));
   assert.ok(store.phaseEvents(a.id).some(event => event.payload.phaseId === 'visual'));
+});
+
+// Two stories of a project build at once, so two captures could meet at one address: one app is photographed at a time.
+test('a capture waits while another app is photographed, says why, and runs once the turn is free', async t => {
+  const c = await checking(t),
+    store = c.app.store;
+  store.claim([visualTurnResource], 'held-capture');
+  await c.start();
+  const id = store.task(c.taskId).lastAttemptId,
+    waiting = await waitFor(() => store.attempt(id).testTurn, 'the capture to wait for its turn');
+  assert.equal(
+    waiting.reason,
+    'Waiting for another visual check to finish: this computer photographs one app at a time.',
+  );
+  assert.equal(waiting.holder, 'held-capture');
+  assert.equal(store.phaseEvents(id).filter(event => event.payload.phaseId === 'visual').length, 0);
+  store.releaseResource(visualTurnResource, 'held-capture');
+  const a = await c.wait(c.taskId);
+  assert.equal(a.testTurn, undefined);
+  assert.equal(a.result.checks.find(item => item.name === 'Visual check').status, 'pass');
+  assert.ok(store.phaseEvents(a.id).some(event => event.payload.phaseId === 'visual'));
+  assert.deepEqual(
+    store.leases().filter(lease => lease.resource === visualTurnResource),
+    [],
+    'The turn is given back.',
+  );
 });
 
 test('with no browser found the check is recorded as not run with the note, and the candidate goes on to review', async t => {

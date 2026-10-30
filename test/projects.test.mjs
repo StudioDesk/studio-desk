@@ -58,7 +58,7 @@ test('new Studio desk defaults add product-owner breakdown while configured proj
   assert.match(definition.executionNotice, /Edit the teams.*default owner/);
   assert.match(
     definition.executionNotice,
-    /wait for their prerequisites to be integrated.*one source story runs at a time/,
+    /wait for their prerequisites to be integrated.*up to two source stories on a line run at once/,
   );
   for (const provider of ['codex', 'claude']) {
     const worker = executionWorker({ provider: 'codex', model: '', enabled: true }, { execution: { provider } });
@@ -2264,15 +2264,17 @@ test('a project with its own repository checks it with its own profile and sourc
   const source = projectSource(store, project.id, runner);
   assert.equal(source.root, fs.realpathSync.native(root));
   assert.deepEqual(source.resources, [`source:${project.id}:integration`, `source:${project.id}:tests`]);
-  // A story in this project holds this repository's resources; Studio desk's stay its own.
+  // A story builds in its own worktree and holds no source resources (October 29: two build at once); its integration
+  // holds this repository's, and Studio desk's stay its own.
   const story = { kind: 'studio-development:change', resources: [], projectId: project.id },
     legacy = { kind: 'studio-development:change', resources: [] };
-  assert.deepEqual(runner.workflows.requirements(story, { store }).resources, source.resources);
-  assert.deepEqual(runner.workflows.requirements(legacy, { store }).resources, [
+  assert.deepEqual(runner.workflows.requirements(story, { store }).resources, []);
+  assert.deepEqual(runner.workflows.requirements(legacy, { store }).resources, []);
+  assert.deepEqual(runner.integration.resources(story), source.resources);
+  assert.deepEqual(runner.integration.resources(legacy), [
     'source:studio-desk-integration',
     'source:studio-desk-tests',
   ]);
-  assert.deepEqual(runner.integration.resources(story), source.resources);
   // Integrating another repository never pauses or restarts the controller, nor asks for a promotion.
   assert.equal(runner.integration.pauses(story), false);
   assert.equal(runner.integration.pauses(legacy), !!runner.selfHosted);

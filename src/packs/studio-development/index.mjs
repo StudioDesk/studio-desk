@@ -42,7 +42,7 @@ import { lineHead, projectLine, storyLine } from '../../connectors/source-lines.
 import { runIdOf } from '../../core/graph.mjs';
 import { projectMilestones } from '../../connectors/source-milestones.mjs';
 import { noteReleaseSuggestions } from '../../core/release-routing.mjs';
-import { projectSource, sourceResources, sourceRoot } from '../../connectors/source-projects.mjs';
+import { projectSource, sourceRoot } from '../../connectors/source-projects.mjs';
 import { profileOf, recordedProfile, storyPathScope, studioDeskProfile } from '../../connectors/source-profile.mjs';
 import { visualSettings } from '../../connectors/visual-check.mjs';
 
@@ -496,9 +496,11 @@ export const studioDevelopmentPack = {
       executionAdapter: 'source-change',
       requiresIsolation: true,
       requiredCapabilities: ['source-change'],
-      // The project's repository's source resources (Studio desk's for a project without its own).
+      // A story builds in its own worktree from its base commit, so it holds none of its project's source resources:
+      // up to two stories on a line build at once (storiesPerLine, validateInputs below), and one integrates while
+      // another builds. Integration, carries and releases still hold the source (October 29). The computer's turns
+      // pace the heavy steps: one full test suite and one visual check at a time (core/test-turn.mjs).
       requiredResources: [],
-      resourcesFor: ({ task, store }) => sourceResources(store, task),
       // Every edited or created file a story lists, plus the controller's six evidence files, and the visual check's
       // record with up to 60 images (ten pages at three widths in two themes, 1.2 step 8).
       maxArtifacts: maxScopePaths + 6 + 61,
@@ -731,7 +733,7 @@ export const studioDevelopmentPack = {
       exactProposals: true,
       autonomy: { recommended: { accept: 'auto' } },
       executionNotice:
-        'Uses the assigned employee’s subscription CLI. For an existing project, explicitly enable Product-owner breakdown, Source improvement and Candidate review in Edit the teams (Agents, then Teams), and select an enabled product owner as the breakdown default owner. Linked stories wait for their prerequisites to be integrated, and one source story runs at a time from its first edit until it is integrated. A story may build on files any integrated story changed; other drift needs fresh measured checks and a new breakdown.',
+        'Uses the assigned employee’s subscription CLI. For an existing project, explicitly enable Product-owner breakdown, Source improvement and Candidate review in Edit the teams (Agents, then Teams), and select an enabled product owner as the breakdown default owner. Linked stories wait for their prerequisites to be integrated, and up to two source stories on a line run at once, each from its first edit until it is integrated. A story may build on files any integrated story changed; other drift needs fresh measured checks and a new breakdown.',
       validateInputs({ store, task, runtime }) {
         breakdownSource(store, task);
         const worker = runtime.effectiveWorker(projectOrganization(store, recordProject(task)), task),

@@ -1,7 +1,7 @@
 // A scheduler pass measures the live source at most once (measuringPass, src/connectors/source-changes.mjs): every
 // story it checks and the scope a start records reuse that measurement until a story starts, which measures again for
 // the checks after it. The next pass measures afresh, and a check outside a pass measures every time. Work that cannot
-// start yet, its resources held, is not measured at all until they are free.
+// start yet, with no free slot or one of its resources held, is not measured at all until it could start.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -36,14 +36,17 @@ function holdFile(t) {
 const uncommitted =
   'Approved source files changed since the proposal, and the changes are not committed: src/core/projects.mjs. Commit or discard them in the development copy, then try again.';
 
-test('one dispatch pass measures the live source once until a story starts, the stories then waiting for its source are not measured, and the pass after it lets go measures again', async t => {
+test('one dispatch pass measures the live source once until a story starts, stories that then have no slot are not measured, and the pass after it measures again', async t => {
   const hold = holdFile(t),
     c = await setup(t, 'pass', undefined, { sourceSetupHold: hold }, true),
     { store, runner } = c.app,
     first = c.taskId,
     second = await c.propose('second'),
     third = await c.propose('third', { files: ['src/core/projects.mjs'] });
-  // Three approved stories wait for the same employee; the first two are queued.
+  // One attempt at a time in this studio. Three approved stories wait for the same employee; the first two are queued.
+  const org = store.organization();
+  org.maxParallel = 1;
+  store.setOrganization(org);
   for (const id of [first, second, third]) {
     assert.equal(store.task(id).status, 'ready');
     assert.equal(store.task(id).workerId, store.task(first).workerId);
@@ -65,18 +68,18 @@ test('one dispatch pass measures the live source once until a story starts, the 
     }
   });
   // The pass checks all three stories, then each queued one again before its start, and the start checks its scope
-  // twice more: one measurement until the first story starts. The stories after it wait for the source it holds, so
-  // nothing is measured for them.
+  // twice more: one measurement until the first story starts. The stories after it have no slot, so nothing is
+  // measured for them (October 29: their git calls held the controller for seconds on each pass).
   runner.dispatchQueued();
   assert.deepEqual(startedAfter, [1], 'The first story started on the pass’s one measurement.');
   assert.equal(measured.count, 1, 'The checks after the start measured nothing.');
   const attempt = store.attempt(store.task(first).lastAttemptId);
   assert.equal(store.task(first).status, 'running');
   assert.deepEqual(attempt.sourceChange.allowedFiles, ['src/core/workflows.mjs']);
-  // The second and third stories wait for the employee the first holds; the second stays queued.
+  // The second and third stories wait for a slot; the second stays queued.
   for (const id of [second, third]) {
     assert.equal(store.task(id).status, 'blocked');
-    assert.match(store.task(id).reason, /^Waiting for /);
+    assert.equal(store.task(id).reason, 'Waiting for a studio execution slot.');
   }
   assert.equal(store.task(second).queued, true);
   await waitFor(
@@ -86,15 +89,13 @@ test('one dispatch pass measures the live source once until a story starts, the 
         .some(event => event.payload.phaseId === 'setup.snapshot' && event.payload.boundary === 'start'),
     'the first story’s setup to be held',
   );
-  // A file the third story lists is edited between passes. While the first story holds the source, the stories
-  // waiting for it cannot start, so a pass does not measure the source for them at all (October 29: their git calls
-  // held the controller for seconds on each pass); the first pass after it lets go sees the edit.
+  // A file the third story lists is edited between passes. While no slot is free, a pass measures nothing for it;
+  // the first pass once one is free sees the edit.
   fs.appendFileSync(path.join(c.root, 'src/core/projects.mjs'), '// Edited between passes.\n');
   measured.count = 0;
   runner.dispatchQueued();
-  assert.equal(measured.count, 0, 'A pass while the source was held measured nothing.');
-  assert.equal(store.task(third).status, 'blocked');
-  assert.match(store.task(third).reason, /^Waiting for /);
+  assert.equal(measured.count, 0, 'A pass with no free slot measured nothing.');
+  assert.equal(store.task(third).reason, 'Waiting for a studio execution slot.');
   assert.deepEqual(startedAfter, [1], 'Nothing else started.');
   // Let the first story finish with nothing queued after it.
   runner.pipeline('remove', [second], 'project-legacy');

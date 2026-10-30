@@ -43,7 +43,7 @@ import {
 } from '../connectors/source-build.mjs';
 import { continuationFile, prepareSourceContinuation } from '../core/attempt-continuation.mjs';
 import { closeEmployeeTests, employeeTestsCommand, openEmployeeTests } from '../connectors/employee-tests.mjs';
-import { releaseTestTurn, takeTestTurn } from '../core/test-turn.mjs';
+import { releaseTestTurn, releaseTurn, takeTestTurn, takeTurn, visualTurnResource } from '../core/test-turn.mjs';
 import { notRunRecord, visualPlan } from '../connectors/visual-check.mjs';
 import { startCommand } from '../connectors/try-copy.mjs';
 import { fileURLToPath } from 'node:url';
@@ -527,7 +527,7 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
       'candidate_checks',
       a.taskId,
       a.id,
-      `${editor} stopped. Controller testing the isolated candidate; employee and source reservations remain held.`,
+      `${editor} stopped. Controller testing the isolated candidate; its reservations remain held.`,
     );
     const command = runtime.sourceCheckCommand || a.sourceCandidate.command,
       environment = subscriptionEnvironment();
@@ -648,8 +648,7 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         fs.writeFileSync(path.join(entry.output, 'visual-check.json'), JSON.stringify(record, null, 2));
         return runtime.finish(entry, withVisual(entry, result, record), null);
       }
-      const phase = runtime.startPhase(entry, 'visual'),
-        planFile = path.join(entry.job, 'visual-plan.json');
+      const planFile = path.join(entry.job, 'visual-plan.json');
       fs.writeFileSync(
         planFile,
         JSON.stringify({
@@ -668,37 +667,46 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
           settleMs: runtime.visualSettleMs ?? 600,
         }),
       );
-      clearTimeout(entry.timer);
-      entry.timer = setTimeout(() => {
-        entry.timedOut = true;
-        runtime.stop(a.id);
-      }, runtime.visualTimeoutMs ?? visualTimeoutMs);
-      runtime.store.event(
-        'visual_check',
-        a.taskId,
-        a.id,
-        `Capturing ${plan.pages.length} page${plan.pages.length === 1 ? '' : 's'} at ${plan.widths.join(' and ')} px in ${plan.themes.join(' and ')}, with ${plan.browser}.`,
-      );
-      const capture = runtime.visualCaptureCommand || { executable: process.execPath, args: [visualCaptureRunner] };
-      runtime.runNative(
-        entry,
-        capture.executable,
-        [...capture.args, planFile],
-        '',
-        () => readVisualRecord(entry, plan),
-        {
-          cwd: entry.output,
-          environment,
-          resultOnFailure: true,
-          onComplete: record => {
-            runtime.store.finishPhase(phase, record.state === 'captured' ? 'succeeded' : 'failed', {
-              images: record.images.length,
-              reason: record.reason || null,
-            });
-            runtime.finish(entry, withVisual(entry, result, record), null);
+      const limitMs = runtime.visualTimeoutMs ?? visualTimeoutMs;
+      // One app is photographed at a time on this computer (core/test-turn.mjs); waiting for the turn does not count
+      // against the capture's time.
+      const capture = () => {
+        const phase = runtime.startPhase(entry, 'visual');
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => {
+          entry.timedOut = true;
+          runtime.stop(a.id);
+        }, limitMs);
+        runtime.store.event(
+          'visual_check',
+          a.taskId,
+          a.id,
+          `Capturing ${plan.pages.length} page${plan.pages.length === 1 ? '' : 's'} at ${plan.widths.join(' and ')} px in ${plan.themes.join(' and ')}, with ${plan.browser}.`,
+        );
+        const command = runtime.visualCaptureCommand || { executable: process.execPath, args: [visualCaptureRunner] };
+        runtime.runNative(
+          entry,
+          command.executable,
+          [...command.args, planFile],
+          '',
+          () => readVisualRecord(entry, plan),
+          {
+            cwd: entry.output,
+            environment,
+            resultOnFailure: true,
+            onComplete: record => {
+              runtime.store.finishPhase(phase, record.state === 'captured' ? 'succeeded' : 'failed', {
+                images: record.images.length,
+                reason: record.reason || null,
+              });
+              // The app has stopped with the capture; a stop or a failure releases the turn with the other leases.
+              releaseTurn(runtime.store, visualTurnResource, a.id);
+              runtime.finish(entry, withVisual(entry, result, record), null);
+            },
           },
-        },
-      );
+        );
+      };
+      takeTurn(runtime, entry, { resource: visualTurnResource, limitMs, start: capture });
     };
     // The build, when the settings name one, as its own phase. A failing build still lets the tests run, so the
     // editor reads both at once; a build that changes the files the settings cover stops the attempt.
