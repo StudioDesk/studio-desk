@@ -2,9 +2,10 @@
 // pages inside one frame with the project rail, Find a project, the pages and the Needs you count.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './app';
+import { setChatBox } from './chat-box';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
 
@@ -212,6 +213,38 @@ test('with the chat box switched off, Ctrl J opens no panel and N still opens To
   } finally {
     delete (Element.prototype as Partial<Element>).scrollIntoView;
   }
+});
+
+test('with the chat box switched off, the sidebar lists no talks, even with an idea in planning', async () => {
+  // An idea whose plan step waits in review, as the controller's run view sends it.
+  const plan = taskFixture('T-plan', {
+    title: 'Plan the idea',
+    kind: 'studio-development:breakdown',
+    status: 'review',
+    workflowReference: { runId: 'run-1', key: 'plan' },
+  });
+  controller.tasks = [plan];
+  controller.runs = [
+    {
+      id: 'run-1',
+      createdAt: '2026-10-29T19:00:00Z',
+      brief: 'Talk it through first.',
+      directorInputs: [],
+      workflow: { id: 'workflow-1', name: 'Source checks and review', version: 3 },
+      revisions: [{ revision: 1, at: '2026-10-29T19:00:00Z', reason: 'created' }],
+      nodes: [{ taskId: 'T-plan', key: 'plan', kind: plan.kind, title: plan.title, workerId: 'W-1', dependencies: [] }],
+      archive: { archived: false },
+    },
+  ];
+  open('/p/project-x/runs/run-1');
+  // The idea is in the project's live records, among the ideas the sidebar lists on its page.
+  const ideas = within(await screen.findByRole('navigation', { name: 'Ideas in this project' }));
+  expect(ideas.getByRole('link', { name: 'Talk it through first.' })).toBeTruthy();
+  expect(screen.queryByRole('navigation', { name: 'Talking it through' })).toBeNull();
+  // Switched on, the same records list it (chat-panel.test.tsx follows it into the chat box).
+  act(() => setChatBox(true));
+  const talks = within(await screen.findByRole('navigation', { name: 'Talking it through' }));
+  expect(talks.getAllByRole('link').map(link => link.textContent)).toEqual(['Talk it through first']);
 });
 
 test("a page's trail marks only the page itself as current, never a step back", async () => {

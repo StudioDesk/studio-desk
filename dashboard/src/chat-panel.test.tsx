@@ -2,7 +2,8 @@
 // project; it stays open with its words as the director moves between pages, holds Today's New idea box and sends what
 // Today's box sends, and on a phone it covers the page with a back arrow. Once it sends an idea it shows that idea's
 // conversation with the planner, where the director answers, replies and makes the plan official as on the idea's
-// page, until New idea or Ctrl J brings the box back. Model-free, with the stand-in controller.
+// page, until New idea or Ctrl J brings the box back. The sidebar's Talking it through lists each idea whose plan is
+// not official yet, and choosing one opens its conversation there. Model-free, with the stand-in controller.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -436,6 +437,40 @@ test('New idea or Ctrl J while a conversation shows brings back the New idea box
   expect(((await box(region)) as HTMLTextAreaElement).value).toBe('Half a thought.');
   expect(within(region).queryByRole('region', { name: 'Talk to Mara' })).toBeNull();
   expect(posted()).toHaveLength(1);
+});
+
+test("the sidebar's Talking it through lists the idea in planning, opens its conversation beside the page, and drops it once official", async () => {
+  const user = userEvent.setup();
+  holding(reviewing());
+  const router = open('/p/project-x/board');
+  const links = within(await screen.findByRole('navigation', { name: 'Talking it through' })).getAllByRole('link');
+  // The idea by its run's title; its address is the idea's page, for a new tab.
+  expect(links.map(link => [link.textContent, link.getAttribute('href')])).toEqual([
+    ['Let me talk to the planner before anything starts', '/p/project-x/runs/run-1'],
+  ]);
+  expect(shut()).toBeNull();
+  await user.click(links[0]!);
+  const region = await panel();
+  expect(labels(await entries(await talk(region)))).toEqual(['Your idea', null, "Mara's plan"]);
+  expect(within(region).getByRole('button', { name: 'Make it official' })).toBeTruthy();
+  // Choosing a talk is no New idea: no box, and the page stays where it is.
+  expect(within(region).queryByRole('textbox', { name: 'New idea for Project X' })).toBeNull();
+  expect(router.history.location.pathname).toBe('/p/project-x/board');
+  expect(posted()).toEqual([]);
+  // The plan is made official elsewhere; the stream's change takes the idea off the list, and with no talks going
+  // the section goes. The conversation stays in the chat box.
+  controller.tasks = controller.tasks.map(task =>
+    task.id === 'T-plan' ? { ...task, status: 'done', acceptedAttemptId: 'a-plan' } : task,
+  );
+  controller.attempts = controller.attempts.map(attempt =>
+    attempt.id === 'a-plan' ? { ...attempt, status: 'accepted' } : attempt,
+  );
+  latest().emit('change', { version: 2, start: 'start-a', changes: [{ seq: 2, type: 'task', id: 'T-plan' }] });
+  await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Talking it through' })).toBeNull());
+  await waitFor(() => expect(within(region).queryByRole('button', { name: 'Make it official' })).toBeNull());
+  expect(labels(await entries(await talk(region)))).toEqual(['Your idea', null, "Mara's plan"]);
+  expect(router.history.location.pathname).toBe('/p/project-x/board');
+  expect(posted()).toEqual([]);
 });
 
 test('a project whose work takes no ideas shows no box in the chat box', async () => {

@@ -5,7 +5,8 @@
 // count is the current project's (the director, October 22); each tile on the rail counts its own project's calls,
 // pointing at or focusing another project's count shows them in a card beside it, and the tab's title counts every
 // project's (the attention indicator, October 29). With the chat box switched on (chat-box.ts), New idea and Ctrl J
-// open the chat box beside the page instead (chat-panel.tsx).
+// open the chat box beside the page instead (chat-panel.tsx), and the sidebar lists the talks going (talks.ts), each
+// opening its conversation there.
 import { Outlet, useRouter, useRouterState } from '@tanstack/react-router';
 import {
   Fragment,
@@ -21,7 +22,7 @@ import {
 } from 'react';
 import type { Project } from './api';
 import { useChatBox } from './chat-box';
-import { ChatPanel } from './chat-panel';
+import { ChatPanel, openChatConversation } from './chat-panel';
 import { COLORS } from './design/agent-kit.js';
 import { Icon, Mark, type IconName } from './design/icons';
 import { journeyChip } from './journey';
@@ -31,6 +32,7 @@ import { cardPlace, RailCard, type CardPlace } from './rail-card';
 import { finishedState, useFinished, useStudio } from './records';
 import { useConnection } from './stream-context';
 import { liveSummary, runStories, type RunStory, type StudioState } from './studio-runs';
+import { talks } from './talks';
 
 export const rememberedProject = 'studio-next-project';
 
@@ -204,11 +206,50 @@ function IdeasHere({ projectId, state, runId }: { projectId: string; state: Stud
   );
 }
 
-// A link inside the app: a plain click moves the router, any other click (a new tab) does what the browser does.
+// Talking it through, under the nav while the chat box is switched on: each idea whose plan is not official yet,
+// newest first, by its title (talks.ts). A plain click opens its conversation in the chat box beside the page shown;
+// any other click (a new tab) opens the idea's page.
+function TalkingItThrough({
+  projectId,
+  state,
+  onOpen,
+}: {
+  projectId: string;
+  state: StudioState;
+  onOpen: (runId: string) => void;
+}) {
+  const going = talks(state);
+  if (!going.length) return null;
+  return (
+    <nav className="sd-sidebar__ideas" aria-label="Talking it through">
+      <span className="sd-eyebrow">Talking it through</span>
+      {going.map(talk => (
+        <a
+          key={talk.runId}
+          className="sd-navlink sd-navlink--idea"
+          href={`/p/${projectId}/runs/${encodeURIComponent(talk.runId)}`}
+          onClick={event => {
+            if (!plain(event)) return;
+            event.preventDefault();
+            onOpen(talk.runId);
+          }}
+        >
+          {talk.title}
+        </a>
+      ))}
+    </nav>
+  );
+}
+
+// A plain click stays in the app; any other click (a new tab) does what the browser does.
+const plain = (event: MouseEvent<HTMLAnchorElement>) =>
+  event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+
+// A link inside the app: a plain click moves the router.
 function useGo() {
   const router = useRouter();
   return (href: string) => (event: MouseEvent<HTMLAnchorElement>) => {
-    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (!plain(event)) return;
     event.preventDefault();
     router.history.push(href);
   };
@@ -272,6 +313,12 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
     if (chatBox) return chat();
     router.history.push(href(''));
     requestNewIdea();
+  };
+  // A talk chosen in the sidebar opens the chat box, or keeps it open, with that idea's conversation; it asks for no
+  // cursor in the box, so it counts as no New idea.
+  const openTalk = (runId: string) => {
+    setChatting(true);
+    openChatConversation(runId);
   };
   // A new tab opens the project shown last; the address still names it, so this is only a convenience.
   useEffect(() => {
@@ -440,6 +487,7 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
                 </a>
               ))}
           </nav>
+          {chatBox && state && <TalkingItThrough projectId={projectId} state={state} onOpen={openTalk} />}
           {state && runId && <IdeasHere projectId={projectId} state={state} runId={decodeURIComponent(runId)} />}
           <div className="sd-status">
             <div className="sd-status__head">
