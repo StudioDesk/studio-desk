@@ -1,10 +1,11 @@
 // An idea's planning conversation on its page (conversation.ts reads it from the records): the director's idea in their
 // own bubble, the checks line, each plan the planner sent with its numbered cards, its questions with their answers
-// in place, the director's replies between plans and a line for each plan attempt that stopped. The plan step's own
-// page supplies its attempts with their files, and each plan's file is read once and kept. While the idea is in
-// planning, the director replies under it and makes the plan official, each with the plan step's own recorded step:
-// a reply is its revise with the reply as direction, then its start; Make it official is its accept.
-import { useMutation, useQueries, useQuery } from '@tanstack/react-query';
+// in place, the director's replies between plans and a line for each plan attempt that stopped. A question still
+// waiting is answered in place, with Today's question card and Answer box. The plan step's own page supplies its
+// attempts with their files, and each plan's file is read once and kept. While the idea is in planning, the director
+// replies under it and makes the plan official, each with the plan step's own recorded step: a reply is its revise
+// with the reply as direction, then its start; Make it official is its accept.
+import { notifyManager, useMutation, useQueries, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useState, type ReactNode } from 'react';
 import { getJSON, send, taskUrl, type AttemptSummary, type Task, type TaskPage } from './api';
@@ -19,6 +20,7 @@ import { projectColor } from './frame';
 import { fileSize } from './idea-composer';
 import { clockOf } from './journey';
 import { workerName } from './names';
+import { AnswerBox, QuestionCard } from './question-card';
 import { waitingQuestion } from './questions';
 import { queryKeys } from './records';
 import type { ReleaseOf } from './release-chip';
@@ -97,6 +99,15 @@ const startedToast = (started: Record<string, unknown>) =>
       ? `Queued. ${started.reason} It starts by itself when it can.`
       : 'Queued behind busy work. It starts by itself when its agent, resources and an execution slot are free.'
     : 'Started.';
+
+// What the controller's answer to a question says, as Today's Your calls says it (today-page.tsx): the planner
+// continues, or why the answer's start was refused.
+function answerToast(sent: Record<string, unknown>, name: string) {
+  const start = sent.start as { ok?: boolean; reason?: string } | null | undefined;
+  return start?.ok === false
+    ? `Answer sent. It did not start: ${start.reason}`
+    : `Answer sent. ${name} continues from its saved work with it.`;
+}
 
 const live = ['running', 'stopping'];
 
@@ -181,6 +192,7 @@ export function IdeaConversation({
               projectId={projectId}
               runId={run.id}
               state={state}
+              records={records}
               entry={entry}
               face={face}
               word={word}
@@ -336,6 +348,7 @@ function Message({
   projectId,
   runId,
   state,
+  records,
   entry,
   face,
   word,
@@ -345,6 +358,8 @@ function Message({
   projectId: string;
   runId: string;
   state: StudioState;
+  // The records with the plan step's own page, which hold the asking attempt.
+  records: StudioState;
   entry: ConversationEntry;
   face: (workerId: string) => ReactNode;
   word: string;
@@ -425,7 +440,11 @@ function Message({
           </div>
         </li>
       );
-    case 'question':
+    case 'question': {
+      const task = entry.waiting ? records.tasks.find(item => item.id === entry.taskId) : undefined,
+        asking = task && records.attempts.find(attempt => attempt.id === entry.attemptId);
+      if (task && asking)
+        return <Asking projectId={projectId} records={records} task={task} attempt={asking} name={entry.name} />;
       return (
         <li className="sd-say" aria-label={`${entry.name}'s question`}>
           {face(entry.workerId)}
@@ -451,23 +470,13 @@ function Message({
                 ))}
               </ul>
             )}
-            {entry.waiting && (
-              <Link
-                className="sd-btn sd-btn--sm"
-                style={{ marginTop: 'var(--space-8)' }}
-                to="/p/$projectId"
-                params={{ projectId }}
-                hash="calls"
-              >
-                Answer
-              </Link>
-            )}
             <div className="sd-meta" style={{ marginTop: '2px' }}>
               {at}
             </div>
           </div>
         </li>
       );
+    }
     case 'answer':
       return entry.by === 'auto-mode' ? (
         <li className="sd-event sd-event--center">
@@ -510,6 +519,38 @@ function Message({
         </li>
       );
   }
+}
+
+// The planner's question while it waits, answered in place: Today's question card with its Answer box inside, which
+// posts the plan step's answer as Your calls does. The answer's records put the answer under the question and, once
+// the plan step runs, the planner replying, without leaving the conversation.
+function Asking({
+  projectId,
+  records,
+  task,
+  attempt,
+  name,
+}: {
+  projectId: string;
+  records: StudioState;
+  task: Task;
+  attempt: AttemptSummary;
+  name: string;
+}) {
+  const toast = useToast();
+  return (
+    <li aria-label={`${name}'s question`}>
+      <QuestionCard projectId={projectId} state={records} task={task} attempt={attempt}>
+        <AnswerBox
+          projectId={projectId}
+          state={records}
+          task={task}
+          attempt={attempt}
+          onSent={sent => notifyManager.schedule(() => toast(answerToast(sent, name)))}
+        />
+      </QuestionCard>
+    </li>
+  );
 }
 
 // One card of a plan: "Story 2" or "Step 2", marked when it changed after the director's reply, with its title, what

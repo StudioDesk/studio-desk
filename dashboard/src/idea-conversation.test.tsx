@@ -1,8 +1,9 @@
 // An idea's planning conversation on its page: the idea in the director's bubble, the checks line, each plan as Story
 // or Step cards with who builds, who reviews and what each builds on, the director's reply between plans with the
-// cards it changed marked, a question in place with its answer, and a stopped attempt as one line. It is the page's
-// main part while the idea is in planning and stays under Talk to <the planner> once the plan is official. The plans'
-// texts are the stand-in's recorded files; reading them sends nothing. While the idea is in planning, a reply under the
+// cards it changed marked, a question in place with its answer (answered right there while it waits, as Today's Your
+// calls answers it), and a stopped attempt as one line. It is the page's main part while the idea is in planning and
+// stays under Talk to <the planner> once the plan is official. The plans' texts are the stand-in's recorded files;
+// reading them sends nothing. While the idea is in planning, a reply under the
 // conversation asks the planner to revise the plan, then starts it, a line says while the planner is replying, and
 // Make it official accepts the plan, each as the plan step's own page sends it.
 import { QueryClient } from '@tanstack/react-query';
@@ -75,13 +76,15 @@ const idea = (tasks: Task[]): RunRecord => ({
 const open = (tasks: Task[], record: Partial<RunRecord> = {}, page = '/p/project-x/runs/run-1') => {
   controller.tasks = tasks;
   controller.runs = [{ ...idea(tasks), ...record }];
+  const router = createAppRouter(createMemoryHistory({ initialEntries: [page] }));
   render(
     <App
-      router={createAppRouter(createMemoryHistory({ initialEntries: [page] }))}
+      router={router}
       queryClient={new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })}
       createStream={createStream}
     />,
   );
+  return router;
 };
 // Opens the idea again on fresh records, as the idea page's tests do.
 const reopen = (tasks: () => Task[], record: Partial<RunRecord> = {}, page?: string) => {
@@ -323,22 +326,104 @@ test('a question shows in place with its options, the recommended one marked, an
     'Instead of them until the plan is official Recommended',
   ]);
   expect(within(options[0]!).queryByText('Recommended')).toBeNull();
-  // Answered: no Answer link, and the director's answer in their bubble right after the question.
+  // Answered: no Answer box or link, and the director's answer in their bubble right after the question.
   expect(asking.queryByRole('link', { name: 'Answer' })).toBeNull();
+  expect(within(region).queryByRole('form', { name: 'Answer Mara' })).toBeNull();
   expect(items[2]!.querySelector('.sd-bubble--mine')?.textContent).toContain(
     'You answeredInstead of them — Keep the stories in view.',
   );
   expect(posted()).toEqual([]);
-  // A question still waiting has the Answer link to Today's calls, and no answer yet.
+  // A question still waiting holds Mara's question card with the Answer box, as Today's Your calls shows it, and no
+  // answer yet; nothing in the conversation leads away to Today.
   reopen(() => {
     asked();
     return [planStep('blocked', { lastAttemptId: 'a-ask' })];
   });
-  const waiting = await entries(await talk());
+  const later = await talk(),
+    waiting = await entries(later);
   expect(waiting.map(item => item.getAttribute('aria-label'))).toEqual(['Your idea', "Mara's question"]);
-  const answer = within(waiting[1] as HTMLElement).getByRole('link', { name: 'Answer' });
-  expect(answer.getAttribute('href')).toBe('/p/project-x#calls');
+  const card = within(within(waiting[1] as HTMLElement).getByRole('article', { name: "Mara's question" }));
+  expect(card.getByText('Mara asks')).toBeTruthy();
+  expect(card.getByText(question.ask)).toBeTruthy();
+  expect(card.getByText(question.why)).toBeTruthy();
+  const form = within(card.getByRole('form', { name: 'Answer Mara' }));
+  expect(form.getByText("Mara's options")).toBeTruthy();
+  expect(form.getByRole('button', { name: /^Above them/ }).textContent).not.toContain('Recommended');
+  expect(within(form.getByRole('button', { name: /^Instead of them/ })).getByText('Recommended')).toBeTruthy();
+  expect(form.getByRole('switch', { name: 'Auto mode' })).toBeTruthy();
+  expect(within(later).queryByRole('link', { name: 'Answer' })).toBeNull();
+  expect(later.querySelector('a[href="/p/project-x#calls"]')).toBeNull();
   expect(posted()).toEqual([]);
+});
+
+// The controller's answer (src/core/questions.mjs answerQuestion): the director's answer recorded on the plan step,
+// which goes back to work with a running attempt, answered with the plan step's records.
+const answering = (body: unknown) => {
+  const { option, text } = body as { option: number; text?: string },
+    given: Answer = {
+      attemptId: 'a-ask',
+      option,
+      label: question.options[option]!.label,
+      ...(text ? { text } : {}),
+      by: { type: 'director', at: at(8) },
+      at: at(8),
+    };
+  controller.attempts.push({
+    id: 'a-plan',
+    taskId: 'T-plan',
+    status: 'running',
+    workerId: 'W-4',
+    startedAt: new Date().toISOString(),
+  });
+  controller.tasks = controller.tasks.map(task =>
+    task.id === 'T-plan' ? { ...task, status: 'running', lastAttemptId: 'a-plan', answers: [given] } : task,
+  );
+  return { answer: given, start: { ok: true }, records: controller.records(['T-plan']) };
+};
+
+test("Mara's waiting question is answered in place: one answer request, the answer under it, then Mara replying", async () => {
+  const user = userEvent.setup();
+  controller.command = (url, _method, body) => (url === '/api/tasks/T-plan/answer' ? answering(body) : {});
+  asked();
+  const router = open([planStep('blocked', { lastAttemptId: 'a-ask' })]),
+    region = await talk();
+  await entries(region);
+  const form = within(within(region).getByRole('form', { name: 'Answer Mara' }));
+  // The director picks an option and adds their own words, then sends to Mara.
+  await user.click(form.getByRole('button', { name: /^Above them/ }));
+  await user.type(form.getByRole('textbox', { name: 'Answer Mara' }), ' Keep the stories in view.');
+  await user.click(form.getByRole('button', { name: 'Send to Mara' }));
+  // The body Today's Your calls sends: the option, the added words, and no Auto mode while the switch is unchanged.
+  await waitFor(() => expect(toast()).toBe('Answer sent. Mara continues from its saved work with it.'));
+  expect(posted()).toEqual([
+    {
+      url: '/api/tasks/T-plan/answer',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'a-ask', option: 0, text: 'Keep the stories in view.' },
+    },
+  ]);
+  // Without a reload: the question as answered, the director's answer after it, and Mara replying.
+  const after = await talk(),
+    shown = () => [...within(after).getByRole('list', { name: 'Your conversation with Mara' }).children];
+  await waitFor(() =>
+    expect(shown().map(item => item.getAttribute('aria-label'))).toEqual([
+      'Your idea',
+      "Mara's question",
+      'Your answer',
+    ]),
+  );
+  const [, asking, answer] = shown();
+  expect(within(asking as HTMLElement).getByRole('list', { name: "Mara's options" })).toBeTruthy();
+  expect(answer!.querySelector('.sd-bubble--mine')?.textContent).toContain(
+    'You answeredAbove them — Keep the stories in view.',
+  );
+  expect(within(after).queryByRole('form', { name: 'Answer Mara' })).toBeNull();
+  expect(await within(after).findByText(/^Mara is replying · /)).toBeTruthy();
+  // Still on the idea's page, and nothing else was sent.
+  expect(router.history.location.pathname).toBe('/p/project-x/runs/run-1');
+  expect(router.history.location.hash).toBe('');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(posted()).toHaveLength(1);
 });
 
 test('a failed plan attempt reads one line saying so with a link to the plan step; an unreadable plan says so', async () => {

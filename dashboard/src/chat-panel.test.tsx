@@ -14,6 +14,7 @@ import { App } from './app';
 import { chatBoxKey } from './chat-box';
 import { openChatConversation } from './chat-panel';
 import { drafts } from './idea-composer';
+import type { Answer } from './questions';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
 
@@ -324,8 +325,16 @@ test("after sending on the board, the chat box says the idea is sent, then shows
   expect(router.history.location.pathname).toBe('/p/project-x/board');
 });
 
-test("Mara's waiting question shows in the chat box with its options, as on the idea's page", async () => {
-  const user = userEvent.setup();
+// Mara's plan step, blocked on attempt a-ask with its question for the director.
+const question = {
+  ask: 'Show the conversation above the stories or instead of them?',
+  why: 'The page has room for one main part.',
+  options: [{ label: 'Above them' }, { label: 'Instead of them', detail: 'until the plan is official' }],
+  recommended: 1,
+  choice: 'inside-story',
+  topics: [],
+};
+const asked = () => {
   controller.attempts.push({
     id: 'a-ask',
     taskId: 'T-plan',
@@ -334,32 +343,96 @@ test("Mara's waiting question shows in the chat box with its options, as on the 
     startedAt: at(4),
     finishedAt: at(7),
     error: 'Needs a call from the director.',
-    question: {
-      ask: 'Show the conversation above the stories or instead of them?',
-      why: 'The page has room for one main part.',
-      options: [{ label: 'Above them' }, { label: 'Instead of them', detail: 'until the plan is official' }],
-      recommended: 1,
-      choice: 'inside-story',
-      topics: [],
-    },
+    question,
   });
-  holding([planStep('blocked', { lastAttemptId: 'a-ask' })]);
+  return [planStep('blocked', { lastAttemptId: 'a-ask' })];
+};
+
+test("Mara's waiting question shows in the chat box as its question card with the Answer box, as on the idea's page", async () => {
+  const user = userEvent.setup();
+  holding(asked());
   controller.command = intake;
   const { region } = await sendIdea(user);
   const conversation = await talk(region),
     items = await entries(conversation);
   expect(labels(items)).toEqual(['Your idea', "Mara's question"]);
-  const asking = within(items[1] as HTMLElement);
-  expect(asking.getByText('Show the conversation above the stories or instead of them?')).toBeTruthy();
-  expect(asking.getByText('The page has room for one main part.')).toBeTruthy();
-  const options = within(asking.getByRole('list', { name: "Mara's options" })).getAllByRole('listitem');
-  expect(options.map(option => option.textContent)).toEqual([
-    'Above them',
-    'Instead of them until the plan is official Recommended',
-  ]);
-  expect(asking.getByRole('link', { name: 'Answer' }).getAttribute('href')).toBe('/p/project-x#calls');
+  const card = within(within(items[1] as HTMLElement).getByRole('article', { name: "Mara's question" }));
+  expect(card.getByText('Mara asks')).toBeTruthy();
+  expect(card.getByText(question.ask)).toBeTruthy();
+  expect(card.getByText(question.why)).toBeTruthy();
+  // The Answer box with Mara's options as suggestions, the recommended one marked, and the Auto mode switch.
+  const form = within(card.getByRole('form', { name: 'Answer Mara' }));
+  expect(form.getByText("Mara's options")).toBeTruthy();
+  expect(form.getByRole('button', { name: /^Above them/ }).textContent).not.toContain('Recommended');
+  expect(within(form.getByRole('button', { name: /^Instead of them/ })).getByText('Recommended')).toBeTruthy();
+  expect(form.getByRole('switch', { name: 'Auto mode' })).toBeTruthy();
+  // Nothing in the conversation leads out of the chat box to Today.
+  expect(within(conversation).queryByRole('link', { name: 'Answer' })).toBeNull();
+  expect(conversation.querySelector('a[href="/p/project-x#calls"]')).toBeNull();
   expect(within(conversation).getByText('Mara asked you a question; answer it first.')).toBeTruthy();
   expect(posted()).toHaveLength(1);
+});
+
+test('an answer sent in the chat box posts what Your calls posts, then shows under the question with Mara replying, on the same page', async () => {
+  const user = userEvent.setup();
+  holding(asked());
+  // The controller records the answer on the plan step, which goes back to work with a running attempt
+  // (src/core/questions.mjs answerQuestion), and answers with the plan step's records.
+  controller.command = (url, _method, body) => {
+    if (url !== '/api/tasks/T-plan/answer') return intake(url);
+    const { option } = body as { option: number },
+      given: Answer = {
+        attemptId: 'a-ask',
+        option,
+        label: question.options[option]!.label,
+        by: { type: 'director', at: at(8) },
+        at: at(8),
+      };
+    controller.attempts.push({
+      id: 'a-plan',
+      taskId: 'T-plan',
+      status: 'running',
+      workerId: 'W-4',
+      startedAt: new Date().toISOString(),
+    });
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-plan' ? { ...task, status: 'running', lastAttemptId: 'a-plan', answers: [given] } : task,
+    );
+    return { answer: given, start: { ok: true }, records: controller.records(['T-plan']) };
+  };
+  const { router, region } = await sendIdea(user);
+  const conversation = await talk(region);
+  await entries(conversation);
+  const form = within(within(conversation).getByRole('form', { name: 'Answer Mara' }));
+  // The director picks the recommended option and sends it to Mara.
+  await user.click(form.getByRole('button', { name: /^Instead of them/ }));
+  await user.click(form.getByRole('button', { name: 'Send to Mara' }));
+  await waitFor(() =>
+    expect(document.querySelector('.sd-toast')?.textContent).toBe(
+      'Answer sent. Mara continues from its saved work with it.',
+    ),
+  );
+  // One request after the idea, with the body Today's Your calls sends for the same pick.
+  expect(posted().slice(1)).toEqual([
+    {
+      url: '/api/tasks/T-plan/answer',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'a-ask', option: 1 },
+    },
+  ]);
+  // Without a reload, the answer under the question, no Answer box, and Mara replying.
+  const after = await talk(region),
+    shown = () => [...within(after).getByRole('list', { name: 'Your conversation with Mara' }).children];
+  await waitFor(() => expect(labels(shown())).toEqual(['Your idea', "Mara's question", 'Your answer']));
+  expect(shown()[2]!.querySelector('.sd-bubble--mine')?.textContent).toContain('You answeredInstead of them');
+  expect(within(after).queryByRole('form', { name: 'Answer Mara' })).toBeNull();
+  expect(await within(after).findByText(/^Mara is replying · /)).toBeTruthy();
+  // The chat box stays open beside the board.
+  expect(router.history.location.pathname).toBe('/p/project-x/board');
+  expect(router.history.location.hash).toBe('');
+  expect(screen.getByRole('complementary', { name: 'The chat box' })).toBe(region);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(posted()).toHaveLength(2);
 });
 
 test("a reply typed in the chat box sends the plan step's revise, then its start, as the idea's page does", async () => {
