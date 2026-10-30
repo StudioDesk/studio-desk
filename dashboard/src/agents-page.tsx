@@ -2,8 +2,8 @@
 // project's own records, beside the picked agent's editor (agent-editor.tsx) or, with a team in the address, that
 // team's editor (team-editor.tsx). The flow starts with the director sending an idea, goes through each team in its
 // saved order with its agents as cards, and ends with the director integrating what passed review; below it, what the
-// agents are told and the kinds of work the project does not take. An agent is a set of instructions and a CLI; it is
-// not reserved, and runs several attempts at once, each its own process and record.
+// agents are told. An agent is a set of instructions and a CLI; it is not reserved, and runs several attempts at once,
+// each its own process and record.
 import { Link } from '@tanstack/react-router';
 import { useMemo } from 'react';
 import type { AttemptSummary, Team, Worker } from './api';
@@ -67,7 +67,6 @@ function Agents({
         <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: '18px' }}>
           <Flow projectId={projectId} state={state} looks={looks} current={chosen?.id} />
           {told && <FlowTold projectId={projectId} worker={told} />}
-          <NotInFlow state={state} />
         </div>
         {team ? (
           <TeamEditor
@@ -442,50 +441,6 @@ function FlowTold({ projectId, worker }: { projectId: string; worker: Worker }) 
       >
         Open the rules
       </Link>
-    </section>
-  );
-}
-
-// The kinds of work the studio has that the project does not take, so no agent in the flow is given them. A project
-// still on the shared organization takes every kind.
-function NotInFlow({ state }: { state: StudioState }) {
-  const takes = state.organizationConfiguration?.taskKinds,
-    outside = takes ? Object.keys(state.taskKinds).filter(kind => !takes.includes(kind)) : [];
-  return (
-    <section
-      className="sd-card sd-sidecard sd-sidecard--roomy"
-      aria-labelledby="flow-outside"
-      style={{ gap: 'var(--space-10)' }}
-    >
-      <h2 id="flow-outside" className="sd-sidecard__title">
-        Not in this flow
-      </h2>
-      {outside.length ? (
-        <>
-          <span className="sd-meta">
-            The studio has these kinds of work, and {state.project.name} does not take them. Each is turned on from an
-            agent&apos;s Does list.
-          </span>
-          <ul
-            style={{
-              listStyle: 'none',
-              margin: 0,
-              padding: 0,
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 'var(--space-6)',
-            }}
-          >
-            {outside.map(kind => (
-              <li key={kind} className="sd-chip">
-                {kindLabel(state, kind)}
-              </li>
-            ))}
-          </ul>
-        </>
-      ) : (
-        <span className="sd-meta">{state.project.name} takes every kind of work the studio has.</span>
-      )}
     </section>
   );
 }

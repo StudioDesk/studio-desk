@@ -1,6 +1,6 @@
 // The Agents page's flow, from the project's own records: You, each team in its saved order with its agents as cards,
-// each naming the work its agent is running; then You; what the picked agent is told, by set; and the kinds of work
-// the project does not take. Model-free, with the stand-in controller.
+// each naming the work its agent is running; then You; and what the picked agent is told, by set, with no list of the
+// kinds of work the project does not take. Model-free, with the stand-in controller.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -253,11 +253,14 @@ test("What they're told shows the picked agent's project, team and own rule coun
   ]);
 });
 
-test('Not in this flow lists exactly the kinds the studio has that the project does not take', async () => {
+test("the page has no Not in this flow, while the flow, What they're told and Does still render", async () => {
+  // The stand-in's project does not take Plan the steps or Layout.
   open('/p/project-x/agents/W-1');
-  const outside = within(await screen.findByRole('region', { name: 'Not in this flow' }));
-  expect(outside.getAllByRole('listitem').map(item => item.textContent)).toEqual(['Plan the steps', 'Layout']);
-  expect(outside.getByText(/Each is turned on from an agent's Does list/)).toBeTruthy();
+  await flow();
+  expect(await screen.findByRole('region', { name: "What they're told" })).toBeTruthy();
+  expect(await screen.findByRole('region', { name: 'Does' })).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Not in this flow' })).toBeNull();
+  expect(screen.queryByText('Not in this flow')).toBeNull();
 });
 
 test('a project without teams shows the two You ends, Add a team and that it has no teams yet', async () => {
