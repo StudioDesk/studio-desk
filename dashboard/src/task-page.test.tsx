@@ -3,14 +3,22 @@
 // refresh, and streams the activity only while its tab is shown.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary } from './api';
 import { App } from './app';
 import { LiveStream } from './live';
 import { createAppRouter } from './router';
-import { FakeSource, createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
+import {
+  FakeSource,
+  createStream,
+  fakeController,
+  latest,
+  taskFixture,
+  whenShown,
+  type Controller,
+} from './test-controller';
 
 let controller: Controller;
 const taskUrl = '/api/tasks/T-1?projectId=project-x';
@@ -258,6 +266,147 @@ const runningTrace = (steps: object[]) => ({
 });
 const wholeTrace = '/api/attempts/attempt-1/trace?projectId=project-x';
 const traceReads = () => controller.reads().filter(url => url.startsWith('/api/attempts/attempt-1/trace'));
+// Delay only the named read, keeping the shared controller and all other routes unchanged.
+const holdActivityRead = (url: string) => {
+  const fetchBefore = globalThis.fetch,
+    gate = Promise.withResolvers<void>(),
+    requested = Promise.withResolvers<void>();
+  vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) => {
+    const response = await fetchBefore(...args);
+    if (String(args[0]) === url) {
+      requested.resolve();
+      await gate.promise;
+    }
+    return response;
+  });
+  return {
+    requested: requested.promise,
+    release: () => act(async () => gate.resolve()),
+    reject: () => act(async () => gate.reject(new Error('Activity unavailable.'))),
+  };
+};
+const storyActivityUrl = '/api/tasks/T-1/activity?projectId=project-x';
+
+test.each([
+  ['running', 'story'],
+  ['running', 'trace'],
+  ['finished', 'story'],
+  ['finished', 'trace'],
+])(
+  'opening %s Activity reveals the idea, approval and chapter together when %s settles first',
+  async (state, firstRead) => {
+    const live = state === 'running';
+    edit({
+      kind: 'studio-development:change',
+      status: live ? 'running' : 'done',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'implementing',
+        current: live ? 'implementing' : 'review',
+        history: [],
+      },
+    });
+    controller.attempts = [
+      {
+        ...controller.attempts[0]!,
+        status: live ? 'running' : 'accepted',
+        startedAt: '2026-10-28T10:00:00.000Z',
+        finishedAt: live ? null : '2026-10-28T10:10:00.000Z',
+        assignment: { kind: 'studio-development:change' },
+        result: live ? undefined : { summary: 'The finished result.' },
+      },
+    ];
+    controller.traces['attempt-1'] = {
+      ...runningTrace([{ seq: 0, at: '2026-10-28T10:01:00.000Z', kind: 'say', text: 'The initial conversation.' }]),
+      status: live ? 'running' : 'accepted',
+    };
+    controller.stories['T-1'] = {
+      idea: { runId: 'run-1', brief: 'Keep the opening in order.', createdAt: '2026-10-28T09:00:00.000Z', files: [] },
+      events: [
+        {
+          seq: 1,
+          time: '2026-10-28T09:01:00.000Z',
+          kind: 'work_approved',
+          message: 'Director approved this work. Add it to a sprint or start it explicitly.',
+          task_id: 'T-1',
+          attempt_id: null,
+        },
+      ],
+      instructions: [],
+    };
+    const story = holdActivityRead(storyActivityUrl),
+      trace = holdActivityRead(wholeTrace);
+    open('/p/project-x/tasks/T-1?tab=activity');
+    const panel = await screen.findByRole('tabpanel'),
+      chapter = await within(panel).findByRole('region', { name: /^Build, / });
+    await Promise.all([story.requested, trace.requested]);
+    const loading = () => {
+      expect(lineOf(chapter).getAttribute('aria-expanded')).toBe('true');
+      const body = chapter.querySelector('.sd-attemptfold__body') as HTMLElement;
+      expect(body.children).toHaveLength(1);
+      expect(within(body).getAllByRole('status')).toHaveLength(1);
+      expect(body.textContent).toBe('Reading what Eli did…');
+      expect(body.firstElementChild?.className).toBe('sd-meta');
+      expect(within(panel).queryByText('Sent the idea')).toBeNull();
+      expect(within(panel).queryByText('Approved this story')).toBeNull();
+    };
+    loading();
+    await (firstRead === 'story' ? story : trace).release();
+    loading();
+    const first = whenShown('The initial conversation.', () => panel.textContent);
+    await (firstRead === 'story' ? trace : story).release();
+    const conversation = await within(chapter).findByText('The initial conversation.');
+    const text = (await first)!;
+    const positions = [
+      'Sent the idea',
+      'Keep the opening in order.',
+      'Approved this story',
+      'The initial conversation.',
+    ].map(word => text.indexOf(word));
+    expect(positions.every(at => at >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(within(chapter).queryByText(/^Reading what /)).toBeNull();
+    if (!live) expect(text).toContain('The finished result.');
+    // A later story refresh may wait on a new activity response, but cannot remove the drawn conversation.
+    const refresh = holdActivityRead(storyActivityUrl);
+    edit({ title: 'Refreshed after the opening' });
+    change(15, [
+      { seq: 15, type: 'event', id: 'event-15', taskId: 'T-1', kind: 'work_approved', projectId: 'project-x' },
+    ]);
+    await screen.findByRole('heading', { name: 'Refreshed after the opening' });
+    await refresh.requested;
+    expect(within(chapter).getByText('The initial conversation.')).toBe(conversation);
+    expect(within(chapter).queryByText(/^Reading what /)).toBeNull();
+    await refresh.release();
+    expect(conversation.isConnected).toBe(true);
+  },
+);
+
+test('an unavailable story activity read still reveals the available attempt', async () => {
+  controller.traces['attempt-1'] = runningTrace([
+    { seq: 0, at: '2026-10-28T10:01:00.000Z', kind: 'say', text: 'Work is still available.' },
+  ]);
+  const record = holdActivityRead(storyActivityUrl);
+  open('/p/project-x/tasks/T-1?tab=activity');
+  await record.requested;
+  expect(screen.queryByText('Work is still available.')).toBeNull();
+  await record.reject();
+  const panel = await screen.findByRole('tabpanel');
+  expect(await within(panel).findByText('Work is still available.')).toBeTruthy();
+  expect(within(panel).queryByText(/^Reading what /)).toBeNull();
+});
+
+test('Activity preserves the no-attempt state without waiting for a chapter read', async () => {
+  controller.attempts = [];
+  edit({ status: 'ready', lastAttemptId: undefined });
+  const record = holdActivityRead(storyActivityUrl);
+  open('/p/project-x/tasks/T-1?tab=activity');
+  expect(await screen.findByText('Nothing has run yet.')).toBeTruthy();
+  await record.requested;
+  expect(traceReads()).toEqual([]);
+  await record.release();
+  expect(screen.getByText('Nothing has run yet.')).toBeTruthy();
+});
 const logLine = (seq: number) =>
   latest().emit('log', { seq, time: '2026-10-21T20:04:00Z', kind: 'log', message: 'x', attempt_id: 'attempt-1' });
 

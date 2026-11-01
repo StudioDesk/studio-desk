@@ -5,7 +5,16 @@
 // scroll position) is the page's own state, so a refresh never resets it.
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 import {
   getJSON,
   logsUrl,
@@ -70,6 +79,7 @@ import {
   ranOn,
   ResultPanel,
   ReviewVerdict,
+  useReviewReport,
   stagedWork,
   StandsInFull,
   standsInFullId,
@@ -1252,7 +1262,7 @@ function Conversation({
   studio: StudioState;
   attempts: AttemptSummary[];
   attempt: AttemptSummary;
-  trace?: AttemptTrace;
+  trace: AttemptTrace;
   looks: Map<string, AgentLook>;
   onRaw: () => void;
   follows: boolean;
@@ -1269,15 +1279,6 @@ function Conversation({
     ]
       .filter(Boolean)
       .join(' · ');
-  if (!trace)
-    return (
-      <>
-        <div className="sd-divider">{heading}</div>
-        <p role="status" className="sd-meta" style={{ margin: 0 }}>
-          Reading what {workerName(studio, attempt.workerId)} did…
-        </p>
-      </>
-    );
   return (
     <TraceActivity
       projectId={projectId}
@@ -1338,6 +1339,8 @@ function Chapter({
   looks: Map<string, AgentLook>;
   follows: boolean;
   opens: boolean;
+  reveal: boolean;
+  onReady: (attemptId: string) => void;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -1379,6 +1382,8 @@ function ChapterBody({
   looks,
   follows,
   opens,
+  reveal,
+  onReady,
 }: {
   projectId: string;
   task: Task;
@@ -1388,19 +1393,44 @@ function ChapterBody({
   looks: Map<string, AgentLook>;
   follows: boolean;
   opens: boolean;
+  reveal: boolean;
+  onReady: (attemptId: string) => void;
 }) {
   const live = running(attempt.status),
     verdict = isReview(attempt) && !!attempt.finishedAt && !!reviewOf(attempt).verdict,
     trace = useTrace(projectId, attempt.id, live),
     detail = useAttemptDetail(projectId, attempt.id, !live && !verdict),
+    report = useReviewReport(projectId, attempt, verdict),
     full = detail.data?.id === attempt.id ? detail.data : undefined,
+    needsReport = verdict && attempt.artifacts?.some(file => file.path === 'source-change-review.json'),
+    ready = !trace.isPending && (live || verdict || !detail.isPending) && (!needsReport || !report.isPending),
+    [drawn, setDrawn] = useState(false),
     [raw, setRaw] = useState(false),
-    recorded = !trace.error && trace.data?.source !== 'none',
+    recorded = trace.data?.source !== 'none' ? trace.data : undefined,
     // What it handed back ends the chapter, so its conversation leaves out the hand-off it would repeat.
     handedBack = !live && !!attempt.result?.summary,
     ran = ranOn(studio, attempt);
+  useEffect(() => {
+    if (ready) onReady(attempt.id);
+  }, [ready, onReady, attempt.id]);
+  // Readiness is only an opening gate. Refetches and the transition out of running must leave the
+  // conversation mounted, keeping its follow state and the reader's position.
+  if (!drawn && reveal && ready) setDrawn(true);
+  if (!drawn && !(reveal && ready))
+    return (
+      <div className="sd-attemptfold__body">
+        <p role="status" className="sd-meta" style={{ margin: 0 }}>
+          Reading what {workerName(studio, attempt.workerId)} did…
+        </p>
+      </div>
+    );
   return (
     <div className="sd-attemptfold__body">
+      {trace.error && !recorded && (
+        <p role="status" className="sd-meta" style={{ margin: 0 }}>
+          The conversation could not be read. The available activity and result follow.
+        </p>
+      )}
       {ran.length > 0 && <span className="sd-meta">{ran.join(' · ')}</span>}
       {live && (
         <>
@@ -1443,7 +1473,7 @@ function ChapterBody({
           studio={studio}
           attempts={attempts}
           attempt={attempt}
-          trace={trace.data && handedBack ? { ...trace.data, handoff: null } : trace.data}
+          trace={handedBack ? { ...recorded, handoff: null } : recorded}
           looks={looks}
           onRaw={() => setRaw(true)}
           follows={follows}
@@ -1454,14 +1484,20 @@ function ChapterBody({
         <>
           <div className="sd-divider">{verdict ? 'Its verdict' : 'What it handed back'}</div>
           {verdict ? (
-            <ReviewVerdict projectId={projectId} studio={studio} review={attempt} looks={looks} />
+            <ReviewVerdict
+              projectId={projectId}
+              studio={studio}
+              review={attempt}
+              looks={looks}
+              preparedReport={report.data ?? null}
+            />
           ) : (
             <HandedBack
               projectId={projectId}
               task={task}
               studio={studio}
               attempt={attempt}
-              full={full}
+              full={full ?? attempt}
               proposals={proposer(task, attempts)?.id === attempt.id}
             />
           )}
@@ -1671,6 +1707,13 @@ function StoryActivity({
       queryKey: queryKeys.story(projectId, task.id),
       queryFn: ({ signal }) => getJSON<StoryActivityRecord>(storyActivityUrl(projectId, task.id), signal),
     }),
+    [prepared, setPrepared] = useState<Record<string, boolean>>({}),
+    [revealed, setRevealed] = useState(false),
+    onReady = useCallback((id: string) => {
+      setPrepared(current => (current[id] ? current : { ...current, [id]: true }));
+    }, []),
+    ready = !record.isPending && ordered.filter(isOpen).every(attempt => prepared[attempt.id]),
+    reveal = revealed || ready,
     parts = yourPart(record.data, {
       noun: isSourceStory(task) ? 'story' : 'task',
       worker: id => workerName(studio, id),
@@ -1688,6 +1731,9 @@ function StoryActivity({
       integrating.length > 0 ||
       carries.length > 0 ||
       (isSourceStory(task) && (stage?.phase === 'integration' || stage?.current === 'integrated'));
+  // Coordinate only the initial opening. Folded chapters never mount their readers, and subsequent
+  // updates or newly opened chapters cannot hide content that the director is already reading.
+  if (!revealed && ready) setRevealed(true);
   // Your part goes before the first attempt that started after it, or before the attempt it started.
   const between = parts.filter(part => !part.integration),
     waiting = waitingQuestion(task, attempts),
@@ -1701,7 +1747,7 @@ function StoryActivity({
       (Date.parse(between[next]!.at) < startOf(attempt) || between[next]!.opens === attempt.id);
       next++
     )
-      blocks.push(<PartLine key={between[next]!.key} projectId={projectId} part={between[next]!} />);
+      if (reveal) blocks.push(<PartLine key={between[next]!.key} projectId={projectId} part={between[next]!} />);
     blocks.push(
       <Chapter
         key={attempt.id}
@@ -1713,12 +1759,14 @@ function StoryActivity({
         looks={looks}
         follows={attempt === follower}
         opens={attempt === follower && (!focus || focus === attempt.id)}
+        reveal={reveal}
+        onReady={onReady}
         open={open}
         onToggle={() => onToggle(attempt.id, !open)}
       />,
     );
     const asked = exchange(task, attempt);
-    if (asked)
+    if (asked && reveal)
       blocks.push(
         <QuestionExchange
           key={`${attempt.id} exchange`}
@@ -1731,12 +1779,13 @@ function StoryActivity({
         />,
       );
   }
-  for (const part of between.slice(next)) blocks.push(<PartLine key={part.key} projectId={projectId} part={part} />);
+  if (reveal)
+    for (const part of between.slice(next)) blocks.push(<PartLine key={part.key} projectId={projectId} part={part} />);
   return (
     <div className="sd-tabpanel" style={{ gap: '12px' }}>
       {blocks}
       {!ordered.length && <p style={{ margin: 0, color: 'var(--ink-2)' }}>Nothing has run yet.</p>}
-      {integration && (
+      {reveal && integration && (
         <>
           <div className="sd-divider">Integration</div>
           {integrating.map(part => (

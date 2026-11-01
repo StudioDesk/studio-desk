@@ -3,13 +3,13 @@
 // verdict, and a folded one reads nothing. The review tile opens the review's chapter; there is no Review tab.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
+import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
 
 let controller: Controller;
 beforeEach(() => {
@@ -24,10 +24,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const open = () =>
+const open = (path = '/p/project-x/tasks/T-1') =>
   render(
     <App
-      router={createAppRouter(createMemoryHistory({ initialEntries: ['/p/project-x/tasks/T-1'] }))}
+      router={createAppRouter(createMemoryHistory({ initialEntries: [path] }))}
       queryClient={new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })}
       createStream={createStream}
     />,
@@ -159,6 +159,7 @@ const activity = async () => {
   await user.click(await screen.findByRole('tab', { name: 'Activity' }, { timeout: 5000 }));
   const panel = await screen.findByRole('tabpanel');
   await within(panel).findByRole('region', { name: 'Review' }, { timeout: 5000 });
+  await within(panel).findByText(/Morgan (passed it|asked for changes)/);
   return { user, panel };
 };
 const chapters = (panel: HTMLElement) => [...panel.querySelectorAll<HTMLElement>('section.sd-attemptfold')];
@@ -207,7 +208,7 @@ test('an open build chapter says what it ran on and ends with everything it hand
   await user.click(lineOf(second));
   const chapter = within(second);
   // Who ran it on what, when and for how long, as its Attempts row says.
-  expect(chapter.getByText(/opus, high effort · workspace · .+ to .+ · 20 min$/)).toBeTruthy();
+  expect(await chapter.findByText(/opus, high effort · workspace · .+ to .+ · 20 min$/)).toBeTruthy();
   expect(await chapter.findByText('Strip the attempts next.', {}, { timeout: 5000 })).toBeTruthy();
   const at = (words: string) => (second.textContent ?? '').indexOf(words);
   const parts = [
@@ -311,6 +312,7 @@ test("a running attempt's chapter is open and shows its live activity", async ()
   expect(lineOf(live).getAttribute('aria-expanded')).toBe('true');
   expect(lineOf(live).textContent).toContain('Running');
   const chapter = within(live);
+  await chapter.findByText('Folding the chapters now.');
   expect(chapter.getByText(/^Eli is working on it now\./)).toBeTruthy();
   expect(chapter.getByText('Continued from attempt-1: src/a.mjs')).toBeTruthy();
   expect(await chapter.findByText('Folding the chapters now.')).toBeTruthy();
@@ -480,7 +482,7 @@ for (const phone of [false, true])
       expect(within(tablist).getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
       const review = await within(screen.getByRole('tabpanel')).findByRole('region', { name: 'Review' });
       expect(lineOf(review).getAttribute('aria-expanded')).toBe('true');
-      expect(within(review).getByText('Morgan passed it')).toBeTruthy();
+      expect(await within(review).findByText('Morgan passed it')).toBeTruthy();
       await waitFor(() => expect(scrolled.mock.contexts).toContain(review));
       // A finished chapter comes into view at its start.
       expect(scrolled.mock.calls[scrolled.mock.contexts.indexOf(review)]).toEqual([{ block: 'start' }]);
@@ -497,3 +499,216 @@ test("a folded chapter does not read its attempt's full record; opening it does"
   await user.click(lineOf(within(panel).getByRole('region', { name: 'Build, attempt 1 of 3' })));
   await waitFor(() => expect(controller.reads()).toContain(detailOf('attempt-1')));
 });
+
+// Hold just one route's response, after the stand-in has recorded the request. Nothing reaches the query
+// until released; multiple holds can be installed to exercise either completion order independently.
+const holdRead = (url: string) => {
+  const fetchBefore = globalThis.fetch,
+    gate = Promise.withResolvers<void>(),
+    requested = Promise.withResolvers<void>();
+  vi.stubGlobal('fetch', async (...args: Parameters<typeof fetch>) => {
+    const response = await fetchBefore(...args);
+    if (String(args[0]) === url) {
+      requested.resolve();
+      await gate.promise;
+    }
+    return response;
+  });
+  return {
+    requested: requested.promise,
+    release: () => act(async () => gate.resolve()),
+    reject: () => act(async () => gate.reject(new Error('Record unavailable.'))),
+  };
+};
+const traceOf = (id: string) => `/api/attempts/${id}/trace?projectId=project-x`;
+const recordedSay = (id: string, text: string) => {
+  const attempt = controller.attempts.find(item => item.id === id)!;
+  controller.traces[id] = {
+    schemaVersion: 'attempt-trace-v1',
+    attemptId: id,
+    taskId: 'T-1',
+    provider: 'claude',
+    status: attempt.status,
+    source: 'activity-file',
+    lines: 1,
+    counts: { say: 1 },
+    steps: [say(0, text)],
+    phases: [],
+    handoff: { summary: attempt.result?.summary },
+  };
+};
+// Check the whole body, so metadata, notices, result sections and a raw panel cannot slip through unnoticed.
+const onlyLoading = (chapter: HTMLElement, name: string) => {
+  expect(lineOf(chapter).getAttribute('aria-expanded')).toBe('true');
+  const body = chapter.querySelector('.sd-attemptfold__body')!;
+  expect(body.children).toHaveLength(1);
+  const status = within(body as HTMLElement).getByRole('status');
+  expect(status.className).toBe('sd-meta');
+  expect(status.textContent).toBe(`Reading what ${name} did…`);
+  expect(body.textContent).toBe(status.textContent);
+};
+const chapterOrder = (chapter: HTMLElement, words: string[]) => {
+  const positions = words.map(word => chapter.textContent!.indexOf(word));
+  expect(positions.every(at => at >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  expect(within(chapter).queryByText(/^Reading what /)).toBeNull();
+};
+const directActivity = async (name: string) => {
+  open('/p/project-x/tasks/T-1?tab=activity');
+  expect((await screen.findByRole('tab', { name: 'Activity' })).getAttribute('aria-selected')).toBe('true');
+  return within(await screen.findByRole('tabpanel')).findByRole('region', { name });
+};
+
+test('a finished review reveals its conversation, verdict and long summary together after its initial trace', async () => {
+  reviewed();
+  const summary = 'The whole review summary. '.repeat(50).trim();
+  controller.attempts[2] = { ...controller.attempts[2]!, result: { summary } };
+  recordedSay('attempt-review', 'I inspected the chapter ordering.');
+  const trace = holdRead(traceOf('attempt-review')),
+    chapter = await directActivity('Review');
+  await trace.requested;
+  onlyLoading(chapter, 'Morgan');
+  expect(lineOf(chapter).textContent).toContain('Passed');
+  const first = whenShown('I inspected the chapter ordering.', () => chapter.textContent);
+  await trace.release();
+  await within(chapter).findByText('I inspected the chapter ordering.');
+  expect(await first).toContain(summary);
+  chapterOrder(chapter, ['I inspected the chapter ordering.', 'Its verdict', 'Morgan passed it', summary]);
+  expect(within(chapter).getAllByText(summary)).toHaveLength(1);
+  expect(controller.reads()).not.toContain(traceOf('attempt-1'));
+  expect(controller.reads()).not.toContain(traceOf('attempt-2'));
+  expect(controller.reads()).not.toContain(detailOf('attempt-1'));
+});
+
+test('a running chapter keeps only its heading and quiet status until its initial trace settles', async () => {
+  runningStory([say(0, 'I am folding the chapters.')]);
+  const trace = holdRead(traceOf('attempt-3')),
+    chapter = await directActivity('Build, attempt 2 of 3');
+  await trace.requested;
+  onlyLoading(chapter, 'Eli');
+  await trace.release();
+  await within(chapter).findByText('I am folding the chapters.');
+  expect(within(chapter).getByText(/^Eli is working on it now/)).toBeTruthy();
+  expect(within(chapter).queryByText(/^Reading what /)).toBeNull();
+});
+
+test('opening an earlier folded chapter waits for its own trace without hiding the settled review', async () => {
+  reviewed();
+  recordedSay('attempt-review', 'Review conversation already drawn.');
+  recordedSay('attempt-1', 'The first build conversation.');
+  const trace = holdRead(traceOf('attempt-1')),
+    chapter = await directActivity('Review');
+  const conversation = await within(chapter).findByText('Review conversation already drawn.');
+  expect(controller.reads()).not.toContain(traceOf('attempt-1'));
+  expect(controller.reads()).not.toContain(detailOf('attempt-1'));
+  const earlier = within(screen.getByRole('tabpanel')).getByRole('region', { name: 'Build, attempt 1 of 3' });
+  await userEvent.setup().click(lineOf(earlier));
+  await trace.requested;
+  onlyLoading(earlier, 'Eli');
+  expect(conversation.isConnected).toBe(true);
+  await trace.release();
+  await within(earlier).findByText('The first build conversation.');
+  chapterOrder(earlier, ['The first build conversation.', 'What it handed back', 'First try.']);
+  expect(within(chapter).getByText('Review conversation already drawn.')).toBe(conversation);
+});
+
+test.each(['trace', 'detail'] as const)(
+  'a completed build waits for both reads when %s settles first',
+  async firstRead => {
+    reviewed();
+    controller.attempts = controller.attempts.slice(0, 2);
+    controller.tasks[0] = { ...controller.tasks[0]!, lastAttemptId: 'attempt-2' };
+    recordedSay('attempt-2', 'The completed build conversation.');
+    const trace = holdRead(traceOf('attempt-2')),
+      detail = holdRead(detailOf('attempt-2')),
+      chapter = await directActivity('Build, attempt 2 of 3');
+    await Promise.all([trace.requested, detail.requested]);
+    onlyLoading(chapter, 'Eli');
+    await (firstRead === 'trace' ? trace : detail).release();
+    onlyLoading(chapter, 'Eli');
+    const first = whenShown('The completed build conversation.', () => chapter.textContent);
+    await (firstRead === 'trace' ? detail : trace).release();
+    await within(chapter).findByText('The completed build conversation.');
+    const body = await first;
+    expect(body).toContain('Strip the attempts next.');
+    expect(body).toContain("Eli's own test runs");
+    expect(body).toContain('How its time went');
+    chapterOrder(chapter, [
+      'The completed build conversation.',
+      'What it handed back',
+      'Second try, folded.',
+      'Strip the attempts next.',
+    ]);
+    expect(within(chapter).getAllByText('Second try, folded.')).toHaveLength(1);
+  },
+);
+
+test.each(['trace', 'report'] as const)(
+  'a review prepares its optional report when %s settles first',
+  async firstRead => {
+    reviewed();
+    controller.attempts[2] = {
+      ...controller.attempts[2]!,
+      artifacts: [{ path: 'source-change-review.json', hash: 'review-hash' }],
+    };
+    controller.artifacts['attempt-review/source-change-review.json'] = JSON.stringify({
+      unperformedChecks: ['Check the browser layout'],
+    });
+    recordedSay('attempt-review', 'I checked the review report.');
+    const trace = holdRead(traceOf('attempt-review')),
+      report = holdRead('/api/attempts/attempt-review/artifact?projectId=project-x&path=source-change-review.json'),
+      chapter = await directActivity('Review');
+    await Promise.all([trace.requested, report.requested]);
+    await (firstRead === 'trace' ? trace : report).release();
+    onlyLoading(chapter, 'Morgan');
+    const first = whenShown('I checked the review report.', () => chapter.textContent);
+    await (firstRead === 'trace' ? report : trace).release();
+    await within(chapter).findByText('I checked the review report.');
+    expect(await first).toContain('Check the browser layout');
+    chapterOrder(chapter, [
+      'I checked the review report.',
+      'Its verdict',
+      'The change holds up.',
+      'Check the browser layout',
+    ]);
+  },
+);
+
+test.each(['trace', 'detail', 'report'] as const)(
+  'a failed %s read settles to available chapter content',
+  async failedRead => {
+    reviewed();
+    const id = failedRead === 'detail' ? 'attempt-2' : 'attempt-review';
+    if (failedRead === 'detail') {
+      controller.attempts = controller.attempts.slice(0, 2);
+      controller.tasks[0] = { ...controller.tasks[0]!, lastAttemptId: id };
+    }
+    if (failedRead === 'report')
+      controller.attempts[2] = {
+        ...controller.attempts[2]!,
+        artifacts: [{ path: 'source-change-review.json', hash: 'missing' }],
+      };
+    recordedSay(id, 'Available conversation.');
+    const url =
+      failedRead === 'trace'
+        ? traceOf(id)
+        : failedRead === 'detail'
+          ? detailOf(id)
+          : `/api/attempts/${id}/artifact?projectId=project-x&path=source-change-review.json`;
+    const read = holdRead(url),
+      chapter = await directActivity(failedRead === 'detail' ? 'Build, attempt 2 of 3' : 'Review');
+    await read.requested;
+    onlyLoading(chapter, failedRead === 'detail' ? 'Eli' : 'Morgan');
+    await read.reject();
+    await within(chapter).findByText(failedRead === 'detail' ? 'Second try, folded.' : 'Morgan passed it');
+    expect(within(chapter).queryByText(/^Reading what /)).toBeNull();
+    expect(within(chapter).queryByText(/Loading what it handed on/)).toBeNull();
+    if (failedRead === 'trace') {
+      const explanation = within(chapter).getAllByText(/^The conversation could not be read\./);
+      expect(explanation).toHaveLength(1);
+      expect(explanation[0]!.getAttribute('role')).toBe('status');
+      expect(explanation[0]!.className).toBe('sd-meta');
+      expect(await within(chapter).findByLabelText('Raw log')).toBeTruthy();
+    } else expect(within(chapter).getByText('Available conversation.')).toBeTruthy();
+  },
+);

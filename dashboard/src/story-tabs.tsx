@@ -508,19 +508,27 @@ export function ChecksPanel({
 
 // A review's verdict, as its chapter in the story's Activity ends: what the reviewer decided, what they said, their
 // findings and notes, and what they did not check.
+export function useReviewReport(projectId: string, review: AttemptSummary, enabled = true) {
+  return useRecordedJson<{ unperformedChecks?: string[] }>(projectId, review, 'source-change-review.json', enabled);
+}
+
 export function ReviewVerdict({
   projectId,
   studio,
   review,
   looks,
+  preparedReport,
 }: {
   projectId: string;
   studio: StudioState;
   review: AttemptSummary;
   looks: Map<string, AgentLook>;
+  // Activity prepares this read with the conversation; null means it settled without a report.
+  preparedReport?: { unperformedChecks?: string[] } | null;
 }) {
   const reviewer = workerName(studio, review.workerId),
-    report = useRecordedJson<{ unperformedChecks?: string[] }>(projectId, review, 'source-change-review.json', true),
+    report = useReviewReport(projectId, review, preparedReport === undefined),
+    recorded = preparedReport === undefined ? report.data : preparedReport,
     look = looks.get(review.workerId ?? ''),
     { verdict, findings, notes } = reviewOf(review),
     model = modelOf(review),
@@ -577,7 +585,7 @@ export function ReviewVerdict({
           ))}
         </Section>
       )}
-      <Unchecked title={`${reviewer} did not check`} names={report.data?.unperformedChecks ?? []} />
+      <Unchecked title={`${reviewer} did not check`} names={recorded?.unperformedChecks ?? []} />
     </>
   );
 }
