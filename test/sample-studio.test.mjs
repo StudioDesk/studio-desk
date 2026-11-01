@@ -4,7 +4,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { sampleDirectory, sampleProjects, startSampleStudio, viteProgram } from '../scripts/sample-studio.mjs';
+import { fileURLToPath } from 'node:url';
+import {
+  buildArguments,
+  sampleDirectory,
+  sampleProjects,
+  startSampleStudio,
+  viteProgram,
+} from '../scripts/sample-studio.mjs';
 
 // The sample studio Studio desk development's visual check starts (October 30, 2026): the two projects at the addresses
 // the planner names, ideas waiting, every agent the Simulator and the studio paused, so a capture never runs a model.
@@ -44,4 +51,8 @@ test("the sample studio's folder is never the data folder, and Vite is found fro
   assert.equal(sampleDirectory('/copy'), path.join('/copy', '.studio-sample'));
   assert.match(viteProgram(), /vite[\\/]bin[\\/]vite\.js$/);
   assert.ok(fs.existsSync(viteProgram()));
+  // Vite's root is the dashboard folder, so the build names the copy's dist folder in full (November 1: a relative
+  // one built into dashboard/dist, and the captures showed The dashboard is not built).
+  const args = buildArguments();
+  assert.equal(args[args.indexOf('--outDir') + 1], path.join(fileURLToPath(new URL('..', import.meta.url)), 'dist'));
 });

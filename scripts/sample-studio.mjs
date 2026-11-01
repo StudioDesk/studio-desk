@@ -52,12 +52,25 @@ export function viteProgram(base = root) {
   return path.join(path.dirname(manifest), 'bin', 'vite.js');
 }
 
+// The build's arguments. Vite's root is the dashboard folder (vite.config.mjs), so the output folder is named in full:
+// a relative one would land in dashboard/dist, where the controller never looks.
+export function buildArguments(base = root) {
+  const outDir = path.join(base, 'dist');
+  return [
+    viteProgram(base),
+    'build',
+    '--configLoader',
+    'native',
+    '--outDir',
+    outDir,
+    '--emptyOutDir',
+    '--logLevel',
+    'warn',
+  ];
+}
+
 function buildDashboard(base) {
-  const built = spawnSync(
-    process.execPath,
-    [viteProgram(base), 'build', '--configLoader', 'native', '--outDir', 'dist', '--emptyOutDir', '--logLevel', 'warn'],
-    { cwd: base, stdio: 'inherit', windowsHide: true },
-  );
+  const built = spawnSync(process.execPath, buildArguments(base), { cwd: base, stdio: 'inherit', windowsHide: true });
   if (built.status !== 0) throw new Error(`The dashboard did not build (exit code ${built.status}).`);
 }
 
