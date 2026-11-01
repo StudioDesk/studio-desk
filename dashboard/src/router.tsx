@@ -26,6 +26,7 @@ const TaskView = lazyRouteComponent(() => import('./task-page'), 'TaskView'),
   RecordPage = lazyRouteComponent(() => import('./record-page'), 'RecordPage'),
   RunsPage = lazyRouteComponent(() => import('./runs-page'), 'RunsPage'),
   SettingsPage = lazyRouteComponent(() => import('./settings-page'), 'SettingsPage'),
+  PreviewsPage = lazyRouteComponent(() => import('./previews-page'), 'PreviewsPage'),
   TeamsPage = lazyRouteComponent(() => import('./teams-page'), 'TeamsPage'),
   TeamPage = lazyRouteComponent(() => import('./teams-page'), 'TeamPage'),
   AgentsPage = lazyRouteComponent(() => import('./agents-page'), 'AgentsPage'),
@@ -201,6 +202,7 @@ const settingsPage = <Path extends string>(path: Path, Page: ComponentType<{ pro
   });
 const platformRoute = settingsPage('platform', PlatformPage);
 const activityRoute = settingsPage('activity', ActivityLogPage);
+const previewsRoute = settingsPage('previews', PreviewsPage);
 // The old overview and setup pages are gone: Today and the board show what the overview did, and Settings holds
 // what the setup page held. Their addresses still lead somewhere.
 const overviewRoute = createRoute({
@@ -407,6 +409,7 @@ export const routeTree = rootRoute.addChildren([
     overviewRoute,
     platformRoute,
     activityRoute,
+    previewsRoute,
     taskRoute,
     traceRoute,
     recordRoute,

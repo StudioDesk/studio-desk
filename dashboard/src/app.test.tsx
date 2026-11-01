@@ -3,6 +3,7 @@
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './app';
 import { setChatBox } from './chat-box';
@@ -118,6 +119,49 @@ test('a story belongs to its idea, and the teams pages to the agents', async () 
   const nav = within(await screen.findByRole('navigation', { name: 'Main' }));
   expect(nav.getByRole('link', { name: 'Agents' }).getAttribute('aria-current')).toBe('page');
   expect(nav.getByRole('link', { name: 'Project settings' }).getAttribute('aria-current')).toBeNull();
+});
+
+test('Previews opens directly under Settings and keeps the project settings frame selected', async () => {
+  // Its link and trail use the project in the address, including a project other than the first.
+  const router = open('/p/project-y/settings/previews');
+  await screen.findByRole('heading', { level: 1, name: 'Previews' });
+  expect(router.history.location.pathname).toBe('/p/project-y/settings/previews');
+  const nav = within(await screen.findByRole('navigation', { name: 'Main' }));
+  expect(nav.getByRole('link', { name: 'Project settings' }).getAttribute('aria-current')).toBe('page');
+  expect(nav.getByRole('link', { name: 'Today' }).getAttribute('aria-current')).toBeNull();
+  const trail = within(screen.getByRole('navigation', { name: 'You are here' }));
+  const settings = trail.getByRole('link', { name: 'Settings' });
+  expect(settings.getAttribute('href')).toBe('/p/project-y/settings');
+  expect(settings.getAttribute('aria-current')).toBeNull();
+  expect(trail.getByText('Previews').getAttribute('aria-current')).toBe('page');
+});
+
+test('Settings opens Previews, its trail returns, and Back and Forward keep both pages in the settings frame', async () => {
+  const user = userEvent.setup();
+  const router = open('/p/project-x/settings');
+  const shown = async (title: string, path: string) => {
+    await screen.findByRole('heading', { level: 1, name: title });
+    expect(router.history.location.pathname).toBe(path);
+    expect(
+      within(screen.getByRole('navigation', { name: 'Main' }))
+        .getByRole('link', { name: 'Project settings' })
+        .getAttribute('aria-current'),
+    ).toBe('page');
+  };
+  await user.click(await screen.findByRole('link', { name: 'Previews' }));
+  await shown('Previews', '/p/project-x/settings/previews');
+  await user.click(
+    within(screen.getByRole('navigation', { name: 'You are here' })).getByRole('link', { name: 'Settings' }),
+  );
+  await shown('Settings', '/p/project-x/settings');
+  act(() => router.history.back());
+  await shown('Previews', '/p/project-x/settings/previews');
+  act(() => router.history.back());
+  await shown('Settings', '/p/project-x/settings');
+  act(() => router.history.forward());
+  await shown('Previews', '/p/project-x/settings/previews');
+  act(() => router.history.forward());
+  await shown('Settings', '/p/project-x/settings');
 });
 
 test('Add a project opens Create a project over the page, from the rail or Find a project', async () => {

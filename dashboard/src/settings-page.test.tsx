@@ -2,7 +2,7 @@
 // shows, with the current dashboard's settings and actions.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { BuiltInSandbox, TrySettings, TryView } from './api';
@@ -467,44 +467,32 @@ test('the appearance is kept in this browser and applied at once', async () => {
   expect(localStorage.getItem('studio-theme')).toBeNull();
 });
 
-test('the chat box preview is off on a fresh browser, kept in this browser when switched, and never sent to the controller', async () => {
+test('Settings ends with one keyboard-accessible Previews link, after all ordinary settings and outside the sections nav', async () => {
   const user = userEvent.setup();
-  open('/p/project-x/settings');
-  const appearance = within(await screen.findByRole('region', { name: 'Appearance' }));
-  const chatBox = () => appearance.getByRole('switch', { name: 'The chat box (preview)' });
-  expect(chatBox().getAttribute('aria-checked')).toBe('false');
-  expect(
-    appearance.getByText(
-      'With it on, New idea opens a chat box beside the page; with it off, New idea works as it always has.',
-    ),
-  ).toBeTruthy();
-  const sent = commands();
-  await user.click(chatBox());
-  expect(chatBox().getAttribute('aria-checked')).toBe('true');
-  expect(localStorage.getItem('studio-chat-box')).toBe('on');
-  await user.click(chatBox());
-  expect(chatBox().getAttribute('aria-checked')).toBe('false');
-  expect(localStorage.getItem('studio-chat-box')).toBeNull();
-  await user.click(chatBox());
-  expect(commands()).toEqual(sent);
-  // Reopened, Settings reads the switch from this browser.
-  cleanup();
-  open('/p/project-x/settings');
-  const reopened = await screen.findByRole('switch', { name: 'The chat box (preview)' });
-  expect(reopened.getAttribute('aria-checked')).toBe('true');
-  expect(commands()).toEqual(sent);
-});
-
-test('the chat box preview follows a change made in another tab without a reload', async () => {
-  open('/p/project-x/settings');
-  const chatBox = await screen.findByRole('switch', { name: 'The chat box (preview)' });
-  localStorage.setItem('studio-chat-box', 'on');
-  fireEvent(window, new StorageEvent('storage', { key: 'studio-chat-box', newValue: 'on' }));
-  expect(chatBox.getAttribute('aria-checked')).toBe('true');
-  // Another tab clearing this browser's storage turns it off too.
-  localStorage.clear();
-  fireEvent(window, new StorageEvent('storage', { key: null }));
-  expect(chatBox.getAttribute('aria-checked')).toBe('false');
+  const router = open('/p/project-x/settings');
+  await screen.findByRole('region', { name: 'Appearance' });
+  expect(screen.queryByRole('switch', { name: /preview/i })).toBeNull();
+  expect(screen.queryByText('The chat box (preview)')).toBeNull();
+  const links = screen.getAllByRole('link', { name: 'Previews' });
+  expect(links).toHaveLength(1);
+  const link = links[0]!;
+  expect(link.getAttribute('href')).toBe('/p/project-x/settings/previews');
+  expect(link.closest('nav, section')).toBeNull();
+  // Every section and the shared-settings note precede the footer, including Appearance's final details.
+  const content = screen.getByRole('main');
+  for (const element of within(content).getAllByRole('region').concat(within(content).getAllByRole('note'))) {
+    expect(element.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+  const appearance = within(screen.getByRole('region', { name: 'Appearance' }));
+  expect(appearance.getByText('Local records')).toBeTruthy();
+  expect(appearance.getByText(/Studio desk test/)).toBeTruthy();
+  appearance.getByRole('button', { name: 'Dark' }).focus();
+  await user.tab();
+  expect(document.activeElement).toBe(link);
+  await user.keyboard('{Enter}');
+  expect(await screen.findByRole('heading', { level: 1, name: 'Previews' })).toBeTruthy();
+  expect(router.history.location.pathname).toBe('/p/project-x/settings/previews');
+  expect(commands()).toEqual([]);
 });
 
 test('the house rules switch a gate between you and the studio, and save against the revision they read', async () => {

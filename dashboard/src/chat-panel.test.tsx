@@ -49,7 +49,39 @@ const box = (region: HTMLElement) => within(region).findByRole('textbox', { name
 const sidebarNewIdea = async () => (await screen.findAllByRole('button', { name: 'New idea' }))[0]!;
 const posted = () => controller.requests.filter(request => request.method === 'POST');
 
-test('New idea opens the chat box beside the board, which stays where it is', async () => {
+test('the switch on Previews enables New idea beside the current page, then removes the panel and restores Today', async () => {
+  const scrolled = vi.fn();
+  Element.prototype.scrollIntoView = scrolled;
+  try {
+    localStorage.removeItem(chatBoxKey);
+    const user = userEvent.setup();
+    const router = open('/p/project-x/settings/previews');
+    const toggle = await screen.findByRole('switch', { name: 'The chat box (preview)' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    await user.click(toggle);
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    await user.click(await sidebarNewIdea());
+    const region = await panel();
+    expect(await box(region)).toBeTruthy();
+    expect(router.history.location.pathname).toBe('/p/project-x/settings/previews');
+    expect(screen.getByRole('heading', { level: 1, name: 'Previews' })).toBeTruthy();
+    await user.click(toggle);
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    await waitFor(() => expect(shut()).toBeNull());
+    expect(localStorage.getItem(chatBoxKey)).toBeNull();
+    await user.click(await sidebarNewIdea());
+    await waitFor(() => expect(router.history.location.pathname).toBe('/p/project-x'));
+    const today = await screen.findByRole('textbox', { name: 'New idea for Project X' });
+    await waitFor(() => expect(document.activeElement).toBe(today));
+    expect(scrolled).toHaveBeenCalled();
+    expect(shut()).toBeNull();
+    expect(controller.requests.filter(request => request.method !== 'GET')).toEqual([]);
+  } finally {
+    delete (Element.prototype as Partial<Element>).scrollIntoView;
+  }
+});
+
+test('a previously enabled preference opens the chat box from New idea without visiting Previews', async () => {
   const router = open('/p/project-x/board');
   fireEvent.click(await sidebarNewIdea());
   const region = await panel();

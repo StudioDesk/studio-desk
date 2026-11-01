@@ -17,7 +17,6 @@ import {
   type TrySettings,
 } from './api';
 import { BuiltInSandboxSetup } from './built-in-sandbox';
-import { setChatBox, useChatBox } from './chat-box';
 import { AgentAvatar } from './design/avatar';
 import { Dialog } from './design/dialog';
 import { Clapper, Icon, StudioMark } from './design/icons';
@@ -1389,7 +1388,6 @@ function applyTheme(value: Theme) {
 
 function Appearance({ state }: { state: StudioState }) {
   const [theme, setTheme] = useState(savedTheme);
-  const chatBox = useChatBox();
   const choose = (value: Theme) => {
     applyTheme(value);
     setTheme(value);
@@ -1404,12 +1402,6 @@ function Appearance({ state }: { state: StudioState }) {
           </button>
         ))}
       </span>
-      <Row
-        title="The chat box (preview)"
-        note="With it on, New idea opens a chat box beside the page; with it off, New idea works as it always has."
-      >
-        <Toggle label="The chat box (preview)" on={chatBox} onChange={() => setChatBox(!chatBox)} />
-      </Row>
       <Row title="Local records" note="To back up, stop the controller and copy this whole folder.">
         {state.runtime?.dataDirectory && <span className="sd-file sd-file--path">{state.runtime.dataDirectory}</span>}
       </Row>
@@ -1465,6 +1457,11 @@ export function SettingsPage({ projectId }: { projectId: string }) {
           <Tools projectId={projectId} state={state} />
           <Projects projectId={projectId} state={state} />
           <Appearance state={state} />
+          <footer className="sd-settingsfoot">
+            <Link to="/p/$projectId/settings/previews" params={{ projectId }}>
+              Previews
+            </Link>
+          </footer>
         </div>
       </div>
     </div>
