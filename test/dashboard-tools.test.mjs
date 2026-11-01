@@ -26,7 +26,8 @@ function tool(relative) {
 }
 
 // describe(tail) builds the failure message from the end of the tool's output; it runs only when the tool fails.
-function run(name, script, args, describe = tail => `The dashboard's ${name} failed:\n${tail}`) {
+// Each tool's run is stopped after its time limit; the dashboard's own tests have the longest, which grows with them.
+function run(name, script, args, describe = tail => `The dashboard's ${name} failed:\n${tail}`, limit = 110000) {
   const file = tool(script);
   if (!file)
     assert.fail(
@@ -39,9 +40,12 @@ function run(name, script, args, describe = tail => `The dashboard's ${name} fai
     cwd: root,
     env: environment,
     encoding: 'utf8',
-    timeout: 110000,
+    timeout: limit,
   });
   const output = `${result.stdout || ''}${result.stderr || ''}`.trim();
+  // A run stopped for time says so, rather than reading as a failure with no report.
+  if (result.error?.code === 'ETIMEDOUT')
+    assert.fail(`The dashboard's ${name} ran past ${limit / 1000} seconds and were stopped:\n${output.slice(-1500)}`);
   assert.equal(
     result.status,
     0,
@@ -108,7 +112,9 @@ test("the dashboard passes its lint rules, including React's rules of hooks", ()
   run('lint', 'eslint/bin/eslint.js', ['--max-warnings', '0', 'dashboard']);
 });
 
-test("the dashboard's own tests pass in a simulated page", t => {
+// On October 30 and November 1 the whole run took 83 to over 110 seconds as the dashboard grew and the computer was
+// busy, past the 110 seconds every tool had; its limit is 300 seconds, inside the test's own.
+test("the dashboard's own tests pass in a simulated page", { timeout: 320000 }, t => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-dashboard-tests-'));
   t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
   const report = path.join(folder, 'report.json');
@@ -119,6 +125,7 @@ test("the dashboard's own tests pass in a simulated page", t => {
     tail =>
       testsFailure(readReport(report), root) ??
       `The dashboard's tests failed, and the runner left no report naming a failure:\n${tail}`,
+    300000,
   );
   assert.match(output, /Tests\s+\d+ passed/);
 });
