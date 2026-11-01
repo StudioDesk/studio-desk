@@ -1,5 +1,5 @@
 // Today's words and figures (the canvas's Today, v1.0 item 23), from the records a project's tab already holds:
-// the page's sentence and the line under it, each agent's face and what it last did, and what shipped today.
+// the page's sentence, each agent's face and what it last did, and what shipped today.
 import type { AttemptSummary, Task, Worker } from './api';
 import { CLASSIC, pickNew, type AgentLook } from './design/agent-kit.js';
 import { openPhaseOf, reviewOf, testingPhases } from './evidence';
@@ -24,16 +24,6 @@ export const greeting = (now = new Date()) => {
 export function callsTitle(calls: number, short = false) {
   if (!calls) return 'Nothing needs you right now.';
   return `${counted(calls)} ${plural(calls, 'call is', 'calls are')} yours${short ? '' : ' to make'}.`;
-}
-
-// The line under Today's heading when calls wait in the director's other projects, and none when none do: "One call
-// waits for you here, and 2 more in your other projects. Their counts are on the rail at the left."
-export function othersLine(here: number, others: number) {
-  if (!others) return null;
-  const rail = 'Their counts are on the rail at the left.';
-  if (!here)
-    return `Nothing waits for you here, and ${others} ${plural(others, 'call waits', 'calls wait')} in your other projects. ${rail}`;
-  return `${counted(here)} ${plural(here, 'call waits', 'calls wait')} for you here, and ${others} more in your other projects. ${rail}`;
 }
 
 // The time a call or a step happened: the clock today, the date before.

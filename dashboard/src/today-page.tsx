@@ -1,20 +1,10 @@
 // Today (the canvas's Today and Today on a phone, v1.0 item 23): the page's sentence, the New idea box, the calls
 // only the director can make with their evidence and the real actions, what moves without them, who is on the
 // floor and what shipped today. Every action asks the controller for the same recorded step the task page would.
-import { notifyManager, useMutation, useQueries } from '@tanstack/react-query';
+import { notifyManager, useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useMemo, useState, type ReactNode } from 'react';
-import {
-  getJSON,
-  liveUrl,
-  send,
-  shellUrl,
-  type AttemptSummary,
-  type Live,
-  type Shell,
-  type Task,
-  type Worker,
-} from './api';
+import { send, type AttemptSummary, type Task, type Worker } from './api';
 import { askedPaths, commandRequest, decisionState, fileRequest } from './decisions';
 import { plural, took, totalsOf, diffStatOf, sandboxed, openPhaseOf, testingPhases } from './evidence';
 import { AgentAvatar } from './design/avatar';
@@ -28,8 +18,7 @@ import { workerName } from './names';
 import { NoteDialog, overReview } from './note-dialog';
 import { AnswerBox, QuestionCard } from './question-card';
 import { changeableAnswer, type Answer } from './questions';
-import { finishedState, queryKeys, useFinished, useStudio } from './records';
-import { useStreamReady } from './stream-context';
+import { finishedState, useFinished, useStudio } from './records';
 import {
   active,
   integrationAction,
@@ -54,7 +43,6 @@ import {
   floorSentence,
   greeting,
   lastDone,
-  othersLine,
   placeIn,
   quoted,
   shippedToday,
@@ -1345,41 +1333,8 @@ function Moving({
   );
 }
 
-// The calls waiting in every project but the open one, the figure the rail's badges add up to (rail-calls.ts): each
-// project's shell and live set under the names and settings the rail reads them by, counted by the same rule. The
-// rail reads them again when the stream names a project, and this follows; listening here too would read twice.
-const quiet = { staleTime: Infinity, refetchOnWindowFocus: false, refetchOnReconnect: false } as const;
-function useOthersCalls(projectId: string, projects: { id: string }[]) {
-  const ready = useStreamReady(),
-    others = projects.map(project => project.id).filter(id => id !== projectId);
-  const shells = useQueries({
-    queries: others.map(id => ({
-      enabled: ready,
-      queryKey: queryKeys.shell(id),
-      queryFn: ({ signal }: { signal: AbortSignal }) => getJSON<Shell>(shellUrl(id), signal),
-      ...quiet,
-    })),
-  });
-  const lives = useQueries({
-    queries: others.map(id => ({
-      enabled: ready,
-      queryKey: queryKeys.live(id),
-      queryFn: ({ signal }: { signal: AbortSignal }) => getJSON<Live>(liveUrl(id), signal),
-      ...quiet,
-    })),
-  });
-  return others.reduce((total, _, index) => {
-    const shell = shells[index],
-      live = lives[index];
-    return shell?.data && live?.data && !shell.isError && !live.isError
-      ? total + liveSummary({ ...shell.data, ...live.data }).decisions
-      : total;
-  }, 0);
-}
-
 export function TodayPage({ projectId }: { projectId: string }) {
   const { state, error, shell } = useStudio(projectId),
-    others = useOthersCalls(projectId, shell?.projects ?? []),
     finished = useFinished(projectId, 3);
   const earlier = useMemo(
     () => (shell && finished.data ? finishedState(shell, finished.data.pages.slice(0, 1)) : null),
@@ -1412,8 +1367,7 @@ export function TodayPage({ projectId }: { projectId: string }) {
     index = state.projects.findIndex(project => project.id === projectId),
     // A sample from the first run offers its suggested ideas until it has one.
     ideas = allStories.length,
-    suggestions = ideas ? undefined : guideOf(projectId)?.suggestions,
-    elsewhere = othersLine(decisions, others);
+    suggestions = ideas ? undefined : guideOf(projectId)?.suggestions;
   const props: CallProps = { projectId, state, stories: allStories, looks };
   return (
     <>
@@ -1429,7 +1383,6 @@ export function TodayPage({ projectId }: { projectId: string }) {
             </span>
           </h1>
           <p className="sd-pagehead__lead sd-wide-only">{floorSentence(state, allStories, shipped.length)}</p>
-          {elsewhere && <p className="sd-pagehead__lead sd-wide-only">{elsewhere}</p>}
         </div>
         <Link className="sd-btn sd-wide-only" to="/p/$projectId/board" params={{ projectId }}>
           <Icon name="search" size={18} weight={2.2} />

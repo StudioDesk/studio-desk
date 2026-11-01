@@ -1210,63 +1210,49 @@ const callsInY = (count: number): Live => ({
   attempts: [],
   runs: [],
 });
-const lineHere = async () => {
-  const heading = await screen.findByRole('heading', { level: 1 });
-  return heading.closest('.sd-pagehead__text') as HTMLElement;
-};
-const elsewhere = /in your other projects/;
 
-test("a line under the title counts the calls waiting in the other projects, as the rail's badges do", async () => {
-  controller.tasks = [taskFixture('T-1', { title: 'Waiting to start' })];
+test('other-project calls stay out of the heading while rail badges and the tab total follow the stream', async () => {
   controller.shells['project-y'] = projectY();
-  controller.lives['project-y'] = callsInY(2);
-  open();
-  const text = await lineHere();
-  expect(
-    await within(text).findByText(
-      'One call waits for you here, and 2 more in your other projects. Their counts are on the rail at the left.',
-    ),
-  ).toBeTruthy();
-  // It sits after the title and its lead sentence, and the rail's tile shows the same count.
-  expect(text.lastElementChild?.textContent).toMatch(elsewhere);
-  expect(await screen.findByRole('link', { name: 'Project Y: 2 calls for you' })).toBeTruthy();
-  expect((await lineHere()).querySelector('h1')?.textContent).toContain('One call is yours to make.');
-});
-
-test('no line shows when the other projects hold no calls', async () => {
-  controller.tasks = [taskFixture('T-1', { title: 'Waiting to start' })];
-  controller.shells['project-y'] = projectY();
-  controller.lives['project-y'] = callsInY(0);
-  open();
-  const text = await lineHere();
-  await waitFor(() =>
-    expect(controller.reads().filter(read => read === '/api/projects/project-y/live')).toHaveLength(1),
-  );
-  await new Promise(resolve => setTimeout(resolve, 50));
-  expect(within(text).queryByText(elsewhere)).toBeNull();
-  expect(text.querySelector('h1')?.textContent).toContain('One call is yours to make.');
-});
-
-test("the line follows another project's calls when the stream names it, without a reload", async () => {
-  controller.tasks = [taskFixture('T-1', { title: 'Waiting to start' })];
-  controller.shells['project-y'] = projectY();
-  controller.lives['project-y'] = callsInY(2);
-  open();
-  const text = await lineHere();
-  await within(text).findByText(/and 2 more in your other projects/);
-  const reads = () => controller.reads().filter(read => read === '/api/projects/project-y/live').length;
-  expect(reads()).toBe(1);
-  controller.lives['project-y'] = callsInY(1);
-  latest().emit('projects', { projectIds: ['project-y'] });
-  expect(
-    await within(text).findByText(
-      'One call waits for you here, and 1 more in your other projects. Their counts are on the rail at the left.',
-    ),
-  ).toBeTruthy();
-  // Today reads nothing of its own: the rail's one read a moment after the event is the only one.
-  expect(reads()).toBe(2);
-  controller.lives['project-y'] = callsInY(0);
-  latest().emit('projects', { projectIds: ['project-y'] });
-  await waitFor(() => expect(within(text).queryByText(elsewhere)).toBeNull(), { timeout: 2000 });
-  expect(reads()).toBe(3);
+  for (const localCalls of [1, 0]) {
+    controller.tasks = localCalls ? [taskFixture('T-1', { title: 'Waiting to start' })] : [];
+    controller.lives['project-y'] = callsInY(2);
+    open();
+    const heading = await screen.findByRole('heading', { level: 1 }),
+      text = heading.closest('.sd-pagehead__text') as HTMLElement;
+    const checkHeading = () => {
+      expect(within(text).queryByText(/in your other projects|counts are on the rail/i)).toBeNull();
+      // Both responsive titles and the floor sentence remain, with no extra paragraph even when hidden by CSS.
+      const wide = heading.querySelector('.sd-wide-only')?.textContent,
+        narrow = heading.querySelector('.sd-narrow-only')?.textContent;
+      expect(wide).toMatch(/^(Morning|Afternoon|Evening)\. /);
+      expect(wide).toContain(localCalls ? 'One call is yours to make.' : 'Nothing needs you right now.');
+      expect(narrow).toMatch(/^(Morning|Afternoon|Evening)\. /);
+      expect(narrow).toContain(localCalls ? 'One call is yours.' : 'Nothing needs you right now.');
+      expect(Array.from(text.querySelectorAll('p'), paragraph => paragraph.textContent)).toEqual([
+        'Nothing is running right now.',
+      ]);
+    };
+    for (const otherCalls of [2, 1, 0]) {
+      if (otherCalls !== 2) {
+        controller.lives['project-y'] = callsInY(otherCalls);
+        latest().emit('projects', { projectIds: ['project-y'] });
+      }
+      const label = otherCalls
+        ? `Project Y: ${otherCalls} ${otherCalls === 1 ? 'call' : 'calls'} for you`
+        : 'Project Y';
+      await waitFor(
+        () => {
+          const tile = screen.getByRole('link', { name: label });
+          expect(tile.querySelector('.sd-rail__badge')?.textContent ?? null).toBe(
+            otherCalls ? String(otherCalls) : null,
+          );
+          const total = localCalls + otherCalls;
+          expect(document.title).toBe(total ? `(${total}) Studio desk` : 'Studio desk');
+        },
+        { timeout: 2000 },
+      );
+      checkHeading();
+    }
+    cleanup();
+  }
 });
