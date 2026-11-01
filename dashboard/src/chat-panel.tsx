@@ -1,8 +1,8 @@
 // The chat box (a preview behind the switch in chat-box.ts): a panel docked at the right of a project's pages, which
-// New idea and Ctrl J open. The frame holds it outside the router's outlet, so it stays open from page to page and
+// New idea and N open. The frame holds it outside the router's outlet, so it stays open from page to page and
 // keeps what was typed. Empty, it holds Today's New idea box, which sends what Today's sends, and says where earlier
 // talks are. Once its box sends an idea, it shows that idea's conversation with the planner, as the idea's page holds
-// it, so the director answers, replies and makes the plan official from any page; New idea or Ctrl J brings the box
+// it, so the director answers, replies and makes the plan official from any page; New idea or N brings the box
 // back. On a phone it opens full screen over the page, with a back arrow in place of Hide.
 import { Link } from '@tanstack/react-router';
 import { useEffect, useId, useMemo, useState } from 'react';
@@ -51,7 +51,7 @@ export function ChatPanel({
   projectId: string;
   // The project's color, as the frame shows it.
   accent: string;
-  // Raised each time New idea or Ctrl J asks for the box: the cursor goes in it.
+  // Raised each time New idea or N asks for the box: the cursor goes in it.
   focus: number;
   onHide: () => void;
 }) {
@@ -60,7 +60,7 @@ export function ChatPanel({
     narrow = useNarrow(),
     title = useId(),
     // The idea whose conversation shows, with the project and the request for the box it was opened under: it shows
-    // until New idea or Ctrl J asks for the box again.
+    // until New idea or N asks for the box again.
     [talk, setTalk] = useState<{ projectId: string; runId: string; focus: number } | null>(null),
     runId = talk?.projectId === projectId && talk.focus === focus ? talk.runId : null;
   // Today's rule: the intake the project's work has, and a sample's suggested first ideas until it has one, counting

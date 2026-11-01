@@ -238,7 +238,7 @@ test('New idea opens Today from any page', async () => {
   await waitFor(() => expect(router.history.location.pathname).toBe('/p/project-x'));
 });
 
-test('with the chat box switched off, Ctrl J opens no panel and N still opens Today', async () => {
+test('with the chat box switched off, modified J is left to the browser and N still opens Today', async () => {
   // Today scrolls its box into view, which the simulated page cannot do.
   const scrolled = vi.fn();
   Element.prototype.scrollIntoView = scrolled;
@@ -248,10 +248,15 @@ test('with the chat box switched off, Ctrl J opens no panel and N still opens To
     // The key is left to the browser.
     expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(true);
     expect(screen.queryByRole('complementary', { name: 'The chat box' })).toBeNull();
+    expect(fireEvent.keyDown(window, { key: 'j', metaKey: true })).toBe(true);
+    expect(screen.queryByRole('complementary', { name: 'The chat box' })).toBeNull();
+    expect(router.history.location.pathname).toBe('/p/project-x/board');
     fireEvent.keyDown(window, { key: 'n' });
     await waitFor(() => expect(router.history.location.pathname).toBe('/p/project-x'));
     const box = await screen.findByRole('textbox', { name: 'New idea for Project X' });
     await waitFor(() => expect(document.activeElement).toBe(box));
+    expect(fireEvent.keyDown(box, { key: 'j', ctrlKey: true })).toBe(true);
+    expect(fireEvent.keyDown(box, { key: 'j', metaKey: true })).toBe(true);
     expect(scrolled).toHaveBeenCalled();
     expect(screen.queryByRole('complementary', { name: 'The chat box' })).toBeNull();
   } finally {

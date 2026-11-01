@@ -5,7 +5,7 @@
 // count is the current project's (the director, October 22); each tile on the rail counts its own project's calls,
 // pointing at or focusing another project's count shows them in a card beside it, each line opening its call's page
 // there, and the tab's title counts every project's (the attention indicator, October 29). With the chat box switched
-// on (chat-box.ts), New idea and Ctrl J open the chat box beside the page instead (chat-panel.tsx), and the sidebar
+// on (chat-box.ts), New idea and N open the chat box beside the page instead (chat-panel.tsx), and the sidebar
 // lists the talks going (talks.ts), each opening its conversation there.
 import { Outlet, useRouter, useRouterState } from '@tanstack/react-router';
 import {
@@ -340,16 +340,6 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
       if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setSearching(open => !open);
-      } else if (
-        chatBox &&
-        (event.ctrlKey || event.metaKey) &&
-        !event.altKey &&
-        !event.shiftKey &&
-        event.key.toLowerCase() === 'j'
-      ) {
-        // Ctrl J opens the chat box even while typing in a field.
-        event.preventDefault();
-        chat();
       } else if (event.key === 'n' && !event.ctrlKey && !event.metaKey && !event.altKey && !typing(event.target)) {
         event.preventDefault();
         newIdea();

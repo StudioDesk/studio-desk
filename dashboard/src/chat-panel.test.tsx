@@ -1,8 +1,8 @@
-// The chat box (a preview behind its switch, chat-box.ts): New idea and Ctrl J open it docked beside any page of the
+// The chat box (a preview behind its switch, chat-box.ts): New idea and N open it docked beside any page of the
 // project; it stays open with its words as the director moves between pages, holds Today's New idea box and sends what
 // Today's box sends, and on a phone it covers the page with a back arrow. Once it sends an idea it shows that idea's
 // conversation with the planner, where the director answers, replies and makes the plan official as on the idea's
-// page, until New idea or Ctrl J brings the box back. The sidebar's Talking it through lists each idea whose plan is
+// page, until New idea or N brings the box back. The sidebar's Talking it through lists each idea whose plan is
 // not official yet, including an accepted plan whose steps all wait for approval, and choosing one opens its
 // conversation there. Model-free, with the stand-in controller.
 import { QueryClient } from '@tanstack/react-query';
@@ -92,34 +92,61 @@ test('a previously enabled preference opens the chat box from New idea without v
   expect(screen.getByRole('main')).toBeTruthy();
 });
 
-test('Ctrl J opens the chat box on another page with the cursor in its box, and puts it back there when open', async () => {
+test('modified J is left to the browser on another page with the chat box switched on', async () => {
+  const router = open('/p/project-x/agents');
+  await screen.findByRole('navigation', { name: 'Main' });
+  expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(true);
+  expect(shut()).toBeNull();
+  expect(fireEvent.keyDown(window, { key: 'j', metaKey: true })).toBe(true);
+  expect(shut()).toBeNull();
+  expect(router.history.location.pathname).toBe('/p/project-x/agents');
+});
+
+test('N opens the chat box on another page with the cursor in its box, and puts it back there when open', async () => {
   const router = open('/p/project-x/agents');
   await screen.findByRole('navigation', { name: 'Main' });
   expect(shut()).toBeNull();
-  // The key is the chat box's, not the browser's.
-  expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(false);
+  expect(fireEvent.keyDown(window, { key: 'n' })).toBe(false);
   const text = await box(await panel());
   await waitFor(() => expect(document.activeElement).toBe(text));
   expect(router.history.location.pathname).toBe('/p/project-x/agents');
-  // Already open, with the cursor elsewhere, Cmd J brings it back to the box.
+  // Already open, with the cursor elsewhere outside a field, N brings it back to the box.
   const search = screen.getByRole('button', { name: 'Find a project (Ctrl K)' });
   search.focus();
-  expect(fireEvent.keyDown(search, { key: 'j', metaKey: true })).toBe(false);
+  expect(fireEvent.keyDown(search, { key: 'n' })).toBe(false);
   await waitFor(() => expect(document.activeElement).toBe(text));
   expect(screen.getAllByRole('complementary', { name: 'The chat box' })).toHaveLength(1);
+  expect(router.history.location.pathname).toBe('/p/project-x/agents');
 });
 
-test("Ctrl J works while typing in Today's box, and the two boxes keep their own words", async () => {
+test("modified J is left to the browser while typing in Today's box, and N types a letter", async () => {
   const user = userEvent.setup();
-  open('/p/project-x');
+  const router = open('/p/project-x');
   const today = await screen.findByRole('textbox', { name: 'New idea for Project X' });
   await user.type(today, 'On Today.');
-  expect(fireEvent.keyDown(today, { key: 'j', ctrlKey: true })).toBe(false);
+  expect(document.activeElement).toBe(today);
+  expect(fireEvent.keyDown(window, { key: 'j', ctrlKey: true })).toBe(true);
+  expect(shut()).toBeNull();
+  expect(fireEvent.keyDown(window, { key: 'j', metaKey: true })).toBe(true);
+  expect(shut()).toBeNull();
+  expect(fireEvent.keyDown(today, { key: 'j', ctrlKey: true })).toBe(true);
+  expect(shut()).toBeNull();
+  expect(fireEvent.keyDown(today, { key: 'j', metaKey: true })).toBe(true);
+  expect(shut()).toBeNull();
+  expect(document.activeElement).toBe(today);
+  expect((today as HTMLTextAreaElement).value).toBe('On Today.');
+  await user.keyboard('n');
+  expect((today as HTMLTextAreaElement).value).toBe('On Today.n');
+  expect(document.activeElement).toBe(today);
+  expect(shut()).toBeNull();
+  expect(router.history.location.pathname).toBe('/p/project-x');
+  // The button still opens the chat box, and the two boxes keep their own words.
+  await user.click(await sidebarNewIdea());
   const text = await box(await panel());
   await waitFor(() => expect(document.activeElement).toBe(text));
   expect((text as HTMLTextAreaElement).value).toBe('');
   await user.type(text, 'In the chat box.');
-  expect((today as HTMLTextAreaElement).value).toBe('On Today.');
+  expect((today as HTMLTextAreaElement).value).toBe('On Today.n');
   expect((text as HTMLTextAreaElement).value).toBe('In the chat box.');
 });
 
@@ -521,11 +548,11 @@ test("Make it official in the chat box sends the plan step's accept, and the con
   expect(posted().slice(1)).toEqual([accept]);
 });
 
-test('New idea or Ctrl J while a conversation shows brings back the New idea box, with its own words', async () => {
+test('New idea or N while a conversation shows brings back the New idea box, with its own words', async () => {
   const user = userEvent.setup();
   holding(reviewing());
   controller.command = intake;
-  const { region } = await sendIdea(user);
+  const { router, region } = await sendIdea(user);
   await talk(region);
   expect(within(region).queryByText(/^Earlier talks sit under Ideas/)).toBeNull();
   await user.click(await sidebarNewIdea());
@@ -534,15 +561,20 @@ test('New idea or Ctrl J while a conversation shows brings back the New idea box
   await waitFor(() => expect(document.activeElement).toBe(text));
   expect(within(region).queryByRole('region', { name: 'Talk to Mara' })).toBeNull();
   expect(within(region).getByText(/^Earlier talks sit under Ideas/)).toBeTruthy();
-  // The frame opens a conversation by its run; the box keeps what was typed, and Ctrl J brings it back.
+  // The frame opens a conversation by its run; the box keeps what was typed, and N brings it back.
   await user.type(text, 'Half a thought.');
   act(() => openChatConversation('run-1'));
   await talk(region);
   expect(within(region).queryByRole('textbox', { name: 'New idea for Project X' })).toBeNull();
-  fireEvent.keyDown(window, { key: 'j', ctrlKey: true });
-  expect(((await box(region)) as HTMLTextAreaElement).value).toBe('Half a thought.');
+  const search = screen.getByRole('button', { name: 'Find a project (Ctrl K)' });
+  search.focus();
+  expect(fireEvent.keyDown(search, { key: 'n' })).toBe(false);
+  const restored = (await box(region)) as HTMLTextAreaElement;
+  expect(restored.value).toBe('Half a thought.');
+  await waitFor(() => expect(document.activeElement).toBe(restored));
   expect(within(region).queryByRole('region', { name: 'Talk to Mara' })).toBeNull();
   expect(posted()).toHaveLength(1);
+  expect(router.history.location.pathname).toBe('/p/project-x/board');
 });
 
 test("the sidebar's Talking it through lists the idea in planning, opens its conversation beside the page, and drops it once official", async () => {
