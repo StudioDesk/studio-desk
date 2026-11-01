@@ -3,7 +3,8 @@
 // Today's box sends, and on a phone it covers the page with a back arrow. Once it sends an idea it shows that idea's
 // conversation with the planner, where the director answers, replies and makes the plan official as on the idea's
 // page, until New idea or Ctrl J brings the box back. The sidebar's Talking it through lists each idea whose plan is
-// not official yet, and choosing one opens its conversation there. Model-free, with the stand-in controller.
+// not official yet, including an accepted plan whose steps all wait for approval, and choosing one opens its
+// conversation there. Model-free, with the stand-in controller.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -544,6 +545,90 @@ test("the sidebar's Talking it through lists the idea in planning, opens its con
   expect(labels(await entries(await talk(region)))).toEqual(['Your idea', null, "Mara's plan"]);
   expect(router.history.location.pathname).toBe('/p/project-x/board');
   expect(posted()).toEqual([]);
+});
+
+test('under house rules that accept plans, a waiting plan stays in Talking it through with reply and approval in the chat box until a step is approved', async () => {
+  const user = userEvent.setup();
+  controller.shell.autonomy = {
+    policy: {
+      enabled: true,
+      revision: 2,
+      kinds: { 'studio-development:breakdown': { approve: 'auto', accept: 'auto' } },
+    },
+  };
+  const reference = { taskId: 'T-plan', attemptId: 'a-plan', path: 'source-breakdown.json', hash: 'h-a-plan' },
+    steps = ['T-1', 'T-2'].map((id, index) =>
+      taskFixture(id, {
+        title: index ? 'Second story' : 'First story',
+        kind: 'studio-development:change',
+        status: 'backlog',
+        approval: { status: 'pending' },
+        dependencies: [index ? 'T-1' : 'T-plan'],
+        workflowReference: { runId: 'run-1', key: id },
+        proposalReference: { ...reference, key: index ? 'page' : 'records' },
+      }),
+    );
+  holding([
+    ...reviewing().map(task =>
+      task.id === 'T-plan'
+        ? {
+            ...task,
+            status: 'done',
+            acceptedAttemptId: 'a-plan',
+            proposedTaskIds: ['T-1', 'T-2'],
+          }
+        : task,
+    ),
+    ...steps,
+  ]);
+  controller.attempts = controller.attempts.map(attempt =>
+    attempt.id === 'a-plan'
+      ? {
+          ...attempt,
+          status: 'accepted',
+          acceptedBy: { type: 'policy', revision: 2 },
+        }
+      : attempt,
+  );
+  controller.command = url => {
+    const taskId = url.match(/^\/api\/tasks\/(T-[12])\/approve-work$/)?.[1];
+    if (taskId)
+      controller.tasks = controller.tasks.map(task =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: 'ready',
+              approval: { status: 'approved' },
+            }
+          : task,
+      );
+    return { ok: true };
+  };
+  const router = open('/p/project-x/board'),
+    navigation = await screen.findByRole('navigation', { name: 'Talking it through' });
+  await user.click(within(navigation).getByRole('link', { name: 'First story (and 1 more)' }));
+  const region = await panel(),
+    conversation = await talk(region);
+  expect(labels(await entries(conversation))).toEqual(['Your idea', null, "Mara's plan"]);
+  const reply = within(conversation).getByRole('textbox', { name: 'Reply to Mara' }) as HTMLTextAreaElement;
+  expect(reply.disabled).toBe(false);
+  expect(posted()).toEqual([]);
+  await user.click(within(conversation).getByRole('button', { name: 'Make it official' }));
+  await waitFor(() => expect(document.querySelector('.sd-toast')?.textContent).toBe('Approved 2 stories.'));
+  expect(posted()).toEqual([
+    { url: '/api/tasks/T-1/approve-work', method: 'POST', body: { projectId: 'project-x' } },
+    { url: '/api/tasks/T-2/approve-work', method: 'POST', body: { projectId: 'project-x' } },
+  ]);
+  // The controller's stream brings the approved records; the talk leaves the sidebar and its controls go, while
+  // the conversation remains readable beside the same board page.
+  expect(screen.getByRole('navigation', { name: 'Talking it through' })).toBeTruthy();
+  latest().emit('change', { version: 2, start: 'start-a', changes: [{ seq: 2, type: 'task', id: 'T-1' }] });
+  await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Talking it through' })).toBeNull());
+  await waitFor(() => expect(within(region).queryByRole('button', { name: 'Make it official' })).toBeNull());
+  expect(within(region).queryByRole('textbox', { name: 'Reply to Mara' })).toBeNull();
+  expect(labels(await entries(await talk(region)))).toEqual(['Your idea', null, "Mara's plan"]);
+  expect(router.history.location.pathname).toBe('/p/project-x/board');
+  expect(posted()).toHaveLength(2);
 });
 
 test('a project whose work takes no ideas shows no box in the chat box', async () => {

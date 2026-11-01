@@ -5,7 +5,8 @@
 // stays under Talk to <the planner> once the plan is official. The plans' texts are the stand-in's recorded files;
 // reading them sends nothing. While the idea is in planning, a reply under the
 // conversation asks the planner to revise the plan, then starts it, a line says while the planner is replying, and
-// Make it official accepts the plan, each as the plan step's own page sends it.
+// Make it official accepts the plan, each as the plan step's own page sends it. Under house rules that accept plans,
+// replies plan again while all proposed steps wait, and Make it official approves those steps in order.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -514,6 +515,36 @@ const proposed = (id: string, title: string, extra: Partial<Task> = {}) =>
     ...extra,
   });
 
+// House rules accept Mara's plan, leaving its proposed stories for the director to approve. Live record order is
+// deliberately different from plan order; only steps pinned to this accepted attempt belong to this plan.
+const acceptedWaiting = (second: Partial<Task> = {}, plan: Partial<Task> = {}) => {
+  controller.shell.autonomy = {
+    policy: {
+      enabled: true,
+      revision: 2,
+      kinds: { 'studio-development:breakdown': { approve: 'auto', accept: 'auto' } },
+    },
+  };
+  planAttempt('a-plan', 4, 7, firstPlan, { status: 'accepted', acceptedBy: { type: 'policy', revision: 2 } });
+  const reference = { taskId: 'T-plan', attemptId: 'a-plan', path: 'source-breakdown.json', hash: 'h-a-plan' };
+  return [
+    checksStep(),
+    planStep('done', {
+      acceptedAttemptId: 'a-plan',
+      lastAttemptId: 'a-plan',
+      proposedTaskIds: ['T-1', 'T-2'],
+      dependencies: ['T-checks'],
+      ...plan,
+    }),
+    proposed('T-2', 'Second story', {
+      proposalReference: { ...reference, key: 'page' },
+      dependencies: ['T-1'],
+      ...second,
+    }),
+    proposed('T-1', 'First story', { proposalReference: { ...reference, key: 'records' }, dependencies: ['T-plan'] }),
+  ];
+};
+
 test('once the plan is official, the page keeps its stories and What happened, with Talk to Mara below them', async () => {
   planAttempt('a-plan', 4, 7, firstPlan, { status: 'accepted' });
   open([
@@ -587,6 +618,179 @@ const revise = (direction: string) => ({
   body: { projectId: 'project-x', direction },
 });
 const start = { url: '/api/tasks/T-plan/start', method: 'POST', body: { projectId: 'project-x' } };
+const replan = (direction: string) => ({
+  url: '/api/tasks/T-plan/replan',
+  method: 'POST',
+  body: { projectId: 'project-x', direction },
+});
+const approve = (id: string) => ({
+  url: `/api/tasks/${id}/approve-work`,
+  method: 'POST',
+  body: { projectId: 'project-x' },
+});
+
+test('an accepted plan whose stories wait takes one replan reply, then shows Mara replying from the returned records', async () => {
+  const user = userEvent.setup();
+  open(acceptedWaiting());
+  const region = await talk(),
+    box = replyBox(region);
+  await entries(region);
+  expect(box.disabled).toBe(false);
+  expect(official(region)!.disabled).toBe(false);
+  expect(within(region).getByText('Mara plans again with your words; the waiting steps are set aside.')).toBeTruthy();
+  controller.command = url => {
+    if (!url.endsWith('/replan')) return {};
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-plan'
+        ? { ...task, status: 'running', acceptedAttemptId: undefined, lastAttemptId: 'a-again' }
+        : ['T-1', 'T-2'].includes(task.id)
+          ? { ...task, status: 'denied', approval: { status: 'denied' } }
+          : task,
+    );
+    controller.attempts.push({
+      id: 'a-again',
+      taskId: 'T-plan',
+      status: 'running',
+      workerId: 'W-4',
+      startedAt: new Date().toISOString(),
+    });
+    return {
+      ok: true,
+      setAside: ['T-1', 'T-2'],
+      start: { ok: true },
+      records: controller.records(['T-plan', 'T-1', 'T-2']),
+    };
+  };
+  await user.type(box, 'Split the second story.');
+  await user.click(within(region).getByRole('button', { name: 'Send to Mara' }));
+  await waitFor(() => expect(toast()).toBe('Started.'));
+  expect(posted()).toEqual([replan('Split the second story.')]);
+  const after = await talk();
+  expect(replyBox(after).value).toBe('');
+  expect(await within(after).findByText(/^Mara is replying · /)).toBeTruthy();
+  expect(replyBox(after).disabled).toBe(true);
+});
+
+test.each([
+  [
+    { ok: true, queued: true, reason: 'Waiting for the usage limit to reset.' },
+    'Queued. Waiting for the usage limit to reset. It starts by itself when it can.',
+  ],
+  [
+    { ok: true, queued: true, reason: 'Busy.' },
+    'Queued behind busy work. It starts by itself when its agent, resources and an execution slot are free.',
+  ],
+  [
+    { ok: false, reason: 'The planner is disabled.' },
+    'Your reply is recorded. It did not start: The planner is disabled.',
+  ],
+])('a recorded replan reports its start outcome: %j', async (outcome, message) => {
+  const user = userEvent.setup();
+  controller.command = () => ({ ok: true, setAside: ['T-1', 'T-2'], start: outcome });
+  open(acceptedWaiting());
+  const region = await talk(),
+    box = replyBox(region);
+  await user.type(box, 'Keep it smaller.');
+  await user.click(within(region).getByRole('button', { name: 'Send to Mara' }));
+  await waitFor(() => expect(toast()).toBe(message));
+  expect(box.value).toBe('');
+  expect(posted()).toEqual([replan('Keep it smaller.')]);
+});
+
+test('a refused replan keeps the reply and shows the controller reason, without revising or starting', async () => {
+  const user = userEvent.setup(),
+    reason = "Some of this plan's steps have started; change them on their own pages instead.";
+  controller.command = () => {
+    throw new Error(reason);
+  };
+  open(acceptedWaiting());
+  const region = await talk(),
+    box = replyBox(region);
+  await user.type(box, 'Split the second story.');
+  await user.click(within(region).getByRole('button', { name: 'Send to Mara' }));
+  expect((await within(region).findByRole('alert')).textContent).toBe(reason);
+  expect(box.value).toBe('Split the second story.');
+  expect(box.disabled).toBe(false);
+  expect(posted()).toEqual([replan('Split the second story.')]);
+  await user.type(box, ' Please.');
+  expect(within(region).queryByRole('alert')).toBeNull();
+});
+
+test('Make it official approves waiting stories one at a time in dependency order and says their release', async () => {
+  const user = userEvent.setup();
+  let finish: (() => void) | undefined;
+  controller.command = url =>
+    url === '/api/tasks/T-1/approve-work'
+      ? new Promise(resolve => {
+          finish = () => resolve({ ok: true });
+        })
+      : {};
+  // Even a plan that lists a dependent first must approve its prerequisite before it.
+  open(acceptedWaiting({}, { proposedTaskIds: ['T-2', 'T-1'] }), {
+    release: { milestoneId: 'milestone-1.1.0', version: '1.1.0', by: { type: 'director' } },
+  });
+  const region = await talk(),
+    button = official(region)!;
+  expect(within(region).getByText('Lands in 1.1.0 · the plan’s steps start once approved')).toBeTruthy();
+  await user.click(button);
+  await waitFor(() => expect(posted()).toEqual([approve('T-1')]));
+  expect(button.disabled).toBe(true);
+  expect(replyBox(region).disabled).toBe(true);
+  await user.click(button);
+  expect(posted()).toHaveLength(1);
+  finish!();
+  await waitFor(() => expect(toast()).toBe('Approved 2 stories.'));
+  expect(posted()).toEqual([approve('T-1'), approve('T-2')]);
+});
+
+test('a refused second approval names the story and reason, counts the first, and sends nothing after it', async () => {
+  const user = userEvent.setup(),
+    tasks = acceptedWaiting();
+  tasks.push(
+    proposed('T-3', 'Third story', {
+      proposalReference: { taskId: 'T-plan', attemptId: 'a-plan' },
+      dependencies: ['T-2'],
+    }),
+  );
+  controller.command = url => {
+    if (url === '/api/tasks/T-2/approve-work') throw new Error('The assigned employee is disabled.');
+    controller.tasks = controller.tasks.map(task =>
+      task.id === 'T-1' ? { ...task, approval: { status: 'approved' }, status: 'ready' } : task,
+    );
+    return { ok: true, records: controller.records(['T-1']) };
+  };
+  open(tasks);
+  const region = await talk();
+  await user.click(official(region)!);
+  await waitFor(() =>
+    expect(toast()).toBe('Could not approve “Second story”: The assigned employee is disabled. Approved 1 story.'),
+  );
+  expect(posted()).toEqual([approve('T-1'), approve('T-2')]);
+  expect((controller.tasks.find(task => task.id === 'T-1')!.approval as { status: string }).status).toBe('approved');
+  expect((controller.tasks.find(task => task.id === 'T-3')!.approval as { status: string }).status).toBe('pending');
+});
+
+test.each([
+  { status: 'ready', approval: { status: 'approved' } },
+  { status: 'running', approval: { status: 'approved' }, lastAttemptId: 'a-story' },
+])('an accepted plan with a started or decided story has no reply controls: %j', async second => {
+  open(acceptedWaiting(second));
+  const region = await talk();
+  await entries(region);
+  expect(within(region).queryByRole('textbox', { name: 'Reply to Mara' })).toBeNull();
+  expect(official(region)).toBeNull();
+  expect(posted()).toEqual([]);
+});
+
+test('independent waiting steps follow the recorded plan order and use Step in a general plan', async () => {
+  const user = userEvent.setup();
+  open(acceptedWaiting({ dependencies: ['T-plan'] }, { kind: 'general:plan' }));
+  const region = await talk();
+  expect(within(region).getByText('The plan’s steps start once approved')).toBeTruthy();
+  await user.click(official(region)!);
+  await waitFor(() => expect(toast()).toBe('Approved 2 steps.'));
+  expect(posted()).toEqual([approve('T-1'), approve('T-2')]);
+});
 
 test("a reply asks Mara to revise the plan with your words, then starts the plan step, and says what happened as Start's does", async () => {
   const user = userEvent.setup();
@@ -706,7 +910,7 @@ test("Make it official sends the plan step's accept, as its own page's decision 
   expect(within(plain).queryByText(/^Lands in/)).toBeNull();
 });
 
-test('once the plan is official, the conversation under Talk to Mara has no reply box and no Make it official', async () => {
+test('once an accepted plan has a decided story, the conversation under Talk to Mara has no reply box and no Make it official', async () => {
   const user = userEvent.setup();
   // Accepting the plan makes the plan step done, with its records in the answer.
   controller.command = url => {
@@ -719,7 +923,14 @@ test('once the plan is official, the conversation under Talk to Mara has no repl
     );
     return { ok: true, records: controller.records(['T-plan']) };
   };
-  open(reviewing());
+  open([
+    ...reviewing(),
+    proposed('T-1', 'First story', {
+      proposalReference: { taskId: 'T-plan', attemptId: 'a-plan' },
+      approval: { status: 'approved' },
+      status: 'ready',
+    }),
+  ]);
   const before = await talk();
   expect(replyBox(before)).toBeTruthy();
   await user.click(official(before)!);

@@ -4,7 +4,8 @@
 // waiting is answered in place, with Today's question card and Answer box. The plan step's own page supplies its
 // attempts with their files, and each plan's file is read once and kept. While the idea is in planning, the director
 // replies under it and makes the plan official, each with the plan step's own recorded step: a reply is its revise
-// with the reply as direction, then its start; Make it official is its accept.
+// with the reply as direction, then its start; Make it official is its accept. An accepted plan whose steps all
+// still wait keeps these controls: a reply plans again and sets those steps aside; Make it official approves them.
 import { notifyManager, useMutation, useQueries, useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useState, type ReactNode } from 'react';
@@ -20,6 +21,7 @@ import { projectColor } from './frame';
 import { fileSize } from './idea-composer';
 import { clockOf } from './journey';
 import { workerName } from './names';
+import { waitingSteps } from './plan-talk';
 import { AnswerBox, QuestionCard } from './question-card';
 import { waitingQuestion } from './questions';
 import { queryKeys } from './records';
@@ -113,7 +115,7 @@ const live = ['running', 'stopping'];
 
 // The conversation, titled for the planner: "Talk to Mara". It reads the plan step's page, then each plan's file. While
 // a planning attempt runs, a line under the last message says the planner is replying and for how long; until the plan
-// is official, the reply box and Make it official follow.
+// is official or while its accepted steps all wait for approval, the reply box and Make it official follow.
 export function IdeaConversation({
   projectId,
   run,
@@ -226,6 +228,7 @@ export function IdeaConversation({
         records={records ?? state}
         plan={plan}
         planner={planner}
+        word={word}
         replying={!!replying}
       />
     </section>
@@ -234,7 +237,9 @@ export function IdeaConversation({
 
 // Under the conversation while the idea is in planning: the reply box, on only while the plan step is in review with
 // a finished planning attempt, as the controller's revise accepts only that, and otherwise saying why in one line; then
-// Make it official, the plan step's approval, with where the plan lands. Once the plan is official, neither shows.
+// Make it official, the plan step's approval, with where the plan lands. An accepted plan whose steps all wait has
+// a waiting mode: reply plans again, setting them aside; Make it official approves each in dependency order. Once
+// any step starts or is decided, neither control shows.
 function Reply({
   projectId,
   run,
@@ -242,6 +247,7 @@ function Reply({
   records,
   plan,
   planner,
+  word,
   replying,
 }: {
   projectId: string;
@@ -251,6 +257,7 @@ function Reply({
   records: StudioState;
   plan: Task;
   planner: string;
+  word: string;
   replying: boolean;
 }) {
   const textId = useId(),
@@ -263,12 +270,23 @@ function Reply({
     { latest, plan: proposal } = decisionState(step, records),
     inReview = step.status === 'review' && !!latest && !live.includes(latest.status) && !replying,
     asked = !!waitingQuestion(step, records.attempts),
+    waiting = waitingSteps(step, records.tasks),
+    canWait = waiting.length > 0 && !replying && !asked,
     index = state.projects.findIndex(project => project.id === projectId),
     release = (state.runs.find(item => item.id === run.id)?.release as ReleaseOf | undefined)?.version;
   // The reply is the plan step's revision with the director's words, then its start; a refused revision keeps the
   // reply and starts nothing, and a refused start leaves the recorded reply for the plan step's own page.
   const reply = useMutation({
     mutationFn: async (direction: string) => {
+      if (waiting.length) {
+        const sent = await send<{ start: Record<string, unknown> }>(`/api/tasks/${id}/replan`, {
+          projectId,
+          direction,
+        });
+        return sent.start.ok === false
+          ? `Your reply is recorded. It did not start: ${sent.start.reason}`
+          : startedToast(sent.start);
+      }
       await send(`/api/tasks/${id}/revise`, { projectId, direction });
       try {
         return startedToast(await send<Record<string, unknown>>(`/api/tasks/${id}/start`, { projectId }));
@@ -291,7 +309,33 @@ function Reply({
     },
     onError: failure => toast(failure.message),
   });
-  if (step.status === 'done' || step.closed || step.status === 'denied') return null;
+  // Keep the accepted plan's order among independent steps, even when the live records arrive in another order.
+  // Each approval is its own controller action; a refusal leaves earlier approvals recorded and stops the batch.
+  const approve = useMutation({
+    mutationFn: async () => {
+      const order = (step.proposedTaskIds as string[] | undefined) ?? [],
+        place = (task: Task) => (order.includes(task.id) ? order.indexOf(task.id) : order.length),
+        remaining = [...waiting].sort((a, b) => place(a) - place(b)),
+        count = (n: number) =>
+          `Approved ${n} ${word === 'Story' ? (n === 1 ? 'story' : 'stories') : n === 1 ? 'step' : 'steps'}.`;
+      let approved = 0;
+      while (remaining.length) {
+        const next = remaining.findIndex(task => !remaining.some(other => task.dependencies?.includes(other.id)));
+        if (next < 0) throw new Error('The plan’s steps depend on each other; approve them on their own pages.');
+        const task = remaining.splice(next, 1)[0]!;
+        try {
+          await send(`/api/tasks/${encodeURIComponent(task.id)}/approve-work`, { projectId });
+        } catch (failure) {
+          return `Could not approve “${task.title}”: ${(failure as Error).message} ${count(approved)}`;
+        }
+        approved++;
+      }
+      return count(approved);
+    },
+    onSuccess: message => toast(message),
+    onError: failure => toast(failure.message),
+  });
+  if ((step.status === 'done' && !waiting.length) || step.closed || step.status === 'denied') return null;
   const why = replying
     ? `${planner} is replying; you can reply once the plan arrives.`
     : asked
@@ -313,30 +357,40 @@ function Reply({
         }}
         error={error}
         sendLabel={`Send to ${planner}`}
-        note={inReview ? `${planner} revises the plan with your words.` : why}
-        busy={reply.isPending || !inReview}
+        note={
+          canWait
+            ? `${planner} plans again with your words; the waiting steps are set aside.`
+            : inReview
+              ? `${planner} revises the plan with your words.`
+              : why
+        }
+        busy={reply.isPending || approve.isPending || !(inReview || canWait)}
         onSend={() => reply.mutate(text.trim())}
       />
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-10)' }}>
         <button
           type="button"
           className="sd-btn sd-btn--primary"
-          disabled={!inReview || accept.isPending}
+          disabled={waiting.length ? !canWait || reply.isPending || approve.isPending : !inReview || accept.isPending}
           onClick={() =>
-            proposal && latest
-              ? accept.mutate({
-                  action: 'accept-proposal',
-                  body: { attemptId: latest.id, proposalHash: proposal.hash },
-                })
-              : accept.mutate({ action: 'accept', body: {}, done: 'Result accepted.' })
+            waiting.length
+              ? approve.mutate()
+              : proposal && latest
+                ? accept.mutate({
+                    action: 'accept-proposal',
+                    body: { attemptId: latest.id, proposalHash: proposal.hash },
+                  })
+                : accept.mutate({ action: 'accept', body: {}, done: 'Result accepted.' })
           }
         >
           Make it official
         </button>
         <span className="sd-meta">
-          {release
-            ? `Lands in ${release} · nothing starts until you make it official`
-            : 'Nothing starts until you make it official'}
+          {waiting.length
+            ? `${release ? `Lands in ${release} · the` : 'The'} plan’s steps start once approved`
+            : release
+              ? `Lands in ${release} · nothing starts until you make it official`
+              : 'Nothing starts until you make it official'}
         </span>
       </div>
     </div>
