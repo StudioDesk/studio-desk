@@ -7,13 +7,25 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDashboard } from './build-dashboard.mjs';
-import { uptimeText } from '../src/stop-record.mjs';
 
 const RESTART_CODE = 75,
   server = fileURLToPath(new URL('../src/server.mjs', import.meta.url)),
   recent = [];
 let child,
   stopping = false;
+
+// How long the controller ran, as src/stop-record.mjs's uptimeText says it. Kept here, so the supervisor needs nothing
+// from the controller's source, which a planned restart may be changing.
+function ranFor(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return 'an unknown time';
+  const days = Math.floor(seconds / 86400),
+    hours = Math.floor((seconds % 86400) / 3600),
+    minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return `${days} d ${hours} h`;
+  if (hours) return `${hours} h ${minutes} min`;
+  if (minutes) return `${minutes} min`;
+  return `${Math.floor(seconds)} s`;
+}
 
 // The line the window shows when the controller exits.
 export function exitLine(code, signal, startedAt, at = new Date()) {
@@ -27,7 +39,7 @@ export function exitLine(code, signal, startedAt, at = new Date()) {
           : code === null
             ? 'with no exit code'
             : `with exit code ${code}`;
-  return `Studio desk: the controller exited ${how} at ${at.toISOString()}, after ${uptimeText((at - startedAt) / 1000)}.`;
+  return `Studio desk: the controller exited ${how} at ${at.toISOString()}, after ${ranFor((at - startedAt) / 1000)}.`;
 }
 
 function launch() {
