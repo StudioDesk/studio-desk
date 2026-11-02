@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layoutExample, validateLayout, validateReview } from '../src/contracts.mjs';
-import { jsonEqual, complexityPolicy, validateComplexity, validateComplexityLimits } from '../src/core/contracts.mjs';
+import {
+  CHECK_STATUS_MEANING,
+  jsonEqual,
+  complexityPolicy,
+  resultSchema,
+  validateComplexity,
+  validateComplexityLimits,
+} from '../src/core/contracts.mjs';
 
 test('complexity is a strict numeric story policy with fixed time and attempt limits', () => {
   for (const [complexity, maxSeconds, maxAttempts] of [
@@ -98,4 +105,14 @@ test('logical layouts require distinct entry, objective and exit rooms', () => {
   renamed.rooms[1].id = renamed.objective = 'goal-room';
   renamed.links[0].to = renamed.links[1].from = 'goal-room';
   assert.deepEqual(validateLayout(renamed), [], 'Objective IDs remain design choices.');
+});
+
+test('the result schema tells every CLI what each check status means', () => {
+  const status = resultSchema.properties.checks.items.properties.status;
+  assert.deepEqual(status.enum, ['pass', 'fail', 'not-run']);
+  assert.equal(status.description, CHECK_STATUS_MEANING);
+  for (const value of status.enum) assert.match(CHECK_STATUS_MEANING, new RegExp(`(^|\. )${value}: `));
+  // A check that could not be performed is not a failure, so it never sends the work back on its own.
+  assert.match(CHECK_STATUS_MEANING, /not-run: the check could not be performed/);
+  assert.match(CHECK_STATUS_MEANING, /a failed check sends the work back/);
 });
