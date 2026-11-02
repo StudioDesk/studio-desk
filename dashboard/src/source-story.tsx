@@ -244,7 +244,9 @@ export function SourceDiff({
           </span>
         </div>
       ) : (
-        <div className="sd-filelist" style={{ flex: '1 1 220px', maxWidth: '280px', minWidth: 0 }}>
+        // The files as a row of chips above the diff, so the diff has the tab's width (November 1, 2026: beside it,
+        // they left the code a narrow column with its lines cut off).
+        <div className="sd-filelist sd-filelist--row" style={{ flex: '1 1 100%', minWidth: 0 }}>
           {files.map((item, index) => {
             const changed = (item.added ?? 0) + (item.removed ?? 0),
               share = changed ? ((item.added ?? 0) / changed) * 100 : 100;
@@ -281,7 +283,7 @@ export function SourceDiff({
       )}
       {file && (
         <div
-          style={{ flex: '3 1 340px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-10)' }}
+          style={{ flex: '1 1 100%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-10)' }}
         >
           <div
             style={{

@@ -1283,6 +1283,23 @@ button.sd-row[aria-pressed='true'] {
   background: var(--brand-soft);
   border-color: var(--brand);
 }
+/* The files as a row of compact chips above a diff that takes the width (November 1, 2026) */
+.sd-filelist--row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.sd-filelist--row .sd-filelist__file {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-8);
+  max-width: 100%;
+  padding: 6px 10px;
+  border-color: var(--line);
+}
+.sd-filelist--row .sd-filelist__file .sd-bar {
+  display: none;
+}
 .sd-code {
   font-family: var(--font-mono);
   font-variant-ligatures: none;
