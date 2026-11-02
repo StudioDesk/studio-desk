@@ -156,9 +156,18 @@ test('a conflicting story keeps its change: merged onto the current source by th
   // Ready for the policy's integration once its fresh review passes, as before the conflict (November 2, 2026: the
   // rejected earlier integration's record kept the merged story waiting for the director).
   assert.equal(sourceStoryIntegrable(store, store.task(c.taskId))?.attemptId, second.id);
-  assert.equal((await c.integration(second)).status, 200);
+  // With integration after a passing review automatic, as the house rules recommend, nothing asked for it here, as
+  // after a restart; the director's Resume does, and the policy integrates it.
+  saveAutonomyPolicy(c.app.store, c.app.runner.registries, 'project-legacy', {
+    expectedRevision: autonomyPolicy(c.app.store, 'project-legacy').revision,
+    enabled: true,
+    retries: 0,
+    kinds: { 'studio-development:change': { approve: 'director', accept: 'director', integrate: 'auto' } },
+  });
+  c.app.runner.pipeline('resume', undefined, 'project-legacy');
   const integrated = await c.settled(second);
   assert.equal(integrated.state, 'integrated', JSON.stringify(integrated));
+  assert.equal(integrated.approvedBy.type, 'policy');
   assert.equal(git(c.root, ['rev-parse', 'HEAD~1']), tip);
   const final = fs.readFileSync(path.join(c.root, target), 'utf8');
   assert.match(final, /A different change here on main\./);

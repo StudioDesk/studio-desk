@@ -277,6 +277,10 @@ export class Runner {
           : 'This project pipeline paused; active attempts continue.',
         projectId,
       );
+      // Resuming also asks for the integration of a story whose review passed and that waits, as a settled
+      // integration would: after a restart nothing else may come to ask for it (November 2, 2026, the live proof of
+      // 1.1, where a story accepted before the restart waited for the director).
+      if (action === 'resume') this.autonomy.integrateWaiting();
     } else if (action === 'remove') {
       if (!Array.isArray(taskIds) || taskIds.length !== 1)
         throw new Error('Choose one assignment to remove from the queue.');
