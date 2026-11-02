@@ -10,7 +10,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { commitIntegration, git, integrationTrailer, stageFiles, verifyIntegration } from './source-integration.mjs';
+import {
+  commitIntegration,
+  git,
+  integrationTrailer,
+  landed,
+  stageFiles,
+  verifyIntegration,
+} from './source-integration.mjs';
 import { testsSentence } from './source-checks.mjs';
 import { createSourceWorktree, removeSourceWorktree, sourceWorktreeRoot } from './source-worktrees.mjs';
 import { lineReached, lineRepository, moveLine, projectLine } from './source-lines.mjs';
@@ -460,7 +467,7 @@ function tagRelease(store, projectId, milestoneId, release, close, discard = () 
   const { milestone } = milestoneOf(store, projectId, milestoneId);
   if (!tagExists(release.root, release.tag))
     git(release.root, ['tag', '-a', release.tag, '-m', `Release ${milestone.version}`, release.commit]);
-  const result = close('released');
+  close('released');
   discard();
   store.event(
     'release_done',
@@ -469,13 +476,93 @@ function tagRelease(store, projectId, milestoneId, release, close, discard = () 
     `Released ${milestone.version} on ${release.repository.branch} as commit ${release.commit.slice(0, 7)}, tagged ${release.tag}. Push it when you are ready.`,
     projectId,
   );
-  return result;
+  shipRelease(store, projectId, milestoneId);
+  return structuredClone(milestoneOf(store, projectId, milestoneId).milestone.release);
+}
+
+// On version lines (decided by the director, November 2, 2026) a release ships: the branch releases ship to (main)
+// moves to it, so it always equals the newest release. A fast-forward when it is behind the release; otherwise a merge
+// commit whose content is exactly the release's, so shipping never conflicts. A release older than one already shipped
+// is not shipped (an older line's patch), and main never goes back. What happened is recorded on the release as
+// `shipped`: the commit, a skip with its reason, or the error that stopped it, which Ship again retries.
+export function shipRelease(store, projectId, milestoneId) {
+  const project = store.project(projectId),
+    shipsTo = project.shipsTo;
+  if (!shipsTo) return null;
+  const { milestone, save } = milestoneOf(store, projectId, milestoneId),
+    release = milestone.release;
+  if (milestone.state !== 'released' || release?.state !== 'released')
+    throw new Error(`Milestone ${milestone.version} has not been released yet.`);
+  if (release.shipped?.commit || release.shipped?.skipped) return structuredClone(release.shipped);
+  const root = release.root,
+    at = new Date().toISOString(),
+    version = parseVersion(milestone.version),
+    newer = releaseTags(root).find(tag => compareVersions(tag.version, version) > 0);
+  const record = (shipped, message) => {
+    release.shipped = shipped;
+    save();
+    store.event('release_shipped', release.reviewTaskId, null, message, projectId);
+    return structuredClone(shipped);
+  };
+  if (newer)
+    return record(
+      { branch: shipsTo, skipped: `${newer.name} is newer, and ${shipsTo} holds the newest release.`, at },
+      `${milestone.version} stays on ${release.repository.branch}: ${newer.name} is newer, so ${shipsTo} does not move.`,
+    );
+  try {
+    const head = git(root, ['rev-parse', `refs/heads/${shipsTo}`]);
+    let commit = release.commit;
+    if (head === release.commit || landed(root, release.commit, `refs/heads/${shipsTo}`))
+      return record({ branch: shipsTo, commit: head, at }, `${shipsTo} already holds ${milestone.version}.`);
+    if (!landed(root, head, release.commit)) {
+      const tree = git(root, ['rev-parse', `${release.commit}^{tree}`]);
+      commit = git(root, [
+        'commit-tree',
+        tree,
+        '-p',
+        head,
+        '-p',
+        release.commit,
+        '-m',
+        `Ship ${milestone.version} to ${shipsTo}\n\nStudio desk shipped release ${release.tag} to ${shipsTo}: its content is the release's.`,
+      ]);
+    }
+    const repository = lineRepository(root, shipsTo);
+    if (repository.live === false) {
+      if (repository.head !== head) throw new Error(`${shipsTo} moved while the release shipped. Ship again.`);
+    } else repository.head = head;
+    const changes = git(root, ['diff', '--name-only', head, commit])
+      .split('\n')
+      .filter(Boolean)
+      .map(file => ({ path: file }));
+    moveLine(root, { repository: { ...repository, branch: shipsTo }, commit, changes });
+    if (!landed(root, commit, `refs/heads/${shipsTo}`)) throw new Error(`${shipsTo} did not reach the shipped commit.`);
+    return record(
+      { branch: shipsTo, commit, at, merged: commit !== release.commit },
+      `Shipped ${milestone.version} to ${shipsTo} at ${commit.slice(0, 7)}${commit !== release.commit ? ', a merge whose content is the release' : ''}.`,
+    );
+  } catch (error) {
+    return record(
+      { branch: shipsTo, error: error.message, at },
+      `${milestone.version} is released on ${release.repository.branch}, but ${shipsTo} did not move: ${error.message}`,
+    );
+  }
+}
+// Ship again, after shipping stopped with an error.
+export function shipAgain(store, projectId, milestoneId) {
+  const { milestone, save } = milestoneOf(store, projectId, milestoneId);
+  if (!store.project(projectId).shipsTo) throw new Error('This project has no branch its releases ship to.');
+  if (!milestone.release?.shipped?.error) throw new Error(`${milestone.version} has nothing to ship again.`);
+  delete milestone.release.shipped;
+  save();
+  return shipRelease(store, projectId, milestoneId);
 }
 
 // Releases the controller's stop cut off: one in verification waits to run again; one moving its line is tagged if the
 // line reached its commit, waits again when the line is not checked out, and otherwise needs the director.
 export function interruptedReleases(runtime) {
-  const store = runtime.store;
+  const store = runtime.store,
+    shipped = [];
   for (const project of store.projects()) {
     const milestones = projectMilestones(store, project.id);
     let changed = false;
@@ -490,6 +577,7 @@ export function interruptedReleases(runtime) {
           git(release.root, ['tag', '-a', release.tag, '-m', `Release ${milestone.version}`, release.commit]);
         Object.assign(release, { state: 'released', finishedAt: new Date().toISOString() });
         milestone.state = 'released';
+        shipped.push(milestone.id);
       } else if (was === 'verifying' || release.repository?.live === false) release.state = 'ready';
       else
         Object.assign(release, {
@@ -510,6 +598,8 @@ export function interruptedReleases(runtime) {
       );
     }
     if (changed) store.putSetting(key(project.id), milestones);
+    // A release the stop cut off after its line reached it ships now, as it would have.
+    for (const id of shipped.splice(0)) shipRelease(store, project.id, id);
   }
 }
 
@@ -535,7 +625,13 @@ export async function pushRelease(store, runtime, projectId, milestoneId, { conf
   const root = projectSource(store, projectId, runtime).root,
     remote = remoteOf(root),
     branch = release.repository.branch,
-    refs = [`refs/heads/${branch}:refs/heads/${branch}`, `refs/tags/${release.tag}:refs/tags/${release.tag}`],
+    // A release shipped to the project's ship branch (version lines) sends that branch too.
+    ship = release.shipped?.commit ? release.shipped.branch : null,
+    refs = [
+      `refs/heads/${branch}:refs/heads/${branch}`,
+      ...(ship && ship !== branch ? [`refs/heads/${ship}:refs/heads/${ship}`] : []),
+      `refs/tags/${release.tag}:refs/tags/${release.tag}`,
+    ],
     environment = {
       ...process.env,
       GIT_TERMINAL_PROMPT: '0',
@@ -569,7 +665,7 @@ export async function pushRelease(store, runtime, projectId, milestoneId, { conf
     'release_pushed',
     release.reviewTaskId,
     null,
-    `Pushed ${branch} and ${release.tag} to ${remote}.`,
+    `Pushed ${branch}${ship && ship !== branch ? `, ${ship}` : ''} and ${release.tag} to ${remote}.`,
     projectId,
   );
   return structuredClone(now.milestone.release);
