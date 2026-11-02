@@ -67,6 +67,21 @@ The secrets are the data folder's `director-key`, `launch-url` and `tool-keys` (
   - `test/sandbox.test.mjs` covers the check's stand-in, including an elevated sandbox opened to it.
   - The suite's studios record Codex's deny instead of making it (`codexSecretDenies` in `test/model-free-studio.mjs`).
 
+## An attempt's processes kept together (November 2026)
+
+On Windows, Node lets its children's children break away from it. So a process an agent or a test starts detached used to outlive its parent, the controller's tree kill, and the controller's own end.
+
+- **The wrapper:** `src/adapters/windows-job.ps1`, run by Windows PowerShell with nothing installed. It's an ordinary child of the controller, so it ends with it. It starts the command suspended and outside Node's job, puts it in a job of its own (ended when its last handle closes, no breakaway allowed), then lets it run with the wrapper's standard handles, environment and working folder. Its inputs travel in the environment (`STUDIO_JOB_COMMAND_LINE`, `STUDIO_JOB_REPORT`, `STUDIO_JOB_KEEP`), since PowerShell changes embedded quotes in its own arguments. It writes nothing to standard output and exits with the command's code.
+- **`src/adapters/process-job.mjs`:** `jobbedCommand`, plus `windowsCommandLine`, which quotes as Windows programs read a command line. `processJobsWork` asks once whether the wrapper runs on this computer; `readJobReport` reads what it reported.
+- **Agent CLIs** (`runNative`) run in it. When the CLI's main process ends, what it left running is ended and counted (the director's rule): the attempt records `leftoverProcesses`, its log says how many, and nothing of it runs when its reservations are released.
+  - The attempt also records `processJob: true`. A restart ends every job with the controller, so after one, a recorded process that is gone means nothing of the attempt runs.
+- **Try's Run** runs in it too, but keeps what it started until Stop (`keep`): a dev server's launcher may exit while the server runs. Stop and a restart end everything it started.
+- **Where the wrapper can't run** (not Windows, PowerShell barred from scripts, or a controller inside a job that allows no breakaway, such as the built-in sandbox), commands start as before, and the first attempt's log says so.
+- **macOS and Linux:** attempts keep their process group as before.
+- **Not yet:** test runs without the built-in sandbox, builds, the visual check's app and the agent's own test runs. Built-in sandbox runs are already held in the sandbox's own job.
+- **Measured:** about 0.35–0.5 s more per process start.
+- **Tests:** `test/process-job.test.mjs` checks the quoting against Node's own reading of a command line, the wrapper's inputs and report, and, where the wrapper runs, a detached process the main process left behind ended and counted with output and exit code intact. The suite's studios start their fixtures directly (`processJobs: false`).
+
 ## Every stop says why (November 2026)
 
 A graceful stop, an ended controller and an ended supervisor used to look alike in the controller's window.

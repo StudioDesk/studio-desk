@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { command, subscriptionEnvironment, live } from './process.mjs';
+import { jobStartFailed, jobbedCommand, processJobsMissing, processJobsWork, readJobReport } from './process-job.mjs';
 import { usageReset, reportedReset } from '../core/usage-reset.mjs';
 import { flushSay } from '../core/attempt-trace.mjs';
 
@@ -20,9 +21,21 @@ export function runNative(
 ) {
   const { attempt: a, output } = entry;
   const [bin, argv] = command(binary, args);
-  const child = spawn(bin, argv, {
+  // On Windows the CLI runs in a job of its own, so whatever it starts ends with it: what its main process leaves
+  // running is ended and counted when it exits, and the whole tree ends with the controller (C-07). Asked of this
+  // computer once; where the wrapper cannot run, the CLI starts as before and the attempt's log says so.
+  if (this.processJobs === undefined) this.processJobs = processJobsWork();
+  if (process.platform === 'win32' && !this.processJobs && !this.processJobsWarned) {
+    this.processJobsWarned = true;
+    this.store.event('log', a.taskId, a.id, `controller: ${processJobsMissing}`);
+  }
+  const report = this.processJobs
+      ? path.join(entry.job || output, `process-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+      : '',
+    started = jobbedCommand(bin, argv, environment, { report, enabled: !!this.processJobs });
+  const child = spawn(started.file, started.args, {
     cwd,
-    env: environment,
+    env: started.environment,
     shell: false,
     detached: process.platform !== 'win32',
     windowsHide: true,
@@ -30,6 +43,10 @@ export function runNative(
   });
   entry.child = child;
   a.pid = child.pid || null;
+  // Whether that process holds the whole tree: in a job, it ending, or the controller ending, ends everything the CLI
+  // started, so after a restart a recorded process that is gone means nothing of the attempt still runs.
+  if (this.processJobs) a.processJob = true;
+  else delete a.processJob;
   this.store.updateAttempt(a);
   child.stdin.on('error', () => {});
   child.stdin.end(prompt);
@@ -45,6 +62,21 @@ export function runNative(
     // its reservations wait for reconciliation, so this close records nothing.
     if (entry.abandoned) return;
     for (const ch of ['stdout', 'stderr']) if (entry.buffers[ch]) this.recordLine(entry, ch, entry.buffers[ch]);
+    // What the CLI's main process left running was ended before the wrapper exited (the director's rule 2); the
+    // attempt records how many, so nothing of it still runs when its reservations are released.
+    const job = report ? readJobReport(report) : null;
+    if (job?.leftovers) {
+      a.leftoverProcesses = (a.leftoverProcesses || 0) + job.leftovers;
+      this.store.updateAttempt(a);
+      this.store.event(
+        'log',
+        a.taskId,
+        a.id,
+        `controller: The CLI's main process ended and left ${job.leftovers} process${job.leftovers === 1 ? '' : 'es'} running; ${job.leftovers === 1 ? 'it was' : 'they were'} ended.`,
+      );
+    }
+    if (report && !job && code === jobStartFailed && !entry.cancelled)
+      entry.spawnError ??= 'The CLI could not be started in its job (src/adapters/windows-job.ps1). See recorded logs.';
     if (live(a)) {
       clearTimeout(entry.timer);
       a.status = 'quarantined';

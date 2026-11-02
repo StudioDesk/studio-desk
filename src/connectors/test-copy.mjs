@@ -75,6 +75,8 @@ export function makeTestCopy(request, holder = {}) {
         reject(new Error('Copying the source for the tests returned no plan.'));
       }
     });
+    // A copy stopped before it read its request (the editor stopping) closes its input; the stop is reported by close.
+    child.stdin.on('error', () => {});
     child.stdin.end(JSON.stringify(request));
   });
 }
