@@ -571,6 +571,7 @@ a.sd-tile:hover {
   padding: var(--space-4) 18px;
 }
 .sd-fold > summary {
+  list-style: none;
   min-height: var(--control-height);
   display: flex;
   align-items: center;
@@ -578,6 +579,11 @@ a.sd-tile:hover {
   font-weight: 700;
   color: var(--ink-2);
   cursor: pointer;
+}
+/* Its arrow at the line's end, so the fold reads as something to open (November 2, 2026) */
+.sd-fold > summary::after {
+  flex: none;
+  margin-left: auto;
 }
 .sd-fold__list {
   list-style: none;
@@ -612,10 +618,12 @@ a.sd-tile:hover {
   color: var(--brand-text);
   cursor: pointer;
 }
-.sd-more > summary::-webkit-details-marker {
+.sd-more > summary::-webkit-details-marker,
+.sd-fold > summary::-webkit-details-marker {
   display: none;
 }
-.sd-more > summary::after {
+.sd-more > summary::after,
+.sd-fold > summary::after {
   content: '';
   width: 7px;
   height: 7px;
@@ -623,7 +631,8 @@ a.sd-tile:hover {
   border-bottom: 2px solid currentColor;
   transform: translateY(-2px) rotate(45deg);
 }
-.sd-more[open] > summary::after {
+.sd-more[open] > summary::after,
+.sd-fold[open] > summary::after {
   transform: translateY(2px) rotate(-135deg);
 }
 .sd-more-button {

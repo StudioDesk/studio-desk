@@ -435,20 +435,26 @@ function NotCode({
   );
 }
 
-// One story's visual check: "The visual check · “its title” · Oct 28 · 4 pictures", which opens the story on its Pages
-// tab, where the pictures are.
+// One story's visual check, as a file row: its story's title over "The visual check · Oct 28 · 4 pictures", and Open
+// its pages, which opens the story on its Pages tab, where the pictures are. (November 2, 2026: the whole line as one
+// link read as an underlined sentence across three lines on a phone.)
 function PicturesItem({ projectId, pictures }: { projectId: string; pictures: WorkPictures }) {
   return (
     <div role="listitem" className="sd-filerow">
       <div className="sd-filerow__head">
         <KindTile path={pictures.images[0]?.path ?? 'pictures.png'} small />
+        <span className="sd-filerow__name">
+          <b>{pictures.title}</b>
+          <span className="sd-meta">{picturesLine(pictures)}</span>
+        </span>
         <Link
-          className="sd-filerow__name"
+          className="sd-btn sd-btn--sm"
           to="/p/$projectId/tasks/$taskId"
           params={{ projectId, taskId: pictures.taskId }}
           search={{ tab: 'pages' }}
+          aria-label={`Open the pages of “${pictures.title}”`}
         >
-          {picturesLine(pictures)}
+          Open its pages
         </Link>
       </div>
     </div>

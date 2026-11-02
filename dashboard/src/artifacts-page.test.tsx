@@ -425,11 +425,13 @@ test("what the work made that isn't code lists a step's documents and each story
   await user.click(within(adding).getByRole('button', { name: 'Cancel' }));
   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add to the library' })).toBeNull());
 
-  // The visual check reads as its story's row and opens the story on its Pages tab.
-  const check = within(rows()[2]!).getByRole('link');
-  expect(check.textContent).toBe(
-    `The visual check · “Board cards show their stage” · ${when('2026-10-22T12:00:00Z')} · 4 pictures`,
-  );
+  // The visual check reads as its story's row, its title over a quiet line, and Open its pages opens the story on
+  // its Pages tab.
+  const pictured = within(rows()[2]!);
+  expect(pictured.getByText('Board cards show their stage').tagName).toBe('B');
+  expect(pictured.getByText(`The visual check · ${when('2026-10-22T12:00:00Z')} · 4 pictures`)).toBeTruthy();
+  const check = pictured.getByRole('link', { name: 'Open the pages of “Board cards show their stage”' });
+  expect(check.textContent).toBe('Open its pages');
   expect(check.getAttribute('href')).toBe('/p/project-x/tasks/T-cards?tab=pages');
   await user.click(check);
   await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-x/tasks/T-cards'));
@@ -479,9 +481,8 @@ test('a code project whose work has made nothing that is not code says so plainl
   open();
   await screen.findByRole('list', { name: 'The work' });
   expect(rows()).toHaveLength(1);
-  expect(within(rows()[0]!).getByRole('link').textContent).toBe(
-    `The visual check · “Board cards show their stage” · ${when('2026-10-22T12:00:00Z')} · 1 picture`,
-  );
+  expect(within(rows()[0]!).getByText(`The visual check · ${when('2026-10-22T12:00:00Z')} · 1 picture`)).toBeTruthy();
+  expect(within(rows()[0]!).getByRole('link').textContent).toBe('Open its pages');
   expect(screen.queryByText('Nothing has been made yet.')).toBeNull();
 });
 

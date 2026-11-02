@@ -302,9 +302,9 @@ test("a visual check's row reads its story's title quoted, its date and how many
     at: new Date(2026, 9, 28, 15, 30).toISOString(),
     images: [1, 2, 3, 4].map(n => ({ path: `visual/0${n}-board.png`, hash: `hash-${n}` })),
   };
-  expect(picturesLine(pictures, now)).toBe('The visual check · “Board cards show their stage” · Oct 28 · 4 pictures');
+  expect(picturesLine(pictures, now)).toBe('The visual check · Oct 28 · 4 pictures');
   expect(picturesLine({ ...pictures, images: pictures.images.slice(0, 1) }, now)).toBe(
-    'The visual check · “Board cards show their stage” · Oct 28 · 1 picture',
+    'The visual check · Oct 28 · 1 picture',
   );
 });
 

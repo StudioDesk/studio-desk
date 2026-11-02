@@ -217,6 +217,4 @@ export function recordsWords(records: ProjectWork['records'], code: boolean) {
 
 // A code story's visual check as its row reads: "The visual check · “the story's title” · Oct 20 · 4 pictures".
 export const picturesLine = (pictures: WorkPictures, now = new Date()) =>
-  ['The visual check', quoted(pictures.title, 60), when(pictures.at, now), plural(pictures.images.length, 'picture')]
-    .filter(Boolean)
-    .join(' · ');
+  ['The visual check', when(pictures.at, now), plural(pictures.images.length, 'picture')].filter(Boolean).join(' · ');

@@ -265,9 +265,16 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
       {narrow ? (
         <>
           <Stops projectId={projectId} state={state} groups={groups} steps={planning} />
-          <details className="sd-card" style={{ padding: '4px 16px' }}>
+          <details className="sd-card sd-more" style={{ padding: '4px 16px' }}>
             <summary
-              style={{ minHeight: '48px', display: 'flex', alignItems: 'center', fontWeight: 700, cursor: 'pointer' }}
+              style={{
+                minHeight: '48px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                fontSize: '15px',
+                fontWeight: 700,
+                color: 'var(--ink)',
+              }}
             >
               Your idea, in full
             </summary>
