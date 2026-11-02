@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { recordProject } from '../core/projects.mjs';
 import { subscriptionEnvironment } from '../adapters/process.mjs';
+import { jobbedCommand, processJobsWork } from '../adapters/process-job.mjs';
 import { builtInSandboxCommand, readBuiltInSandboxStatus } from '../adapters/built-in-sandbox.mjs';
 import { git } from './source-integration.mjs';
 import { lineRepository, projectLine } from './source-lines.mjs';
@@ -363,9 +364,14 @@ export function runTry(runtime, projectId, { confirmOutside = false } = {}) {
     entry.resolve();
   };
   const launch = (executable, args, onExit) => {
-    const child = spawn(executable, args, {
+    // On Windows the app runs in a job of its own (C-07): Stop and a controller restart end everything it started,
+    // detached or not. What it starts is kept while it runs, even past its first process, which a dev server's
+    // launcher may be (the director's exemption from ending leftovers).
+    if (runtime.processJobs === undefined) runtime.processJobs = processJobsWork();
+    const started = jobbedCommand(executable, args, environment, { keep: true, enabled: !!runtime.processJobs });
+    const child = spawn(started.file, started.args, {
       cwd: copy.folder,
-      env: environment,
+      env: started.environment,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       // Elsewhere the app gets a process group of its own, so Stop ends everything it started.

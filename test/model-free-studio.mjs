@@ -102,6 +102,8 @@ export function createStudio(options = {}) {
       // director's secrets recorded rather than made (C-42; test/agent-secrets.test.mjs covers the deny itself).
       codexElevatedReady: () => true,
       denyCodexSecrets: directory => (codexSecretDenies.push(directory), []),
+      // The suite's protocol fixtures start directly; test/process-job.test.mjs runs the Windows job wrapper itself (C-07).
+      processJobs: false,
       ...fixtureOptions,
       ...options.runnerOptions,
     },

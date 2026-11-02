@@ -57,6 +57,9 @@ export class Runner {
     this.store = store;
     this.active = new Map();
     this.fixtureProcessTermination = options.fixtureProcessTermination; // trusted model-free test seam; never exposed by HTTP
+    // Whether attempts' processes run in a job of their own on Windows (C-07, src/adapters/process-job.mjs); undefined
+    // asks this computer at the first attempt. A trusted option of the code that starts the controller, like the above.
+    this.processJobs = options.processJobs;
     this.registries = options.registries;
     if (!this.registries) throw new Error('Explicit workflow and adapter registries are required.');
     this.workflows = this.registries.workflows;
