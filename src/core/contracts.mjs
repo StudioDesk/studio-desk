@@ -31,6 +31,8 @@ export function jsonEqual(a, b) {
   const keys = Object.keys(a);
   return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key) && jsonEqual(a[key], b[key]));
 }
+export const CHECK_STATUS_MEANING =
+  'pass: the work meets this check. fail: the work misses it and needs another attempt; a failed check sends the work back. not-run: the check could not be performed, for example a source refused or timed out or a tool was missing; say why in evidence, and state the gap in the work.';
 export const resultSchema = {
   type: 'object',
   additionalProperties: false,
@@ -48,6 +50,8 @@ export const resultSchema = {
         properties: { path: { type: 'string' }, kind: { type: 'string' } },
       },
     },
+    // The schema is the one place every CLI reads what a check status means (November 2: researchers marked a source
+    // that refused them as failed, and each failed check sent the work back for a retry that could not help).
     checks: {
       type: 'array',
       items: {
@@ -56,7 +60,7 @@ export const resultSchema = {
         required: ['name', 'status', 'evidence'],
         properties: {
           name: { type: 'string' },
-          status: { type: 'string', enum: ['pass', 'fail', 'not-run'] },
+          status: { type: 'string', enum: ['pass', 'fail', 'not-run'], description: CHECK_STATUS_MEANING },
           evidence: { type: 'string' },
         },
       },

@@ -2301,7 +2301,20 @@ export function createStudio({
             return json(res, { ok: true, taskIds: t.materializedTaskIds });
           }
           if (action === 'accept') {
-            const accepted = acceptAttempt(store, registries, t);
+            // Over a failed check, with the director's reason, where the step's contract allows it (November 2, 2026).
+            if (Object.keys(data).some(key => !['projectId', 'overReason'].includes(key)))
+              fail('Accepting takes only a reason, to accept over a failed check.');
+            const accepted = acceptAttempt(
+              store,
+              registries,
+              t,
+              data.overReason !== undefined
+                ? {
+                    type: 'director',
+                    over: { reason: text(data.overReason, 'Reason for accepting over a failed check', 2000, true) },
+                  }
+                : { type: 'director' },
+            );
             runner.autonomy.accepted(t.id);
             return json(res, { ok: true, proposedTaskIds: accepted.proposedTaskIds });
           }

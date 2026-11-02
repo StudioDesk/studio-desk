@@ -65,8 +65,9 @@ export function compileInstructions(org, worker, task, attemptId, workspace, inp
           '\n',
         )}${context.library.leftOut?.length ? `\nLeft out of this idea by the director: ${context.library.leftOut.map(item => item.name).join(', ')}.` : ''}`,
     });
-  // An agent may propose a file of its own for the project's library (1.2 step 6); code stories and reviews do not.
-  if (!/^studio-development:|review|check/i.test(task.kind || ''))
+  // An agent may propose a file of its own for the project's library (1.2 step 6) when its step contract allows it
+  // (`proposes.library`): reviews, code steps and the studio's own steps do not.
+  if (context.libraryProposals !== false)
     layers.push({
       title: 'Proposing a library file',
       text: 'When this work makes a file that later work in the project should follow (guidelines, a spec, a reference table), you may propose it for the project library: return library-proposal.json (artifact kind library-proposal) as {"schemaVersion": "library-proposal-v1", "proposals": [{"name": a short name, "purpose": what later work uses it for, "path": the path of one of the files you return, "entryId": an existing entry to add a revision to, when it replaces one}]}, at most five. The director, or auto mode when the project\'s autonomy policy is on, decides once your work is accepted. Propose only what later work should follow.',

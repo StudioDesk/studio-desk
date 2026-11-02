@@ -1,3 +1,4 @@
+import { stepContract } from './step-contract.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -538,6 +539,7 @@ export class Runner {
   ) {
     return compileInstructions(org, worker, task, attemptId, workspace, inputs, {
       ...this.instructionContext(org, worker, task),
+      libraryProposals: stepContract(this.workflows.find(task.kind)).proposes.library,
       directorInputReferences: directorReferences,
       ...(library ? { library } : {}),
       ...(history ? { history: { reference: history.reference, attempts: history.attempts } } : {}),
@@ -768,7 +770,9 @@ export class Runner {
     // Earlier attempts on this work, as bounded unaccepted reference data (never inputs).
     const history = buildAttemptHistory(store, task, { attemptId: id });
     // The project's library (1.2 step 6): its index and the files that fit beside the work, recorded by hash.
-    const library = libraryFor(store, { ...task, projectId }, references);
+    const library = libraryFor(store, { ...task, projectId }, references, {
+      delivery: stepContract(this.workflows.find(task.kind)).receives.library,
+    });
     const snapshot = this.compileInstructions(
       org,
       worker,

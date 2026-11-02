@@ -4,6 +4,7 @@ const recordsFormat = { id: 'records-v1', label: 'Normalized records', artifactK
 function definition(domain, categories, source) {
   return {
     kind: `${domain}-fixture:${source === 'task-data' ? 'prepare' : 'handoff'}`,
+    step: { kind: 'operation' },
     version: 'fixture-records-v1',
     label: `${domain === 'game' ? 'Game kit' : 'Architecture spaces'} fixture ${source === 'task-data' ? 'data' : 'accepted handoff'}`,
     cardLabel: 'Data fixture',
