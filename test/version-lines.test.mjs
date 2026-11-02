@@ -213,7 +213,7 @@ test('readiness is read-only, follows the recorded newest line, and counts unfin
       tasks: Array.from({ length: 5 }, (_, index) => ({ id: `T-open-${index}`, title: `Open story ${index}` })),
     },
   ]);
-  assert.deepEqual(releaseOverview(store, project, c.app.runner).versionLines, {
+  assert.deepEqual((await releaseOverview(store, project, c.app.runner)).versionLines, {
     shipsTo: 'main',
     ready: false,
     needs: readiness.needs,
