@@ -13,7 +13,12 @@ import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
 import { git, landedSince } from '../src/connectors/source-integration.mjs';
-import { mergeSourceStory, sourceStoriesInFlight, sourceStoryInFlight } from '../src/connectors/source-changes.mjs';
+import {
+  mergeSourceStory,
+  sourceStoriesInFlight,
+  sourceStoryInFlight,
+  sourceStoryIntegrable,
+} from '../src/connectors/source-changes.mjs';
 import { autonomyPolicy, saveAutonomyPolicy } from '../src/core/autonomy.mjs';
 import { approveWork } from '../src/core/proposals.mjs';
 
@@ -148,6 +153,9 @@ test('a conflicting story keeps its change: merged onto the current source by th
   // Its tests and a fresh independent review, then integration onto the tip it was merged onto.
   const second = await c.review(merged);
   await c.accept(second.taskId);
+  // Ready for the policy's integration once its fresh review passes, as before the conflict (November 2, 2026: the
+  // rejected earlier integration's record kept the merged story waiting for the director).
+  assert.equal(sourceStoryIntegrable(store, store.task(c.taskId))?.attemptId, second.id);
   assert.equal((await c.integration(second)).status, 200);
   const integrated = await c.settled(second);
   assert.equal(integrated.state, 'integrated', JSON.stringify(integrated));

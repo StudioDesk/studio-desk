@@ -1744,7 +1744,9 @@ export function sourceStoryIntegrable(store, task) {
     stage?.current !== 'waiting-for-integration' ||
     ref?.verdict !== 'pass' ||
     task.acceptedAttemptId !== ref.attemptId ||
-    stage.integration
+    // Only an integration of this review stops it; one of an earlier review, rejected before the story was merged onto
+    // the current source, does not (November 2, 2026: the merged story then waited for the director).
+    stage.integration?.attemptId === ref.attemptId
   )
     return null;
   const review = store.attempt(ref.attemptId);
