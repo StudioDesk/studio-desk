@@ -3222,16 +3222,71 @@ button.sd-row[aria-pressed='true'] {
 .sd-addagent .sd-agentpick > li > .sd-agentrow:hover {
   background: var(--surface-2);
 }
-/* Add an agent's two choices, an agent the studio has and a new one, side by side, one under the other on a phone */
+/* Add an agent's two choices (add-agent.tsx), Make a new one and then An agent the studio has, in the Agents page's
+   panel and a team's Who's on it. Their own width decides, not the window's: side by side at equal widths once both
+   have room, one above the other otherwise, as in an editor column beside the flow on a wide window. */
 .sd-addagent {
+  container-type: inline-size;
+  container-name: addagent;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+  overflow-wrap: anywhere;
+}
+.sd-addagent__choices {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-16);
+  align-items: start;
+}
+@container addagent (min-width: 660px) {
+  .sd-addagent__choices {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.sd-addagent__choice {
+  min-width: 0;
+}
+/* Inside another card, a team's Who's on it, each choice drops its own card for a rule above it */
+.sd-sidecard .sd-addagent__choice {
+  padding: 0;
+  padding-top: var(--space-16);
+  border: 0;
+  border-top: 1.5px solid var(--line);
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+.sd-sidecard .sd-addagent__choice > .sd-sidecard__title {
+  font-size: 16px;
+}
+/* A new agent's form, straight in its choice with no card of its own */
+.sd-addagent__form {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+/* Each label, field, search, studio agent and action spans its side; the CLI's fields one under another, here only,
+   and the studio's agents grow with the page rather than scrolling in a box of their own */
+.sd-addagent .sd-field {
+  min-width: 0;
+}
+.sd-addagent .sd-addagent__form > .sd-fieldgrid {
+  grid-template-columns: minmax(0, 1fr);
+}
+.sd-addagent .sd-agentpick {
+  max-height: none;
+  overflow: visible;
+}
+.sd-addagent .sd-agentrow__text {
+  flex: 1 1 auto;
+}
+.sd-addagent__actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 18px;
-  align-items: flex-start;
-}
-.sd-addagent > * {
-  flex: 1 1 280px;
-  min-width: 0;
+  gap: var(--space-8);
 }
 /* The field that finds an agent the studio has, its magnifier inside it */
 .sd-agentfind {
@@ -3247,11 +3302,6 @@ button.sd-row[aria-pressed='true'] {
 }
 .sd-agentfind > .sd-input {
   padding-left: 42px;
-}
-@media (max-width: 860px) {
-  .sd-addagent > * {
-    flex-basis: 100%;
-  }
 }
 /* The bar that saves the teams, in view at the foot of the screen while the page scrolls */
 .sd-editbar {

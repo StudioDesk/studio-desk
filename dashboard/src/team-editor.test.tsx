@@ -5,7 +5,7 @@ import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, toldFixture, type Controller } from './test-controller';
@@ -417,6 +417,94 @@ test("the team's address with add=true opens its editor with Add an agent's choi
     }),
   ).toBeTruthy();
   expect(commands()).toEqual([]);
+});
+
+const follows = (earlier: Node, later: Node) =>
+  !!(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING);
+// Add an agent's two choices in their shared layout (add-agent.tsx): one grid holding Make a new one, then An agent
+// the studio has.
+const choicesIn = (container: HTMLElement) => {
+  const make = within(container).getByRole('region', { name: 'Make a new one' }),
+    has = within(container).getByRole('region', { name: 'An agent the studio has' }),
+    grid = make.parentElement!;
+  expect(grid.className).toBe('sd-addagent__choices');
+  expect([...grid.children]).toEqual([make, has]);
+  expect(grid.parentElement!.className).toBe('sd-addagent');
+  return { make, has, box: grid.parentElement! };
+};
+
+test("Who's on it opens the shared two choices after the team it edits, Make a new one first, with no team choice of its own", async () => {
+  open('/p/project-x/agents?team=engineering&add=true');
+  const region = await screen.findByRole('region', { name: 'Edit Engineering' }),
+    whoRegion = within(region).getByRole('region', { name: "Who's on it" }),
+    { make, has, box } = choicesIn(whoRegion),
+    add = within(whoRegion).getByRole('button', { name: 'Add an agent' });
+  // The team first: its name, Who's on it and its Add an agent, then the choices.
+  expect(follows(field(within(region), 'Team name'), box)).toBe(true);
+  expect(follows(add, make) && follows(make, has)).toBe(true);
+  expect(add.getAttribute('aria-expanded')).toBe('true');
+  // No second team choice: the only lists to choose from are the CLI's.
+  expect(within(box).queryByLabelText('Team')).toBeNull();
+  expect([...box.querySelectorAll('select')].map(select => select.labels?.[0]?.textContent)).toEqual(['CLI', 'Effort']);
+  const form = within(make).getByRole('form', { name: 'A new agent for Engineering' });
+  expect(within(form).getByText(/^A new agent for Engineering\. It belongs to Project X:/)).toBeTruthy();
+  expect(within(form).getByRole('button', { name: 'Make the agent' }).closest('.sd-addagent__choice')).toBe(make);
+  expect(within(has).getByRole('list', { name: 'Agents the studio has' }).closest('.sd-addagent__choice')).toBe(has);
+  // Its Cancel follows both choices.
+  expect(follows(has, within(box).getByRole('button', { name: 'Cancel' }))).toBe(true);
+  // Inside Who's on it's card, each choice drops a card of its own; the page's panel keeps its cards.
+  const base = import.meta.url,
+    { readFileSync } = await vi.importActual<{ readFileSync: (file: URL, encoding: 'utf8') => string }>('node:fs'),
+    style = document.createElement('style');
+  style.textContent = readFileSync(new URL('./design/bundle.css', base), 'utf8');
+  document.head.append(style);
+  try {
+    for (const side of [make, has]) {
+      const css = getComputedStyle(side);
+      expect(css.getPropertyValue('box-shadow')).toBe('none');
+      expect(css.getPropertyValue('padding-left')).toMatch(/^0(px)?$/);
+      expect(css.getPropertyValue('padding-right')).toMatch(/^0(px)?$/);
+    }
+    expect(getComputedStyle(box).getPropertyValue('container-type')).toBe('inline-size');
+  } finally {
+    style.remove();
+  }
+  expect(commands()).toEqual([]);
+});
+
+test("Make a new one keeps the team's other unsaved edits, which save with the new agent", async () => {
+  const user = userEvent.setup();
+  controller.command = url =>
+    url === '/api/projects/project-x/agents'
+      ? {
+          worker: { id: 'W-new', displayName: 'Iris', jobTitle: 'Tester', provider: 'codex', enabled: true },
+          revision: 4,
+        }
+      : {};
+  open('/p/project-x/agents?team=engineering');
+  const editor = within(await screen.findByRole('region', { name: 'Edit Engineering' }));
+  await retype(user, field(editor, 'Purpose'), 'Build it well.');
+  await user.click(editor.getByRole('button', { name: 'Remove Eli from Engineering' }));
+  await user.click(editor.getByRole('button', { name: 'Add an agent' }));
+  const form = within(editor.getByRole('form', { name: 'A new agent for Engineering' }));
+  await user.type(form.getByLabelText('Name'), 'Iris');
+  await user.type(form.getByLabelText('Job title'), 'Tester');
+  await user.click(form.getByRole('button', { name: 'Make the agent' }));
+  expect(await editor.findByRole('button', { name: 'Remove Iris from Engineering' })).toBeTruthy();
+  // The new agent is saved at once; the purpose and Eli's leaving still wait in the draft.
+  expect(commands().map(command => command.url)).toEqual(['/api/projects/project-x/agents']);
+  expect(field(editor, 'Purpose').value).toBe('Build it well.');
+  expect(editor.queryByRole('button', { name: 'Remove Eli from Engineering' })).toBeNull();
+  await user.click(editor.getByRole('button', { name: 'Save the team' }));
+  await waitFor(() => expect(commands()).toHaveLength(2));
+  const saved = commands()[1]!.body as {
+    expectedRevision: number;
+    teams: { purpose: string }[];
+    members: { workerId: string }[];
+  };
+  expect(saved.expectedRevision).toBe(4);
+  expect(saved.teams[0]!.purpose).toBe('Build it well.');
+  expect(saved.members.map(member => member.workerId)).toEqual(['W-2', 'W-3', 'W-new']);
 });
 
 test('Remove the team asks in place, then sends the organization without the team or its agents', async () => {

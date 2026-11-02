@@ -1,8 +1,9 @@
 // Add an agent, the Agents page's own panel (?add=true): beside the flow in the agent editor's place, or on a phone
-// under the page's buttons. The agent joins one of the project's teams, the first one chosen until the director picks
-// another: an agent the studio has, found in a list it searches, or a new one made here. Either way it is saved at
-// once as the organization's next revision, and its editor opens; Cancel goes back to the agents and sends nothing.
-// The two choices are a team editor's Add an agent too (team-editor.tsx), where an agent picked joins the team's draft.
+// under the page's buttons. The agent joins one of the project's teams, chosen first, the first one until the director
+// picks another: a new one made here, or an agent the studio has, found in a list it searches. Either way it is saved
+// at once as the organization's next revision, and its editor opens; Cancel goes back to the agents and sends nothing.
+// The two choices are a team editor's Add an agent too (team-editor.tsx), for the team it edits, where an agent picked
+// joins the team's draft.
 import { useMutation } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useEffect, useId, useRef, useState } from 'react';
@@ -182,10 +183,12 @@ export function AddAgent({
   );
 }
 
-// The two ways to add an agent to a team, side by side: an agent the studio has, from the agents given, found by a
-// name, a job or what it does and handed to onPick; or a new one for the team, saved at once as the organization's
-// next revision and handed to onMade. A team not saved yet gets a new agent once it is. With onCancel, the choices
-// have a Cancel of their own.
+// The two ways to add an agent to a team, in one layout for the page's panel and a team's Who's on it: a new one for
+// the team, first, saved at once as the organization's next revision and handed to onMade; then an agent the studio
+// has, from the agents given, found by a name, a job or what it does and handed to onPick. A team not saved yet gets a
+// new agent once it is. The choices' own width decides their layout (design/bundle.css, .sd-addagent): side by side at
+// equal widths when both have room, otherwise one above the other, each field, row and action across its side. With
+// onCancel, the choices have a Cancel of their own.
 export function AddChoices({
   projectId,
   state,
@@ -227,9 +230,25 @@ export function AddChoices({
       return terms.every(term => text.includes(term));
     });
   return (
-    <>
-      <div className="sd-addagent">
-        <section className="sd-card sd-sidecard sd-sidecard--roomy" aria-labelledby={`${id}-has`}>
+    <div className="sd-addagent">
+      <div className="sd-addagent__choices">
+        <section className="sd-card sd-sidecard sd-addagent__choice" aria-labelledby={`${id}-new`}>
+          <h3 id={`${id}-new`} className="sd-sidecard__title">
+            Make a new one
+          </h3>
+          {unsaved ? (
+            <span className="sd-meta">Save the team first, then make a new agent for it.</span>
+          ) : (
+            <NewAgent
+              projectId={projectId}
+              state={state}
+              team={team}
+              expectedRevision={expectedRevision}
+              onMade={onMade}
+            />
+          )}
+        </section>
+        <section className="sd-card sd-sidecard sd-addagent__choice" aria-labelledby={`${id}-has`}>
           <h3 id={`${id}-has`} className="sd-sidecard__title">
             An agent the studio has
           </h3>
@@ -287,31 +306,15 @@ export function AddChoices({
             <span className="sd-meta">{everyone}</span>
           )}
         </section>
-        <section className="sd-card sd-sidecard sd-sidecard--roomy" aria-labelledby={`${id}-new`}>
-          <h3 id={`${id}-new`} className="sd-sidecard__title">
-            Make a new one
-          </h3>
-          {unsaved ? (
-            <span className="sd-meta">Save the team first, then make a new agent for it.</span>
-          ) : (
-            <NewAgent
-              projectId={projectId}
-              state={state}
-              team={team}
-              expectedRevision={expectedRevision}
-              onMade={onMade}
-            />
-          )}
-        </section>
       </div>
       {onCancel && (
-        <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
+        <div className="sd-addagent__actions">
           <button type="button" className="sd-btn sd-btn--sm sd-btn--ghost" disabled={busy} onClick={onCancel}>
             Cancel
           </button>
-        </span>
+        </div>
       )}
-    </>
+    </div>
   );
 }
 
@@ -334,7 +337,8 @@ function usualProvider(state: StudioState) {
 
 // A new agent for a saved team: its name, its job here, the CLI it runs on and what it is told. It is saved at once as
 // the organization's next revision and belongs to this project; its face is the agent kit's until one is chosen on its
-// page. It has no Cancel of its own: the panel or the choices it is in have one.
+// page. It has no Cancel of its own: the panel or the choices it is in have one. It sits straight in its choice, with
+// no card of its own, and its CLI, model and effort fields one under another across it (.sd-addagent__form).
 function NewAgent({
   projectId,
   state,
@@ -377,16 +381,16 @@ function NewAgent({
   });
   return (
     <form
-      className="sd-editpanel sd-card"
+      className="sd-addagent__form"
       aria-label={`A new agent for ${team.name}`}
       onSubmit={event => {
         event.preventDefault();
         make.mutate();
       }}
     >
-      <h3 style={{ margin: 0 }}>A new agent for {team.name}</h3>
       <p className="sd-meta" style={{ margin: 0 }}>
-        It belongs to {state.project.name}: its name, CLI and instructions change nothing in any other project.
+        A new agent for {team.name}. It belongs to {state.project.name}: its name, CLI and instructions change nothing
+        in any other project.
       </p>
       <div className="sd-field">
         <label className="sd-field__label" htmlFor="new-agent-name">
@@ -473,11 +477,11 @@ function NewAgent({
           {make.error.message}
         </p>
       )}
-      <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-8)' }}>
-        <button type="submit" className="sd-btn sd-btn--primary" disabled={make.isPending}>
+      <div className="sd-addagent__actions">
+        <button type="submit" className="sd-btn sd-btn--sm sd-btn--primary" disabled={make.isPending}>
           {make.isPending ? 'Making…' : 'Make the agent'}
         </button>
-      </span>
+      </div>
     </form>
   );
 }
