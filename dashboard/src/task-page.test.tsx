@@ -1478,6 +1478,65 @@ test('other work has the brief card too, with its brief and what it was handed; 
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
 });
 
+// Finished work has no next attempt, so its brief card shows no direction for one, though the record keeps it: a code
+// story once integrated, other work once accepted. Work still going keeps the field.
+const recordedDirection = 'Independent review attempt-f1ca9924 passed, but its checks failed';
+const directed = (source: boolean, status: string, current?: string) => {
+  handed(source);
+  // The task with its direction, beside the plan that handed it its work.
+  controller.tasks[0] = {
+    ...controller.tasks[0]!,
+    status,
+    direction: recordedDirection,
+    ...(current
+      ? { sourceStage: { version: 'source-story-stages-v1', phase: 'integration', current, history: [] } }
+      : {}),
+  };
+};
+const noDirection = async () => {
+  const brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
+  await waitFor(() => handedTo(brief));
+  expect(screen.queryByLabelText('Direction for the next attempt')).toBeNull();
+  expect(document.querySelector('[aria-label="Direction"]')).toBeNull();
+  expect(screen.queryByText('Recorded attempts keep the direction they started with.')).toBeNull();
+  expect(document.body.textContent).not.toContain('attempt-f1ca9924');
+  const boxes = [...document.querySelectorAll('textarea, input')] as HTMLInputElement[];
+  expect(boxes.some(box => box.value.includes('attempt-f1ca9924'))).toBe(false);
+};
+
+test('an integrated code story shows no direction for a next attempt, though its record carries one', async () => {
+  directed(true, 'done', 'integrated');
+  open();
+  await noDirection();
+});
+
+test('accepted other work shows no direction for a next attempt, though its record carries one', async () => {
+  directed(false, 'done');
+  open();
+  await noDirection();
+});
+
+test('work still going keeps its direction: editable while it waits, read only once accepted but not integrated', async () => {
+  // A code story whose attempt failed may take new direction for its next one.
+  directed(true, 'failed', 'failed');
+  open();
+  let brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
+  let box = brief.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
+  expect(box.value).toBe(recordedDirection);
+  expect(box.readOnly).toBe(false);
+  expect(brief.getByRole('button', { name: 'Save future direction' })).toBeTruthy();
+  cleanup();
+  // A code story accepted but not yet integrated is not finished: its direction stays, read only, as before.
+  directed(true, 'done', 'waiting-for-integration');
+  open();
+  brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
+  box = brief.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
+  expect(box.value).toBe(recordedDirection);
+  expect(box.readOnly).toBe(true);
+  expect(brief.queryByRole('button', { name: 'Save future direction' })).toBeNull();
+  expect(brief.getByText('Recorded attempts keep the direction they started with.')).toBeTruthy();
+});
+
 // Other work's Overview is where its Result tab was, on a wide screen and on a phone, and no story has an Attempts or a
 // Record tab: its attempts are the strip above the tabs and each one's record a page that Details links to (a code
 // story's wide tabs are above).

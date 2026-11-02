@@ -331,6 +331,9 @@ function Story({
           dirty={draft !== null}
           onChange={setDraft}
           status={task.status}
+          // Finished work has no next attempt: a code story once integrated, as the journey counts it, other work
+          // once accepted.
+          done={source ? task.sourceStage?.current === 'integrated' : task.status === 'done'}
         />
       </BriefCard>
       <People task={task} studio={studio} looks={looks} />
@@ -1188,7 +1191,8 @@ function TaskExecution({ projectId, task, studio }: { projectId: string; task: T
 
 // The draft is the page's own state: it starts from the recorded direction and survives every refresh. A
 // revision request's note starts from it; once the controller records that request, the draft is dropped and the
-// field shows the direction it recorded.
+// field shows the direction it recorded. Finished work shows none: there is no next attempt, and the task and each
+// attempt keep the direction they recorded.
 function Direction({
   projectId,
   taskId,
@@ -1196,6 +1200,7 @@ function Direction({
   dirty,
   onChange,
   status,
+  done,
 }: {
   projectId: string;
   taskId: string;
@@ -1203,6 +1208,7 @@ function Direction({
   dirty: boolean;
   onChange: (value: string | null) => void;
   status: string;
+  done: boolean;
 }) {
   const editable = !running(status) && !['done', 'denied'].includes(status);
   const save = useMutation({
@@ -1210,7 +1216,7 @@ function Direction({
       send(`/api/tasks/${encodeURIComponent(taskId)}`, { projectId, direction }, 'PATCH'),
     onSuccess: () => onChange(null),
   });
-  if (!editable && !value.trim()) return null;
+  if (done || (!editable && !value.trim())) return null;
   return (
     <div className="sd-field" aria-label="Direction">
       <label className="sd-eyebrow" htmlFor="task-direction">
