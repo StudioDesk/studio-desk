@@ -5,7 +5,7 @@
 // change applies to work that starts after it.
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { Fragment, useEffect, useId, useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import {
   send,
   type KindModes,
@@ -114,8 +114,9 @@ function Row({
   );
 }
 
-// The section nav, which marks the section in view.
-function SubNav() {
+// The section nav, which marks the section in view, and Previews last: switches for unfinished features on a page of
+// their own (November 1, 2026: it was an inline link at the foot of the page, which the design never draws).
+function SubNav({ projectId }: { projectId: string }) {
   const [current, setCurrent] = useState('general');
   useEffect(() => {
     if (typeof IntersectionObserver === 'undefined') return;
@@ -139,6 +140,9 @@ function SubNav() {
       {sections.map(section => (
         <SubNavItem key={section.id} section={section} current={current === section.id} />
       ))}
+      <Link to="/p/$projectId/settings/previews" params={{ projectId }}>
+        Previews
+      </Link>
     </nav>
   );
 }
@@ -930,19 +934,28 @@ function HouseRules({ projectId, state }: { projectId: string; state: StudioStat
           </tbody>
         </table>
       </div>
+      {/* The kinds of work no agent here does, folded: the whole catalog, other packs' kinds included (November 1,
+          2026: shown as a run of links, it read as noise under the rules this project uses). */}
       {notTaken.length > 0 && (
-        <p className="sd-meta" style={{ margin: 0 }}>
-          Not taken yet:{' '}
-          {notTaken.map(([kind, definition], index) => (
-            <Fragment key={kind}>
-              {index > 0 && ', '}
+        <details className="sd-more">
+          <summary>Other kinds of work ({notTaken.length})</summary>
+          <div className="sd-more__body">
+            <span style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-6)' }}>
+              {notTaken.map(([kind, definition]) => (
+                <span key={kind} className="sd-chip">
+                  {workNames[kind] ?? definition.label ?? kind}
+                </span>
+              ))}
+            </span>
+            <span className="sd-meta">
+              No agent in this project does these.{' '}
               <Link to="/p/$projectId/agents" params={{ projectId }}>
-                {workNames[kind] ?? definition.label ?? kind}
-              </Link>
-            </Fragment>
-          ))}
-          . Give one to an agent on its Agents page to turn it on.
-        </p>
+                Give one to an agent
+              </Link>{' '}
+              to turn it on.
+            </span>
+          </div>
+        </details>
       )}
       <div className="sd-meta" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 22px' }}>
         <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-8)' }}>
@@ -1004,6 +1017,17 @@ const intakes: Record<string, [string, string][]> = {
   ],
 };
 
+// A saved workflow's steps by the names the app gives each kind of work (November 1, 2026: its stored description
+// named internals, such as "Copied-source Node tests → director acceptance → Codex review"). Its description stays for a
+// workflow whose steps carry no kinds.
+function stepsLine(workflow: StudioState['workflows'][number], state: StudioState) {
+  const steps = (workflow.graph?.nodes ?? workflow.steps ?? []) as { kind?: string }[],
+    names = steps
+      .map(step => (step.kind ? (workNames[step.kind] ?? state.taskKinds?.[step.kind]?.label ?? step.kind) : ''))
+      .filter(Boolean);
+  return names.length ? names.join(' → ') : workflow.description;
+}
+
 function Workflows({ projectId, state }: { projectId: string; state: StudioState }) {
   const kinds = state.organizationConfiguration?.taskKinds ?? [],
     intake = kinds.includes('studio-development:breakdown') ? 'source' : kinds.includes('general:plan') ? 'plan' : null,
@@ -1060,7 +1084,7 @@ function Workflows({ projectId, state }: { projectId: string; state: StudioState
         </div>
       )}
       {state.workflows.map((workflow, index) => (
-        <Row key={workflow.id} first={!intake && index === 0} title={workflow.name} note={workflow.description}>
+        <Row key={workflow.id} first={!intake && index === 0} title={workflow.name} note={stepsLine(workflow, state)}>
           <span className="sd-chip">
             {workflow.graph?.nodes?.length ?? workflow.steps?.length ?? 0}{' '}
             {(workflow.graph?.nodes?.length ?? workflow.steps?.length) === 1 ? 'step' : 'steps'}
@@ -1434,7 +1458,7 @@ export function SettingsPage({ projectId }: { projectId: string }) {
         <p>Changes apply to work that starts after you save. Anything that already ran keeps the settings it used.</p>
       </header>
       <div className="sd-settings">
-        <SubNav />
+        <SubNav projectId={projectId} />
         <div className="sd-settings__sections">
           <General key={`general-${state.project.revision}`} projectId={projectId} state={state} index={index} />
           <Repository projectId={projectId} state={state} />
@@ -1457,11 +1481,6 @@ export function SettingsPage({ projectId }: { projectId: string }) {
           <Tools projectId={projectId} state={state} />
           <Projects projectId={projectId} state={state} />
           <Appearance state={state} />
-          <footer className="sd-settingsfoot">
-            <Link to="/p/$projectId/settings/previews" params={{ projectId }}>
-              Previews
-            </Link>
-          </footer>
         </div>
       </div>
     </div>

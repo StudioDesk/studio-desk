@@ -3536,16 +3536,6 @@ button.sd-row[aria-pressed='true'] {
   flex-direction: column;
   gap: 18px;
 }
-.sd-settingsfoot {
-  font-size: 14px;
-}
-.sd-settingsfoot > a {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  color: var(--ink-2);
-  border-radius: var(--radius-sm);
-}
 .sd-previewspage .sd-setrow {
   flex-wrap: nowrap;
   padding-bottom: 0;

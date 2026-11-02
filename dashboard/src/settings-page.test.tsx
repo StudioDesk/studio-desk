@@ -139,6 +139,7 @@ test('Settings links the records it keeps elsewhere and changes where candidate 
     'Command-line tools',
     'Projects',
     'Appearance',
+    'Previews',
   ]);
   const links = Object.fromEntries(
     ['Open the log', 'Teams', 'Platform map'].map(name => [
@@ -467,7 +468,7 @@ test('the appearance is kept in this browser and applied at once', async () => {
   expect(localStorage.getItem('studio-theme')).toBeNull();
 });
 
-test('Settings ends with one keyboard-accessible Previews link, after all ordinary settings and outside the sections nav', async () => {
+test('Settings lists Previews last in its sections nav, a page of its own that the keyboard reaches', async () => {
   const user = userEvent.setup();
   const router = open('/p/project-x/settings');
   await screen.findByRole('region', { name: 'Appearance' });
@@ -477,16 +478,12 @@ test('Settings ends with one keyboard-accessible Previews link, after all ordina
   expect(links).toHaveLength(1);
   const link = links[0]!;
   expect(link.getAttribute('href')).toBe('/p/project-x/settings/previews');
-  expect(link.closest('nav, section')).toBeNull();
-  // Every section and the shared-settings note precede the footer, including Appearance's final details.
-  const content = screen.getByRole('main');
-  for (const element of within(content).getAllByRole('region').concat(within(content).getAllByRole('note'))) {
-    expect(element.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  }
-  const appearance = within(screen.getByRole('region', { name: 'Appearance' }));
-  expect(appearance.getByText('Local records')).toBeTruthy();
-  expect(appearance.getByText(/Studio desk test/)).toBeTruthy();
-  appearance.getByRole('button', { name: 'Dark' }).focus();
+  // November 1, 2026: in the sections nav, after Appearance, not an inline link at the foot of the page.
+  const nav = screen.getByRole('navigation', { name: 'Settings sections' }),
+    entries = within(nav).getAllByRole('link');
+  expect(entries.at(-1)).toBe(link);
+  expect(entries.at(-2)!.textContent).toBe('Appearance');
+  entries.at(-2)!.focus();
   await user.tab();
   expect(document.activeElement).toBe(link);
   await user.keyboard('{Enter}');
@@ -538,12 +535,16 @@ test('under the house rules table, a quiet line names each kind the project does
       .getAllByRole('rowheader')
       .map(row => row.textContent),
   ).toEqual(['Build a story', 'General work']);
-  const layout = rules.getByRole('link', { name: 'Layout' }),
-    line = table.nextElementSibling!;
-  expect(layout.getAttribute('href')).toBe('/p/project-x/agents');
-  expect(line.contains(layout)).toBe(true);
-  expect(line.className).toBe('sd-meta');
-  expect(line.textContent).toBe('Not taken yet: Layout. Give one to an agent on its Agents page to turn it on.');
+  // The kinds no agent does fold quietly under the table, named as chips, with one link to the Agents page (November 1,
+  // 2026: a run of links read as noise).
+  const fold = table.nextElementSibling as HTMLDetailsElement;
+  expect(fold.className).toBe('sd-more');
+  expect(fold.open).toBe(false);
+  expect(within(fold).getByText('Other kinds of work (1)').tagName).toBe('SUMMARY');
+  expect(within(fold).getByText('Layout').className).toBe('sd-chip');
+  expect(within(fold).getByRole('link', { name: 'Give one to an agent' }).getAttribute('href')).toBe(
+    '/p/project-x/agents',
+  );
 });
 
 test('when the project takes every kind, the house rules name none as not taken yet', async () => {
@@ -558,8 +559,8 @@ test('when the project takes every kind, the house rules name none as not taken 
       .getAllByRole('rowheader')
       .map(row => row.textContent),
   ).toEqual(['Build a story', 'General work', 'Layout']);
-  expect(rules.queryByText(/Not taken yet/)).toBeNull();
-  expect(rules.queryByRole('link', { name: 'Layout' })).toBeNull();
+  expect(rules.queryByText(/Other kinds of work/)).toBeNull();
+  expect(rules.queryByRole('link', { name: 'Give one to an agent' })).toBeNull();
 });
 
 test('instructions load only on their page, a draft keeps its text through a refresh, and Publish saves it first', async () => {
@@ -1185,4 +1186,24 @@ test('a project without a repository shows nothing of trying a story yourself', 
   expect(screen.queryByText('Trying a story yourself')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Edit how stories are tried' })).toBeNull();
   expect(controller.reads().filter(url => url.includes('/try'))).toEqual([]);
+});
+
+test('a saved workflow names its steps as the app names each kind of work, not by its stored description', async () => {
+  controller.shell = {
+    ...controller.shell,
+    workflows: [
+      {
+        id: 'workflow-1',
+        name: 'Check Studio desk and propose one improvement',
+        version: 1,
+        description: 'Copied-source Node tests → director acceptance → Codex review → director acceptance.',
+        steps: [{ kind: 'studio-development:checks' }, { kind: 'studio-development:review' }],
+      },
+    ],
+  };
+  open('/p/project-x/settings');
+  const workflows = within(await screen.findByRole('region', { name: 'Workflows' }));
+  expect(workflows.getByText('Source checks → Propose an improvement')).toBeTruthy();
+  expect(workflows.queryByText(/Copied-source/)).toBeNull();
+  expect(workflows.getByText('2 steps')).toBeTruthy();
 });
