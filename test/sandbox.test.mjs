@@ -54,6 +54,18 @@ test('model-free sandbox diagnostics require real files, expected denials and un
   assert.equal(opened.passed, false);
   assert.equal(opened.secretsDenied, false);
   process.env.STUDIO_SANDBOX_FIXTURE_CASE = 'pass';
+  // A stand-in that cannot be denied fails the check, which still answers what it found rather than throwing.
+  const undeniable = checkCodexSandbox({
+    binary,
+    implementation: 'elevated',
+    parentDirectory: directory,
+    denySecret: () => {
+      throw new Error('No mapping between account names and security IDs was done.');
+    },
+  });
+  assert.equal(undeniable.passed, false);
+  assert.equal(undeniable.secretsDenied, false);
+  assert.match(undeniable.denyError, /No mapping/);
   const count = fs.readdirSync(directory).length;
   for (const invalid of ['unelevated', 'danger-full-access', 'mxc"; unsafe'])
     assert.throws(() => run(invalid), /must be elevated or mxc/);

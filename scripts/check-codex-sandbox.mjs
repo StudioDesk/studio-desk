@@ -35,7 +35,15 @@ export function checkCodexSandbox({
   const secret = path.join(directory, 'secret-stand-in.txt'),
     secretsDeniable = implementation === 'elevated';
   fs.writeFileSync(secret, secretText);
-  if (secretsDeniable) denySecret([secret]);
+  // A stand-in that cannot be denied fails the check, as a real secret that cannot be denied stops an attempt; the
+  // check still reports what it found.
+  let denyError = null;
+  if (secretsDeniable)
+    try {
+      denySecret([secret]);
+    } catch (error) {
+      denyError = error.message;
+    }
   const probe = path.join(output, 'probe.mjs');
   fs.writeFileSync(
     probe,
@@ -90,12 +98,13 @@ if (!inputReadable || !outsideWriteDenied || !inputWriteDenied) process.exitCode
     insideMatches &&
     !outsideExists &&
     inputUnchanged &&
-    // Where the secrets can be denied, a readable stand-in fails the check.
-    !(secretsDeniable && reported.secretReadable !== false);
+    // Where the secrets can be denied, a stand-in that could not be denied, or was read, fails the check.
+    !(secretsDeniable && (denyError || reported.secretReadable !== false));
   return {
     passed,
     implementation: implementation || 'platform default',
-    secretsDenied: reported?.secretReadable === false,
+    secretsDenied: !denyError && reported?.secretReadable === false,
+    ...(denyError ? { denyError } : {}),
     ...(reported?.secretReadable && !secretsDeniable
       ? { warning: "Codex's sandbox can read the director's secrets in this mode." }
       : {}),
