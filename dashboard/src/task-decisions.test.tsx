@@ -109,6 +109,40 @@ test('while a question waits, Start assignment stays but is not the primary acti
   expect(region.getByRole('button', { name: 'Start assignment' }).className).toMatch(/sd-btn--primary/);
 });
 
+// A story whose attempt the controller's stop cut off, as the controller leaves it after a restart: the banner says to
+// reconcile it first, and the controller refuses to start another attempt until then.
+const cutOff = (status: string, fields: Partial<AttemptSummary> = {}) => {
+  controller.attempts = [
+    { id: 'attempt-1', taskId: 'T-1', status, workerId: 'W-1', error: 'Controller restarted.', ...fields },
+  ];
+  open(taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' }));
+};
+
+test.each(['interrupted', 'quarantined'])(
+  'a story whose attempt is %s offers Reconcile first as its primary action, and no Start',
+  async status => {
+    const user = userEvent.setup();
+    cutOff(status);
+    const region = await decisions();
+    const reconcile = region.getByRole('button', { name: 'Reconcile interrupted attempt' });
+    expect(isPrimary(reconcile)).toBe(true);
+    expect(row(region).getAllByRole('button')[0]).toBe(reconcile);
+    expect(region.queryByRole('button', { name: 'Start assignment' })).toBeNull();
+    expect(region.getAllByRole('button').filter(isPrimary)).toEqual([reconcile]);
+    await user.click(reconcile);
+    await waitFor(() =>
+      expect(posted()).toEqual([{ url: '/api/tasks/T-1/reconcile', method: 'POST', body: { projectId: 'project-x' } }]),
+    );
+  },
+);
+
+test('once the attempt is reconciled, Reconcile is gone and Start assignment is the primary action again', async () => {
+  cutOff('interrupted', { reconciledAt: '2026-10-21T21:00:00Z' });
+  const region = await decisions();
+  expect(region.queryByRole('button', { name: 'Reconcile interrupted attempt' })).toBeNull();
+  expect(isPrimary(region.getByRole('button', { name: 'Start assignment' }))).toBe(true);
+});
+
 // A result in review, with the direction its task recorded.
 const inReview = () => {
   controller.attempts = [

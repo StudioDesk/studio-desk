@@ -178,9 +178,12 @@ export function TaskDecisions({
     if (onEditFiles)
       actions.push({ key: 'edit-files', label: 'Edit the file list', emphasis: 'default', onClick: onEditFiles });
   }
+  // An interrupted attempt holds what it reserved until it is reconciled, and the controller refuses to start another
+  // before then, so Start comes back only once Reconcile interrupted attempt (below) has settled it.
   if (
     !live &&
     !closed &&
+    !unsettled &&
     explanation.kind !== 'fixed-limit' &&
     ['ready', 'blocked', 'failed', 'cancelled'].includes(task.status)
   ) {
@@ -280,11 +283,12 @@ export function TaskDecisions({
           }),
       });
   }
+  // What the banner tells the director to do first, so it is the row's primary action; Start waits for it.
   if (unsettled)
     actions.push({
       key: 'reconcile',
       label: 'Reconcile interrupted attempt',
-      emphasis: 'default',
+      emphasis: 'primary',
       onClick: () => act('reconcile'),
     });
   if (journal?.state && busyJournal.includes(journal.state))
