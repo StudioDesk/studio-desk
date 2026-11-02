@@ -11,6 +11,7 @@ import { Store as CoreStore } from '../src/core/store.mjs';
 import { planningContext, simulatedPlan, validatePlan } from '../src/planning.mjs';
 import { validatePlan as validateCorePlan } from '../src/core/planning.mjs';
 import { validateWorkflow } from '../src/core/workflows.mjs';
+import { stepContract } from '../src/core/step-contract.mjs';
 
 // A trusted test-only pack. No model calls, browser checks or external services.
 const reportTask = {
@@ -370,6 +371,40 @@ test('a task type has an integrate mode only when it says when its result is rea
   const described = registries.workflows.describe()[reportTask.kind];
   assert.equal(described.integrationLabel, 'Fixture integration');
   assert.equal(described.scopeRequestLabel, undefined);
+});
+
+test('each task type tells the pages how a failed check meets acceptance, as the controller decides it', () => {
+  const registries = createRegistries(),
+    tasks = [
+      reportTask,
+      { ...reportTask, kind: 'test:accepting', acceptFailedChecks: true },
+      { ...reportTask, kind: 'test:decision', step: { kind: 'decide' } },
+      { ...reportTask, kind: 'test:gate', step: { kind: 'gate' }, acceptFailedChecks: true },
+      { ...reportTask, kind: 'test:held', step: { kind: 'work', acceptance: { acceptOver: false } } },
+      { ...reportTask, kind: 'test:joining', step: { kind: 'join', acceptance: { acceptOver: true } } },
+    ];
+  registries.workflows.register(testPack(tasks));
+  const described = registries.workflows.describe(),
+    facts = kind => ({
+      acceptsFailedChecks: described[kind].acceptsFailedChecks,
+      acceptOver: described[kind].acceptOver,
+    });
+  assert.deepEqual(facts(reportTask.kind), { acceptsFailedChecks: false, acceptOver: true });
+  assert.deepEqual(facts('test:accepting'), { acceptsFailedChecks: true, acceptOver: true });
+  assert.deepEqual(facts('test:decision'), { acceptsFailedChecks: false, acceptOver: false });
+  assert.deepEqual(facts('test:gate'), { acceptsFailedChecks: true, acceptOver: false });
+  assert.deepEqual(facts('test:held'), { acceptsFailedChecks: false, acceptOver: false });
+  assert.deepEqual(facts('test:joining'), { acceptsFailedChecks: false, acceptOver: true });
+  // Every registered type, the shipped packs' too, reports exactly what acceptAttempt reads.
+  for (const definition of registries.workflows.list())
+    assert.deepEqual(
+      facts(definition.kind),
+      {
+        acceptsFailedChecks: !!definition.acceptFailedChecks,
+        acceptOver: stepContract(definition).acceptance.acceptOver,
+      },
+      definition.kind,
+    );
 });
 
 test('legacy review attempts and planning contexts retain acceptance and independent-review rules', async t => {

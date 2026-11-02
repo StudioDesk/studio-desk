@@ -1,6 +1,6 @@
 // Registries contain explicitly imported, trusted local code. They do not load
 // arbitrary plugins and are not a permission sandbox.
-import { validateStep } from './step-contract.mjs';
+import { validateStep, stepContract } from './step-contract.mjs';
 import { FormatRegistry, validatePorts } from './formats.mjs';
 import { isRoleId } from './staffing.mjs';
 import { graphProposalFormat } from './planning.mjs';
@@ -414,6 +414,10 @@ export class WorkflowRegistry {
             milestones: ['accepted', ...Object.keys(task.milestones || {})],
             tier: task.tier || null,
             distinctFromInputs: !!task.distinctFromInputs,
+            // How a failed check meets acceptance, as acceptAttempt decides it: whether the type accepts its result
+            // plainly anyway, and whether its step contract lets the director accept over one with a reason.
+            acceptsFailedChecks: !!task.acceptFailedChecks,
+            acceptOver: stepContract(task).acceptance.acceptOver,
             ...(task.stageTemplate
               ? {
                   stageTemplate: task.stageTemplate.stages.map(stage => ({
