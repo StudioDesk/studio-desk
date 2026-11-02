@@ -10,6 +10,7 @@ import { createStudio } from '../src/server.mjs';
 import { createRegistries } from '../src/registry.mjs';
 import { createProject } from '../src/core/project-creation.mjs';
 import { startIdeaIntake } from '../src/core/idea-intake.mjs';
+import { addLibraryEntry } from '../src/core/library.mjs';
 import { inspectRepository, recordProjectSource } from '../src/connectors/source-projects.mjs';
 import { repositoryOrganization } from '../src/organizations/studio-development/project.mjs';
 import { projectTemplate, templateFiles } from '../src/templates/index.mjs';
@@ -34,6 +35,24 @@ const ideas = {
     'Write a two-line sign for the counter saying we now have oat milk.',
     'Plan a Saturday pop-up: a short menu with one signature drink, a stand sign and a post announcing it.',
   ],
+};
+
+// One file in each project's library, so library and Artifacts pictures have a card and a panel to show (November 2:
+// the first Artifacts captures found none). Finished work in The work is still to come: it needs an attempt run and
+// accepted while seeding, before the studio listens.
+const libraries = {
+  [sampleProjects.work]: {
+    name: 'Brand guidelines',
+    purpose: 'How Northbound Coffee looks and sounds: its colors, its type and its voice.',
+    file: 'brand-guidelines.md',
+    text: '# Northbound Coffee brand guidelines\n\n## Voice\n\nWarm and plain. Say what the drink is, then why it is good.\n\n## Colors\n\n- Pine #1F4D3A for headings\n- Oat #F3EBDD for backgrounds\n- Ember #C8572B for one thing per page\n\n## Type\n\nHeadings in a rounded serif; everything else in a clean sans.\n',
+  },
+  [sampleProjects.code]: {
+    name: 'How the app talks',
+    purpose: 'The copy rules every page follows: plain words, roles not names, and a button that says what it does.',
+    file: 'how-the-app-talks.md',
+    text: '# How the app talks\n\n- Plain words, the way a person would say them.\n- Name things by what people recognize, not how the system is built.\n- A button says exactly what happens: Publish, then a note that says Published.\n- An error says what went wrong and how to fix it.\n',
+  },
 };
 
 // The sample's folder: inside the copy, emptied at each start. Refused if it is or holds the copy's data folder.
@@ -123,6 +142,12 @@ export async function seedSampleStudio({ store, runner, registries, directory })
     { name: 'Northbound Coffee', houseRules: 'recommended' },
     { fields: { id: sampleProjects.work } },
   );
+  for (const [projectId, entry] of Object.entries(libraries))
+    addLibraryEntry(store, projectId, {
+      name: entry.name,
+      purpose: entry.purpose,
+      file: { name: entry.file, mediaType: 'text/markdown', data: Buffer.from(entry.text).toString('base64') },
+    });
   for (const [projectId, list] of Object.entries(ideas))
     for (const idea of list) startIdeaIntake(store, registries, runner, { projectId, idea, general: true });
   const org = store.organization();

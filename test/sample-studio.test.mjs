@@ -41,6 +41,9 @@ test('the sample studio holds both projects at their fixed addresses, paused, wi
   assert.ok(!path.relative(studio.directory, code.project.source.root).startsWith('..'));
   assert.deepEqual([...new Set(code.employeeDirectory.map(worker => worker.provider))], ['mock']);
   for (const projectId of Object.values(sampleProjects)) {
+    // A library file in each, so library and Artifacts pictures have something to show.
+    const library = await get(`/api/projects/${projectId}/library?projectId=${projectId}`);
+    assert.equal((library.entries ?? []).length, 1, `${projectId} has one library file`);
     const state = await get(`/api/state?mode=dashboard&projectId=${projectId}`);
     assert.equal(state.runs.length, 2, `${projectId} holds two ideas`);
     assert.equal(state.attempts.length, 0, `${projectId} started nothing`);
