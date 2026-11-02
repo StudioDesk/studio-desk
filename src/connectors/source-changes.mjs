@@ -1563,17 +1563,26 @@ export function sourceStoryReturnable(store, task) {
   if (review.verdict === 'pass') {
     const journal = attempt.sourceIntegration,
       open = stage.current === 'waiting-for-integration' && stage.phase !== 'integration',
-      stopped = stage.current === 'failed' && stage.phase === 'integration';
-    if ((!open && !stopped) || (journal && !['rejected', 'abandoned'].includes(journal.state))) return null;
+      stopped = stage.current === 'failed' && stage.phase === 'integration',
+      // A passing review whose own checks failed (November 1, 2026: a visual check that captured an error page) failed
+      // the stage with no findings and nothing could move it; it goes back with the checks that failed.
+      checks = stage.current === 'failed' && stage.phase === 'candidate-review',
+      failed = checks
+        ? [...(attempt.result?.checks || []), ...(attempt.controllerChecks || [])].filter(c => c.status === 'fail')
+        : [];
+    if ((!open && !stopped && !checks) || (journal && !['rejected', 'abandoned'].includes(journal.state))) return null;
     const { summary, notes = [] } = report();
     return {
       findings: [
-        `Independent review ${attempt.id} passed, and the director sent the change back for another attempt.`,
+        checks
+          ? `Independent review ${attempt.id} passed, but its checks failed, so the change goes back for another attempt.`
+          : `Independent review ${attempt.id} passed, and the director sent the change back for another attempt.`,
         `- ${summary}`,
+        ...failed.map(check => `- ${check.name} failed: ${check.evidence}`),
         ...(notes.length ? ['Its notes, which did not block it:', ...notes.map(note => `- ${note}`)] : []),
       ].join('\n'),
-      passed: true,
-      needsNote: !notes.length,
+      passed: !checks,
+      needsNote: !checks && !notes.length,
     };
   }
   if (stage.current !== 'failed' || review.verdict !== 'needs-work') return null;

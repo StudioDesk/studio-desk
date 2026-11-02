@@ -23,7 +23,21 @@ export const artifact = (
 
 export interface StageRecord {
   current?: string;
+  phase?: string;
   review?: { verdict?: string; attemptId?: string; hash?: string };
+}
+
+// A source story the director can send back over its accepted review, as the controller's sourceStoryReturnable
+// allows: a review that asked for changes, or one that passed while its own checks failed (November 1, 2026: a visual
+// check that captured an error page), which left the story failed at its review with nothing else to press.
+export function reviewReturnable(task: Task) {
+  const stage = task.sourceStage as StageRecord | null | undefined;
+  return (
+    task.status === 'done' &&
+    stage?.current === 'failed' &&
+    task.acceptedAttemptId === stage.review?.attemptId &&
+    (stage.review?.verdict === 'needs-work' || (stage.review?.verdict === 'pass' && stage.phase === 'candidate-review'))
+  );
 }
 
 // The task page's conditions (app-dialogs.js renderTaskModal and the source story's decisions), unchanged.
@@ -72,13 +86,10 @@ export function decisionState(task: Task, studio: StudioState) {
         ? integrationReview(studio, task)?.id === review.id
         : (!journal || ['rejected', 'abandoned'].includes(journal.state ?? '')) &&
           review.candidateReviewVerdict === 'pass');
-  // The independent review asked for changes: send the story back, or integrate over the review with a reason.
+  // The independent review asked for changes, or passed while its checks failed: send the story back, or integrate over
+  // the review with a reason.
   const stage = task.sourceStage as StageRecord | null | undefined,
-    returnable =
-      task.status === 'done' &&
-      stage?.current === 'failed' &&
-      stage.review?.verdict === 'needs-work' &&
-      task.acceptedAttemptId === stage.review.attemptId;
+    returnable = reviewReturnable(task);
   // An integration that stopped on a conflict (1.1 step 3), or failed only merged onto work that landed after the
   // change was tested (October 27): the story goes back to its editor merged onto the current source.
   const landed = journal?.verification?.landedSince,

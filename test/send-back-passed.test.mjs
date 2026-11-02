@@ -101,6 +101,37 @@ test("a passing review's notes go back with the story, so the director's note is
   assert.match(next.assignment.direction, /Fixture note: a case this repository does not use\./);
 });
 
+// November 1, 2026: a review passed while its own checks failed (a visual check that captured an error page). The stage
+// failed with no findings, and nothing could move the story: not Send back, Integrate or Start.
+test("a passing review whose own checks failed goes back with the checks that failed, without the director's note", async t => {
+  const { c, store, review } = await passed(t);
+  const story = store.task(c.taskId);
+  Object.assign(story.sourceStage, {
+    current: 'failed',
+    phase: 'candidate-review',
+    reason: 'Independent review requested changes.',
+  });
+  store.putTask(story);
+  const reviewed = store.attempt(review.id);
+  reviewed.controllerChecks = [
+    ...(reviewed.controllerChecks || []),
+    { name: 'Visual check', status: 'fail', evidence: 'every picture showed an error page' },
+  ];
+  store.updateAttempt(reviewed);
+  const sent = await sendBack(c);
+  assert.equal(sent.status, 202, JSON.stringify(sent.data));
+  assert.equal(
+    store.task(c.taskId).direction,
+    `Independent review ${review.id} passed, but its checks failed, so the change goes back for another attempt.\n- Model-free candidate review fixture.\n- Visual check failed: every picture showed an error page`,
+  );
+  assert.equal(
+    store.events().find(event => event.kind === 'sent_back').message,
+    'Director sent this work back for another attempt.',
+  );
+  const next = await c.wait(c.taskId);
+  assert.match(next.assignment.direction, /Visual check failed: every picture showed an error page/);
+});
+
 test('an integration approved first refuses the send-back, and the story is exactly as it was', async t => {
   const { c, store, review, before } = await passed(t);
   enable(c, 'director');

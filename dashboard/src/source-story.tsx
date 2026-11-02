@@ -6,7 +6,7 @@ import '../../public/source-diff.js';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { send, type AttemptSummary, type Task } from './api';
-import { fileRequest, type Paths, type ScopeEdit } from './decisions';
+import { fileRequest, reviewReturnable, type Paths, type ScopeEdit } from './decisions';
 import { artifactUrl } from './files';
 import { workerName } from './names';
 import type { StudioState } from './studio-runs';
@@ -626,15 +626,7 @@ const listed = (paths: Paths) =>
     .filter(Boolean)
     .join(' · ');
 
-const returnable = (task: Task) => {
-  const stage = task.sourceStage as { current?: string; review?: { verdict?: string; attemptId?: string } } | null;
-  return (
-    task.status === 'done' &&
-    stage?.current === 'failed' &&
-    stage.review?.verdict === 'needs-work' &&
-    task.acceptedAttemptId === stage.review.attemptId
-  );
-};
+const returnable = reviewReturnable;
 
 // Whether the director may change the story's files now (the current dashboard's sourceStoryDetails).
 export function filesEditable(task: Task, studio: StudioState) {
