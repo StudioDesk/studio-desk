@@ -24,8 +24,16 @@ test('model-free sandbox diagnostics require real files, expected denials and un
   });
   process.env.OPENAI_API_KEY = 'fixture-must-be-scrubbed';
   process.env.CODEX_API_KEY = 'fixture-must-be-scrubbed';
+  // The stand-in secret is denied as the real ones are; here the deny is recorded, and the fixture plays the sandbox.
+  const denied = [];
   const run = (implementation = 'mxc', timeoutMs = 2000) =>
-    checkCodexSandbox({ binary, implementation, parentDirectory: directory, timeoutMs });
+    checkCodexSandbox({
+      binary,
+      implementation,
+      parentDirectory: directory,
+      timeoutMs,
+      denySecret: paths => (denied.push(...paths), paths),
+    });
   process.env.STUDIO_SANDBOX_FIXTURE_CASE = 'pass';
   for (const implementation of ['mxc', 'elevated']) {
     const passed = run(implementation);
@@ -34,7 +42,30 @@ test('model-free sandbox diagnostics require real files, expected denials and un
     assert.equal(passed.insideMatches, true);
     assert.equal(passed.outsideExists, false);
     assert.equal(passed.inputUnchanged, true);
+    // Elevated is kept from the secrets; MXC runs as the director and is said to read them.
+    assert.equal(passed.secretsDenied, implementation === 'elevated');
+    assert.equal(!!passed.warning, implementation === 'mxc');
   }
+  assert.equal(denied.length, 1, 'only the elevated check denies the stand-in');
+  assert.equal(path.basename(denied[0]), 'secret-stand-in.txt');
+  // An elevated sandbox that reads the stand-in fails the check, so a Codex update cannot quietly reopen the secrets.
+  process.env.STUDIO_SANDBOX_FIXTURE_CASE = 'secret-readable';
+  const opened = run('elevated');
+  assert.equal(opened.passed, false);
+  assert.equal(opened.secretsDenied, false);
+  process.env.STUDIO_SANDBOX_FIXTURE_CASE = 'pass';
+  // A stand-in that cannot be denied fails the check, which still answers what it found rather than throwing.
+  const undeniable = checkCodexSandbox({
+    binary,
+    implementation: 'elevated',
+    parentDirectory: directory,
+    denySecret: () => {
+      throw new Error('No mapping between account names and security IDs was done.');
+    },
+  });
+  assert.equal(undeniable.passed, false);
+  assert.equal(undeniable.secretsDenied, false);
+  assert.match(undeniable.denyError, /No mapping/);
   const count = fs.readdirSync(directory).length;
   for (const invalid of ['unelevated', 'danger-full-access', 'mxc"; unsafe'])
     assert.throws(() => run(invalid), /must be elevated or mxc/);

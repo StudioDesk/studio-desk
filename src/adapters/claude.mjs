@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { command, subscriptionEnvironment } from './process.mjs';
+import { claudeSecretRules } from './agent-secrets.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { textDeliverySchema, textPrompt, stageTextDelivery } from './text-delivery.mjs';
@@ -64,6 +65,8 @@ export function runClaude(entry, worker, { mode = 'workspace', editable = [], co
       ...(rules.length ? ['--allowedTools', ...rules] : []),
       '--disallowedTools',
       ...CLAUDE_UNBOUNDED_TOOLS,
+      // The director's secrets in the data folder, kept from Claude's file tools (C-42, src/adapters/agent-secrets.mjs).
+      ...claudeSecretRules(this?.store?.directory),
       '--add-dir',
       job,
       '--no-session-persistence',

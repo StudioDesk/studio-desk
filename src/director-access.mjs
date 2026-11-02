@@ -16,8 +16,11 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 export const directorKeyName = 'director-key';
 export const directorKeyFile = directory => path.join(directory, directorKeyName);
 export const launchFileName = 'launch-url';
-// What lets a program act as the director: the key, and this start's launch link, whose code sets the session cookie.
-export const directorSecretNames = [directorKeyName, launchFileName];
+// The folder of the tools' keys (the tool key store keeps a key per tool there, sealed for the director's account).
+export const toolKeysFolderName = 'tool-keys';
+// What lets a program act as the director, or as a tool on the director's behalf: the key, this start's launch link,
+// whose code sets the session cookie, and the tools' keys. Each is kept from every sandbox by name (C-40, C-42).
+export const directorSecretNames = [directorKeyName, launchFileName, toolKeysFolderName];
 
 const digest = text => createHash('sha256').update(text).digest('hex');
 const wellFormed = key => /^[0-9a-f]{64}$/.test(key);

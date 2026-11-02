@@ -82,7 +82,7 @@ Push sends a released line and its tag to your remote, with your own git sign-in
 
 Agents run commands on your computer through your CLI:
 
-- **Codex CLI** runs in its own sandbox.
+- **Codex CLI** runs in its own sandbox. On Windows that's Codex's elevated sandbox, a separate account kept away from Studio desk's key and your tools' keys; it needs Codex's one-time setup, which Windows asks an administrator to approve. Setting `STUDIO_CODEX_WINDOWS_SANDBOX=mxc` picks Codex's other sandbox, which runs as you and can read them.
 - **Claude Code** has no sandbox on Windows. It runs only the commands you approve in Settings, unless you turn on auto mode, which lets Claude Code decide.
 
 Anything an agent runs has your account's access to your files and network, so **approve narrowly**. A change's tests are kept apart: they run in a disposable copy inside the built-in sandbox, which can change only that copy and can't reach past your computer. On Windows they run as a separate account, which needs a one-time setup from Settings where Windows asks for an administrator; on macOS and Linux your home folder is kept out of their reach. You can choose to run tests without it in Settings, and they then have your account's access.

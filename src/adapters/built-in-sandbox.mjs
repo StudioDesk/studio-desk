@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { directorSecretNames } from '../director-access.mjs';
+import { directorKeyName, directorSecretNames } from '../director-access.mjs';
 
 export const builtInSandboxVersion = '0.0.81';
 const studioRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -199,16 +199,23 @@ export function builtInSandboxPackages(root) {
 }
 
 // The files of the data folder a copy sits in that let a program act as the director (C-01, src/director-access.mjs):
-// the key, and the launch link, whose code sets the session cookie. They are found the way the packages are, in a
-// folder above the copy. On macOS and Linux they are denied by name, so a data folder kept outside the home folder
-// still hides them. On Windows the sandbox account cannot read a data folder inside the director's profile; one
-// outside the profile gets them denied before each run (below).
+// the key, the launch link, whose code sets the session cookie, and the tools' keys. They are found the way the
+// packages are, in a folder above the copy. On macOS and Linux they are denied by name, so a data folder kept outside
+// the home folder still hides them. On Windows the sandbox account cannot read a data folder inside the director's
+// profile; one outside the profile gets them denied before each run (below).
 export function builtInSandboxSecrets(root) {
   const secrets = [];
   for (let folder = path.dirname(root); folder !== path.dirname(folder); folder = path.dirname(folder))
     for (const name of directorSecretNames)
       if (fs.existsSync(path.join(folder, name))) secrets.push(path.join(folder, name));
   return secrets;
+}
+// The data folder a copy sits in: the nearest folder above it that holds the director's key; null for a copy outside
+// any data folder.
+export function builtInSandboxDataFolder(root) {
+  for (let folder = path.dirname(root); folder !== path.dirname(folder); folder = path.dirname(folder))
+    if (fs.existsSync(path.join(folder, directorKeyName))) return folder;
+  return null;
 }
 
 // What one test run may touch. It writes only the copy it runs on; it reads Node, the packages installed for
@@ -240,7 +247,13 @@ export function builtInSandboxSettings({
     return {
       network,
       filesystem: {
-        denyRead: [home, ...builtInSandboxSecrets(root)],
+        // The data folder too, for one kept outside the home folder: its database, its other projects' copies and
+        // records. The copy and its packages are let back in below, as on Windows (C-40).
+        denyRead: [
+          home,
+          ...(builtInSandboxDataFolder(root) ? [builtInSandboxDataFolder(root)] : []),
+          ...builtInSandboxSecrets(root),
+        ],
         allowRead: [root, ...reads, seccomp, ...(fs.existsSync(npm) ? [npm] : [])],
         allowWrite: [root, temporary],
         denyWrite: [],
@@ -320,12 +333,13 @@ export function openBuiltInSandboxPassThrough(paths, files = builtInSandboxFiles
 // On Windows the sandbox account reads what every account may read, and a data folder outside the director's profile
 // (C:\StudioDesk, say) lets every signed-in account read it: a probe on November 1, 2026 read the director's key and
 // the database there (C-40), and on November 2 the launch link's file beside the key. Before each run, the director's
-// key and launch link above the copy are denied to the runtime's sandbox group by an entry of their own, so they stay
-// the director's wherever the data folder is. A file that cannot be denied stops the run rather than leaving it
-// readable.
+// key, launch link and the tools' keys above the copy are denied to the runtime's sandbox group by an entry of their
+// own (a folder's reaching everything in it), so they stay the director's wherever the data folder is. A file that
+// cannot be denied stops the run rather than leaving it readable.
 export function denyBuiltInSandboxSecrets(secrets, run = spawnSync) {
   for (const secret of secrets) {
-    const result = run('icacls', [secret, '/deny', `${builtInSandboxGroup}:(R)`], {
+    const folder = fs.statSync(secret, { throwIfNoEntry: false })?.isDirectory();
+    const result = run('icacls', [secret, '/deny', `${builtInSandboxGroup}:${folder ? '(OI)(CI)(R)' : '(R)'}`], {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 30000,
@@ -336,6 +350,25 @@ export function denyBuiltInSandboxSecrets(secrets, run = spawnSync) {
       );
   }
   return secrets;
+}
+// The rest of the data folder (C-40's second part, the director's "deny and grant back", November 2): its database,
+// its other projects' copies and records. The runtime's sandbox group is denied reading what any of it holds, the
+// folder's own listing included, by one entry everything in it inherits. Looking at a folder is still allowed, since
+// Node looks at each folder on the way to the copy. What a run uses is let back in by the runtime's own grants, which
+// it gives the copy and its packages explicitly and which therefore come before the inherited deny. Probed on a data
+// folder outside the profile: the database and the listing refused; the copy written, its packages read and loaded.
+export function denyBuiltInSandboxData(folder, run = spawnSync) {
+  if (!folder) return null;
+  const result = run('icacls', [folder, '/deny', `${builtInSandboxGroup}:(OI)(CI)(RD)`], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30000,
+  });
+  if (result.status !== 0)
+    throw new Error(
+      `The sandbox could not be kept from the data folder (${folder}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
+    );
+  return folder;
 }
 
 // The command line the runtime runs inside the sandbox, through cmd.exe on Windows and sh elsewhere. The test

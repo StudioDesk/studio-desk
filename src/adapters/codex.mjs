@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { command, subscriptionEnvironment } from './process.mjs';
+import { codexElevatedMissing, codexElevatedReady, codexMxcWarning, denyCodexSecrets } from './agent-secrets.mjs';
 import { checkCodexSandbox } from '../../scripts/check-codex-sandbox.mjs';
 import { workspacePrompt } from './workspace-delivery.mjs';
 import { modelMode } from '../core/execution.mjs';
@@ -49,6 +50,11 @@ export function runCodex(entry, worker, processOptions = {}) {
     if (!['mxc', 'elevated'].includes(a.configuration.windowsSandbox))
       throw new Error('Invalid recorded Windows sandbox implementation.');
     args.push('--config', `windows.sandbox="${a.configuration.windowsSandbox}"`);
+    // The elevated sandbox runs in an account group of its own, which is kept from the director's secrets (C-42). The
+    // MXC sandbox runs as the director, so nothing can be denied it (src/adapters/agent-secrets.mjs).
+    if (a.configuration.windowsSandbox === 'elevated')
+      (this.denyCodexSecrets ?? denyCodexSecrets)(this.store?.directory);
+    else this.store?.event('log', a.taskId, a.id, `controller: ${codexMxcWarning}`);
   }
   if (worker.model) args.push('--model', worker.model);
   if (worker.effort) args.push('--config', `model_reasoning_effort="${worker.effort}"`);
@@ -110,7 +116,11 @@ export const codexAdapter = {
       options.codexModelsFile ??
         path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'models_cache.json'),
     );
-    runtime.codexWindowsSandbox = options.codexWindowsSandbox ?? process.env.STUDIO_CODEX_WINDOWS_SANDBOX ?? 'mxc';
+    // Elevated by default (the director's decision, November 2): its sandbox runs in an account group of its own, which
+    // is kept from the director's secrets; MXC runs as the director and is chosen only by name (C-42).
+    runtime.codexWindowsSandbox = options.codexWindowsSandbox ?? process.env.STUDIO_CODEX_WINDOWS_SANDBOX ?? 'elevated';
+    runtime.codexElevatedReady = options.codexElevatedReady ?? codexElevatedReady;
+    runtime.denyCodexSecrets = options.denyCodexSecrets ?? denyCodexSecrets;
     runtime.sourceReviewSandbox =
       options.sourceReviewSandbox ||
       (() => checkCodexSandbox({ binary: runtime.codexBinary, implementation: runtime.codexWindowsSandbox }));
@@ -118,11 +128,17 @@ export const codexAdapter = {
   status: runtime => ({
     available: !!runtime.codexBinary,
     windowsSandbox: process.platform === 'win32' ? runtime.codexWindowsSandbox : null,
+    ...(process.platform === 'win32' && runtime.codexWindowsSandbox === 'mxc' ? { warning: codexMxcWarning } : {}),
     label: 'Codex CLI, subscription login required',
   }),
   blockReason(runtime, verifyAuth) {
     if (process.platform === 'win32' && !['mxc', 'elevated'].includes(runtime.codexWindowsSandbox))
       return 'STUDIO_CODEX_WINDOWS_SANDBOX must be mxc or elevated. No weaker sandbox fallback is allowed.';
+    // Asked once per start of the controller: setting the sandbox up asks for a restart anyway.
+    if (process.platform === 'win32' && runtime.codexWindowsSandbox === 'elevated') {
+      runtime.codexElevatedSetUp ??= runtime.codexElevatedReady();
+      if (!runtime.codexElevatedSetUp) return codexElevatedMissing;
+    }
     if (!runtime.codexBinary) return 'Codex CLI was not found. Install and sign in, then restart the controller.';
     if (verifyAuth) {
       const [bin, args] = command(runtime.codexBinary, ['login', 'status']);

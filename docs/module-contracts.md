@@ -19,10 +19,15 @@ Every request needs the director's session or key (`src/director-access.mjs`).
   - `POST /api/attempts/:id/tests`, an agent's own test run, which its attempt's token authorizes
 - **Local tools** that act as the director (development scripts, a coordinating session's reads and commands) send the key. The key is the director's: it is never handed to an agent the controller runs, and no page, route or export returns it.
 - **`createStudio({ access })`** is `'session'` by default. `'open'` asks for neither, and is passed only by `scripts/sample-studio.mjs`, whose seeded studio the visual check photographs. It is a trusted option of the code that starts the controller, never a setting, a variable or a request.
-- **The sandbox, the key and the launch link** (`directorSecretNames`: `director-key` and `launch-url`, whose code sets the session cookie):
-  - On Windows, the sandbox account can't read a data folder inside the director's profile.
-  - On macOS and Linux, the sandbox denies the home folder and, by name, both files above the copy (`builtInSandboxSecrets`).
-  - Before each Windows run both files above the copy are also denied to the runtime's sandbox group (`denyBuiltInSandboxSecrets`, `icacls /deny`), since a data folder outside the profile is readable by every signed-in account; a file that cannot be denied stops the run. The database in such a folder stays readable to the sandbox (C-40 in the notes).
+- **The sandbox and the data folder.** The secrets are `directorSecretNames`: `director-key`, `launch-url`, whose code sets the session cookie, and the `tool-keys` folder. The data folder is the nearest folder above the copy holding the key (`builtInSandboxDataFolder`).
+  - On Windows, the sandbox account can't read a data folder inside the director's profile anyway.
+  - On macOS and Linux, the sandbox denies the home folder, the data folder and, by name, the secrets above the copy (`builtInSandboxSecrets`). The copy and its packages are let back in by the run's allow list.
+  - **Before each Windows run:**
+    - The secrets are denied to the runtime's sandbox group (`denyBuiltInSandboxSecrets`, `icacls /deny`, a folder's entry reaching everything in it). This matters because a data folder outside the profile is readable by every signed-in account.
+    - The rest of the data folder is denied too (`denyBuiltInSandboxData`): reading what anything in it holds, its own listing included, by one entry everything inherits (`(OI)(CI)(RD)`). Looking at a folder stays allowed, since Node looks at each folder on the way to the copy.
+    - The runtime's own grants to the copy and its packages are explicit, so they come before the inherited deny.
+    - A path that can't be denied stops the run.
+  - **Probed November 2** on data folders inside and outside the profile, with dummy files: the database, a tool key, the key, the launch link and the folder listing were refused; the copy was written and its packages read and loaded.
 - **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
 
 ## The controller's own git (November 2026)
@@ -42,6 +47,25 @@ Every git command the controller runs goes through `src/git.mjs` (`runGit`), exc
   - **Fewer calls where they stay synchronous:** `repositoryState`, which every story start, measurement, carry and integration asks, takes four git calls where it took six. The top folder comes with the commit, and both identity settings come in one read (`config --get-regexp`, each key's last value, an empty value counting as unset). In the integration tests its calls had been a third of all synchronous git time; they fell by a third (`test/repository-state.test.mjs` covers each answer).
   - **Still synchronous:** integration, carries, worktrees and story starts interleave git with the records and their journals step by step. Moving them off the thread means deciding what may change between two steps, so it waits for C-31's decision on that boundary. No read the dashboard's pages make calls git synchronously now; a count over every page read on the source fixture found none.
 - **Tests:** `test/git-trust.test.mjs`. A repository whose hooks and fsmonitor command leave marker files: the director's own git runs them, and the controller's reads, commits, worktrees and checkouts run none.
+
+## The director's secrets and the agents' CLIs (November 2026)
+
+The secrets are the data folder's `director-key`, `launch-url` and `tool-keys` (`directorSecretNames`). `src/adapters/agent-secrets.mjs` keeps them from each agent CLI in the way that CLI allows.
+
+- **Claude:** workspace attempts pass deny rules after the unbounded tools (`claudeSecretRules`). Each is a `Read(//…)` rule in the form Claude Code matches: POSIX, a Windows drive as `/c`, glob characters taken literally, a folder with `/**`.
+  - They cover Claude's file tools, the shell's file commands it recognizes (`cat`, `head`, `<`), and Edit and Write on the same paths.
+  - They don't cover a script that opens a file itself. That would need an OS boundary for Claude agents (C-08 in the notes).
+- **Codex on Windows** defaults to its elevated sandbox. It runs in an account group of its own (`CodexSandboxUsers`), which is denied each secret before every elevated attempt (`denyCodexSecrets`, `icacls /deny`). A secret that can't be denied stops the attempt.
+  - **Without elevated setup:** a computer without Codex's elevated setup is told so, with what to run (`codexElevatedMissing`). The check runs once per start of the controller.
+  - **MXC:** setting `STUDIO_CODEX_WINDOWS_SANDBOX=mxc` picks Codex's MXC sandbox. It runs as the director and can be denied nothing. Codex's status says so, and each MXC attempt's log does too (`codexMxcWarning`).
+- **Codex on macOS and Linux:** its sandbox reads the whole disk, so nothing is denied there.
+- **The isolation check** (`scripts/check-codex-sandbox.mjs`, which runs before steps that need verified isolation) also reads a stand-in secret, denied as the real ones are.
+  - **Elevated:** if the stand-in is readable, the check fails, so a Codex update can't quietly reopen the secrets.
+  - **MXC and off Windows:** the check reports `secretsDenied: false` with a warning.
+- **Tests:**
+  - `test/agent-secrets.test.mjs` covers the rules, the denies, the setup message and the MXC warning.
+  - `test/sandbox.test.mjs` covers the check's stand-in, including an elevated sandbox opened to it.
+  - The suite's studios record Codex's deny instead of making it (`codexSecretDenies` in `test/model-free-studio.mjs`).
 
 ## Every stop says why (November 2026)
 
