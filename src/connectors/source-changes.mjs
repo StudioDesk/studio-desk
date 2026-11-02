@@ -682,8 +682,8 @@ export function mergeSourceStory(store, registries, task, by = { type: 'director
     };
     stage.merges = (stage.merges || 0) + 1;
     story.direction = conflicts.length
-      ? `Independent review ${review.id} passed your change, but work integrated since it started conflicts with it in ${named}. The controller merged your change onto the current source: the files under changes/ hold it, and ${named} hold conflict markers between the current source (<<<<<<<) and your change (>>>>>>>). Resolve each conflict so that both changes work, remove every marker, and keep the rest of your change. Its tests and an independent review follow.`
-      : `Independent review ${review.id} passed your change, and it passed its own tests, but ${landedText(store, landed)} landed since it started, and merged onto that, ${failing}. The controller merged your change onto the current source, with no conflicts: the files under changes/ hold it. Make your change work with what landed so the tests pass, without undoing any of what landed, and keep the rest of your change. Its tests and an independent review follow.`;
+      ? `The independent review passed your change, but work integrated since it started conflicts with it in ${named}. The controller merged your change onto the current source: the files under changes/ hold it, and ${named} hold conflict markers between the current source (<<<<<<<) and your change (>>>>>>>). Resolve each conflict so that both changes work, remove every marker, and keep the rest of your change. Its tests and an independent review follow.`
+      : `The independent review passed your change, and it passed its own tests, but ${landedText(store, landed)} landed since it started, and merged onto that, ${failing}. The controller merged your change onto the current source, with no conflicts: the files under changes/ hold it. Make your change work with what landed so the tests pass, without undoing any of what landed, and keep the rest of your change. Its tests and an independent review follow.`;
     delete story.autonomyNote;
     Object.assign(story, { status: 'ready', queued: false, reason: '', controllerWait: false });
     registries.workflows.stageProgress(store, story);
@@ -1578,8 +1578,8 @@ export function sourceStoryReturnable(store, task) {
     return {
       findings: [
         checks
-          ? `Independent review ${attempt.id} passed, but its checks failed, so the change goes back for another attempt.`
-          : `Independent review ${attempt.id} passed, and the director sent the change back for another attempt.`,
+          ? 'The independent review passed, but its checks failed, so the change goes back for another attempt.'
+          : 'The independent review passed, and the director sent the change back for another attempt.',
         `- ${summary}`,
         ...failed.map(check => `- ${check.name} failed: ${check.evidence}`),
         ...(notes.length ? ['Its notes, which did not block it:', ...notes.map(note => `- ${note}`)] : []),
@@ -1592,7 +1592,7 @@ export function sourceStoryReturnable(store, task) {
   const { summary, findings } = report();
   return {
     findings: [
-      `Independent review ${attempt.id} requested changes. Address these findings:`,
+      'The independent review requested changes. Address these findings:',
       `- ${summary}`,
       ...findings.map(finding => `- ${finding}`),
     ].join('\n'),

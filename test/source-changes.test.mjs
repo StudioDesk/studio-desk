@@ -3516,8 +3516,10 @@ test('the director sends a story back when its review requested changes; the nex
   assert.notEqual(second.id, first.id);
   assert.equal(
     second.assignment.direction,
-    `Independent review ${negative.id} requested changes. Address these findings:\n- Model-free candidate review fixture.\n- Fixture requests more work.\n\nDirector's note: Keep the import order.`,
+    "The independent review requested changes. Address these findings:\n- Model-free candidate review fixture.\n- Fixture requests more work.\n\nDirector's note: Keep the import order.",
   );
+  // The review is named in words, never by its attempt code.
+  assert.doesNotMatch(second.assignment.direction, /attempt-[0-9a-f]/);
   // The replacement is reviewed as usual; the earlier candidate and its review stay in the history.
   await c.review(second);
   await c.accept(c.taskId);

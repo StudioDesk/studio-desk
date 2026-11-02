@@ -68,8 +68,12 @@ test('the director sends a story back over its passing review, and the note is t
   assert.equal(story.sourceStage.phase, 'implementing');
   assert.equal(
     story.direction,
-    `Independent review ${review.id} passed, and the director sent the change back for another attempt.\n- Model-free candidate review fixture.\n\nDirector's note: Name the setting in plain words, not its key.`,
+    "The independent review passed, and the director sent the change back for another attempt.\n- Model-free candidate review fixture.\n\nDirector's note: Name the setting in plain words, not its key.",
   );
+  // The director reads it on the story page: the review is named in words, never by its attempt code, which the
+  // stage record keeps.
+  assert.doesNotMatch(story.direction, /attempt-[0-9a-f]/);
+  assert.equal(story.sourceStage.review.attemptId, review.id);
   assert.equal(
     store.events().find(event => event.kind === 'sent_back').message,
     'Director sent this work back for another attempt over a passing review. Note: Name the setting in plain words, not its key.',
@@ -94,8 +98,10 @@ test("a passing review's notes go back with the story, so the director's note is
   assert.equal(sent.status, 202, JSON.stringify(sent.data));
   assert.equal(
     store.task(c.taskId).direction,
-    `Independent review ${review.id} passed, and the director sent the change back for another attempt.\n- Model-free candidate review fixture.\nIts notes, which did not block it:\n- Fixture note: a case this repository does not use.`,
+    'The independent review passed, and the director sent the change back for another attempt.\n- Model-free candidate review fixture.\nIts notes, which did not block it:\n- Fixture note: a case this repository does not use.',
   );
+  assert.doesNotMatch(store.task(c.taskId).direction, /attempt-[0-9a-f]/);
+  assert.equal(store.task(c.taskId).sourceStage.review.attemptId, review.id);
   // The next attempt has them in its direction, and the whole review in its history.
   const next = await c.wait(c.taskId);
   assert.match(next.assignment.direction, /Fixture note: a case this repository does not use\./);
@@ -122,8 +128,10 @@ test("a passing review whose own checks failed goes back with the checks that fa
   assert.equal(sent.status, 202, JSON.stringify(sent.data));
   assert.equal(
     store.task(c.taskId).direction,
-    `Independent review ${review.id} passed, but its checks failed, so the change goes back for another attempt.\n- Model-free candidate review fixture.\n- Visual check failed: every picture showed an error page`,
+    'The independent review passed, but its checks failed, so the change goes back for another attempt.\n- Model-free candidate review fixture.\n- Visual check failed: every picture showed an error page',
   );
+  assert.doesNotMatch(store.task(c.taskId).direction, /attempt-[0-9a-f]/);
+  assert.equal(store.task(c.taskId).sourceStage.review.attemptId, review.id);
   assert.equal(
     store.events().find(event => event.kind === 'sent_back').message,
     'Director sent this work back for another attempt.',

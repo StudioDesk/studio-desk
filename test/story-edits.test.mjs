@@ -272,10 +272,11 @@ test('after a review requests changes, an edit sends the story back with the fin
   assert.equal(second.assignment.kind, 'studio-development:change');
   assert.match(
     second.assignment.direction,
-    new RegExp(
-      `Independent review ${negative.id} requested changes\\. Address these findings:\\n- Model-free candidate review fixture\\.\\n- Fixture requests more work\\.`,
-    ),
+    /The independent review requested changes\. Address these findings:\n- Model-free candidate review fixture\.\n- Fixture requests more work\./,
   );
+  // The findings name the review in words, not by its attempt code; this direction names the earlier attempt whose
+  // edits it continues from, which is not the review.
+  assert.ok(!second.assignment.direction.includes(negative.id), second.assignment.direction);
   assert.deepEqual(second.sourceChange.allowedFiles, files);
   // A review proposal's story keeps its accepted proposal; the edit decides its paths.
   assert.deepEqual(second.sourceChange.proposal, first.sourceChange.proposal);

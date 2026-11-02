@@ -134,6 +134,9 @@ test('a conflicting story keeps its change: merged onto the current source by th
     story.direction,
     /the files under changes\/ hold it, and src\/core\/workflows\.mjs hold conflict markers/,
   );
+  // The review is named in words, never by its attempt code.
+  assert.match(story.direction, /^The independent review passed your change, but work integrated since it started/);
+  assert.doesNotMatch(story.direction, /attempt-[0-9a-f]/);
   assert.deepEqual(merged.sourceChange.merge, {
     from: first.id,
     candidateCommit: first.sourceCandidate.commit,
@@ -227,8 +230,10 @@ test('a change that passed its own tests and fails them merged onto work that la
   );
   assert.match(
     story.direction,
-    /passed your change, and it passed its own tests, but T-landed1 and 1 commit made by hand landed since it started, and merged onto that, (these tests fail: .+|its tests fail)\. The controller merged your change onto the current source, with no conflicts: the files under changes\/ hold it\. Make your change work with what landed so the tests pass, without undoing any of what landed/,
+    /^The independent review passed your change, and it passed its own tests, but T-landed1 and 1 commit made by hand landed since it started, and merged onto that, (these tests fail: .+|its tests fail)\. The controller merged your change onto the current source, with no conflicts: the files under changes\/ hold it\. Make your change work with what landed so the tests pass, without undoing any of what landed/,
   );
+  // The review is named in words, never by its attempt code.
+  assert.doesNotMatch(story.direction, /attempt-[0-9a-f]/);
   assert.deepEqual(merged.sourceChange.merge, {
     from: first.id,
     candidateCommit: first.sourceCandidate.commit,
