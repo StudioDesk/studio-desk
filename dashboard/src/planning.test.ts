@@ -64,7 +64,7 @@ const idea = (tasks: Task[]) =>
     taskIds: tasks.map(task => task.id),
     steps: [],
     needsYou: [],
-    outcome: { tone: 'busy', label: 'In progress', text: '' },
+    outcome: { state: 'in-progress', tone: 'busy', label: 'In progress', text: '' },
   }) as unknown as RunStory;
 const read = (
   tasks: Task[],

@@ -88,8 +88,13 @@ test("today's agents keep their faces, and every other agent gets one of its own
 
 test('an idea shipped today when its last integration finished today, with its commits in order', () => {
   const now = new Date('2026-10-22T20:00:00'),
-    story = (id: string, taskIds: string[], tone: RunStory['outcome']['tone'] = 'ok') =>
-      ({ id, brief: id, taskIds, outcome: { tone, label: '', text: '' } }) as unknown as RunStory,
+    story = (id: string, taskIds: string[], state: RunStory['outcome']['state'] = 'integrated') =>
+      ({
+        id,
+        brief: id,
+        taskIds,
+        outcome: { state, tone: state === 'integrated' ? 'ok' : 'bad', label: '', text: '' },
+      }) as unknown as RunStory,
     integrated = (taskId: string, commit: string, finishedAt: string) =>
       ({
         id: `a-${taskId}`,
@@ -98,7 +103,7 @@ test('an idea shipped today when its last integration finished today, with its c
         sourceIntegration: { state: 'integrated', finishedAt, repository: { commit } },
       }) as unknown as AttemptSummary;
   const shipped = shippedToday(
-    [story('today', ['T-1', 'T-2']), story('yesterday', ['T-3']), story('stopped', ['T-4'], 'bad')],
+    [story('today', ['T-1', 'T-2']), story('yesterday', ['T-3']), story('stopped', ['T-4'], 'stopped')],
     [
       integrated('T-2', 'bbbbbbbbbb', '2026-10-22T15:00:00'),
       integrated('T-1', 'aaaaaaaaaa', '2026-10-22T09:00:00'),
@@ -141,12 +146,12 @@ test("an agent's last work says how it ended: stopped, a review's verdict, or fi
 test('other work shipped today when its last result was accepted today, counted without its plan or review', () => {
   const now = new Date('2026-10-24T20:00:00'),
     // As the shared run rules word them: other work that finished reads Finished, not Integrated.
-    story = (id: string, taskIds: string[], label = 'Finished') =>
+    story = (id: string, taskIds: string[], label = 'Finished', state: RunStory['outcome']['state'] = 'finished') =>
       ({
         id,
         brief: id,
         taskIds,
-        outcome: { tone: 'muted', label, text: 'Nothing is waiting.' },
+        outcome: { state, tone: 'muted', label, text: 'Nothing is waiting.' },
       }) as unknown as RunStory,
     accepted = (taskId: string, kind: string, acceptedAt: string, id = `a-${taskId}-${kind}`) =>
       ({ id, taskId, status: 'accepted', acceptedAt, assignment: { kind } }) as unknown as AttemptSummary;
@@ -155,7 +160,7 @@ test('other work shipped today when its last result was accepted today, counted 
       story('guide', ['T-plan', 'T-guide']),
       story('older', ['T-old']),
       story('code-unintegrated', ['T-change']),
-      story('running', ['T-run'], 'In progress'),
+      story('running', ['T-run'], 'In progress', 'in-progress'),
     ],
     [
       accepted('T-plan', 'general:plan', '2026-10-24T10:00:00'),
@@ -170,5 +175,50 @@ test('other work shipped today when its last result was accepted today, counted 
   );
   expect(shipped.map(item => [item.story.id, item.commits, item.results, item.at])).toEqual([
     ['guide', [], 1, '2026-10-24T10:30:00'],
+  ]);
+});
+
+// Whether an idea shipped is read from its outcome's fixed state, so rewording a label changes nothing: a finished or
+// integrated idea counts whatever its label says, and one in progress does not, even labelled Finished.
+test("an idea counts as shipped today by its outcome's state, whatever its label says", () => {
+  const now = new Date('2026-10-24T20:00:00'),
+    story = (id: string, state: RunStory['outcome']['state'], label: string) =>
+      ({
+        id,
+        brief: id,
+        taskIds: [`T-${id}`],
+        outcome: { state, tone: 'muted', label, text: '' },
+      }) as unknown as RunStory,
+    accepted = (id: string, acceptedAt: string) =>
+      ({
+        id: `a-${id}`,
+        taskId: `T-${id}`,
+        status: 'accepted',
+        acceptedAt,
+        assignment: { kind: 'general:work' },
+      }) as unknown as AttemptSummary,
+    integrated = (id: string, finishedAt: string) =>
+      ({
+        id: `a-${id}`,
+        taskId: `T-${id}`,
+        status: 'accepted',
+        sourceIntegration: { state: 'integrated', finishedAt, repository: { commit: 'eeeeeeeeee' } },
+      }) as unknown as AttemptSummary;
+  const shipped = shippedToday(
+    [
+      story('wrapped', 'finished', 'All wrapped up'),
+      story('landed', 'integrated', 'Landed'),
+      story('open', 'in-progress', 'Finished'),
+    ],
+    [
+      accepted('wrapped', '2026-10-24T10:00:00'),
+      integrated('landed', '2026-10-24T11:00:00'),
+      accepted('open', '2026-10-24T12:00:00'),
+    ],
+    now,
+  );
+  expect(shipped.map(item => [item.story.id, item.commits, item.results])).toEqual([
+    ['landed', ['eeeeeee'], 0],
+    ['wrapped', [], 1],
   ]);
 });

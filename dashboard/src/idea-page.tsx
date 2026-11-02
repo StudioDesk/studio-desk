@@ -23,6 +23,7 @@ import {
   clockOf,
   firstSentence,
   happened,
+  ideaEnded,
   journeyChip,
   journeyStages,
   journeyStories,
@@ -53,8 +54,6 @@ import { useToast } from './toast';
 import { queryKeys } from './records';
 import { useNarrow } from './use-narrow';
 import { useNow } from './use-now';
-
-const finishedLabels = ['Integrated', 'Finished', 'Stopped', 'Cancelled', 'Closed'];
 
 interface DirectorInput {
   id: string;
@@ -112,7 +111,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
         ? { ...state, attempts: state.attempts.map(attempt => filed.find(item => item.id === attempt.id) ?? attempt) }
         : state,
     ),
-    finished = finishedLabels.includes(run.outcome.label),
+    finished = ideaEnded(run),
     // The idea's own record, which carries its release and line (1.1).
     record = state.runs.find(item => item.id === run.id),
     // The idea may be brought back to an older line (1.1, October 27) once each of its source stories landed or was
@@ -212,7 +211,7 @@ export function IdeaPage({ projectId, run, state }: { projectId: string; run: Ru
       <section className="sd-card sd-journey" aria-label="Journey">
         <ol className="sd-journey__track">
           {stages.map(stage => (
-            <li key={stage.label} className={`sd-journey__station sd-journey__station--${stage.state}`}>
+            <li key={stage.step} className={`sd-journey__station sd-journey__station--${stage.state}`}>
               <span className="sd-journey__node" aria-hidden="true">
                 <Icon name={stationIcon(stage)} size={narrow ? 18 : 20} weight={stage.state === 'done' ? 3 : 2.4} />
               </span>
@@ -362,9 +361,9 @@ const stationIcon = (stage: JourneyStage): IconName =>
       ? 'build'
       : stage.icon === 'flag'
         ? 'flag'
-        : stage.label === 'Checked'
+        : stage.step === 'checked'
           ? 'test'
-          : stage.label === 'Planned'
+          : stage.step === 'planned'
             ? 'ideas'
             : 'arrow';
 
@@ -901,9 +900,9 @@ function IdeaActions({
     id = useId(),
     paused = !!state.project.dispatchPaused,
     archived = !!run.archive?.archived,
-    canArchive = !!run.archive && finishedLabels.includes(run.outcome.label),
+    canArchive = !!run.archive && ideaEnded(run),
     closable = run.needsYou.filter(item => item.canClose).map(item => item.taskId),
-    open = !finishedLabels.includes(run.outcome.label);
+    open = !ideaEnded(run);
   const request = useMutation({
     mutationFn: ({ path, body }: { path: string; body: Record<string, unknown>; done: string }) =>
       send(path, { projectId, ...body }),

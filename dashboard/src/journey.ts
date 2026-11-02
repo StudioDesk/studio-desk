@@ -6,7 +6,7 @@ import { plural, reviewOf, spoken, totalsOf } from './evidence';
 import { workerName } from './names';
 import { changeableAnswer, exchange, waitingQuestion } from './questions';
 import { cliName, isSourceStory, standing, storySteps } from './story';
-import { active, type GraphNode, type RunStory, type StudioState } from './studio-runs';
+import { active, type GraphNode, type Outcome, type RunStory, type StudioState } from './studio-runs';
 
 export type Tone = 'ok' | 'live' | 'you' | 'bad' | 'wait';
 // The idea's planning steps, which planning.ts reads too.
@@ -44,7 +44,9 @@ export function runRecords(run: RunStory, state: StudioState) {
 const storyDone = (task: Task) =>
   isSourceStory(task) ? task.sourceStage?.current === 'integrated' : task.status === 'done';
 
+// A stage's step is its fixed name, which pages decide from; its label is the words shown.
 export interface JourneyStage {
+  step: 'sent' | 'checked' | 'planned' | 'building' | 'shipped';
   label: string;
   note: string;
   state: 'done' | 'live' | 'you' | 'bad' | 'todo';
@@ -70,12 +72,15 @@ export function journeyStages(run: RunStory, state: StudioState): JourneyStage[]
                 : group.some(task => task.lastAttemptId)
                   ? 'live'
                   : 'todo';
-  const out: JourneyStage[] = [{ label: 'Sent', note: `You · ${clockOf(run.startedAt)}`, state: 'done', icon: 'send' }];
+  const out: JourneyStage[] = [
+    { step: 'sent', label: 'Sent', note: `You · ${clockOf(run.startedAt)}`, state: 'done', icon: 'send' },
+  ];
   const checks = stageOf(checkKinds).filter(Boolean);
   if (checks.length) {
     const attempt = attempts(checks[0]!.id).find(item => item.status === 'accepted') ?? attempts(checks[0]!.id).at(-1),
       totals = totalsOf(attempt);
     out.push({
+      step: 'checked',
       label: 'Checked',
       note: [workerName(state, checks[0]!.workerId), totals?.tests ? `${totals.pass} of ${totals.tests} passed` : '']
         .filter(Boolean)
@@ -87,6 +92,7 @@ export function journeyStages(run: RunStory, state: StudioState): JourneyStage[]
   const plans = stageOf(planKinds).filter(Boolean);
   if (plans.length)
     out.push({
+      step: 'planned',
       label: 'Planned',
       note: [
         workerName(state, plans[0]!.workerId),
@@ -101,6 +107,7 @@ export function journeyStages(run: RunStory, state: StudioState): JourneyStage[]
     const done = stories.filter(storyDone).length,
       source = stories.some(isSourceStory);
     out.push({
+      step: 'building',
       label: source ? 'Building' : 'Working',
       note: `${done} of ${stories.length} ${source ? 'integrated' : 'accepted'}`,
       state: stateOf(stories),
@@ -108,6 +115,7 @@ export function journeyStages(run: RunStory, state: StudioState): JourneyStage[]
     });
     const shipped = done === stories.length;
     out.push({
+      step: 'shipped',
       label: source ? 'Shipped' : 'Done',
       note: shipped
         ? clockOf(lastFinish(stories.flatMap(task => attempts(task.id))))
@@ -669,12 +677,16 @@ export function whoWorked(run: RunStory, state: StudioState): Worked[] {
     });
 }
 
+// Whether an idea has ended, from its outcome's fixed state rather than the words it shows: it integrated, finished,
+// stopped, was cancelled or was closed.
+const endedStates: readonly Outcome['state'][] = ['integrated', 'finished', 'stopped', 'cancelled', 'closed'];
+export const ideaEnded = (run: Pick<RunStory, 'outcome'>) => endedStates.includes(run.outcome.state);
+
 // The head's chip: what the idea is doing now.
 export function journeyChip(run: RunStory, state: StudioState): { tone: Tone; label: string } {
   const stories = journeyStories(run, state),
-    current = stories.find(story => story.current),
-    open = !['Integrated', 'Finished', 'Stopped', 'Cancelled', 'Closed'].includes(run.outcome.label);
-  if (!open)
+    current = stories.find(story => story.current);
+  if (ideaEnded(run))
     return {
       tone: run.outcome.tone === 'ok' ? 'ok' : run.outcome.tone === 'bad' ? 'bad' : 'wait',
       label: run.outcome.label,

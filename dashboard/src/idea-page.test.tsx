@@ -12,6 +12,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary, RunRecord, Task } from './api';
 import { App } from './app';
+import { Icon } from './design/icons';
 import type { Answer } from './questions';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
@@ -607,6 +608,45 @@ test("Checks and plan links each planning step's own page, while the plan runs a
     'Open the plan → /p/project-x/tasks/T-plan · Done',
   ]);
   expect([...document.querySelectorAll('.sd-storycard__title')].map(item => item.textContent)).toEqual(['First']);
+});
+
+// The journey's stations as drawn: each one's words and the icon it shows, told by the icon's own drawing. The page
+// tells the Checked and Planned stations apart by their fixed step, so each keeps its icon until it is done.
+const stations = async () => {
+  const journey = await screen.findByRole('region', { name: 'Journey' }, { timeout: 5000 }),
+    drawings = (['check', 'test', 'ideas', 'build', 'flag', 'arrow'] as const).map(
+      name => [name, render(<Icon name={name} />, { container: document.createElement('div') }).container] as const,
+    );
+  return [...journey.querySelectorAll('.sd-journey__station')].map(station => {
+    const drawn = station.querySelector('.sd-journey__node svg')?.innerHTML,
+      icon = drawings.find(([, container]) => container.querySelector('svg')?.innerHTML === drawn)?.[0];
+    return `${station.querySelector('.sd-journey__label')?.textContent}: ${icon}`;
+  });
+};
+
+test('the journey draws the checks running as a test and the plan running as an idea, each a check once done', async () => {
+  controller.attempts.push({
+    id: 'attempt-checks',
+    taskId: 'T-checks',
+    status: 'running',
+    workerId: 'W-1',
+    startedAt: new Date().toISOString(),
+  });
+  open([
+    taskFixture('T-checks', {
+      title: 'Check the source',
+      kind: 'studio-development:checks',
+      status: 'running',
+      lastAttemptId: 'attempt-checks',
+      workflowReference: { runId: 'run-1', key: 'checks' },
+    }),
+  ]);
+  expect(await stations()).toEqual(['Sent: check', 'Checked: test']);
+  cleanup();
+  controller.requests = [];
+  controller.attempts = [];
+  open([checksStep(), planStep('planning', { answers: [yourAnswer], dependencies: ['T-checks'] })]);
+  expect(await stations()).toEqual(['Sent: check', 'Checked: check', 'Planned: ideas']);
 });
 
 test('an idea without checks links only its plan, waiting for you while its question does, in either view', async () => {

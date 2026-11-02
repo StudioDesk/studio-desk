@@ -171,19 +171,16 @@ export function lastDone(state: StudioState, stories: RunStory[], worker: Worker
   return { words, at: String(attempt.finishedAt) };
 }
 
-// The ideas that shipped today, newest first: a code idea when its last story integrated today (its outcome
-// Integrated), other work when it finished and its last result was accepted today (the fresh install, October 24:
-// an accepted guide never showed). `results` counts other work's accepted results, not its planning, checks or
-// reviews; a code idea that finished without integrating shipped nothing.
+// The ideas that shipped today, newest first: a code idea when its last story integrated today (its outcome's state
+// integrated), other work when it finished (state finished) and its last result was accepted today (the fresh
+// install, October 24: an accepted guide never showed). `results` counts other work's accepted results, not its
+// planning, checks or reviews; a code idea that finished without integrating shipped nothing.
 const supporting = /:(plan|breakdown|checks|review|change-review)$/;
 export function shippedToday(stories: RunStory[], attempts: AttemptSummary[], now = new Date()) {
   const seen = new Set<string>();
   return stories
     .filter(
-      story =>
-        !seen.has(story.id) &&
-        seen.add(story.id) &&
-        (story.outcome.tone === 'ok' || story.outcome.label === 'Finished'),
+      story => !seen.has(story.id) && seen.add(story.id) && ['integrated', 'finished'].includes(story.outcome.state),
     )
     .map(story => {
       const integrations = attempts

@@ -52,7 +52,7 @@ const idea = (tasks: Task[]) =>
     taskIds: tasks.map(task => task.id),
     steps: [],
     needsYou: [],
-    outcome: { tone: 'busy', label: 'In progress', text: '' },
+    outcome: { state: 'in-progress', tone: 'busy', label: 'In progress', text: '' },
   }) as unknown as RunStory;
 
 test('each task stands in one of five columns, and stopped work where it stopped', () => {

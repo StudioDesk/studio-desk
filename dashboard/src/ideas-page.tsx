@@ -8,7 +8,7 @@ import { Fragment, useState, type ReactNode } from 'react';
 import { AgentAvatar } from './design/avatar';
 import { plural } from './evidence';
 import { agentState } from './faces';
-import { journeyChip, journeyStories } from './journey';
+import { ideaEnded, journeyChip, journeyStories } from './journey';
 import { workerName } from './names';
 import { requestNewIdea } from './new-idea';
 import { planningOf, type Planning } from './planning';
@@ -16,14 +16,11 @@ import type { RunStory, StudioState } from './studio-runs';
 import { agentLooks } from './today';
 import { useNow } from './use-now';
 
-const finishedLabels = ['Integrated', 'Finished', 'Stopped', 'Cancelled', 'Closed'];
 const planningTones = { planning: 'live', you: 'you', stopped: 'bad' } as const;
 // Where an open idea's planning stands. An idea stopped on its plan goes on once the director acts, so its row
 // tells that stop's reason and what to do too.
 const planningFor = (entry: IdeaEntry, now: number) =>
-  !finishedLabels.includes(entry.run.outcome.label) || entry.run.outcome.label === 'Stopped'
-    ? planningOf(entry.run, entry.state, now)
-    : null;
+  !ideaEnded(entry.run) || entry.run.outcome.state === 'stopped' ? planningOf(entry.run, entry.state, now) : null;
 const day = (value: string) =>
   new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const words = (run: RunStory) => {
@@ -57,7 +54,7 @@ function PlanningWords({ projectId, state, planning }: { projectId: string; stat
 
 function IdeaRow({ projectId, entry, planning }: { projectId: string; entry: IdeaEntry; planning: Planning | null }) {
   const { run, state } = entry,
-    open = !finishedLabels.includes(run.outcome.label),
+    open = !ideaEnded(run),
     chip = planning ? { tone: planningTones[planning.state], label: planning.label } : journeyChip(run, state),
     stories = journeyStories(run, state),
     done = stories.filter(story => story.chip.tone === 'ok').length,
@@ -145,7 +142,7 @@ export function IdeasList({
     ),
     planning = new Map([...ideas, ...archived].map(entry => [entry.run.id, planningFor(entry, now)]));
   const kind = (entry: IdeaEntry): Filter[] => {
-    const open = !finishedLabels.includes(entry.run.outcome.label),
+    const open = !ideaEnded(entry.run),
       // An idea whose planning waits for the director is a call, whether or not its run names it.
       calls = entry.run.needsYou.some(item => item.requiresDirector) || planning.get(entry.run.id)?.state === 'you';
     return ['all', open ? 'open' : 'finished', ...(calls ? (['calls'] as const) : [])];

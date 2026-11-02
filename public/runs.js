@@ -1422,6 +1422,9 @@
     return `The changes were committed as ${commits.slice(0, -1).join(', ')} and ${commits.at(-1)}.`;
   }
 
+  // How a run stands: its words (label, text) and tone for the page, and beside them a fixed state the pages decide
+  // from, so rewording a label changes no behavior: closed, cancelled, in-progress, needs-you, integrated, stopped,
+  // finished or idle.
   function outcome(tasks, attempts, waiting, pending) {
     const decisions = waiting.filter(item => item.requiresDirector),
       progress = tasks
@@ -1430,25 +1433,36 @@
         .filter(Boolean),
       unfinished = progress.filter(item => item.stage.current !== 'integrated');
     if (tasks.every(task => task.closed))
-      return { tone: 'muted', label: 'Closed', text: 'All work was closed without taking it further.' };
+      return {
+        state: 'closed',
+        tone: 'muted',
+        label: 'Closed',
+        text: 'All work was closed without taking it further.',
+      };
     if (
       !attempts.some(attempt => attempt.acceptedAt) &&
       tasks.every(task => ['denied', 'cancelled'].includes(task.status))
     )
-      return { tone: 'muted', label: 'Cancelled', text: 'Cancelled before it produced anything.' };
+      return { state: 'cancelled', tone: 'muted', label: 'Cancelled', text: 'Cancelled before it produced anything.' };
     if (unfinished.some(item => item.busy))
-      return { tone: 'busy', label: 'In progress', text: 'Integration is approved or running.' };
+      return { state: 'in-progress', tone: 'busy', label: 'In progress', text: 'Integration is approved or running.' };
     if (unfinished.length) {
       if (decisions.length)
         return {
+          state: 'needs-you',
           tone: 'wait',
           label: 'Needs you',
           text: `${decisions.length} item${decisions.length === 1 ? '' : 's'} waiting for you.`,
         };
-      return { tone: 'busy', label: 'In progress', text: `${unfinished[0].label}.` };
+      return { state: 'in-progress', tone: 'busy', label: 'In progress', text: `${unfinished[0].label}.` };
     }
     if (progress.length && progress.every(item => item.stage.current === 'integrated'))
-      return { tone: 'ok', label: 'Integrated', text: committed(progress.map(item => item.journal)) };
+      return {
+        state: 'integrated',
+        tone: 'ok',
+        label: 'Integrated',
+        text: committed(progress.map(item => item.journal)),
+      };
     const integrated = attempts.find(attempt => attempt.sourceIntegration?.state === 'integrated'),
       active =
         tasks.some(task => ['running', 'stopping'].includes(task.status) || (task.queued && task.status === 'ready')) ||
@@ -1458,20 +1472,22 @@
         .sort((a, b) => time(b.createdAt) - time(a.createdAt))[0];
     if (integrated)
       return {
+        state: 'integrated',
         tone: 'ok',
         label: 'Integrated',
         text: committed(attempts.map(attempt => attempt.sourceIntegration)),
       };
-    if (active) return { tone: 'busy', label: 'In progress', text: 'Work is running now.' };
+    if (active) return { state: 'in-progress', tone: 'busy', label: 'In progress', text: 'Work is running now.' };
     if (
       stopped &&
       tasks.every(task => ['failed', 'cancelled', 'denied', 'done'].includes(task.status)) &&
       waiting.length &&
       waiting.every(item => item.requiresDirector)
     )
-      return { tone: 'bad', label: 'Stopped', text: waiting[0].reason };
+      return { state: 'stopped', tone: 'bad', label: 'Stopped', text: waiting[0].reason };
     if (decisions.length)
       return {
+        state: 'needs-you',
         tone: 'wait',
         label: 'Needs you',
         text: `${decisions.length} item${decisions.length === 1 ? '' : 's'} waiting for you.`,
@@ -1480,17 +1496,28 @@
     // (v1.0 item 17). Any other wait keeps the run in progress.
     if (waiting.length && waiting.every(item => !item.requiresDirector && item.kind === 'review-findings'))
       return {
+        state: 'finished',
         tone: 'muted',
         label: 'Finished',
         text: "Ended without integrating because the review asked for changes. If you still want the change, start new work from the review's findings.",
       };
     if (waiting.some(item => !item.requiresDirector))
-      return { tone: 'busy', label: 'In progress', text: 'The controller is waiting; nothing is needed from you.' };
+      return {
+        state: 'in-progress',
+        tone: 'busy',
+        label: 'In progress',
+        text: 'The controller is waiting; nothing is needed from you.',
+      };
     if (stopped && !['done', 'denied', 'cancelled'].includes(stopped.status))
-      return { tone: 'bad', label: 'Stopped', text: sentence(stopped.autonomyNote).split('. ')[0] + '.' };
+      return {
+        state: 'stopped',
+        tone: 'bad',
+        label: 'Stopped',
+        text: sentence(stopped.autonomyNote).split('. ')[0] + '.',
+      };
     if (tasks.every(task => ['done', 'denied', 'cancelled'].includes(task.status)))
-      return { tone: 'muted', label: 'Finished', text: 'Nothing is waiting.' };
-    return { tone: 'muted', label: 'Idle', text: 'Nothing is running and nothing is waiting for you.' };
+      return { state: 'finished', tone: 'muted', label: 'Finished', text: 'Nothing is waiting.' };
+    return { state: 'idle', tone: 'muted', label: 'Idle', text: 'Nothing is running and nothing is waiting for you.' };
   }
 
   // A run is named after the work it proposed, else its brief, else its workflow. Proposals

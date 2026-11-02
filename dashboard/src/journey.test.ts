@@ -2,7 +2,7 @@
 // few plain sentences with its stops and decisions marked, and who worked on it.
 import { expect, test } from 'vitest';
 import type { AttemptSummary, Task } from './api';
-import { firstSentence, happened, journeyStages, journeyStories, whoWorked } from './journey';
+import { firstSentence, happened, ideaEnded, journeyChip, journeyStages, journeyStories, whoWorked } from './journey';
 import type { RunStory, StudioState } from './studio-runs';
 
 const at = (minute: number) => `2026-10-22T19:${String(minute).padStart(2, '0')}:00Z`;
@@ -88,7 +88,7 @@ const run = {
   taskIds: ['T-checks', 'T-plan', 'T-1', 'T-2'],
   steps: [],
   needsYou: [],
-  outcome: { tone: 'busy', label: 'In progress', text: '' },
+  outcome: { state: 'in-progress', tone: 'busy', label: 'In progress', text: '' },
 } as unknown as RunStory;
 const state = {
   project: { id: 'project-x', name: 'Project X' },
@@ -119,6 +119,52 @@ test('the journey runs from Sent through the checks, the plan and the stories to
     'Building:live:1 of 2 integrated',
     'Shipped:todo:when story 2 integrates',
   ]);
+  expect(journeyStages(run, state).map(item => item.step)).toEqual([
+    'sent',
+    'checked',
+    'planned',
+    'building',
+    'shipped',
+  ]);
+});
+
+// Pages tell the stages apart by their fixed step, not their words: other work's Working and Done are the same
+// building and shipped steps as a code idea's Building and Shipped.
+test("other work's journey reads Working and Done, at the building and shipped steps", () => {
+  const work = task('T-w', 'general:work'),
+    general = {
+      ...run,
+      taskIds: ['T-w'],
+      graph: { ...run.graph, stages: [[{ taskId: 'T-w', title: work.title, kind: work.kind, status: 'done' }]] },
+    } as RunStory,
+    records = {
+      ...state,
+      tasks: [work],
+      attempts: [attempt('a-w1', 'T-w', 1, 3, { assignment: { kind: 'general:work' } })],
+    } as unknown as StudioState;
+  expect(journeyStages(general, records).map(item => `${item.label}:${item.step}:${item.state}`)).toEqual([
+    'Sent:sent:done',
+    'Working:building:done',
+    'Done:shipped:done',
+  ]);
+});
+
+// Whether an idea ended is read from its outcome's fixed state, whatever words its label shows.
+test("an idea ends when its outcome's state integrated, finished, stopped, was cancelled or closed, not by its label", () => {
+  const ended = (outcome: RunStory['outcome']) => ideaEnded({ outcome });
+  for (const name of ['integrated', 'finished', 'stopped', 'cancelled', 'closed'] as const)
+    expect(ended({ state: name, tone: 'muted', label: 'In progress', text: '' }), name).toBe(true);
+  for (const name of ['in-progress', 'needs-you', 'idle'] as const)
+    expect(ended({ state: name, tone: 'muted', label: 'Finished', text: '' }), name).toBe(false);
+
+  // The head's chip shows an ended idea's own words, however they read, and an open one's story in progress.
+  const reworded: RunStory = {
+    ...run,
+    outcome: { state: 'finished', tone: 'muted', label: 'All wrapped up', text: '' },
+  };
+  expect(journeyChip(reworded, state)).toEqual({ tone: 'wait', label: 'All wrapped up' });
+  const open: RunStory = { ...run, outcome: { state: 'in-progress', tone: 'busy', label: 'Finished', text: '' } };
+  expect(journeyChip(open, state)).toEqual({ tone: 'live', label: 'Building · story 2 of 2' });
 });
 
 test('each story says where it is: integrated with its commit, or the attempt running now', () => {

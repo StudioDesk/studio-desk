@@ -49,7 +49,7 @@ const runOf = (tasks: Task[]) =>
     taskIds: tasks.map(item => item.id),
     steps: [],
     needsYou: [],
-    outcome: { tone: 'busy', label: 'In progress', text: '' },
+    outcome: { state: 'in-progress', tone: 'busy', label: 'In progress', text: '' },
   }) as unknown as RunStory;
 const stateOf = (tasks: Task[], attempts: AttemptSummary[]) =>
   ({

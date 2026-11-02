@@ -341,6 +341,7 @@ test('run stories list approvals, stuck steps, integration and outcomes', () => 
   const ready = buildRunStories({ ...base, tasks: [review], attempts: [passed] })[0];
   assert.equal(ready.needsYou[0].action, 'Inspect stage');
   assert.equal(ready.outcome.label, 'Needs you');
+  assert.equal(ready.outcome.state, 'needs-you');
 
   const verifying = buildRunStories({
     ...base,
@@ -348,6 +349,7 @@ test('run stories list approvals, stuck steps, integration and outcomes', () => 
     attempts: [{ ...passed, sourceIntegration: { state: 'verifying', startedAt: at(6) } }],
   })[0];
   assert.equal(verifying.outcome.label, 'In progress');
+  assert.equal(verifying.outcome.state, 'in-progress');
   assert.equal(verifying.needsYou[0].requiresDirector, false);
 
   const rejected = buildRunStories({
@@ -380,6 +382,7 @@ test('run stories list approvals, stuck steps, integration and outcomes', () => 
   })[0];
   assert.equal(done.outcome.label, 'Integrated');
   assert.equal(done.outcome.text, 'The change was committed as abcdef1.');
+  assert.equal(done.outcome.state, 'integrated');
   assert.ok(done.steps.some(step => step.text === 'Integrated as commit abcdef1.'));
   assert.equal(done.needsYou.length, 0);
 });
@@ -2507,7 +2510,12 @@ test('a run that ended in reviews asking for changes is finished, while any othe
     story = state => buildRunStories(state).find(candidate => candidate.id === run.runId),
     items = result => result.needsYou.map(item => [item.taskId, item.kind, item.action, item.requiresDirector]),
     plain = value => JSON.parse(JSON.stringify(value)),
-    waiting = { tone: 'busy', label: 'In progress', text: 'The controller is waiting; nothing is needed from you.' };
+    waiting = {
+      state: 'in-progress',
+      tone: 'busy',
+      label: 'In progress',
+      text: 'The controller is waiting; nothing is needed from you.',
+    };
 
   const finished = story(ended());
   assert.deepEqual(plain(items(finished)), [
@@ -2515,6 +2523,7 @@ test('a run that ended in reviews asking for changes is finished, while any othe
     ['R2', 'review-findings', null, false],
   ]);
   assert.deepEqual(plain(finished.outcome), {
+    state: 'finished',
     tone: 'muted',
     label: 'Finished',
     text: "Ended without integrating because the review asked for changes. If you still want the change, start new work from the review's findings.",
@@ -2642,6 +2651,23 @@ function archiveState(specs) {
         delete a.acceptedAt;
         delete t.acceptedAttemptId;
         break;
+      case 'Closed':
+        t.closed = { at: createdAt, reason: 'No longer needed.' };
+        break;
+      // Accepted work beside work the director closed after it failed: nothing runs, waits or ended it.
+      case 'Idle':
+        state.tasks.push(
+          task('T-' + id + '-closed', {
+            projectId: project.id,
+            kind: 'change',
+            workerId: 'W-02',
+            status: 'failed',
+            createdAt,
+            closed: { at: createdAt, reason: 'No longer needed.' },
+            workflowReference: { ...run, runId: id, key: 'closed' },
+          }),
+        );
+        break;
     }
     state.tasks.push(t);
     if (spec.outcome !== 'Cancelled') state.attempts.push(a);
@@ -2690,6 +2716,35 @@ test('a run shows a final outcome when it integrated, finished, stopped or was c
       .join(' '),
     /abcdef1/,
   );
+});
+
+// Pages decide whether an idea ended from its outcome's fixed state, never from its words, so rewording a label
+// changes nothing they do. Each outcome keeps the label, tone and text it had before.
+test('each outcome carries a fixed state beside its unchanged label, tone and text', () => {
+  const expected = {
+      Integrated: { state: 'integrated', tone: 'ok', text: 'The change was committed as abcdef1.' },
+      Finished: { state: 'finished', tone: 'muted', text: 'Nothing is waiting.' },
+      Stopped: {
+        state: 'stopped',
+        tone: 'bad',
+        text: 'The last attempt failed, and automatic execution reached this assignment’s attempt limit.',
+      },
+      Cancelled: { state: 'cancelled', tone: 'muted', text: 'Cancelled before it produced anything.' },
+      'In progress': { state: 'in-progress', tone: 'busy', text: 'Work is running now.' },
+      'Needs you': { state: 'needs-you', tone: 'wait', text: '1 item waiting for you.' },
+      Closed: { state: 'closed', tone: 'muted', text: 'All work was closed without taking it further.' },
+      Idle: { state: 'idle', tone: 'muted', text: 'Nothing is running and nothing is waiting for you.' },
+    },
+    labels = Object.keys(expected),
+    stories = buildRunStories(archiveState(labels.map((outcome, index) => ({ id: 'outcome-' + index, outcome }))));
+  for (const [index, label] of labels.entries()) {
+    const { state, tone, text } = expected[label];
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(stories.find(story => story.id === 'outcome-' + index).outcome)),
+      { state, tone, label, text },
+      label,
+    );
+  }
 });
 
 // The computer runs one full test suite at a time (core/test-turn.mjs); a run waiting for its turn records whose

@@ -25,7 +25,9 @@ export interface NeedsItem extends Explanation {
   canClose: boolean;
 }
 
+// How a run stands. Pages decide from state, a fixed name; label and text are the words shown.
 export interface Outcome {
+  state: 'closed' | 'cancelled' | 'in-progress' | 'needs-you' | 'integrated' | 'stopped' | 'finished' | 'idle';
   tone: 'ok' | 'busy' | 'wait' | 'bad' | 'muted';
   label: string;
   text: string;
