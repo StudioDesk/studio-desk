@@ -1,7 +1,7 @@
 // Development tool (C-18): the controller's measures under a fixture load, for a baseline before a change and the
 // same numbers after it. Seeds a throwaway studio, shaped like a project that has run for weeks, with finished code
-// stories, waiting ones and attempts of a realistic size, then runs scheduler passes and the pages' common reads and
-// prints what GET /api/health/load answers. It never reads or writes a real data folder, and it deletes its own.
+// stories, waiting ones and attempts of a realistic size, then runs scheduler passes and every read the dashboard's
+// pages make for a project (dashboard/src/api.ts), timing each, and prints what GET /api/health/load answers. It never reads or writes a real data folder, and it deletes its own.
 // Usage: node scripts/load-baseline.mjs [tasks=2000] [attempts=1200] [passes=200] [reads=100]
 import fs from 'node:fs';
 import os from 'node:os';
@@ -75,10 +75,30 @@ try {
   org.pipelineEnabled = true;
   store.setOrganization(org);
   // The reads must answer what a page gets, not an error that returns at once.
-  for (const read of [`/api/state?mode=dashboard&projectId=${project}`, `/api/projects/${project}/runs?limit=5`]) {
+  const check = async read => {
     const response = await fetch(origin + read);
     if (!response.ok) throw new Error(`${read} answered ${response.status}: ${(await response.text()).slice(0, 200)}`);
-  }
+    return response.text();
+  };
+  // Each read the dashboard's pages make for the project, named as readMs reports it. The next page of finished ideas
+  // starts after the run the first page names; a first page that names none (this fixture records no idea) has no
+  // next page, so that read asks for the first page again and the output says so.
+  const projectRead = page => `/api/projects/${project}/${page}`,
+    firstIdeas = projectRead('runs?limit=5'),
+    { next } = JSON.parse(await check(firstIdeas));
+  const pageReads = [
+    ['compactState', `/api/state?mode=dashboard&projectId=${project}`],
+    ['finishedIdeas', firstIdeas],
+    ['finishedIdeasNextPage', next ? `${firstIdeas}&before=${encodeURIComponent(next)}` : firstIdeas],
+    ['shell', projectRead('shell')],
+    ['live', projectRead('live')],
+    ['settledAccepted', projectRead('settled?kind=accepted&limit=12')],
+    ['settledCounts', projectRead('settled?kind=closed&limit=0')],
+    ['people', projectRead('people')],
+    ['activity', projectRead('activity')],
+    ['taskPage', `/api/tasks/T-0?projectId=${project}`],
+  ];
+  for (const [, read] of pageReads) await check(read);
   const began = performance.now();
   for (let i = 0; i < passes; i++) runner.dispatchQueued();
   const passTime = performance.now() - began;
@@ -98,10 +118,7 @@ try {
   // Each read's own times, as a page waits for them, beside the controller's measure of all requests.
   const timed = {};
   for (let i = 0; i < reads; i++)
-    for (const [name, read] of [
-      ['compactState', `/api/state?mode=dashboard&projectId=${project}`],
-      ['finishedIdeas', `/api/projects/${project}/runs?limit=5`],
-    ]) {
+    for (const [name, read] of pageReads) {
       const start = performance.now();
       await (await fetch(origin + read)).text();
       (timed[name] ??= []).push(performance.now() - start);
@@ -121,6 +138,13 @@ try {
         fixture: { tasks, attempts, passes, reads, passesTotalMs: Math.round(passTime) },
         quietWrites,
         readMs,
+        ...(next
+          ? {}
+          : {
+              notes: [
+                'The first page of finished ideas names no next page, so finishedIdeasNextPage asks for the first page again.',
+              ],
+            }),
         measures,
       },
       null,
