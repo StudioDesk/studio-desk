@@ -1,8 +1,12 @@
-// Shape checks only: graph-v2 is not executable or accepted by the workflow routes.
+// Shape checks, and checks against one project's organization and task types (validateFlow). graph-v2 is not
+// executable or accepted by the workflow routes yet: they validate graph-v1 and refuse any other schemaVersion.
 import { graphCeilings } from './graph.mjs';
-import { validateStep } from './step-contract.mjs';
+import { stepContract, validateStep } from './step-contract.mjs';
 import { isRoleId } from './staffing.mjs';
 import { TIERS } from './execution.mjs';
+import { projectOrganization, projectCatalog } from './project-organization.mjs';
+import { seenBy } from './project-agents.mjs';
+import { itemListFormat } from './fanout.mjs';
 
 export const GRAPH_V2_SCHEMA = 'graph-v2';
 const controllerKinds = ['gate', 'for-each', 'join'];
@@ -323,4 +327,65 @@ export function validateFlowShape(graph, { stepOf } = {}) {
 export function flowEnvelope(graph) {
   const links = topology(graph);
   return envelopeOf(graph, links, checkBodies(graph, links));
+}
+
+// A flow checked against what one project has: each task type registered and enabled for it (its catalog), each owner
+// an enabled agent on it, one of its teams or a role label its members use, and each for-each over a task type that
+// produces an item list. Returns the flow's envelope. Nothing is saved or rewritten.
+export function validateFlow(store, registries, graph, projectId) {
+  const org = projectOrganization(store, projectId),
+    enabled = new Set(projectCatalog(store, registries, projectId).map(definition => definition.kind)),
+    members = org.workers.filter(worker => seenBy(worker, projectId));
+  // The shape check reports any resolver failure as an unknown kind, so the project's own reason is kept here.
+  let refusal = null;
+  const stepOf = node => {
+    const definition = registries.workflows.find(node.kind);
+    refusal = !definition
+      ? `Node ${node.key} names task type ${node.kind}, which is not registered.`
+      : !enabled.has(node.kind)
+        ? `Node ${node.key} names task type ${node.kind}, which this project has not enabled.`
+        : null;
+    if (refusal) throw new Error(refusal);
+    return {
+      kind: stepContract(definition).kind,
+      milestones: registries.workflows.milestonesOf(node.kind).filter(name => name !== 'accepted'),
+    };
+  };
+  try {
+    validateFlowShape(graph, { stepOf });
+  } catch (error) {
+    throw refusal ? new Error(refusal) : error;
+  }
+  const byKey = new Map(graph.nodes.map(node => [node.key, node]));
+  for (const node of graph.nodes) {
+    const { type, id } = node.owner;
+    if (type === 'agent' && !members.some(worker => worker.id === id))
+      throw new Error(`Node ${node.key} names agent ${id}, who is not on this project.`);
+    if (type === 'agent' && !members.some(worker => worker.id === id && worker.enabled))
+      throw new Error(`Node ${node.key} names agent ${id}, who is not enabled on this project.`);
+    if (type === 'team' && !org.teams.some(team => team.id === id))
+      throw new Error(`Node ${node.key} names team ${id}, which this project does not have.`);
+    if (type === 'role' && !members.some(worker => worker.roles?.includes(id) || worker.jobTitle === id))
+      throw new Error(
+        `Node ${node.key} names role ${id}, which no member of this project holds as a staffing role or job title.`,
+      );
+    // Supplied data as graph-v1 checks it: only a task type whose operation reads task data takes it.
+    const definition = controllerKinds.includes(node.kind) ? null : registries.workflows.get(node.kind);
+    if (definition?.operation?.source === 'task-data')
+      try {
+        registries.connectors.inputData(definition.operation, node.inputData);
+      } catch (error) {
+        throw new Error(`Node ${node.key}'s supplied data is refused: ${error.message}`);
+      }
+    else if (node.inputData !== undefined) throw new Error(`Node ${node.key} takes no supplied data.`);
+    if (node.kind === 'for-each') {
+      const source = byKey.get(node.items.from);
+      if (
+        controllerKinds.includes(source.kind) ||
+        !registries.workflows.get(source.kind).produces?.includes(itemListFormat.id)
+      )
+        throw new Error(`For-each ${node.key} goes over ${source.key}, which does not produce an item list.`);
+    }
+  }
+  return flowEnvelope(graph);
 }
