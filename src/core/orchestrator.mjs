@@ -310,6 +310,7 @@ export class Runner {
   dispatchQueued() {
     if (this.closing || this.dispatching || !this.store.organization().pipelineEnabled) return;
     this.dispatching = true;
+    const began = performance.now();
     try {
       // The pass measures each live source once for all its checks, and again after each start (measuringPass).
       measuringPass(() => {
@@ -347,6 +348,8 @@ export class Runner {
       });
     } finally {
       this.dispatching = false;
+      // Each pass's time, for the controller's own measures (C-18).
+      this.loadMeasures?.pass(performance.now() - began);
     }
   }
   // The tier a task requests: its own, else its task type's default.

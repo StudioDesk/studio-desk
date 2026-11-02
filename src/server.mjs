@@ -148,6 +148,7 @@ import {
 import { developmentOrganization } from './organizations/studio-development/project.mjs';
 import { toldView } from './core/instructions.mjs';
 import { formatRules } from './core/rules.mjs';
+import { createLoadMeasures } from './core/load-measures.mjs';
 
 // The most attempts the studio-wide limit allows at once (MP-033).
 const mostAttemptsAtOnce = 16;
@@ -290,6 +291,7 @@ export function createStudio({
   const key = directorKey(store.directory),
     director = directorAccess(key);
   let runner;
+  const measures = createLoadMeasures();
   const planningContext = (org, repair, projectId) =>
     registries.workflows.planningContext(org, repair, registries.adapters, store.project(projectId));
   try {
@@ -328,6 +330,7 @@ export function createStudio({
   const origin = () => `http://127.0.0.1:${actualPort}`;
   // A code-editing employee's test command calls back here (connectors/employee-tests.mjs).
   runner.controllerOrigin = origin;
+  runner.loadMeasures = measures;
   // A burst of writes reaches each tab as one change event, at most four a second, naming each changed
   // record of the tab's project and every shared one, with the store's version. Log lines are not
   // changes: they go only to the tabs watching their attempt. Recent changes stay in a capped list in
@@ -506,6 +509,10 @@ export function createStudio({
     );
   };
   const server = http.createServer(async (req, res) => {
+    // How long each request takes, for the controller's own measures (C-18); the change stream stays open, so not it.
+    const began = performance.now();
+    if (!req.url.startsWith('/api/events') && typeof res.on === 'function')
+      res.on('finish', () => measures.request(performance.now() - began));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     try {
@@ -809,6 +816,8 @@ export function createStudio({
         if (parts[3]) return json(res, storyActivity(store, record));
         return json(res, taskPage(queryProject, record));
       }
+      // The controller's own measures (C-18): event-loop delay, scheduler passes, requests, memory and record sizes.
+      if (url.pathname === '/api/health/load' && req.method === 'GET') return json(res, measures.snapshot(store));
       if (url.pathname === '/api/state' && req.method === 'GET') {
         const mode = url.searchParams.get('mode') ?? 'full';
         if (mode !== 'dashboard') return json(res, state(queryProject, { mode }));
@@ -2634,6 +2643,7 @@ export function createStudio({
       closing = true;
       closePromise = (async () => {
         await runner.shutdown();
+        measures.close();
         clearTimeout(broadcastTimer);
         for (const client of clients) client.res.end();
         // Node's close ends only the connections idle at that moment and stops timing out headers and requests. A
