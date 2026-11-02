@@ -16,6 +16,7 @@ import {
   signInPage,
   staleLaunchPage,
 } from './director-access.mjs';
+import { previousStop, stopRecorder } from './stop-record.mjs';
 import { Runner, artifactPath, acceptedReference, validateAcceptedReferences } from './runner.mjs';
 import { hash, complexityPolicy, validateComplexity } from './core/contracts.mjs';
 import {
@@ -2776,6 +2777,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   // Under scripts/supervisor.mjs a planned restart exits with 75 and is relaunched.
   const supervised = process.env.STUDIO_SUPERVISED === '1',
     local = localConfiguration();
+  // Every stop this process sees is recorded, and said, before it happens (C-41, src/stop-record.mjs).
+  let stops = null;
+  const stop = reason => {
+    if (stops?.stop(reason)) console.log(`Studio desk: stopping at ${new Date().toISOString()}: ${reason}.`);
+  };
   const app = createStudio({
     directory: local.dataDirectory,
     // Only the controller itself looks at this computer's built-in sandbox; tests pass their own.
@@ -2783,23 +2789,46 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       ...(local.sourceRoot ? { sourceChangeRoot: local.sourceRoot } : {}),
       builtInSandbox: builtInSandbox(),
     },
-    restart: supervised ? () => app.close().then(() => process.exit(75)) : null,
+    restart: supervised
+      ? () =>
+          app.close().then(() => {
+            stop('a planned restart to load updated source');
+            process.exit(75);
+          })
+      : null,
   });
+  const previous = previousStop(app.store.directory);
+  stops = stopRecorder(app.store.directory);
+  process.on('uncaughtExceptionMonitor', (error, origin) =>
+    stop(
+      `${origin === 'unhandledRejection' ? 'an unhandled rejection' : 'an uncaught error'}: ${error?.message ?? error}`,
+    ),
+  );
+  process.on('exit', code => stop(`it exited with code ${code}`));
   try {
     const url = await app.start();
     console.log(
       `Studio desk: ${app.launchUrl}\nLocal records: ${app.store.directory}\nDeveloping: ${app.runner.sourceChangeRoot}${app.runner.selfHosted ? ' (this copy; integrations restart the controller)' : ' (separate development copy)'}\nOpen the link above in your browser once: it signs that browser in, and ${url} then opens the dashboard, also after restarts. Press Ctrl+C to stop. Approve a pipeline or start assignments individually. Restarts pause queued dispatch.${supervised ? '' : '\nRun through npm start or start-studio to allow planned restarts after source integration.'}`,
     );
+    // The previous run's stop, in this window and in the activity that belongs to no project.
+    if (previous) {
+      console.log(`Studio desk: ${previous.text}`);
+      app.store.event('controller_stop', null, null, previous.text);
+    }
   } catch (err) {
     console.error(`Cannot start: ${err.message}`);
+    stop(`it could not start: ${err.message}`);
     process.exitCode = 1;
     await app.close();
   }
   let stopping = false;
-  for (const signal of ['SIGINT', 'SIGTERM'])
+  // SIGHUP is Windows closing the window (it ends the process about ten seconds later) and SIGBREAK is Ctrl+Break;
+  // each is recorded before the controller closes.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', ...(process.platform === 'win32' ? ['SIGBREAK'] : [])])
     process.on(signal, async () => {
       if (stopping) return;
       stopping = true;
+      stop(`it was asked to stop (${signal})`);
       await app.close();
       process.exit(0);
     });

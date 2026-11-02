@@ -1347,19 +1347,24 @@ export class Runner {
     this.terminate(entry, false);
     entry.killTimer = setTimeout(() => this.terminate(entry, true), stopGrace);
   }
-  // Ends the attempt's current process and its tree, asked or forced.
+  // Ends the attempt's current process and its tree, asked or forced. The forced end comes a grace period after the
+  // asked one. On Windows a process that has exited by then is passed over: taskkill finds a tree by its root's ID,
+  // which may belong to another process by then (C-41). Elsewhere the process group outlives its first process, and
+  // its ID is not reused while any of it runs, so what is left of the tree is still ended.
   terminate(entry, force) {
     try {
       if (this.fixtureProcessTermination) {
         this.fixtureProcessTermination(entry, force);
         return;
       }
-      if (process.platform === 'win32')
-        spawnSync('taskkill', ['/PID', String(entry.child.pid), '/T', ...(force ? ['/F'] : [])], {
+      const child = entry.child;
+      if (process.platform === 'win32') {
+        if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+        spawnSync('taskkill', ['/PID', String(child.pid), '/T', ...(force ? ['/F'] : [])], {
           windowsHide: true,
           timeout: 3000,
         });
-      else process.kill(-entry.child.pid, force ? 'SIGKILL' : 'SIGTERM');
+      } else process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM');
     } catch {}
   }
   // Stops every active attempt and waits, within a bound, for each to leave: a process still running after

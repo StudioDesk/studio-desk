@@ -137,11 +137,16 @@ function npxCli() {
     if (fs.existsSync(candidate)) return candidate;
   throw new Error('npx was not found beside Node.js, so the formatter cannot run.');
 }
-function stopProcess(child) {
+// On Windows a process that has already exited is passed over: taskkill finds a tree by its root's ID, which may
+// belong to another process by now (C-41). Elsewhere the process group outlives its first process and its ID is not
+// reused while any of it runs, so what is left of the tree is still ended.
+export function stopProcess(child) {
+  if (!child?.pid) return;
   try {
-    if (process.platform === 'win32')
+    if (process.platform === 'win32') {
+      if (child.exitCode !== null || child.signalCode !== null) return;
       spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 3000 });
-    else process.kill(-child.pid, 'SIGKILL');
+    } else process.kill(-child.pid, 'SIGKILL');
   } catch {}
 }
 export function stopIntegrationProcess(runtime) {

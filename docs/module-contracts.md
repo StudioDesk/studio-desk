@@ -43,6 +43,21 @@ Every git command the controller runs goes through `src/git.mjs` (`runGit`), exc
   - **Still synchronous:** integration, carries, worktrees and story starts interleave git with the records and their journals step by step. Moving them off the thread means deciding what may change between two steps, so it waits for C-31's decision on that boundary. No read the dashboard's pages make calls git synchronously now; a count over every page read on the source fixture found none.
 - **Tests:** `test/git-trust.test.mjs`. A repository whose hooks and fsmonitor command leave marker files: the director's own git runs them, and the controller's reads, commits, worktrees and checkouts run none.
 
+## Every stop says why (November 2026)
+
+A graceful stop, an ended controller and an ended supervisor used to look alike in the controller's window.
+
+- **The record:** `src/stop-record.mjs`.
+  - **At start:** each start writes `<data>/last-exit.json` with its process ID and start time.
+  - **At stop:** each stop the process sees completes the record once, with the time, how long it ran and why, and says so in the window. The reasons are a signal (SIGINT, SIGTERM, SIGHUP when Windows closes the window, SIGBREAK), a planned restart, a start that failed, an uncaught error or unhandled rejection (`uncaughtExceptionMonitor`, which changes nothing about how the process ends), or an exit with its code.
+- **The next start:** it prints the previous record and adds it to the activity that belongs to no project, as a `controller_stop` event.
+  - A record with no stop means the process was ended from outside (Task Manager, taskkill, a closed console), crashed hard, or the computer stopped.
+- **The supervisor** (`scripts/supervisor.mjs`) prints every exit of the controller: the planned restart, the exit code or signal, the time and how long it ran (`exitLine`).
+- **Forced ends:**
+  - **On Windows:** a forced end never reaches a process that has exited. The orchestrator's `terminate` and integration's `stopProcess` skip a child whose exit code or signal is known, since taskkill finds a tree by its root's ID, which may belong to another process by then. Try's and the visual check's `endTree` already did.
+  - **On macOS and Linux:** the process group is still ended after its first process exits, since its ID is not reused while any of it runs.
+- **Tests:** `test/stop-record.test.mjs`. The record and its texts, the supervisor's lines, and the forced ends with the process calls replaced. It also starts the real controller script on a throwaway data folder, ends it from outside and checks that the next start reports that. On macOS and Linux it also checks a SIGTERM stop that the next start reports.
+
 ## Bounded project context and source checks
 
 The director approved using Studio desk on its own source in a separate selectable project. The existing partial project/workflow modules are now connected to the dashboard and covered by behavioral tests. Projects/workflows use additive settings records in the same SQLite database. `recordProject()` maps only missing project IDs to `project-legacy` at read time. Old task/attempt JSON, job paths and instruction snapshots are not rewritten. New project attempts use `projects/<project-id>/jobs/<attempt-id>` inside the controller data directory.
