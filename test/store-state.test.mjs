@@ -11,6 +11,8 @@ import { createStudio } from './model-free-studio.mjs';
 import { dashboardAttempt } from '../src/core/dashboard-state.mjs';
 import { LEGACY_PROJECT, recordProject } from '../src/core/projects.mjs';
 import { leftoverWorktrees } from '../src/connectors/source-worktrees.mjs';
+import { liveRecords } from '../src/core/project-records.mjs';
+import { directorInputsOf } from '../src/core/idea-inputs.mjs';
 
 test("the dashboard state reads every attempt's phase events with one query, whatever the attempt count", async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-state-phases-')),
@@ -498,7 +500,11 @@ test('dashboard summaries preserve outcomes, review actions and timing while exc
     const snapshot = JSON.parse(row.snapshot);
     update.run(JSON.stringify({ ...snapshot, text: snapshot.text.repeat(2) }), row.id);
   }
-  assert.equal(JSON.stringify(store.state(task.projectId, { mode: 'dashboard' })), JSON.stringify(compact));
+  // Only the change sequence it reflects differs, raised by the writes since.
+  assert.equal(
+    JSON.stringify(store.state(task.projectId, { mode: 'dashboard' })),
+    JSON.stringify({ ...compact, version: store.version }),
+  );
   // Even malformed snapshot JSON cannot be selected or parsed in this mode.
   for (const row of before) update.run('not JSON: instruction snapshot', row.id);
   const prepare = store.db.prepare.bind(store.db),
@@ -512,7 +518,7 @@ test('dashboard summaries preserve outcomes, review actions and timing while exc
   });
   t.mock.method(store, 'allAttempts', () => assert.fail('summary expanded full attempts'));
   t.mock.method(store, 'phaseEventsByAttempt', () => assert.fail('summary expanded phase histories'));
-  assert.deepEqual(store.state(task.projectId, { mode: 'dashboard' }), compact);
+  assert.deepEqual(store.state(task.projectId, { mode: 'dashboard' }), { ...compact, version: store.version });
   assert.equal(queries.filter(sql => sql.includes("kind='phase'")).length, 1);
   assert.throws(() => store.state(task.projectId, { mode: 'unknown' }), /State mode/);
 });
@@ -1169,4 +1175,132 @@ test("a code story's setup keeps the worktrees of live work and of integrations 
       parent,
     );
   assert.deepEqual(listed.worktrees.map(worktree => path.basename(worktree.path)).sort(), ['c1', 'd', 'r', 's', 'x']);
+});
+
+// The compact state holds a project's open work in full and only its newest finished work, says what it left out and
+// names the change sequence it reflects; the full state keeps the whole history (bounded-compact-state, MP-026).
+test('the compact state holds the live set and the newest 100 settled tasks, saying how many more there are', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-state-bounded-')),
+    app = createStudio({ directory, port: 0 }),
+    store = app.store,
+    project = LEGACY_PROJECT;
+  t.after(async () => {
+    await app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const run = runId => ({
+      workflowReference: {
+        runId,
+        key: runId,
+        id: 'flow',
+        name: 'Fixture flow',
+        version: 1,
+        brief: `The ${runId} idea.`,
+      },
+    }),
+    put = (id, status, extra = {}) => {
+      store.putTask({
+        id,
+        projectId: project,
+        kind: 'general',
+        title: id,
+        team: 'Design',
+        workerId: 'W-01',
+        resources: [],
+        brief: 'Fixture work.',
+        acceptance: 'Fixture acceptance.',
+        status,
+        dependencies: [],
+        ...extra,
+      });
+      store.insertAttempt(
+        { id: `attempt-${id}`, taskId: id, projectId: project, workerId: 'W-01', status: 'accepted' },
+        { text: `instructions of ${id}`, hash: 'fixture' },
+      );
+    },
+    settledIds = from => Array.from({ length: 150 - from }, (_, i) => `B-settled-${String(from + i).padStart(3, '0')}`),
+    ids = records => records.map(record => record.id);
+  // Live work recorded before every settled task, so only the live rule can keep it: a prerequisite from a finished
+  // idea, an open idea's finished stories and its open one, and three open stories, one waiting on that prerequisite.
+  put('B-prerequisite', 'done', run('run-finished'));
+  put('B-idea-done-1', 'done', run('run-open'));
+  put('B-idea-done-2', 'done', run('run-open'));
+  put('B-idea-open', 'running', run('run-open'));
+  put('B-open-1', 'ready');
+  put('B-open-2', 'failed');
+  put('B-open-3', 'blocked', { dependencies: ['B-prerequisite'] });
+  const liveFixture = [
+    'B-prerequisite',
+    'B-idea-done-1',
+    'B-idea-done-2',
+    'B-idea-open',
+    'B-open-1',
+    'B-open-2',
+    'B-open-3',
+  ];
+  // Fewer than 100 settled tasks: every task and attempt the compact state answered before it was bounded.
+  for (const id of settledIds(0).slice(0, 50)) put(id, 'done');
+  const few = store.state(project, { mode: 'dashboard' });
+  assert.deepEqual(
+    few.tasks,
+    store
+      .tasks()
+      .filter(task => recordProject(task) === project)
+      .map(task => ({ ...task, directorInputs: directorInputsOf(task) })),
+  );
+  assert.deepEqual(few.attempts, store.dashboardAttempts(project));
+  assert.deepEqual(few.more, { tasks: false, settled: 0 });
+  assert.equal(few.version, store.version);
+  // 150 settled tasks: the live set in full and exactly the newest 100 settled, in record order.
+  for (const id of settledIds(50)) put(id, 'done');
+  const live = ids(liveRecords(store, project).tasks),
+    projectTasks = store.projectTasks(project),
+    settled = projectTasks.filter(task => !live.includes(task.id)),
+    compact = store.state(project, { mode: 'dashboard' });
+  assert.ok(
+    liveFixture.every(id => live.includes(id)),
+    'the fixture covers each rule of the live set',
+  );
+  assert.equal(settled.length, 150, 'the starter tasks are live, so the fixture alone is settled');
+  const newest = settledIds(50);
+  assert.deepEqual(
+    ids(compact.tasks),
+    ids(projectTasks).filter(id => live.includes(id) || newest.includes(id)),
+    'the live set and the newest 100 settled tasks, in record order',
+  );
+  assert.equal(compact.tasks.filter(task => !live.includes(task.id)).length, 100);
+  assert.ok(compact.tasks.every(task => Array.isArray(task.directorInputs)));
+  assert.deepEqual(compact.more, { tasks: true, settled: 50 });
+  assert.equal(compact.version, store.version);
+  // Attempt summaries of exactly the tasks it holds, in record order, still without instructions.
+  const held = new Set(ids(compact.tasks));
+  assert.deepEqual(
+    ids(compact.attempts),
+    ids(store.dashboardAttempts(project).filter(attempt => held.has(attempt.taskId))),
+  );
+  assert.ok(liveFixture.every(id => ids(compact.attempts).includes(`attempt-${id}`)));
+  assert.ok(
+    settledIds(0)
+      .slice(0, 50)
+      .every(id => !ids(compact.attempts).includes(`attempt-${id}`)),
+  );
+  assert.equal(JSON.stringify(compact).includes('instructions of'), false);
+  assert.ok(compact.events.every(event => event.kind !== 'log'));
+  // The full state keeps every task and attempt with their instructions, and says nothing is left out.
+  const full = store.state(project);
+  assert.deepEqual(ids(full.tasks), ids(projectTasks));
+  assert.equal(full.tasks.filter(task => task.id.startsWith('B-settled-')).length, 150);
+  assert.deepEqual(ids(full.attempts), ids(store.allAttempts().filter(attempt => recordProject(attempt) === project)));
+  assert.ok(
+    liveFixture
+      .concat(settledIds(0))
+      .every(id => full.attempts.find(attempt => attempt.taskId === id).instructions.text === `instructions of ${id}`),
+  );
+  assert.equal('more' in full, false);
+  // The full state's version stays the organization record's; the compact state's names the change sequence.
+  assert.equal(full.version, store.organization().version);
+  // A write raises the version the next compact answer reflects.
+  put('B-open-4', 'ready');
+  assert.equal(store.state(project, { mode: 'dashboard' }).version, store.version);
+  assert.ok(store.version > compact.version);
 });

@@ -8,6 +8,7 @@ import { directoryFor } from './project-agents.mjs';
 import { assertUnchangedDirectorInputs, directorInputsOf } from './idea-inputs.mjs';
 import { dashboardAttempt, dashboardOpenPhases, dashboardTimings } from './dashboard-state.mjs';
 import { testTurnResource, visualTurnResource } from './test-turn.mjs';
+import { runMembership, settled } from './project-records.mjs';
 
 const attemptChange = a => ({ type: 'attempt', id: a.id, taskId: a.taskId, projectId: recordProject(a) });
 // A setting's change names a run or workflow as its own record, and its project when the setting has one:
@@ -59,6 +60,9 @@ const phaseNames = {
 const phaseIdsPerQuery = 200;
 // The task IDs one query of lastFinished reads, well under SQLite's limit on a statement's parameters.
 const taskIdsPerQuery = 500;
+// The settled tasks the compact state holds beside the open work: the newest, so a long-running project's state
+// stops growing with its history. The full state and the export keep every task.
+const compactSettledTasks = 100;
 
 // A task's or an attempt's project as the projects' indexes read it, by recordProject's rule (core/projects.mjs): the
 // record's own projectId, or for the legacy project also a record that names none. json_type is NULL only when the
@@ -823,13 +827,57 @@ export class Store {
       leases: this.leases(),
     };
   }
+  // The compact state's tasks: the project's live set in full, chosen by liveRecords' rule (core/project-records.mjs)
+  // without reading its attempt summaries twice, and the newest settled tasks up to compactSettledTasks, newest by
+  // record order, all listed in record order. Attempts are those of the tasks it holds; when it leaves nothing out,
+  // the project's every attempt summary, as before it was bounded.
+  compactTasks(projectId) {
+    const all = this.projectTasks(projectId),
+      // An older-layout review settles by its accepted attempt's verdict and integration (settled()).
+      reviewIds = all
+        .filter(task => task.kind === 'studio-development:change-review' && task.status === 'done' && !task.sourceStage)
+        .map(task => task.acceptedAttemptId)
+        .filter(Boolean),
+      reviews = new Map(
+        reviewIds.length
+          ? this.db
+              .prepare(`SELECT id, data FROM attempts WHERE id IN (${reviewIds.map(() => '?').join(',')})`)
+              .all(...reviewIds)
+              .map(row => [row.id, JSON.parse(row.data)])
+          : [],
+      ),
+      done = task => settled(task, id => reviews.get(id) ?? null),
+      runOf = runMembership(all),
+      openRuns = new Set(all.filter(task => !done(task) && runOf.has(task.id)).map(task => runOf.get(task.id))),
+      live = new Set(all.filter(task => !done(task) || openRuns.has(runOf.get(task.id))).map(task => task.id)),
+      byId = new Map(all.map(task => [task.id, task]));
+    // Direct prerequisites only, as liveRecords keeps them.
+    for (const id of [...live]) for (const dependency of byId.get(id)?.dependencies || []) live.add(dependency);
+    const finished = all.filter(task => !live.has(task.id)),
+      kept = new Set(finished.slice(-compactSettledTasks).map(task => task.id)),
+      tasks = all.filter(task => live.has(task.id) || kept.has(task.id)),
+      left = finished.length - kept.size;
+    return {
+      all,
+      tasks,
+      attempts: left
+        ? this.dashboardAttempts(
+            projectId,
+            tasks.map(task => task.id),
+          )
+        : this.dashboardAttempts(projectId),
+      more: { tasks: left > 0, settled: left },
+    };
+  }
   state(projectId = LEGACY_PROJECT, { mode = 'full' } = {}) {
     if (!['full', 'dashboard'].includes(mode)) throw new Error('State mode must be full or dashboard.');
-    const project = this.project(projectId),
-      tasks = this.tasks()
-        .filter(task => recordProject(task) === projectId)
-        .map(task => ({ ...task, directorInputs: directorInputsOf(task) })),
-      ids = new Set(tasks.map(task => task.id)),
+    // The change sequence this answer reflects: state reads synchronously, so no write lands while it is built.
+    const version = this.version,
+      project = this.project(projectId),
+      compact = mode === 'dashboard' ? this.compactTasks(projectId) : null,
+      all = compact ? compact.all : this.tasks().filter(task => recordProject(task) === projectId),
+      tasks = (compact ? compact.tasks : all).map(task => ({ ...task, directorInputs: directorInputsOf(task) })),
+      ids = new Set(all.map(task => task.id)),
       org = projectOrganization(this, projectId);
     // The compact state leaves agent output out (MP-026); an attempt's lines stream to a tab watching it.
     const events = this.events(null, { logs: mode !== 'dashboard' }).filter(event =>
@@ -847,14 +895,15 @@ export class Store {
       project,
       workflows: this.workflows(projectId),
       tasks,
-      attempts:
-        mode === 'dashboard'
-          ? this.dashboardAttempts(projectId)
-          : this.allAttempts()
-              .filter(attempt => recordProject(attempt) === projectId)
-              .map(attempt => ({ ...attempt, phaseEvents: phases.get(attempt.id) || [] })),
+      attempts: compact
+        ? compact.attempts
+        : this.allAttempts()
+            .filter(attempt => recordProject(attempt) === projectId)
+            .map(attempt => ({ ...attempt, phaseEvents: phases.get(attempt.id) || [] })),
       leases: this.leases(),
       events,
+      // What the compact state left out, and the change sequence to resume the change stream from (/api/events after=).
+      ...(compact ? { more: compact.more, version } : {}),
     };
   }
   close() {
