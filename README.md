@@ -89,6 +89,7 @@ The [release notes](RELEASE-NOTES.md) have the full list. The big ones:
 - Only Windows has been tested.
 - Each agent works on one thing at a time, and a code project's stories go one after another.
 - Tests must run with Node's test runner.
+- On Windows, keep Studio desk inside your user folder. Installed somewhere else, such as `C:\StudioDesk`, the tests of a change can read its records.
 - Nothing is checked by eye: reviews read the code, tests and evidence.
 
 ## For developers
