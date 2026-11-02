@@ -1,6 +1,7 @@
 // Shape checks, and checks against one project's organization and task types (validateFlow). graph-v2 is not
 // executable or accepted by the workflow routes yet: they validate graph-v1 and refuse any other schemaVersion.
 import { graphCeilings } from './graph.mjs';
+import { complexityPolicy } from './contracts.mjs';
 import { stepContract, validateStep } from './step-contract.mjs';
 import { isRoleId } from './staffing.mjs';
 import { TIERS } from './execution.mjs';
@@ -9,6 +10,18 @@ import { seenBy } from './project-agents.mjs';
 import { itemListFormat } from './fanout.mjs';
 
 export const GRAPH_V2_SCHEMA = 'graph-v2';
+// A node may run as long, and be tried as often, as the longest build the studio gives a source change (complexity 8),
+// and a flow at full width may spend ten authored nodes' worth of that limit. graph-v1 keeps its own ceilings.
+const longestBuild = complexityPolicy[8];
+export const flowCeilings = Object.freeze({
+  nodes: graphCeilings.nodes,
+  expandedNodes: graphCeilings.expandedNodes,
+  edges: graphCeilings.edges,
+  mapWidth: graphCeilings.mapWidth,
+  maxSeconds: longestBuild.maxSeconds,
+  maxAttempts: longestBuild.maxAttempts,
+  attemptSeconds: graphCeilings.nodes * longestBuild.maxSeconds * longestBuild.maxAttempts,
+});
 const controllerKinds = ['gate', 'for-each', 'join'];
 const agentOwners = ['agent', 'team', 'role'];
 const nodeFields = [
@@ -105,14 +118,14 @@ function checkNode(node, stepOf) {
 
   for (const field of ['brief', 'acceptance'])
     if (ownedByAgent || node[field] !== undefined) text(node[field], 24000, `${label}'s ${field}`);
-  if ((ownedByAgent || node.maxSeconds !== undefined) && !bounded(node.maxSeconds, 600, 5))
-    throw new Error(`${label} needs maxSeconds from 5 to 600.`);
-  if ((ownedByAgent || node.maxAttempts !== undefined) && !bounded(node.maxAttempts, 3))
-    throw new Error(`${label} needs maxAttempts from 1 to 3.`);
+  if ((ownedByAgent || node.maxSeconds !== undefined) && !bounded(node.maxSeconds, flowCeilings.maxSeconds, 5))
+    throw new Error(`${label} needs maxSeconds from 5 to ${flowCeilings.maxSeconds}.`);
+  if ((ownedByAgent || node.maxAttempts !== undefined) && !bounded(node.maxAttempts, flowCeilings.maxAttempts))
+    throw new Error(`${label} needs maxAttempts from 1 to ${flowCeilings.maxAttempts}.`);
   if (
     node.distinctFrom !== undefined &&
     (!Array.isArray(node.distinctFrom) ||
-      node.distinctFrom.length > graphCeilings.nodes ||
+      node.distinctFrom.length > flowCeilings.nodes ||
       new Set(node.distinctFrom).size !== node.distinctFrom.length ||
       !node.distinctFrom.every(safeKey))
   )
@@ -203,8 +216,8 @@ function checkBodies(graph, links) {
   for (const node of graph.nodes) {
     if (node.kind === 'for-each') {
       closed(node.items, ['from', 'maxWidth'], `For-each ${node.key}'s items`);
-      if (!bounded(node.items.maxWidth, graphCeilings.mapWidth))
-        throw new Error(`For-each ${node.key} needs a maxWidth from 1 to ${graphCeilings.mapWidth}.`);
+      if (!bounded(node.items.maxWidth, flowCeilings.mapWidth))
+        throw new Error(`For-each ${node.key} needs a maxWidth from 1 to ${flowCeilings.mapWidth}.`);
       const before = links.incoming.get(node.key);
       if (before.length !== 1 || before[0].from !== node.items.from || before[0].loop !== undefined)
         throw new Error(
@@ -255,9 +268,9 @@ function envelopeOf(graph, links, bodies) {
     }),
     { nodes: 0, attemptSeconds: 0 },
   );
-  if (needed.nodes > graphCeilings.expandedNodes || needed.attemptSeconds > graphCeilings.attemptSeconds)
+  if (needed.nodes > flowCeilings.expandedNodes || needed.attemptSeconds > flowCeilings.attemptSeconds)
     throw new Error(
-      `At full width the graph from node ${graph.nodes[0].key} needs ${needed.nodes} nodes and ${needed.attemptSeconds} attempt-seconds; the ceilings are ${graphCeilings.expandedNodes} and ${graphCeilings.attemptSeconds}.`,
+      `At full width the graph from node ${graph.nodes[0].key} needs ${needed.nodes} nodes and ${needed.attemptSeconds} attempt-seconds; the ceilings are ${flowCeilings.expandedNodes} and ${flowCeilings.attemptSeconds}.`,
     );
   const envelope = { ...needed, ...graph.envelope };
   if (envelope.nodes < needed.nodes || envelope.attemptSeconds < needed.attemptSeconds)
@@ -272,12 +285,12 @@ function envelopeOf(graph, links, bodies) {
 export function validateFlowShape(graph, { stepOf } = {}) {
   closed(graph, ['schemaVersion', 'nodes', 'edges', 'envelope'], 'Graph');
   if (graph.schemaVersion !== GRAPH_V2_SCHEMA) throw new Error(`schemaVersion must be ${GRAPH_V2_SCHEMA}.`);
-  if (!Array.isArray(graph.nodes) || !graph.nodes.length || graph.nodes.length > graphCeilings.nodes)
+  if (!Array.isArray(graph.nodes) || !graph.nodes.length || graph.nodes.length > flowCeilings.nodes)
     throw new Error(
-      `A graph needs 1 to ${graphCeilings.nodes} nodes${Array.isArray(graph.nodes) && graph.nodes.length ? `, including node ${graph.nodes.at(-1)?.key}` : ''}.`,
+      `A graph needs 1 to ${flowCeilings.nodes} nodes${Array.isArray(graph.nodes) && graph.nodes.length ? `, including node ${graph.nodes.at(-1)?.key}` : ''}.`,
     );
-  if (!Array.isArray(graph.edges) || graph.edges.length > graphCeilings.edges)
-    throw new Error(`The graph at node ${graph.nodes[0]?.key} has at most ${graphCeilings.edges} edges.`);
+  if (!Array.isArray(graph.edges) || graph.edges.length > flowCeilings.edges)
+    throw new Error(`The graph at node ${graph.nodes[0]?.key} has at most ${flowCeilings.edges} edges.`);
   const steps = new Map();
   for (const node of graph.nodes) {
     const step = checkNode(node, stepOf);
@@ -308,12 +321,12 @@ export function validateFlowShape(graph, { stepOf } = {}) {
   if (graph.envelope !== undefined) {
     closed(graph.envelope, ['nodes', 'attemptSeconds'], `The graph at node ${graph.nodes[0].key}'s envelope`);
     if (
-      (graph.envelope.nodes !== undefined && !bounded(graph.envelope.nodes, graphCeilings.expandedNodes)) ||
+      (graph.envelope.nodes !== undefined && !bounded(graph.envelope.nodes, flowCeilings.expandedNodes)) ||
       (graph.envelope.attemptSeconds !== undefined &&
-        !bounded(graph.envelope.attemptSeconds, graphCeilings.attemptSeconds))
+        !bounded(graph.envelope.attemptSeconds, flowCeilings.attemptSeconds))
     )
       throw new Error(
-        `The graph at node ${graph.nodes[0].key}'s envelope allows at most ${graphCeilings.expandedNodes} nodes and ${graphCeilings.attemptSeconds} attempt-seconds.`,
+        `The graph at node ${graph.nodes[0].key}'s envelope allows at most ${flowCeilings.expandedNodes} nodes and ${flowCeilings.attemptSeconds} attempt-seconds.`,
       );
   }
   const links = topology(graph);

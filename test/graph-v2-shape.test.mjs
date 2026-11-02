@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { graphCeilings, validateGraphShape } from '../src/core/graph.mjs';
-import { GRAPH_V2_SCHEMA, validateFlowShape, loopAtLimit, flowEnvelope } from '../src/core/graph-v2.mjs';
+import { complexityPolicy } from '../src/core/contracts.mjs';
+import { GRAPH_V2_SCHEMA, validateFlowShape, loopAtLimit, flowEnvelope, flowCeilings } from '../src/core/graph-v2.mjs';
 
 const stepOf = node => {
   const step = {
@@ -418,17 +419,73 @@ refuses(
   },
   new RegExp(`For-each each needs a maxWidth from 1 to ${graphCeilings.mapWidth}`),
 );
+const atLongestBuild = graph => {
+  for (const node of graph.nodes.filter(node => node.owner.type === 'role')) {
+    node.maxSeconds = flowCeilings.maxSeconds;
+    node.maxAttempts = flowCeilings.maxAttempts;
+  }
+  return graph;
+};
+// Ten authored nodes in a line, each at the longest build: exactly the attempt-second ceiling.
+const longestLine = () => ({
+  schemaVersion: GRAPH_V2_SCHEMA,
+  nodes: Array.from({ length: flowCeilings.nodes }, (_, i) => agent(`step-${i}`)),
+  edges: Array.from({ length: flowCeilings.nodes - 1 }, (_, i) => edge(`step-${i}`, `step-${i + 1}`)),
+});
+
+test('graph-v2 ceilings follow the longest build and share graph-v1 shape ceilings; graph-v1 keeps its own', () => {
+  assert.ok(Object.isFrozen(flowCeilings));
+  assert.equal(flowCeilings.maxSeconds, complexityPolicy[8].maxSeconds);
+  assert.equal(flowCeilings.maxAttempts, complexityPolicy[8].maxAttempts);
+  assert.deepEqual(flowCeilings, {
+    nodes: graphCeilings.nodes,
+    expandedNodes: graphCeilings.expandedNodes,
+    edges: graphCeilings.edges,
+    mapWidth: graphCeilings.mapWidth,
+    maxSeconds: 2700,
+    maxAttempts: 3,
+    attemptSeconds: 81000,
+  });
+  assert.equal(graphCeilings.attemptSeconds, 3600);
+});
+
+test('a role-owned node may run for the longest build limit', () => {
+  const graph = chain();
+  Object.assign(graph.nodes[0], { maxSeconds: 2700, maxAttempts: 3 });
+  assert.strictEqual(check(graph), graph);
+  assert.deepEqual(flowEnvelope(graph), { nodes: 2, attemptSeconds: 8130 });
+});
+
+test('a flow above graph-v1 attempt-seconds is accepted within the graph-v2 ceiling', () => {
+  const graph = flow();
+  for (const node of graph.nodes.filter(node => node.owner.type === 'role')) {
+    node.maxSeconds = 600;
+    node.maxAttempts = 3;
+  }
+  assert.strictEqual(check(graph), graph);
+  assert.deepEqual(flowEnvelope(graph), { nodes: 27, attemptSeconds: 34200 });
+});
+
+test('ten authored nodes at the longest build fill the attempt-second ceiling exactly', () => {
+  const graph = atLongestBuild(longestLine());
+  assert.strictEqual(check(graph), graph);
+  assert.deepEqual(flowEnvelope(graph), { nodes: 10, attemptSeconds: flowCeilings.attemptSeconds });
+  graph.envelope = { attemptSeconds: flowCeilings.attemptSeconds };
+  assert.strictEqual(check(graph), graph);
+});
+
 refuses(
   'widths and loops count toward the attempt-second ceiling',
+  atLongestBuild,
+  /^At full width the graph from node plan needs 27 nodes and 153900 attempt-seconds; the ceilings are 30 and 81000\.$/,
+);
+refuses(
+  'a declared envelope above the graph-v2 attempt-second ceiling is refused',
   g => {
-    for (const node of g.nodes.filter(node => node.owner.type === 'role')) {
-      node.maxSeconds = 600;
-      node.maxAttempts = 3;
-    }
+    atLongestBuild(g).envelope = { attemptSeconds: flowCeilings.attemptSeconds + 1 };
   },
-  new RegExp(
-    `node plan needs 27 nodes and 34200 attempt-seconds; the ceilings are ${graphCeilings.expandedNodes} and ${graphCeilings.attemptSeconds}`,
-  ),
+  /^The graph at node step-0's envelope allows at most 30 nodes and 81000 attempt-seconds\.$/,
+  longestLine,
 );
 refuses(
   'loop rounds and width count control nodes toward the expanded ceiling',
@@ -452,16 +509,27 @@ refuses(
   /node plan needs 27 nodes and 570 attempt-seconds, more than its envelope allows/,
 );
 refuses(
-  'an envelope cannot exceed the shared ceilings',
+  'an envelope cannot exceed the graph-v2 ceilings',
   g => {
-    g.envelope = { attemptSeconds: graphCeilings.attemptSeconds + 1 };
+    g.envelope = { attemptSeconds: flowCeilings.attemptSeconds + 1 };
   },
-  /node plan's envelope allows at most/,
+  /^The graph at node plan's envelope allows at most 30 nodes and 81000 attempt-seconds\.$/,
+);
+refuses(
+  'an envelope cannot exceed the expanded node ceiling',
+  g => {
+    g.envelope = { nodes: flowCeilings.expandedNodes + 1 };
+  },
+  /node plan's envelope allows at most 30 nodes/,
 );
 
 test('declared envelopes cover exact needs or reserve more within the ceilings', () => {
   const graph = flow();
-  graph.envelope = { nodes: graphCeilings.expandedNodes, attemptSeconds: graphCeilings.attemptSeconds };
+  // graph-v1's attempt-second ceiling no longer bounds a graph-v2 envelope.
+  graph.envelope = { attemptSeconds: graphCeilings.attemptSeconds + 1 };
+  assert.strictEqual(check(graph), graph);
+  assert.deepEqual(flowEnvelope(graph), { nodes: 27, attemptSeconds: graphCeilings.attemptSeconds + 1 });
+  graph.envelope = { nodes: flowCeilings.expandedNodes, attemptSeconds: flowCeilings.attemptSeconds };
   assert.strictEqual(check(graph), graph);
   assert.deepEqual(flowEnvelope(graph), graph.envelope);
   graph.envelope = { nodes: 27, attemptSeconds: 570 };
@@ -635,18 +703,32 @@ refuses(
   /Node work's acceptance/,
 );
 refuses(
-  'agent execution seconds are bounded',
+  'agent execution seconds have a floor',
   g => {
     byKey(g, 'work').maxSeconds = 4;
   },
-  /Node work needs maxSeconds from 5 to 600/,
+  /^Node work needs maxSeconds from 5 to 2700\.$/,
+);
+refuses(
+  'agent execution seconds stop at the longest build',
+  g => {
+    byKey(g, 'work').maxSeconds = 2701;
+  },
+  /^Node work needs maxSeconds from 5 to 2700\.$/,
 );
 refuses(
   'agent retries are bounded',
   g => {
     byKey(g, 'work').maxAttempts = 4;
   },
-  /Node work needs maxAttempts from 1 to 3/,
+  /^Node work needs maxAttempts from 1 to 3\.$/,
+);
+refuses(
+  'agent retries need at least one attempt',
+  g => {
+    byKey(g, 'work').maxAttempts = 0;
+  },
+  /^Node work needs maxAttempts from 1 to 3\.$/,
 );
 refuses(
   'resources must be safe names',
