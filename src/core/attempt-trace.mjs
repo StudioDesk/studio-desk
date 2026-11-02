@@ -322,6 +322,6 @@ export function flushSay(entry, now = Date.now()) {
   entry.attempt.lastSay = entry.pendingSay;
   entry.pendingSay = null;
   entry.sayWrittenAt = now;
-  this.store.updateAttempt(entry.attempt);
+  this.store.updateAttempt(entry.attempt, { trace: true });
   return true;
 }

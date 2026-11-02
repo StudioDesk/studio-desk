@@ -85,7 +85,9 @@ export class Store {
       CREATE INDEX IF NOT EXISTS events_by_kind ON events (kind, seq);
       CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts (task_id);
       CREATE INDEX IF NOT EXISTS attempts_by_status ON attempts (json_extract(data, '$.status'));
-      CREATE INDEX IF NOT EXISTS attempts_by_integration ON attempts (json_extract(data, '$.sourceIntegration.state'));`);
+      CREATE INDEX IF NOT EXISTS attempts_by_integration ON attempts (json_extract(data, '$.sourceIntegration.state'));
+      CREATE INDEX IF NOT EXISTS tasks_by_status ON tasks (json_extract(data, '$.status'));
+      CREATE INDEX IF NOT EXISTS tasks_by_queued ON tasks (json_extract(data, '$.queued'));`);
     // Every write raises the version and calls onChange with what changed (MP-026): the dashboard's
     // cache tags and change events follow it, and the scheduler runs on it. Each event also reaches
     // onEvent, so a tab watching an attempt receives its lines. A log line is not a change: the compact
@@ -254,6 +256,25 @@ export class Store {
       .all()
       .map(r => JSON.parse(r.data));
   }
+  // The tasks a scheduler pass weighs, read through the status and queued indexes (C-19): a pass after nearly every
+  // write parsed every task the project ever had, three times.
+  tasksWithStatus(...statuses) {
+    return this.db
+      .prepare(
+        `SELECT data FROM tasks WHERE json_extract(data, '$.status') IN (${statuses.map(() => '?').join(',')}) ORDER BY rowid`,
+      )
+      .all(...statuses)
+      .map(r => JSON.parse(r.data));
+  }
+  queuedTasks() {
+    return this.db
+      .prepare("SELECT data FROM tasks WHERE json_extract(data, '$.queued') = 1 ORDER BY rowid")
+      .all()
+      .map(r => JSON.parse(r.data));
+  }
+  anyQueued() {
+    return !!this.db.prepare("SELECT 1 FROM tasks WHERE json_extract(data, '$.queued') = 1 LIMIT 1").get();
+  }
   // When each task's attempts last finished, read without parsing any attempt, to list settled work newest first.
   lastFinished() {
     return new Map(
@@ -355,10 +376,11 @@ export class Store {
       .run(a.id, a.taskId, JSON.stringify(snapshot), JSON.stringify(a));
     this.changed(attemptChange(a));
   }
-  updateAttempt(a) {
+  // `trace` marks a write of what the attempt is saying or doing, which no task's readiness depends on (C-19).
+  updateAttempt(a, { trace = false } = {}) {
     const { instructions, ...data } = a;
     this.db.prepare('UPDATE attempts SET data=? WHERE id=?').run(JSON.stringify(data), a.id);
-    this.changed(attemptChange(a));
+    this.changed({ ...attemptChange(a), ...(trace ? { trace: true } : {}) });
   }
   leases() {
     return this.db.prepare('SELECT resource, attempt_id AS attemptId,token FROM leases ORDER BY resource').all();

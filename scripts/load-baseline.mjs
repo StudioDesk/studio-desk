@@ -82,6 +82,19 @@ try {
   const began = performance.now();
   for (let i = 0; i < passes; i++) runner.dispatchQueued();
   const passTime = performance.now() - began;
+  // Writes no task's readiness depends on, each in its own turn as a running attempt makes them: an event row and the
+  // attempt's speech bubble (C-19). Counts the scheduler passes they cause.
+  const passCount = async () => (await (await fetch(`${origin}/api/health/load`)).json()).schedulerPassMs.count;
+  const quietBefore = await passCount(),
+    talking = store.attempt('attempt-0');
+  for (let i = 0; i < passes; i++) {
+    store.event('note', talking.taskId, talking.id, `A line the attempt said, number ${i}.`);
+    await new Promise(resolve => setImmediate(resolve));
+    talking.lastSay = { text: `Still working, step ${i}.`, at: new Date().toISOString() };
+    store.updateAttempt(talking, { trace: true });
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const quietWrites = { writes: passes * 2, passes: (await passCount()) - quietBefore };
   // Each read's own times, as a page waits for them, beside the controller's measure of all requests.
   const timed = {};
   for (let i = 0; i < reads; i++)
@@ -104,7 +117,12 @@ try {
   const measures = await (await fetch(`${origin}/api/health/load`)).json();
   console.log(
     JSON.stringify(
-      { fixture: { tasks, attempts, passes, reads, passesTotalMs: Math.round(passTime) }, readMs, measures },
+      {
+        fixture: { tasks, attempts, passes, reads, passesTotalMs: Math.round(passTime) },
+        quietWrites,
+        readMs,
+        measures,
+      },
       null,
       2,
     ),

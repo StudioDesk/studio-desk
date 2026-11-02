@@ -361,7 +361,8 @@ export function createStudio({
     }
   };
   const notify = change => {
-    runner.schedule();
+    // An event row or an attempt's speech bubble changes no task's readiness, so it starts no scheduler pass (C-19).
+    if (change.type !== 'event' && !change.trace) runner.schedule();
     journal.push(change);
     if (journal.length > journalLimit) journal.shift();
     pending.push(change);

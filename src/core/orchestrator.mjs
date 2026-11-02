@@ -316,10 +316,8 @@ export class Runner {
       measuringPass(() => {
         this.refreshReadiness();
         for (const task of this.store
-          .tasks()
-          .filter(
-            task => task.queued && task.status === 'ready' && !this.store.project(recordProject(task)).dispatchPaused,
-          )) {
+          .queuedTasks()
+          .filter(task => task.status === 'ready' && !this.store.project(recordProject(task)).dispatchPaused)) {
           // Refresh after each claim, so later jobs observe the same slots and leases.
           this.refreshReadiness();
           if (this.store.task(task.id).status !== 'ready') continue;
@@ -339,7 +337,7 @@ export class Runner {
             }
           }
         }
-        if (!this.store.tasks().some(task => task.queued)) {
+        if (!this.store.anyQueued()) {
           const org = this.store.organization();
           org.pipelineEnabled = false;
           this.store.setOrganization(org);
@@ -559,16 +557,18 @@ export class Runner {
     measuringPass(() => this.refreshEach());
   }
   refreshEach() {
+    // What every waiting task is weighed against, read once for the pass (C-19): weighing a task writes only that task,
+    // never an attempt or a lease.
+    const slotsTaken = this.store.liveAttempts().length >= this.store.organization().maxParallel,
+      leases = this.store.leases();
     for (const t of this.store
-      .tasks()
-      .filter(t => t.status === 'ready' || (t.status === 'blocked' && t.controllerWait))) {
-      // The live attempts only, through the status index: this runs for every waiting task on every pass.
-      const slotsTaken = this.store.liveAttempts().length >= this.store.organization().maxParallel;
+      .tasksWithStatus('ready', 'blocked')
+      .filter(t => t.status === 'ready' || t.controllerWait)) {
       let resources = null;
       try {
         resources = this.workflows.requirements(this.workflows.stageView(t), { store: this.store }).resources;
       } catch {} // blockReason says why
-      const taken = slotsTaken || (!!resources && this.store.leases().some(l => resources.includes(l.resource)));
+      const taken = slotsTaken || (!!resources && leases.some(l => resources.includes(l.resource)));
       let reason = this.blockReason(t, false, { quick: taken }),
         conflict;
       // Queued work whose own prerequisites are met waits for the director to resume its project,
@@ -579,7 +579,7 @@ export class Runner {
         // An agent is not reserved (MP-033): it runs as many attempts at once as the limits allow, so only the
         // work's own resources can make it wait.
         const execution = this.workflows.stageView(t);
-        const held = this.store.leases().find(l => resources?.includes(l.resource));
+        const held = leases.find(l => resources?.includes(l.resource));
         if (held) {
           conflict = this.store.resourceConflict(held.resource, held.attemptId);
           reason = conflict.reason;
