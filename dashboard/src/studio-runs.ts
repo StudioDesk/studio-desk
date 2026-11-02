@@ -2,6 +2,8 @@
 // unchanged so both dashboards say the same thing until the old one is removed. They read a state shaped like
 // the old one's: a project's shell with the records a page holds.
 import '../../public/runs.js';
+// The story page's task actions as shared rules the controller can run too (public/task-actions.js), after runs.js.
+import '../../public/task-actions.js';
 import type { AttemptSummary, Live, RunRecord, Shell, Task } from './api';
 
 export type StudioState = Shell & Live;
@@ -99,6 +101,29 @@ interface StudioRunsModule {
   holdItems(state: StudioState, explain: (task: Task, state: StudioState) => Explanation): HoldItem[];
 }
 
+// One action the story page offers on a task (public/task-actions.js): the words on its button, the route it is sent
+// to and the body fields that route takes, each with the value the page sends from the records when it sends one.
+export interface TaskActionField {
+  name: string;
+  required: boolean;
+  kind: 'id' | 'hash' | 'text' | 'note' | 'reason' | 'boolean' | 'list' | 'number';
+  value?: unknown;
+}
+export interface TaskAction {
+  key: string;
+  label: string;
+  method: 'POST' | 'PATCH';
+  path: string;
+  fields: TaskActionField[];
+}
+// What the page reads besides the records: the controller's answer to a landed story's bring-back read.
+export interface TaskActionReads {
+  bringBack?: { lines: ({ line: string; through: string[] } | { line: string; reason: string })[] };
+}
+export interface StudioTaskActionsModule {
+  taskActions(task: Task, state: StudioState, reads?: TaskActionReads): TaskAction[];
+}
+
 // A CLI's usage hold (public/runs.js holdItems): one item for the CLI, with the work waiting on it. It needs the
 // director only when no reset time is known.
 export interface HoldItem {
@@ -115,6 +140,13 @@ export interface HoldItem {
 }
 
 const rules = (globalThis as unknown as { StudioRuns: StudioRunsModule }).StudioRuns;
+// The task actions the shared rules list (public/task-actions.js); the story page keeps its own conditions for now.
+export const taskActions: StudioTaskActionsModule['taskActions'] = (task, state, reads) =>
+  (globalThis as unknown as { StudioTaskActions: StudioTaskActionsModule }).StudioTaskActions.taskActions(
+    task,
+    state,
+    reads,
+  );
 
 export const statusLabels: Record<string, string> = {
   backlog: 'Planned',

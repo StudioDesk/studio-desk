@@ -503,3 +503,290 @@ export function fakeController(projectId = 'project-x'): Controller {
   );
   return controller;
 }
+
+// The story page's decision states as dashboard/src/task-decisions.test.tsx lays them out, shared so another test can
+// open the page in each (task-actions.test.ts). Each puts its attempts, and any other record it needs, on the stand-in
+// and returns the story T-1 to open.
+const passedPin = {
+  taskId: 'T-1',
+  attemptId: 'attempt-edit',
+  workerId: 'W-1',
+  path: 'source-change.json',
+  hash: 'change-hash',
+  candidateHash: 'candidate-hash',
+};
+// A story ready to integrate: its edit accepted, and its independent review accepted and passing.
+function passedStory(controller: Controller) {
+  controller.attempts = [
+    {
+      id: 'attempt-edit',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change' },
+      result: { outcome: 'completed' },
+      sourceCandidate: { sourceHash: 'candidate-hash' },
+      artifacts: [{ path: 'source-change.json', hash: 'change-hash', kind: 'source-change' }],
+    },
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-2',
+      assignment: { kind: 'studio-development:change-review' },
+      result: { outcome: 'completed' },
+      candidateReviewVerdict: 'pass',
+      candidateReviewNotes: [],
+      candidateReview: { ...passedPin, passed: true },
+      inputReferences: [
+        { taskId: 'T-1', attemptId: 'attempt-edit', artifacts: [{ kind: 'source-change', hash: 'change-hash' }] },
+      ],
+      artifacts: [{ path: 'source-change-review.json', hash: 'review-hash', kind: 'source-change-review' }],
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'done',
+    acceptedAttemptId: 'attempt-review',
+    lastAttemptId: 'attempt-review',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'candidate-review',
+      current: 'waiting-for-integration',
+      candidate: passedPin,
+      review: {
+        taskId: 'T-1',
+        attemptId: 'attempt-review',
+        workerId: 'W-2',
+        path: 'source-change-review.json',
+        hash: 'review-hash',
+        verdict: 'pass',
+      },
+    },
+  });
+}
+// A story whose passing review's integration stopped, with what its verification recorded.
+function stoppedStory(
+  controller: Controller,
+  verification: NonNullable<AttemptSummary['sourceIntegration']>['verification'],
+) {
+  const story = passedStory(controller);
+  controller.attempts[1]!.sourceIntegration = { state: 'rejected', verification };
+  return { ...story, sourceStage: { ...story.sourceStage, phase: 'integration', current: 'failed' } };
+}
+// A story that landed, with any carries its review records.
+function landedStory(controller: Controller, sourceCarries?: AttemptSummary['sourceCarries']) {
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change-review' },
+      candidateReviewVerdict: 'pass',
+      sourceIntegration: { state: 'integrated' },
+      ...(sourceCarries ? { sourceCarries } : {}),
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'done',
+    acceptedAttemptId: 'attempt-review',
+    lastAttemptId: 'attempt-review',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'integration',
+      current: 'integrated',
+      review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+    },
+  });
+}
+// A story whose attempt the controller's stop cut off, as the controller leaves it after a restart.
+const cutOff = (controller: Controller, status: string, fields: Partial<AttemptSummary> = {}) => {
+  controller.attempts = [
+    { id: 'attempt-1', taskId: 'T-1', status, workerId: 'W-1', error: 'Controller restarted.', ...fields },
+  ];
+  return taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' });
+};
+const blockedStop = (fields: Partial<AttemptSummary> = {}): AttemptSummary => ({
+  id: 'attempt-1',
+  taskId: 'T-1',
+  status: 'blocked',
+  workerId: 'W-1',
+  result: { outcome: 'blocked', summary: 'I need a call on the old route.' },
+  ...fields,
+});
+
+export const decisionStates: Record<string, (controller: Controller) => Task> = {
+  'ready work': () => taskFixture('T-1'),
+  'a waiting question': controller => {
+    controller.attempts = [
+      blockedStop({
+        question: {
+          ask: 'Keep the old route for one release?',
+          why: 'Two pages still call it.',
+          options: [{ label: 'Keep it' }, { label: 'Remove it' }],
+          recommended: 0,
+          choice: 'director',
+          topics: [],
+        },
+      }),
+    ];
+    return taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' });
+  },
+  'a stop without a question': controller => {
+    controller.attempts = [blockedStop()];
+    return taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' });
+  },
+  'an interrupted attempt': controller => cutOff(controller, 'interrupted'),
+  'a quarantined attempt': controller => cutOff(controller, 'quarantined'),
+  'an interrupted attempt after reconciling': controller =>
+    cutOff(controller, 'interrupted', { reconciledAt: '2026-10-21T21:00:00Z' }),
+  'a result in review': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-1',
+        taskId: 'T-1',
+        status: 'review',
+        workerId: 'W-1',
+        result: { outcome: 'completed', summary: 'Ready.' },
+      },
+    ];
+    return taskFixture('T-1', { status: 'review', lastAttemptId: 'attempt-1', direction: 'Recorded direction.' });
+  },
+  'past the attempt limit': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-1',
+        taskId: 'T-1',
+        status: 'failed',
+        workerId: 'W-1',
+        assignment: { kind: 'studio-development:change' },
+        result: { outcome: 'failed', summary: 'A test failed.' },
+      },
+    ];
+    return taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'failed',
+      maxAttempts: 1,
+      lastAttemptId: 'attempt-1',
+      direction: 'Recorded direction.',
+    });
+  },
+  'proposed work': () => taskFixture('T-1', { status: 'backlog', approval: { status: 'pending' } }),
+  'running work': controller => {
+    controller.attempts = [
+      { id: 'attempt-1', taskId: 'T-1', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+    ];
+    return taskFixture('T-1', { status: 'running', lastAttemptId: 'attempt-1' });
+  },
+  'a passing review': passedStory,
+  'a review in progress': controller => {
+    const story = passedStory(controller);
+    controller.attempts = [
+      controller.attempts[0]!,
+      {
+        id: 'attempt-review',
+        taskId: 'T-1',
+        status: 'running',
+        workerId: 'W-2',
+        startedAt: new Date().toISOString(),
+        assignment: { kind: 'studio-development:change-review' },
+      },
+    ];
+    return {
+      ...story,
+      status: 'running',
+      acceptedAttemptId: 'attempt-edit',
+      sourceStage: {
+        ...story.sourceStage,
+        current: 'candidate-review',
+        review: { taskId: 'T-1', attemptId: 'attempt-review', workerId: 'W-2' },
+      },
+    };
+  },
+  'a review that asked for changes': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-review',
+        taskId: 'T-1',
+        status: 'accepted',
+        workerId: 'W-1',
+        candidateReviewVerdict: 'needs-work',
+      },
+    ];
+    return taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'candidate-review',
+        current: 'failed',
+        review: { attemptId: 'attempt-review', verdict: 'needs-work', hash: 'review-hash' },
+      },
+    });
+  },
+  'a conflict': controller => stoppedStory(controller, { conflicts: ['src/core/store.mjs'] }),
+  'landed since': controller => {
+    controller.tasks = [taskFixture('T-2', { title: 'Name the stage in plain words' })];
+    return stoppedStory(controller, { landedSince: { commits: 2, stories: ['T-2'] } });
+  },
+  'failed with nothing landed': controller => stoppedStory(controller, { conflicts: [] }),
+  'a carry waiting': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-review',
+        taskId: 'T-1',
+        status: 'accepted',
+        workerId: 'W-1',
+        assignment: { kind: 'studio-development:change-review' },
+        candidateReviewVerdict: 'pass',
+        sourceIntegration: { state: 'integrated' },
+        sourceCarries: [{ line: 'main', state: 'waiting' }],
+      },
+    ];
+    return taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'integration',
+        current: 'done',
+        review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+      },
+    });
+  },
+  'a landed story with bring-back lines': controller => {
+    controller.bringBack['T-1'] = {
+      lines: [
+        { line: 'release/1.1', through: ['release/1.1'] },
+        { line: 'release/1.0', through: ['release/1.1', 'release/1.0'] },
+        { line: 'release/0.9', reason: 'release/0.9 already has it.' },
+      ],
+    };
+    return landedStory(controller);
+  },
+  'a landed story on a project with one line': controller => landedStory(controller),
+  'a landed carry story': controller => ({
+    ...landedStory(controller),
+    carryOf: { storyId: 'T-0', line: 'release/1.1', reviewAttemptId: 'attempt-0', carryId: 'carry-0' },
+  }),
+  'a stopped bring-back': controller =>
+    landedStory(controller, [{ line: 'release/1.0', state: 'rejected', back: true, approved: true }]),
+  'a closed story': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-1',
+        taskId: 'T-1',
+        status: 'failed',
+        workerId: 'W-1',
+        result: { outcome: 'failed', summary: 'A test failed.' },
+      },
+    ];
+    return taskFixture('T-1', { status: 'failed', lastAttemptId: 'attempt-1', closed: true });
+  },
+};
