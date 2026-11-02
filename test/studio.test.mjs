@@ -1001,7 +1001,7 @@ test('idea files sent with an idea are kept byte for byte and served only as dow
         headers: {
           host: '127.0.0.1:0',
           // Requests reach the server directly, as the dashboard or the director's own tool would send them (C-01).
-          ...directorCredentials(app.directorKey, options.headers),
+          ...directorCredentials(app.directorKey, options.headers, options.method),
           ...Object.fromEntries(
             Object.entries(options.headers || {}).map(([key, value]) => [key.toLowerCase(), value]),
           ),

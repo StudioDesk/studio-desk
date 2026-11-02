@@ -173,7 +173,11 @@ test('only the key header stands for the key, and the session cookie alone still
 test('reads answer an unknown route with 404 and other methods with 405', async t => {
   const { app, origin } = await studio(t);
   const key = { ...plain, headers: { 'x-studio-key': app.directorKey } };
-  assert.equal((await fetch(origin + '/api/no-such-read', key)).status, 404);
+  const unknown = await fetch(origin + '/api/no-such-read', key);
+  assert.equal(unknown.status, 404);
+  assert.match((await unknown.json()).error, /Unknown read route\. Commands are sent with POST or PATCH\./);
+  // A command asked for with GET is no read either, for the dashboard as for a tool.
+  assert.equal((await fetch(origin + '/api/control', key)).status, 404);
   const deleted = await fetch(origin + '/api/control', { ...key, method: 'DELETE' });
   assert.equal(deleted.status, 405);
   assert.equal(deleted.headers.get('allow'), 'POST, PATCH');

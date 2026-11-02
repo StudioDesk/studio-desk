@@ -1177,7 +1177,8 @@ test('project-scoped archive actions are protected, reversible and leave settled
       body: JSON.stringify({ projectId: project.id }),
     });
     assert.equal(foreignOrigin.status, 403);
-    assert.equal((await fetch(c.origin + url + '/' + action)).status, 403);
+    // A command asked for with GET is no read route.
+    assert.equal((await fetch(c.origin + url + '/' + action)).status, 404);
     assert.equal((await c.request(url + '/' + action, { projectId: 'project-legacy' })).status, 400);
     const crossProject = await c.request(`/api/projects/project-legacy/runs/${run.runId}/${action}`);
     assert.equal(crossProject.status, 400);
@@ -1336,7 +1337,7 @@ async function fileIntakeProject(t) {
       Object.assign(req, {
         url,
         method,
-        headers: { host: '127.0.0.1:0', ...directorCredentials(c.app.directorKey, headers), ...headers },
+        headers: { host: '127.0.0.1:0', ...directorCredentials(c.app.directorKey, headers, method), ...headers },
       });
       c.app.server.emit('request', req, res);
     });
@@ -2469,6 +2470,6 @@ test('the folder list answers the dashboard with its request token and nothing e
   const read = await fetch(c.origin + '/api/folders?path=' + encodeURIComponent(folder), {
     headers: { 'X-Studio-Token': c.token },
   });
-  assert.equal(read.status, 403);
+  assert.equal(read.status, 404);
   assert.equal((await read.json()).folders, undefined);
 });

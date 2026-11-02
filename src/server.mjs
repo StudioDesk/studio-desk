@@ -1009,8 +1009,10 @@ export function createStudio({
         return json(res, await runEmployeeTests(runner, entry, data));
       }
       if (parts[0] === 'api') {
-        // Every read route answered above, so a read that gets here names no route; a command is a POST or a PATCH.
-        if (req.method === 'GET' || req.method === 'HEAD') fail('Unknown controller route.', 404);
+        // Every read route answered above, so a read that gets here names no read route: a mistyped one, or a command
+        // asked for with GET. A command is a POST or a PATCH.
+        if (req.method === 'GET' || req.method === 'HEAD')
+          fail('Unknown read route. Commands are sent with POST or PATCH.', 404);
         if (!['POST', 'PATCH'].includes(req.method)) {
           res.setHeader('Allow', 'POST, PATCH');
           fail('Commands are sent with POST or PATCH.', 405);
