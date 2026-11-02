@@ -9,6 +9,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
+import { attemptChip } from './story-tabs';
 import { createStream, fakeController, latest, taskFixture, whenShown, type Controller } from './test-controller';
 
 let controller: Controller;
@@ -184,6 +185,48 @@ test('a code story lists a chapter for each attempt in start order, the latest o
   expect(lineOf(chapters(panel)[2]!).textContent).toBe('Review · MorganPassed');
 });
 
+test('a chapter’s chip says its attempt’s status in words, never the status’s code', () => {
+  const chip = (status: string) => attemptChip({ id: 'a', taskId: 'T-1', status } as AttemptSummary);
+  expect(chip('revision_requested')).toEqual(['you', 'Sent back for another attempt']);
+  // A status the dashboard does not know yet still reads as words.
+  expect(chip('some_new_state')).toEqual(['', 'Some new state']);
+  expect(chip('Some_new_state')[1]).not.toContain('_');
+});
+
+test('a build sent back for another attempt says so on its chapter’s line, not as its status’s code', async () => {
+  reviewed();
+  controller.attempts[0] = { ...controller.attempts[0]!, status: 'revision_requested' };
+  const { panel } = await activity(),
+    line = lineOf(within(panel).getByRole('region', { name: 'Build, attempt 1 of 3' })).textContent;
+  expect(line).toBe('Build, attempt 1 of 3 · EliSent back for another attempt');
+  expect(line).not.toContain('revision_requested');
+  expect(chapters(panel).filter(item => item.textContent?.includes('revision_requested'))).toEqual([]);
+});
+
+test('a build past the limit names its chapter as the attempts row says it, never "attempt 4 of 3"', async () => {
+  reviewed();
+  const [first, second, review] = controller.attempts;
+  controller.attempts = [
+    first!,
+    build('attempt-1b', '2026-10-28T10:21:00.000Z', '2026-10-28T10:24:00.000Z'),
+    build('attempt-1c', '2026-10-28T10:25:00.000Z', '2026-10-28T10:28:00.000Z'),
+    second!,
+    review!,
+  ];
+  const { panel } = await activity();
+  expect(chapters(panel).map(item => item.getAttribute('aria-label'))).toEqual([
+    'Build, attempt 1 of 3',
+    'Build, attempt 2 of 3',
+    'Build, attempt 3 of 3',
+    'Build, fourth attempt, started by you past the limit of 3',
+    'Review',
+  ]);
+  expect(lineOf(chapters(panel)[3]!).textContent).toBe(
+    'Build, fourth attempt, started by you past the limit of 3 · EliAccepted',
+  );
+  expect(panel.textContent).not.toMatch(/attempt 4 of 3/i);
+});
+
 test('clicking a folded line opens its chapter, and clicking an open chapter’s line folds it', async () => {
   reviewed();
   const { user, panel } = await activity(),
@@ -318,6 +361,28 @@ test("a running attempt's chapter is open and shows its live activity", async ()
   expect(await chapter.findByText('Folding the chapters now.')).toBeTruthy();
   expect(chapter.getByLabelText('Working')).toBeTruthy();
   expect(chapter.queryByText('What it handed back')).toBeNull();
+});
+
+test('a running build past the limit is named the same way on the phone’s chip as on its chapter', async () => {
+  runningStory([say(0, 'Trying once more.')]);
+  const [first, running] = controller.attempts;
+  controller.attempts = [
+    first!,
+    build('attempt-1b', '2026-10-28T10:21:00.000Z', '2026-10-28T10:24:00.000Z'),
+    build('attempt-1c', '2026-10-28T10:25:00.000Z', '2026-10-28T10:28:00.000Z'),
+    running!,
+  ];
+  const user = userEvent.setup();
+  open();
+  await user.click(await screen.findByRole('tab', { name: 'Activity' }, { timeout: 5000 }));
+  const live = await within(await screen.findByRole('tabpanel')).findByRole(
+    'region',
+    { name: 'Build, fourth attempt, started by you past the limit of 3' },
+    { timeout: 5000 },
+  );
+  expect(lineOf(live).textContent).toContain('Running');
+  const chip = document.querySelector<HTMLElement>('.sd-storyhead .sd-narrow-only .sd-chip')!;
+  expect(chip.textContent).toMatch(/^(Working|Editing|Testing) · fourth attempt, started by you past the limit of 3$/);
 });
 
 // The page's scroll geometry, a stand-in where nothing lays out or scrolls: each part of an open chapter is 40px

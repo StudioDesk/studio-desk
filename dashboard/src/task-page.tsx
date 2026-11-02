@@ -283,7 +283,7 @@ function Story({
     liveLabel = active(task)
       ? isReview(latest)
         ? 'Reviewing'
-        : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^A/, 'a')}` : ''}`
+        : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^./, first => first.toLowerCase())}` : ''}`
       : null;
   // The attempts are the strip above the tabs, not a tab of their own, and everything recorded about the one shown is
   // its own page, linked from Details. Pages follows Checks when it shows, and Try it follows them once the story's

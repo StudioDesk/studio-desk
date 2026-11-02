@@ -20,7 +20,7 @@ import {
   useAttemptDetail,
   type FullAttempt,
 } from './attempt-record';
-import { attemptRow, chipLabel, isReview, shownChips, shownName, type Chip } from './attempt-row';
+import { attemptRow, chipLabel, isReview, ordinal, shownChips, shownName, type Chip } from './attempt-row';
 import { storyPaths } from './decisions';
 import { AgentAvatar } from './design/avatar';
 import { agentState, attemptState } from './faces';
@@ -628,16 +628,21 @@ export function ReviewVerdict({
 // other work's own attempts, count against its limit; a review is a step of its own, not another attempt at the
 // work. An attempt that uses up none of them (a usage limit stopped it, or the controller's stop interrupted it and
 // it was reconciled) is named for what stopped it, so the next one never reads "attempt 3 of 2" (the recovery
-// drill, October 24). `short` leaves out "Build, ", as on the story's working line and on Today's floor. The attempts
-// row above the story's tabs says its own words (attempt-row.ts).
+// drill, October 24). One that counts past the limit, which only you can start, says so as the attempts row's limit
+// line does (attempt-row.ts): "Build, fourth attempt, started by you past the limit of 3", never "attempt 4 of 3".
+// `short` leaves out "Build, ", as on the story's working line and on Today's floor.
 export function attemptName(task: Task, attempts: AttemptSummary[], attempt: AttemptSummary, short = false) {
   const same = attempts.filter(item => isReview(item) === isReview(attempt)),
     counted = same.filter(countsTowardLimit),
     source = isSourceStory(task);
   if (isReview(attempt)) return `Review${same.length > 1 ? ` ${same.indexOf(attempt) + 1}` : ''}`;
-  const name = countsTowardLimit(attempt)
-    ? `attempt ${counted.indexOf(attempt) + 1} of ${task.maxAttempts ?? counted.length}`
-    : `${attempt.subscriptionHold ? 'stopped by a usage limit' : attempt.question?.ask ? 'asked you a question' : 'interrupted'}, not counted`;
+  const number = counted.indexOf(attempt) + 1,
+    max = task.maxAttempts;
+  const name = !countsTowardLimit(attempt)
+    ? `${attempt.subscriptionHold ? 'stopped by a usage limit' : attempt.question?.ask ? 'asked you a question' : 'interrupted'}, not counted`
+    : max && number > max
+      ? `${ordinal(number)} attempt, started by you past the limit of ${max}`
+      : `attempt ${number} of ${max ?? counted.length}`;
   return source && !short ? `Build, ${name}` : name[0]!.toUpperCase() + name.slice(1);
 }
 
@@ -664,6 +669,12 @@ const statusChips: Record<string, [string, string]> = {
   interrupted: ['bad', 'Interrupted'],
   quarantined: ['bad', 'Quarantined'],
   uncertain: ['bad', 'Uncertain'],
+  revision_requested: ['you', 'Sent back for another attempt'],
+};
+// A status this table does not know yet, in words rather than as its code: "some_new_state" reads "Some new state".
+const statusWords = (status: string) => {
+  const words = status.replace(/_/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
 };
 export function attemptChip(attempt: AttemptSummary) {
   if (attempt.status === 'accepted') {
@@ -679,7 +690,7 @@ export function attemptChip(attempt: AttemptSummary) {
       ? ['ok', 'Accepted by house rules']
       : ['ok', 'Accepted'];
   }
-  return statusChips[attempt.status] ?? ['', attempt.status];
+  return statusChips[attempt.status] ?? ['', statusWords(attempt.status)];
 }
 
 // What an attempt ran on, when and for how long, after who ran it on its chip's title in the attempt strip and in its
