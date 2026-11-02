@@ -787,6 +787,8 @@ test("a task's attempt summaries read its own attempts' phases through their ind
     'events.events_by_attempt',
     'events.events_by_kind',
     'events.events_by_task',
+    'tasks.tasks_by_queued',
+    'tasks.tasks_by_status',
   ]);
   const attempts = [0, 1].map(i => ({
     id: `index-attempt-${i}`,

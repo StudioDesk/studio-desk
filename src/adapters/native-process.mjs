@@ -146,9 +146,10 @@ export function recordLine(entry, channel, line) {
       entry.adapter.recordEvent?.(this, entry, data);
       // The latest message the adapter noted, for Today's speech bubble, at most once every 10 seconds.
       flushSay.call(this, entry);
-      if (typeof data.model === 'string') {
+      // The model the CLI reports, written once when it changes; no task's readiness depends on it (C-19).
+      if (typeof data.model === 'string' && a.reportedModel !== data.model) {
         a.reportedModel = data.model;
-        this.store.updateAttempt(a);
+        this.store.updateAttempt(a, { trace: true });
       }
       if (data.type === 'error' || data.type === 'turn.failed')
         this.nativeFailure(entry, data.message || data.error?.message || 'CLI reported a failure.');
