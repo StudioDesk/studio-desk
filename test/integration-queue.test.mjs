@@ -145,12 +145,14 @@ const checkFixture = fileURLToPath(new URL('./fixture-source-check.mjs', import.
     '# skipped 0',
     '# todo 0',
   ].join('\n');
-// A passing test run that ends once its gate file exists, so a test decides when a run holding the turn ends.
+// A passing test run that ends once its gate file exists, so a test decides when a run holding the turn ends. It marks
+// that it started (<gate>.started), since a verification takes the turn before its install and reads its test command
+// only then.
 const gated = gate => ({
   executable: process.execPath,
   args: [
     '-e',
-    `const fs = require('node:fs'); const wait = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(wait); console.log(${JSON.stringify(tap)}); } }, 20);`,
+    `const fs = require('node:fs'); fs.writeFileSync(process.argv[1] + '.started', ''); const wait = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(wait); console.log(${JSON.stringify(tap)}); } }, 20);`,
     gate,
   ],
 });
@@ -267,9 +269,11 @@ test("an idea's checks wait while an integration's verification runs its tests, 
     holders = turnHolders(t, store);
   runner.sourceCheckCommand = gated(gate);
   const { journal, settled } = integrate(c, review);
-  await waitFor(() => holder(store) === journal.id, "the verification's test run to take the turn");
+  await waitFor(() => holder(store) === journal.id, 'the verification to take the turn');
   assert.equal(store.attempt(review.id).sourceIntegration.testTurn, undefined, 'A free turn is taken with no wait.');
   assert.deepEqual(turnEvents(store, review.id), []);
+  // It holds the turn from its install on; its gated test run reads the command once the install is done.
+  await waitFor(() => fs.existsSync(gate + '.started'), "the verification's test run to start");
   runner.sourceCheckCommand = command('pass');
   const check = runner.start(addChecks(c, 'T-check-b')).attemptId;
   const waiting = await waitFor(() => store.attempt(check).testTurn, 'the checks to wait for the turn');

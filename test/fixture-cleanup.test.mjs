@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { createStudio } from './model-free-studio.mjs';
+import { createStudio, directorHeaders } from './model-free-studio.mjs';
 import { closeAndRemove, removeFolder } from './fixture-cleanup.mjs';
 import { waitFor } from './wait-for.mjs';
 
@@ -25,9 +25,11 @@ function partialRequest(origin, token) {
   socket.on('data', chunk => (request.answer += chunk));
   socket.on('error', () => {});
   request.closed = new Promise(resolve => socket.on('close', resolve));
+  // It acts as the director's own tool, with the studio's key (C-01).
+  const key = directorHeaders(origin)['x-studio-key'];
   socket.write(
     `POST /api/fixture-cleanup HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: keep-alive\r\n` +
-      `Content-Type: application/json\r\nX-Studio-Token: ${token}\r\nContent-Length: 2\r\n\r\n{`,
+      `Content-Type: application/json\r\nX-Studio-Token: ${token}\r\nX-Studio-Key: ${key}\r\nContent-Length: 2\r\n\r\n{`,
   );
   return request;
 }
