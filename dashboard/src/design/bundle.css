@@ -592,6 +592,67 @@ a.sd-tile:hover {
   color: var(--ink);
 }
 
+/* More: a quiet disclosure for detail the director rarely needs, such as the full text written for an agent; a text
+   button that opens it in place (November 1, 2026) */
+.sd-more > summary,
+.sd-more-button {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  min-height: 32px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--brand-text);
+  cursor: pointer;
+}
+.sd-more > summary::-webkit-details-marker {
+  display: none;
+}
+.sd-more > summary::after {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+}
+.sd-more[open] > summary::after {
+  transform: translateY(2px) rotate(-135deg);
+}
+.sd-more-button {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+}
+.sd-bubble--mine .sd-more-button {
+  color: inherit;
+  text-decoration: underline;
+}
+.sd-more > summary:focus-visible,
+.sd-more-button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+.sd-more__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  padding-top: var(--space-8);
+  min-width: 0;
+}
+
+/* Clamp: long text shown to a few lines, fading out, until the director opens it with Show all (November 1, 2026) */
+.sd-clamp {
+  max-height: calc(var(--clamp, 4) * 1.55em);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
+  mask-image: linear-gradient(to bottom, #000 55%, transparent);
+}
+
 /* Floor: who is working and what they last said, then the free agents */
 .sd-floor-live {
   display: flex;

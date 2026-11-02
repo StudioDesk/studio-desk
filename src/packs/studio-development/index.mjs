@@ -193,13 +193,16 @@ const breakdownShape = {
     contextPath: 'source-context.json',
     contextHash: 'context SHA-256',
   },
-  summary: 'How these stories deliver the director idea',
+  summary:
+    'How these stories deliver the director idea, in plain words for the director: no file names, code or identifiers',
   stories: [
     {
       key: 'validate',
       kind: 'studio-development:change',
       role: 'engineer',
       title: 'Validate the requested behavior',
+      summary:
+        'What this story does and why, in one or two plain sentences for the director: no file names, code or identifiers',
       scope: 'Concrete bounded source change',
       acceptance: 'Observable model-free behavioral evidence',
       complexity: 1,

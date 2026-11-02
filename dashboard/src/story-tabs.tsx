@@ -135,9 +135,11 @@ function useRecordedJson<T>(projectId: string, attempt: AttemptSummary | undefin
   });
 }
 
-// The brief, a card beside the tabs on every story (under Details on a phone): what the agent was asked to do
-// without its path lines, what done means, the files it may change and the form that edits them, and what earlier
-// steps handed it. The story's Edit the file list brings that form into view by its id.
+// The brief, a card beside the tabs on every story (under Details on a phone), as the Story-tidy frame draws it: what
+// the story does in the planner's plain words, the files it may change as compact chips and the form that edits them,
+// and what earlier steps handed it. What the agent was asked to do and what done means, written for the agent, fold
+// under a quiet disclosure (November 1, 2026: shown in full, they filled the card with file names and test plans). The
+// story's Edit the file list brings that form into view by its id.
 export const briefEditId = 'brief-edit';
 export function BriefCard({
   projectId,
@@ -168,50 +170,82 @@ export function BriefCard({
     files = (shown?.directorInputs ??
       (shown?.assignment as { directorInputs?: IdeaFile[] } | undefined)?.directorInputs ??
       task.directorInputs ??
-      []) as IdeaFile[];
+      []) as IdeaFile[],
+    summary = typeof task.summary === 'string' ? task.summary : '',
+    chips = paths
+      ? [
+          ...paths.files.map(path => ({ path, className: 'sd-file', label: path, title: undefined })),
+          ...paths.newFiles.map(path => ({
+            path,
+            className: 'sd-file sd-file--add',
+            label: `+ ${path}`,
+            title: 'A new file',
+          })),
+          ...paths.deleteFiles.map(path => ({
+            path,
+            className: 'sd-file sd-file--del',
+            label: `− ${path}`,
+            title: 'A file to delete',
+          })),
+        ]
+      : [];
+  // Three files show; the rest open with their count.
+  const [allFiles, setAllFiles] = useState(false),
+    shownChips = allFiles ? chips : chips.slice(0, 3);
   return (
     <section className="sd-card sd-sidecard" aria-label="The brief" style={{ gap: 'var(--space-14)' }}>
       <h2 className="sd-sidecard__title">The brief</h2>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
-        <span className="sd-eyebrow">What {editor} was asked to do</span>
-        {/* Briefs are written by the agent that broke the idea down, often with code and lists in Markdown. */}
-        {brief ? (
-          <div style={{ color: 'var(--ink-2)', maxWidth: '72ch' }}>
-            <TextReader text={brief} markdown />
-          </div>
-        ) : (
+      {summary ? (
+        <p style={{ margin: 0, color: 'var(--ink-2)', maxWidth: '72ch' }}>{summary}</p>
+      ) : (
+        !brief &&
+        !task.acceptance && (
           <p className="sd-meta" style={{ margin: 0 }}>
             No brief was recorded.
           </p>
-        )}
-      </div>
-      {task.acceptance && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
-          <span className="sd-eyebrow">Done means</span>
-          <p className="sd-quote">{task.acceptance}</p>
-        </div>
+        )
       )}
-      {paths && (paths.files.length > 0 || paths.newFiles.length > 0 || paths.deleteFiles.length > 0) && (
+      {chips.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
-          <span className="sd-eyebrow">Files it may change</span>
+          <span className="sd-eyebrow">May change</span>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-6)' }}>
-            {paths.files.map(path => (
-              <span key={path} className="sd-file">
-                {path}
+            {shownChips.map(chip => (
+              <span key={chip.path} className={chip.className} title={chip.title}>
+                {chip.label}
               </span>
             ))}
-            {paths.newFiles.map(path => (
-              <span key={path} className="sd-file sd-file--add" title="A new file">
-                + {path}
-              </span>
-            ))}
-            {paths.deleteFiles.map(path => (
-              <span key={path} className="sd-file sd-file--del" title="A file to delete">
-                − {path}
-              </span>
-            ))}
+            {chips.length > 3 && !allFiles && (
+              <button
+                type="button"
+                className="sd-file"
+                aria-label={`Show all ${chips.length} files`}
+                onClick={() => setAllFiles(true)}
+                style={{ cursor: 'pointer' }}
+              >
+                +{chips.length - 3}
+              </button>
+            )}
           </div>
         </div>
+      )}
+      {/* Written by the planner for the agent that builds the story, often with code and lists in Markdown. */}
+      {(brief || task.acceptance) && (
+        <details className="sd-more">
+          <summary>What {editor} was asked to do</summary>
+          <div className="sd-more__body">
+            {brief && (
+              <div style={{ color: 'var(--ink-2)', maxWidth: '72ch' }}>
+                <TextReader text={brief} markdown />
+              </div>
+            )}
+            {task.acceptance && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' }}>
+                <span className="sd-eyebrow">Done means</span>
+                <p className="sd-quote">{task.acceptance}</p>
+              </div>
+            )}
+          </div>
+        </details>
       )}
       {source && <FileChanges task={task} studio={studio} />}
       {source && filesEditable(task, studio) && (

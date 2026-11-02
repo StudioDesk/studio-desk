@@ -18,6 +18,7 @@ import {
   sourceIntegrationRequested,
   editSourceStory,
   mergeSourceStory,
+  proposedStory,
 } from './connectors/source-changes.mjs';
 import { stopIntegrationProcess } from './connectors/source-integration.mjs';
 import { addProjectLine, retireProjectLine } from './connectors/source-lines.mjs';
@@ -412,11 +413,25 @@ export function createStudio({
     res.writeHead(status, headers);
     res.end(body);
   };
+  // A planned story's summary in plain words for the director (November 1, 2026), read from its accepted breakdown;
+  // a story planned before summaries, or a breakdown that cannot be read, has none.
+  const storySummary = record => {
+    if (record.proposalReference?.path !== 'source-breakdown.json') return undefined;
+    try {
+      const summary = proposedStory(store, record)?.summary;
+      return typeof summary === 'string' && summary.trim() ? summary.trim() : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   // One task as its page reads it, and as a command's records carry it.
-  const taskPage = (projectId, record) => ({
-    task: { ...record, directorInputs: directorInputsOf(record) },
-    attempts: store.dashboardAttempts(projectId, record.id),
-  });
+  const taskPage = (projectId, record) => {
+    const summary = storySummary(record);
+    return {
+      task: { ...record, directorInputs: directorInputsOf(record), ...(summary ? { summary } : {}) },
+      attempts: store.dashboardAttempts(projectId, record.id),
+    };
+  };
   // A command the dashboard sends with X-Studio-Records: 1 is answered with what it changed: the changes recorded
   // since it began that its project's tab would hear, as a change event names them, and the page of each task of
   // that project they name, so the page shows the effect without waiting for the stream. Beyond the stream's 200

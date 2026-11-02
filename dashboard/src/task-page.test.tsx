@@ -1437,14 +1437,18 @@ test("a code story's brief is a card beside its tabs, which have no Overview, an
     'Details',
   ]);
   expect(card.parentElement!.className).toBe('sd-story__side');
-  // What was asked, as formatted text without its path lines, then what done means and the files it may change.
-  expect(brief.getByText('What Eli was asked to do')).toBeTruthy();
+  // The files it may change, then what was asked, folded under a quiet disclosure, as formatted text without its path
+  // lines, with what done means (November 1, 2026: shown in full, the agent's text filled the card).
+  const asked = brief.getByText('What Eli was asked to do');
+  expect(asked.tagName).toBe('SUMMARY');
+  expect(asked.parentElement!.className).toBe('sd-more');
+  expect((asked.parentElement as HTMLDetailsElement).open).toBe(false);
   expect(brief.getByText('outcome()').tagName).toBe('CODE');
   expect(brief.getAllByRole('listitem').map(item => item.textContent)).toEqual(['Keep the label.']);
   expect(brief.queryByText(/Files:|`/)).toBeNull();
   expect(brief.getByText('Done means')).toBeTruthy();
   expect(brief.getByText('Results are readable.')).toBeTruthy();
-  expect(brief.getByText('Files it may change')).toBeTruthy();
+  expect(brief.getByText('May change')).toBeTruthy();
   expect(brief.getByText('src/result.mjs').className).toBe('sd-file');
   expect(brief.getByText('test/result.test.mjs').className).toBe('sd-file');
   // The story may still change its files, so the form that edits them is here too.
@@ -1462,7 +1466,7 @@ test('other work has the brief card too, with its brief and what it was handed; 
   // Other work's brief keeps every line it was written with; it has no files to change.
   expect(brief.getByText('outcome()').tagName).toBe('CODE');
   expect(brief.getByText(/^Files: src\/result\.mjs/)).toBeTruthy();
-  expect(brief.queryByText('Files it may change')).toBeNull();
+  expect(brief.queryByText('May change')).toBeNull();
   expect(brief.queryByText("Edit this story's files")).toBeNull();
   expect(brief.getByText('Results are readable.')).toBeTruthy();
   await waitFor(() => handedTo(brief));
@@ -2046,4 +2050,20 @@ test('an attempt whose question could not be read shows no exchange in Activity'
   const panel = await storyActivity();
   expect(within(panel).queryByRole('region', { name: /question and its answers$/ })).toBeNull();
   expect(within(panel).queryByText('No answer yet.')).toBeNull();
+});
+
+test("a code story's brief leads with the planner's plain summary, with the agent's text folded", async () => {
+  handed(true);
+  controller.tasks = [
+    { ...controller.tasks[0]!, summary: 'Shows finished results in plain words.' },
+    ...controller.tasks.slice(1),
+  ];
+  open();
+  const brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
+  const summary = brief.getByText('Shows finished results in plain words.');
+  expect(summary.tagName).toBe('P');
+  // The summary comes before what was asked, which stays folded.
+  const asked = brief.getByText('What Eli was asked to do');
+  expect(summary.compareDocumentPosition(asked) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect((asked.parentElement as HTMLDetailsElement).open).toBe(false);
 });

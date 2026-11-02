@@ -166,6 +166,7 @@ export function validateBreakdown(plan, source) {
         'release',
         'releaseReason',
         'pages',
+        'summary',
       ],
       'Breakdown story',
     );
@@ -201,6 +202,8 @@ export function validateBreakdown(plan, source) {
     boundedText(story.title, 160, `Story ${story.key} title`);
     boundedText(story.scope, 8000, `Story ${story.key} scope`);
     boundedText(story.acceptance, 8000, `Story ${story.key} acceptance`);
+    // What the story does and why in plain words, for the director (November 1, 2026); optional for older planners.
+    if (story.summary !== undefined) boundedText(story.summary, 400, `Story ${story.key} summary`);
     validateComplexity(story.complexity);
     if (
       !Array.isArray(story.dependencies) ||

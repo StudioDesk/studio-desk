@@ -426,7 +426,9 @@ function Message({
       return (
         <li className="sd-say sd-say--mine" aria-label="Your idea">
           <div className="sd-bubble sd-bubble--mine" style={{ display: 'flex', flexDirection: 'column' }}>
-            <TextReader text={entry.words} markdown />
+            <Folded text={entry.words} lines={6}>
+              <TextReader text={entry.words} markdown />
+            </Folded>
             {entry.files.length > 0 && (
               <span style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', marginTop: '8px' }}>
                 {entry.files.map(file => (
@@ -459,7 +461,11 @@ function Message({
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-10)' }}>
             <div className="sd-bubble">
               <span className="sd-bubble__lead">{entry.name}</span>
-              {entry.summary && <span className="sd-bubble__words">{entry.summary}</span>}
+              {entry.summary && (
+                <Folded text={entry.summary} lines={4}>
+                  <span className="sd-bubble__words">{entry.summary}</span>
+                </Folded>
+              )}
               <div className="sd-meta" style={{ marginTop: '2px' }}>
                 {at}
               </div>
@@ -607,8 +613,28 @@ function Asking({
   );
 }
 
+// Long text in a few lines until the director opens it: the whole of an idea, or what a planner wrote for its agents
+// (November 1, 2026: shown in full, they filled the conversation). Short text shows whole, with no button.
+function Folded({ text, lines, children }: { text: string; lines: number; children: ReactNode }) {
+  const [open, setOpen] = useState(false),
+    long = text.length > lines * 90;
+  return (
+    <>
+      <div className={long && !open ? 'sd-clamp' : undefined} style={{ ['--clamp' as string]: lines, minWidth: 0 }}>
+        {children}
+      </div>
+      {long && (
+        <button type="button" className="sd-more-button" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? 'Show less' : 'Show all'}
+        </button>
+      )}
+    </>
+  );
+}
+
 // One card of a plan: "Story 2" or "Step 2", marked when it changed after the director's reply, with its title, what
-// it does, who builds and reviews it and what it builds on.
+// it does in the planner's plain words (or, from a plan without them, what it was asked to do, folded), who builds and
+// reviews it and what it builds on.
 function PlanCard({
   card,
   word,
@@ -620,7 +646,7 @@ function PlanCard({
   builder: string;
   reviewer: string;
 }) {
-  const [first, ...rest] = card.does.trim().split(/\n\s*\n/);
+  const does = card.does.trim();
   return (
     <li className={`sd-storycard${card.changed ? ' sd-storycard--you' : ''}`}>
       <span className="sd-storycard__head">
@@ -630,16 +656,27 @@ function PlanCard({
         {card.changed && <span className="sd-chip sd-chip--brand sd-chip--inline">Changed after your reply</span>}
       </span>
       <span className="sd-storycard__title">{card.title}</span>
-      {first && <span style={{ color: 'var(--ink-2)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>{first}</span>}
-      {rest.length > 0 && (
-        <details style={{ color: 'var(--ink-2)', fontSize: '14px' }}>
-          <summary className="sd-link" style={{ fontSize: '13px' }}>
-            All of what it does
-          </summary>
-          <span style={{ display: 'block', marginTop: 'var(--space-6)', whiteSpace: 'pre-wrap' }}>
-            {rest.join('\n\n')}
-          </span>
-        </details>
+      {card.summary ? (
+        <>
+          <span style={{ color: 'var(--ink-2)', fontSize: '14px' }}>{card.summary}</span>
+          {does && (
+            <details className="sd-more">
+              <summary>What it does in full</summary>
+              <span
+                className="sd-more__body"
+                style={{ display: 'block', color: 'var(--ink-2)', fontSize: '14px', whiteSpace: 'pre-wrap' }}
+              >
+                {does}
+              </span>
+            </details>
+          )}
+        </>
+      ) : (
+        does && (
+          <Folded text={does} lines={3}>
+            <span style={{ color: 'var(--ink-2)', fontSize: '14px', whiteSpace: 'pre-wrap' }}>{does}</span>
+          </Folded>
+        )
       )}
       <span className="sd-storycard__foot" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 0 }}>
         <span className="sd-meta">

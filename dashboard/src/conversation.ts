@@ -21,6 +21,8 @@ export interface PlanCard {
   key: string;
   number: number;
   title: string;
+  // What the story does in the planner's plain words for the director, when the plan gives it (November 1, 2026).
+  summary?: string;
   does: string;
   acceptance: string;
   builder: string;
@@ -122,6 +124,7 @@ export function planCards(text: string): PlanCard[] | null {
       key: item.key as string,
       number: index + 1,
       title: item.title as string,
+      ...(words(item.summary) ? { summary: words(item.summary) } : {}),
       does: words(source ? item.scope : item.brief),
       acceptance: words(item.acceptance),
       builder: worker || words(item.role),

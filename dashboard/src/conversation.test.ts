@@ -491,3 +491,12 @@ test("a planning attempt's plan file is its source breakdown or graph proposal",
   expect(withFiles([{ path: 'notes.md', hash: 'h1', kind: 'text' }])).toBeNull();
   expect(planArtifact(attempt('a', 'T-plan', 1, 2))).toBeNull();
 });
+
+test("a plan card carries the story's summary in plain words when the plan gives one, and none otherwise", () => {
+  const cards = planCards(
+    breakdown([story('records', { summary: 'Keeps your records in one place.' }), story('page')]),
+  )!;
+  expect(cards[0]!.summary).toBe('Keeps your records in one place.');
+  expect(cards[0]!.does).toBe('What records does.');
+  expect(cards[1]!.summary).toBeUndefined();
+});
