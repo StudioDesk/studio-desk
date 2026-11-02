@@ -4,13 +4,20 @@
 // address through the operations its record declares. Every tool has a name, a line on what it is for, the rules an
 // agent follows when using it, and limits on calls per hour and per attempt, a time limit and the largest answer.
 //
-// Domain-free and pure: no storage, routes or pages, and no imports from packs, connectors or the server. A record
-// never holds a key: checked input refuses any key, secret, token, password or header field, and toolKey() says no key
-// is set. A command names a program, never a shell line. A studio call can only ever be built from an operation its
-// record declares, with the arguments that operation declares (operationRequest), so undeclared input never reaches
-// the address.
+// Domain-free: no routes or pages, and no imports from packs, connectors or the server. The record's checks are pure.
+// A record never holds a key: checked input refuses any key, secret, token, password or header field, and toolKey()
+// says no key is set. A command names a program, never a shell line. A studio call can only ever be built from an
+// operation its record declares, with the arguments that operation declares (operationRequest), so undeclared input
+// never reaches the address.
+//
+// The studio's tool list (1.4, tools, step 2) keeps the records in the store it is given, each as the studio setting
+// tool:<id> with no project. Adding one gives it an ID the controller makes and revision 1; a change or retiring names
+// the revision it changes and is refused when that revision is out of date; every write raises the revision and goes
+// on the change stream as { type: 'tool', id, revision } (core/store.mjs). Retiring keeps the record: nothing here
+// deletes a tool. Each read says what its reader may do, and reads the key as not set.
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export const toolKinds = Object.freeze(['command', 'studio-call']);
 export const toolMethods = Object.freeze(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -306,4 +313,107 @@ export function operationRequest(record, operationName, args = {}) {
       .map(argument => [argument, args[argument]]),
   );
   return { method: operation.method, url: `${record.address}/${segments.join('/')}`, query };
+}
+
+// The most tools the studio keeps, retired ones included, since a retired tool is never removed.
+export const maxTools = 200;
+// What a read of a tool carries from its stored record, in this order; nothing else a record might hold is read.
+const readFields = ['id', 'name', 'purpose', 'kind', 'rules', 'program', 'getFrom', 'address', 'operations', 'limits'];
+const recordFields = ['revision', 'createdAt', 'updatedAt', 'by'];
+
+// The director's fields from an add or a change. An ID in the input is ignored: the controller names every tool.
+function directorInput(input) {
+  if (!plainObject(input)) return input;
+  const { id, ...fields } = input;
+  return fields;
+}
+
+// The record a change or retiring starts from: refused when the revision it names is not the current one, or when the
+// tool is retired, so nothing is saved over a change the director has not seen.
+function currentRecord(store, id, expectedRevision, retiredMessage) {
+  const record = store.tool(id);
+  if (expectedRevision !== record.revision) throw failure('Tool changed. Refresh before saving.', 409);
+  if (record.retiredAt) throw failure(retiredMessage, 409);
+  return record;
+}
+
+// Adds a tool from the director's checked fields, with an ID the controller makes and never reuses.
+export function addTool(store, input, by = 'director') {
+  const body = checkToolInput(directorInput(input));
+  return store.tx(() => {
+    if (store.tools().length >= maxTools)
+      throw failure(`The studio keeps at most ${maxTools} tools, retired ones included.`);
+    const now = new Date().toISOString();
+    const record = {
+      id: 'tool-' + randomUUID(),
+      ...body,
+      key: toolKey(),
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+      by,
+    };
+    store.putTool(record);
+    return record;
+  });
+}
+
+// Replaces the director's fields of the tool at expectedRevision with the checked input, keeping its ID, when it was
+// added and its key state.
+export function changeTool(store, id, expectedRevision, input, by = 'director') {
+  const body = checkToolInput(directorInput(input));
+  return store.tx(() => {
+    const previous = currentRecord(store, id, expectedRevision, 'This tool is retired, so it cannot be changed.');
+    const record = {
+      id: previous.id,
+      ...body,
+      key: previous.key ?? toolKey(),
+      revision: previous.revision + 1,
+      createdAt: previous.createdAt,
+      updatedAt: new Date().toISOString(),
+      by,
+    };
+    store.putTool(record);
+    return record;
+  });
+}
+
+// Retires the tool at expectedRevision. The record is kept, marked by when it was retired.
+export function retireTool(store, id, expectedRevision, by = 'director') {
+  return store.tx(() => {
+    const previous = currentRecord(store, id, expectedRevision, 'This tool is already retired.');
+    const now = new Date().toISOString();
+    const record = { ...previous, revision: previous.revision + 1, updatedAt: now, by, retiredAt: now };
+    store.putTool(record);
+    return record;
+  });
+}
+
+// What a reader may do with a tool, worked out by the controller: the director may change or retire an active tool;
+// a retired tool takes no action, and any other reader (an agent's attempt) none either.
+export function toolActions(record, reader) {
+  return reader === 'director' && !record?.retiredAt ? ['change', 'retire'] : [];
+}
+
+// A tool as read: its stored fields, the key as not set and nothing else about a key, whether this computer has a
+// command's program (null for a studio call), when it was retired (null while active) and what the reader may do.
+function readRecord(record, { reader = 'director', find } = {}) {
+  const read = {};
+  for (const field of readFields) if (Object.hasOwn(record, field)) read[field] = record[field];
+  read.key = toolKey();
+  for (const field of recordFields) read[field] = record[field];
+  read.retiredAt = record.retiredAt ?? null;
+  read.availability = programAvailability(record, find);
+  read.actions = toolActions(record, reader);
+  return read;
+}
+
+// Every tool the studio keeps, retired ones included, in the order they were added.
+export function readTools(store, { reader = 'director', find } = {}) {
+  return store.tools().map(record => readRecord(record, { reader, find }));
+}
+
+// One tool; an Error with status 404 when there is none.
+export function readTool(store, id, options) {
+  return readRecord(store.tool(id), options);
 }

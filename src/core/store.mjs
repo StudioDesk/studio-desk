@@ -11,8 +11,11 @@ import { testTurnResource, visualTurnResource } from './test-turn.mjs';
 
 const attemptChange = a => ({ type: 'attempt', id: a.id, taskId: a.taskId, projectId: recordProject(a) });
 // A setting's change names a run or workflow as its own record, and its project when the setting has one:
-// in its data, or after a colon in its key (project-organization:<id>, run-archive:<id>:<run>).
+// in its data, or after a colon in its key (project-organization:<id>, run-archive:<id>:<run>). A tool belongs to the
+// studio, not a project: its change names the tool and the revision it now has and never a project, so every tab hears
+// it whatever project it follows, and another device can follow the tool by its ID and revision.
 function settingChange(id, data) {
+  if (id.startsWith('tool:')) return { type: 'tool', id: id.slice('tool:'.length), revision: data?.revision ?? null };
   const type = id.startsWith('run:')
       ? 'run'
       : id.startsWith('workflow:')
@@ -244,6 +247,22 @@ export class Store {
   }
   putWorkflow(workflow) {
     this.putSetting('workflow:' + workflow.id, workflow);
+  }
+  // The studio's tools (core/tools.mjs): each a studio setting tool:<id> with no project, retired ones included, in
+  // the order they were added. A tool is kept once added; nothing here removes one.
+  tools() {
+    return this.db
+      .prepare('SELECT data FROM settings WHERE id LIKE ? ORDER BY rowid')
+      .all('tool:%')
+      .map(row => JSON.parse(row.data));
+  }
+  tool(id) {
+    const tool = typeof id === 'string' ? this.setting('tool:' + id) : null;
+    if (!tool) throw Object.assign(new Error('Tool not found.'), { status: 404 });
+    return tool;
+  }
+  putTool(tool) {
+    this.putSetting('tool:' + tool.id, tool);
   }
   // Run records (MP-015 G2): the graph each run executes, with numbered revisions.
   runs(projectId) {

@@ -1,16 +1,26 @@
 // A studio tool's record and its checks: a command names one program and where to get it, a studio call an https
 // address with nothing secret in it and the operations it allows, every tool its rules and limits, and no record ever
-// holds a key. Model-free: the program finder is injected, or reads a temporary folder of plain files.
+// holds a key. The studio's tool list on a temporary store: adding, changing by revision, retiring, the change stream
+// and what each reader may do. Model-free: the program finder is injected, or reads a temporary folder of plain files.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Store } from '../src/core/store.mjs';
+import * as tools from '../src/core/tools.mjs';
 import {
+  addTool,
+  changeTool,
   checkToolInput,
+  maxTools,
   operationRequest,
   programAvailability,
   programOnPath,
+  readTool,
+  readTools,
+  retireTool,
+  toolActions,
   toolKey,
   toolLimitBounds,
 } from '../src/core/tools.mjs';
@@ -421,4 +431,285 @@ test('operationRequest refuses anything a record does not declare', () => {
   const optional = checkToolInput(withOperation({ path: '/items/{id}', arguments: ['id'] }));
   refusedCall(() => operationRequest(optional, 'read', {}), /needs the argument "id" for its path/);
   assert.equal(operationRequest(optional, 'read', { id: 7 }).url, 'https://api.example.com/v2/items/7');
+});
+
+// A temporary store whose changes are kept, as the change stream hears them.
+function studio(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-tool-list-')),
+    store = new Store(directory, () => ({ organization: { company: {}, workers: [], teams: [] }, tasks: [] })),
+    changes = [];
+  store.onChange = change => changes.push(change);
+  t.after(() => {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  return { store, changes };
+}
+function refusedWith(call, status, message) {
+  assert.throws(call, error => {
+    assert.equal(error.status, status);
+    assert.match(error.message, message);
+    return true;
+  });
+}
+const stale = /^Tool changed\. Refresh before saving\.$/;
+const notFound = /^Tool not found\.$/;
+const uuid = /^tool-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+test('adding a tool gives it an ID the controller makes and revision 1, ignoring any ID in the input', t => {
+  const { store, changes } = studio(t);
+  const added = addTool(store, command({ id: 'tool-mine' }));
+  assert.match(added.id, uuid);
+  assert.notEqual(added.id, 'tool-mine');
+  refusedWith(() => store.tool('tool-mine'), 404, notFound);
+  assert.deepEqual(added, {
+    id: added.id,
+    ...checkToolInput(command()),
+    key: { set: false },
+    revision: 1,
+    createdAt: added.createdAt,
+    updatedAt: added.createdAt,
+    by: 'director',
+  });
+  assert.ok(Number.isFinite(Date.parse(added.createdAt)));
+  // The record is kept as the studio's own setting, with no project.
+  assert.deepEqual(store.tool(added.id), added);
+  assert.deepEqual(store.setting('tool:' + added.id), added);
+  assert.ok(!('projectId' in added));
+  // Each tool has its own ID, and the list keeps the order they were added in.
+  const second = addTool(store, studioCall(), 'director');
+  assert.match(second.id, uuid);
+  assert.notEqual(second.id, added.id);
+  assert.deepEqual(
+    store.tools().map(tool => tool.id),
+    [added.id, second.id],
+  );
+  // Refused input stores nothing and announces nothing; a key or a controller field never comes from the input.
+  const announced = changes.length;
+  refusedWith(() => addTool(store, command({ key: 'sk-secret' })), 400, /never holds a key/);
+  refusedWith(() => addTool(store, command({ revision: 7 })), 400, /leave out "revision"/);
+  refusedWith(() => addTool(store, null), 400, /object of its fields/);
+  assert.equal(store.tools().length, 2);
+  assert.equal(changes.length, announced);
+  refusedWith(() => store.tool(undefined), 404, notFound);
+});
+
+test('a change naming the current revision raises it; one naming an earlier revision is refused', t => {
+  const { store } = studio(t);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-02T10:00:00.000Z') });
+  const added = addTool(store, command());
+  t.mock.timers.tick(60_000);
+  // The director's fields are replaced (a command may become a studio call); the ID, when it was added and the key
+  // state are kept, whatever ID the input names.
+  const changed = changeTool(store, added.id, 1, studioCall({ id: 'tool-other' }), 'director');
+  assert.deepEqual(changed, {
+    id: added.id,
+    ...checkToolInput(studioCall()),
+    key: { set: false },
+    revision: 2,
+    createdAt: '2026-11-02T10:00:00.000Z',
+    updatedAt: '2026-11-02T10:01:00.000Z',
+    by: 'director',
+  });
+  assert.ok(!('program' in changed) && !('getFrom' in changed));
+  assert.deepEqual(store.tool(added.id), changed);
+  refusedWith(() => store.tool('tool-other'), 404, notFound);
+  // A second change naming revision 1 was made before the first and is refused, leaving the record as it was.
+  refusedWith(() => changeTool(store, added.id, 1, command({ name: 'Stale' })), 409, stale);
+  for (const revision of [3, 0, undefined, null, '2'])
+    refusedWith(() => changeTool(store, added.id, revision, command({ name: 'Stale' })), 409, stale);
+  assert.deepEqual(store.tool(added.id), changed);
+  // Input that breaks the record's rules is refused before anything is read or saved.
+  refusedWith(() => changeTool(store, added.id, 2, command({ program: 'ffmpeg -i in.mp4' })), 400, /Name one program/);
+  refusedWith(() => changeTool(store, added.id, 2, command({ token: 'abc' })), 400, /never holds a key/);
+  assert.deepEqual(store.tool(added.id), changed);
+  refusedWith(() => changeTool(store, 'tool-missing', 1, command()), 404, notFound);
+  // The current revision changes it again.
+  assert.equal(changeTool(store, added.id, 2, command({ name: 'Encoder' })).revision, 3);
+});
+
+test('retiring raises the revision and keeps the tool listed with retiredAt; then a change or retire is refused', t => {
+  const { store } = studio(t);
+  const added = addTool(store, command()),
+    other = addTool(store, studioCall());
+  changeTool(store, added.id, 1, command({ name: 'Encoder' }));
+  refusedWith(() => retireTool(store, added.id, 1), 409, stale);
+  assert.equal(store.tool(added.id).retiredAt, undefined);
+  const retired = retireTool(store, added.id, 2);
+  assert.equal(retired.revision, 3);
+  assert.ok(Number.isFinite(Date.parse(retired.retiredAt)));
+  assert.equal(retired.updatedAt, retired.retiredAt);
+  assert.equal(retired.name, 'Encoder');
+  assert.equal(retired.createdAt, added.createdAt);
+  assert.deepEqual(retired.key, { set: false });
+  // The record is kept, in its place in the list, and read as retired.
+  assert.deepEqual(store.tool(added.id), retired);
+  assert.deepEqual(
+    store.tools().map(tool => tool.id),
+    [added.id, other.id],
+  );
+  assert.deepEqual(
+    readTools(store, { find: () => true }).map(tool => [tool.id, tool.retiredAt]),
+    [
+      [added.id, retired.retiredAt],
+      [other.id, null],
+    ],
+  );
+  // A retired tool takes no further change or retiring, at its current revision or any other.
+  refusedWith(() => changeTool(store, added.id, 3, command()), 409, /retired, so it cannot be changed/);
+  refusedWith(() => retireTool(store, added.id, 3), 409, /already retired/);
+  refusedWith(() => retireTool(store, added.id, 2), 409, stale);
+  refusedWith(() => retireTool(store, 'tool-missing', 1), 404, notFound);
+  assert.deepEqual(store.tool(added.id), retired);
+});
+
+test('nothing deletes a tool, and deleting a project leaves the studio its tools', t => {
+  const { store } = studio(t);
+  assert.deepEqual(
+    Object.keys(tools).filter(name => /delete|remove|drop|purge|erase|destroy/i.test(name)),
+    [],
+  );
+  assert.deepEqual(
+    Object.getOwnPropertyNames(Store.prototype).filter(name => /tool/i.test(name)),
+    ['tools', 'tool', 'putTool'],
+  );
+  const added = addTool(store, command());
+  store.deleteProjectRecords('project-other', [], []);
+  assert.deepEqual(store.tools(), [added]);
+});
+
+test("every add, change and retire goes on the change stream with the tool's ID and revision and no project", t => {
+  const { store, changes } = studio(t);
+  changes.length = 0;
+  const added = addTool(store, command());
+  changeTool(store, added.id, 1, command({ name: 'Encoder' }));
+  refusedWith(() => changeTool(store, added.id, 1, command()), 409, stale);
+  refusedWith(() => retireTool(store, added.id, 1), 409, stale);
+  retireTool(store, added.id, 2);
+  assert.deepEqual(
+    changes.map(({ seq, ...change }) => change),
+    [
+      { type: 'tool', id: added.id, revision: 1 },
+      { type: 'tool', id: added.id, revision: 2 },
+      { type: 'tool', id: added.id, revision: 3 },
+    ],
+  );
+  assert.deepEqual(
+    changes.map(change => change.seq),
+    [changes[0].seq, changes[0].seq + 1, changes[0].seq + 2],
+  );
+  assert.equal(store.version, changes[2].seq);
+  // A tool's setting never names a project, even one its data holds, so every tab hears it.
+  store.putSetting('tool:tool-elsewhere', { id: 'tool-elsewhere', revision: 4, projectId: 'project-other' });
+  const { seq, ...last } = changes.at(-1);
+  assert.ok(seq);
+  assert.deepEqual(last, { type: 'tool', id: 'tool-elsewhere', revision: 4 });
+});
+
+test('the director may change or retire an active tool; a retired one and any other reader take no action', t => {
+  const { store } = studio(t);
+  const active = addTool(store, command()),
+    retired = retireTool(store, addTool(store, studioCall()).id, 1),
+    find = () => true;
+  assert.deepEqual(readTool(store, active.id, { find }).actions, ['change', 'retire']);
+  assert.deepEqual(readTool(store, retired.id, { find }).actions, []);
+  assert.deepEqual(
+    readTools(store, { find }).map(tool => tool.actions),
+    [['change', 'retire'], []],
+  );
+  for (const reader of ['attempt-d4508f47', 'W-02', 'Director', '', null])
+    assert.deepEqual(
+      readTools(store, { reader, find }).map(tool => tool.actions),
+      [[], []],
+      `reader ${reader}`,
+    );
+  assert.deepEqual(readTool(store, active.id, { reader: 'attempt-d4508f47', find }).actions, []);
+  assert.deepEqual(toolActions(active, 'director'), ['change', 'retire']);
+  assert.deepEqual(toolActions(retired, 'director'), []);
+  assert.deepEqual(toolActions(active, 'attempt-d4508f47'), []);
+  // A read with no options is the director's.
+  assert.deepEqual(readTool(store, retired.id).actions, []);
+  assert.deepEqual(readTool(store, addTool(store, studioCall()).id).actions, ['change', 'retire']);
+});
+
+test("every read's key is exactly { set: false }, and the list holds no other key field", t => {
+  const { store } = studio(t);
+  const added = addTool(store, command()),
+    call = addTool(store, studioCall());
+  // Even a record written past the checks with key material reads as having no key set, and nothing else of it.
+  store.putTool({
+    ...store.tool(call.id),
+    key: { set: true, value: 'sk-live-secret' },
+    apiKey: 'sk-live-secret',
+    headers: { Authorization: 'Bearer sk-live-secret' },
+  });
+  retireTool(store, added.id, 1);
+  const list = readTools(store, { find: () => true });
+  assert.equal(list.length, 2);
+  for (const tool of list) assert.deepEqual(tool.key, { set: false });
+  assert.deepEqual(readTool(store, call.id).key, { set: false });
+  const json = JSON.stringify(list);
+  assert.ok(!json.includes('sk-live-secret'));
+  const keyFields = [];
+  JSON.parse(json, (name, value) => {
+    if (/key|secret|token|password|passwd|credential|auth|header|cookie/i.test(name)) keyFields.push([name, value]);
+    return value;
+  });
+  assert.deepEqual(keyFields, [
+    ['key', { set: false }],
+    ['key', { set: false }],
+  ]);
+});
+
+test("a command's read says found, or missing with where to get it, from an injected finder", t => {
+  const { store } = studio(t);
+  const encoder = addTool(store, command()),
+    resizer = addTool(store, command({ name: 'Resizer', program: 'magick', getFrom: 'https://imagemagick.org' })),
+    call = addTool(store, studioCall()),
+    asked = [];
+  const find = program => {
+    asked.push(program);
+    return program === 'ffmpeg' ? 'C:\\Users\\someone\\bin\\ffmpeg.exe' : null;
+  };
+  const list = readTools(store, { find });
+  assert.deepEqual(
+    list.map(tool => [tool.id, tool.availability]),
+    [
+      [encoder.id, { state: 'found' }],
+      [resizer.id, { state: 'missing', getFrom: 'https://imagemagick.org' }],
+      [call.id, null],
+    ],
+  );
+  assert.deepEqual(asked, ['ffmpeg', 'magick']);
+  assert.ok(!JSON.stringify(list).includes('someone'));
+  // A read is the stored fields, the key as not set, when it was retired, whether its program is here and the actions.
+  assert.deepEqual(readTool(store, encoder.id, { find }), {
+    ...checkToolInput(command()),
+    id: encoder.id,
+    key: { set: false },
+    revision: 1,
+    createdAt: encoder.createdAt,
+    updatedAt: encoder.updatedAt,
+    by: 'director',
+    retiredAt: null,
+    availability: { state: 'found' },
+    actions: ['change', 'retire'],
+  });
+  refusedWith(() => readTool(store, 'tool-missing', { find }), 404, notFound);
+});
+
+test('the studio keeps at most 200 tools, retired ones included', t => {
+  const { store, changes } = studio(t);
+  assert.equal(maxTools, 200);
+  const first = addTool(store, command());
+  for (let index = 1; index < maxTools; index++) addTool(store, command({ name: `Tool ${index}` }));
+  assert.equal(store.tools().length, 200);
+  retireTool(store, first.id, 1);
+  const announced = changes.length;
+  refusedWith(() => addTool(store, studioCall()), 400, /at most 200 tools, retired ones included/);
+  assert.equal(store.tools().length, 200);
+  assert.equal(changes.length, announced);
+  // The tools it keeps can still change.
+  const last = store.tools().at(-1);
+  assert.equal(changeTool(store, last.id, 1, command({ name: 'Last tool' })).revision, 2);
 });
