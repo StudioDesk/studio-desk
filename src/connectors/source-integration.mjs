@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { command, subscriptionEnvironment } from '../adapters/process.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
 import { hash } from '../core/contracts.mjs';
+import { runGit } from '../git.mjs';
 import { releaseTestTurn, testTurnResource } from '../core/test-turn.mjs';
 import { sourcePlan, testOutput, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, studioDeskProfile } from './source-profile.mjs';
@@ -37,24 +38,11 @@ const samePath = (a, b) => {
     ? resolve(a).toLowerCase() === resolve(b).toLowerCase()
     : resolve(a) === resolve(b);
 };
-// Every pathspec is the exact path, never a glob or magic pattern: story paths may hold [ ] and
-// ( ), so src/[A]GENTS.md must not match src/AGENTS.md. A folder still matches the files under it.
-// check-ignore refuses any pathspec magic, --literal-pathspecs included; it matches each path
-// against the ignore rules as written, and only its check for tracked files reads [ ] as a glob.
-// Git for Windows stops at 260-character paths unless core.longpaths is set; candidate
-// copies sit deep inside job folders. Other platforms ignore the setting.
-// Output is trimmed unless raw is set (porcelain status lines may start with a space).
+// The connectors' git: the controller's own git (src/git.mjs), with exact pathspecs, the repository's hooks and
+// fsmonitor off, and long paths on. check-ignore matches each path against the ignore rules as written, and only its
+// check for tracked files reads [ ] as a glob. Output is trimmed unless raw is set.
 export function git(root, args, { raw = false } = {}) {
-  const literal = args[0] === 'check-ignore' ? [] : ['--literal-pathspecs'];
-  const result = spawnSync('git', [...literal, '-c', 'core.longpaths=true', ...args], {
-    cwd: root,
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 30000,
-  });
-  if (result.error || result.status !== 0)
-    throw new Error(`git ${args[0]} failed: ${(result.stderr || result.error?.message || '').trim().slice(0, 500)}`);
-  return raw ? result.stdout : result.stdout.trim();
+  return runGit(root, args, { raw });
 }
 // The live source must be the root of a git repository on a branch with a commit identity.
 // A story starts only from a clean tree; integration fast-forwards, and git refuses that
@@ -108,7 +96,7 @@ export function commitIntegration(root, files, message, directory) {
   const file = path.join(directory, 'commit-message.txt');
   fs.writeFileSync(file, message);
   stageFiles(root, files);
-  git(root, ['commit', '--file', file, '--', ...files]);
+  git(root, ['commit', '--no-verify', '--file', file, '--', ...files]);
   return git(root, ['rev-parse', 'HEAD']);
 }
 // A commit that landed before its journal was updated is recognized by this trailer.

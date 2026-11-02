@@ -25,6 +25,21 @@ Every request needs the director's session or key (`src/director-access.mjs`).
   - Before each Windows run both files above the copy are also denied to the runtime's sandbox group (`denyBuiltInSandboxSecrets`, `icacls /deny`), since a data folder outside the profile is readable by every signed-in account; a file that cannot be denied stops the run. The database in such a folder stays readable to the sandbox (C-40 in the notes).
 - **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
 
+## The controller's own git (November 2026)
+
+Every git command the controller runs goes through `src/git.mjs` (`runGit`), except Push.
+
+- **What each call adds:**
+  - `-c core.hooksPath=/dev/null` and `-c core.fsmonitor=false`, so no hook and no fsmonitor command from the repository or the director's configuration runs. These calls run outside every sandbox. Git for Windows reads `/dev/null` as no folder too.
+  - `-c core.longpaths=true` for deep job folders.
+  - `--literal-pathspecs`, except for `check-ignore` and calls that take none.
+  - Commits also pass `--no-verify`.
+- **What still applies:** filters, line endings and Git LFS, so a checkout writes what the director's own checkout would, plus git's system and global settings.
+- **Push** (`src/connectors/source-releases.mjs`) runs as the director's own git, hooks included. The director confirms each Push, and pre-push hooks and Git LFS uploads need the repository's setup.
+- **Who uses it:** the connectors' `git()` (`src/connectors/source-integration.mjs`), the candidate commit's plumbing (`src/adapters/source-change.mjs`), reading a file at a commit (`src/connectors/source-lines.mjs`) and the sample projects (`src/core/project-templates.mjs`).
+- **Still synchronous:** moving the calls off the controller's thread comes next, in the order the load measures show.
+- **Tests:** `test/git-trust.test.mjs`. A repository whose hooks and fsmonitor command leave marker files: the director's own git runs them, and the controller's reads, commits, worktrees and checkouts run none.
+
 ## Bounded project context and source checks
 
 The director approved using Studio desk on its own source in a separate selectable project. The existing partial project/workflow modules are now connected to the dashboard and covered by behavioral tests. Projects/workflows use additive settings records in the same SQLite database. `recordProject()` maps only missing project IDs to `project-legacy` at read time. Old task/attempt JSON, job paths and instruction snapshots are not rewritten. New project attempts use `projects/<project-id>/jobs/<attempt-id>` inside the controller data directory.

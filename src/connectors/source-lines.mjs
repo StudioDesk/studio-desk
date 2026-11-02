@@ -10,7 +10,7 @@
 // every function here takes `undefined` for that line.
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runGit } from '../git.mjs';
 import { sourcePlan } from './source-checks.mjs';
 import {
   committedFiles,
@@ -125,14 +125,15 @@ export function measureLine(root, line, profile, parent) {
 const ignoredAt = new Map();
 // Reads a file at a commit as a checkout would write it (with its end-of-line and other filters).
 function readAt(root, commit, file) {
-  const result = spawnSync('git', ['-c', 'core.longpaths=true', 'cat-file', '--filters', `${commit}:${file}`], {
-    cwd: root,
-    windowsHide: true,
-    timeout: 30000,
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  if (result.error || result.status !== 0) throw new Error(`${file} could not be read from ${commit.slice(0, 7)}.`);
-  return result.stdout;
+  try {
+    return runGit(root, ['cat-file', '--filters', `${commit}:${file}`], {
+      encoding: null,
+      literal: false,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch {
+    throw new Error(`${file} could not be read from ${commit.slice(0, 7)}.`);
+  }
 }
 // How a story's scope reads the line it measured: a file's bytes, which changed files are committed, which missing
 // files a commit deleted, and which new paths git ignores. On the checked-out branch these are the folder's; on another line, its tip commit's, where every

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runGit } from '../git.mjs';
 import { subscriptionEnvironment } from './process.mjs';
 import { artifactPath, validateProtectedFiles } from '../core/artifacts.mjs';
 import { hash } from '../core/contracts.mjs';
@@ -365,12 +365,8 @@ function mergeContinuedWork(store, previous, carried, worktree, output) {
 // git for building that commit: an index file of its own when given, input on stdin, and a fixed identity, since the
 // commit is never on a branch.
 function plumbing(cwd, args, { index, input } = {}) {
-  const result = spawnSync('git', ['--literal-pathspecs', '-c', 'core.longpaths=true', ...args], {
-    cwd,
+  return runGit(cwd, args, {
     input,
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 30000,
     env: {
       ...process.env,
       ...(index ? { GIT_INDEX_FILE: index } : {}),
@@ -380,9 +376,6 @@ function plumbing(cwd, args, { index, input } = {}) {
       GIT_COMMITTER_EMAIL: 'studio-desk@localhost',
     },
   });
-  if (result.error || result.status !== 0)
-    throw new Error(`git ${args[0]} failed: ${(result.stderr || result.error?.message || '').trim().slice(0, 500)}`);
-  return result.stdout.trim();
 }
 // The lines git writes around a part it could not combine.
 const conflictMarkers = /^(<{7}|>{7})( |$)/m;

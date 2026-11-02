@@ -389,7 +389,7 @@ async function finishRelease(runtime, projectId, milestoneId, notes) {
     createSourceWorktree(root, path.dirname(draft), path.basename(draft), release.repository.head, profile);
     const files = writeRelease(draft, milestone.version, notes);
     stageFiles(draft, files);
-    git(draft, ['commit', '--quiet', '-m', `Release ${milestone.version} (draft)`, '--', ...files]);
+    git(draft, ['commit', '--quiet', '--no-verify', '-m', `Release ${milestone.version} (draft)`, '--', ...files]);
     release.candidateCommit = git(draft, ['rev-parse', 'HEAD']);
     git(draft, ['update-ref', `refs/studio/releases/${milestone.id}`, release.candidateCommit]);
     release.changes = files.map(file => ({ path: file, afterHash: 'release' }));
@@ -639,6 +639,8 @@ export async function pushRelease(store, runtime, projectId, milestoneId, { conf
       ...(process.env.GIT_SSH_COMMAND ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }),
     };
   const result = await new Promise(resolve => {
+    // The one git call that runs as the director's own git does, hooks included (src/git.mjs): the director confirms
+    // each Push, and pre-push hooks and Git LFS uploads need the repository's own setup.
     const child = spawn('git', ['push', '--porcelain', remote, ...refs], {
       cwd: root,
       env: environment,

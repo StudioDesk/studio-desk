@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { runGit } from '../git.mjs';
 import { houseRules, projectTemplate, projectTemplates, templateFiles } from '../templates/index.mjs';
 import { createProject } from './project-creation.mjs';
 import { repositoryOrganization } from '../organizations/studio-development/project.mjs';
@@ -118,9 +119,14 @@ function sampleFolder(root, name, fallback) {
 }
 
 function git(folder, args) {
-  const result = spawnSync('git', args, { cwd: folder, encoding: 'utf8', timeout: 30000, windowsHide: true });
-  if (result.status !== 0)
-    throw new Error(`Git could not set up the sample: ${(result.stderr || result.stdout || '').trim().slice(0, 300)}`);
+  // The controller's own git (src/git.mjs): the director's own hooks never run on a sample's first commit.
+  try {
+    runGit(folder, args, { literal: false });
+  } catch (error) {
+    throw new Error(
+      `Git could not set up the sample: ${error.message.replace(/^git [\w-]+ failed: /, '').slice(0, 300)}`,
+    );
+  }
 }
 
 // A writing sample's three files as the idea box sends files, for its first idea.
