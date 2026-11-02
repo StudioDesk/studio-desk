@@ -1,15 +1,18 @@
 // A code story's setup runs in a process of its own (src/connectors/source-setup.mjs): the controller keeps answering
 // while the working copy is made, checked and copied, a stop ends that process and removes the working copy, and a
 // base commit other than the approved snapshot still fails the attempt with the same message, which a test's wait for
-// the task then repeats with the end of the attempt's log.
+// the task then repeats with the end of the attempt's log. A setup process that ends without a failed step or an error
+// line says how it ended, in which step and with its last output line.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
 import { waitFor, waitForTask } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
+import { runSourceSetup, setupEndedMessage } from '../src/connectors/source-setup.mjs';
 import {
   createSourceWorktree,
   leftoverWorktrees,
@@ -225,4 +228,136 @@ test('the setup process leaves a listed worktree that was made again under its n
   assert.deepEqual(fs.readdirSync(parent), ['i-retried']);
   assert.equal(git(c.root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 2);
   removeSourceWorktree(c.root, path.join(parent, 'i-retried'));
+});
+
+// The message for a setup process that ended without a failed step or an error line, which never points at the log.
+function ended(fields) {
+  const message = setupEndedMessage(fields);
+  assert.ok(!message.includes('See the attempt log'), message);
+  return message;
+}
+
+test('a setup that ended without a reason names its exit code', () => {
+  assert.equal(
+    ended({ code: 1 }),
+    'Setting up the attempt failed: the setup process ended with exit code 1 before reporting any step.',
+  );
+  assert.ok(!ended({ code: 255 }).includes('0x'));
+});
+
+test('a setup that ended with a large Windows status names it in hexadecimal too', () => {
+  assert.ok(ended({ code: 3221225794 }).includes('ended with exit code 3221225794 (0xC0000142)'));
+  assert.ok(ended({ code: 3221225477 }).includes('exit code 3221225477 (0xC0000005)'));
+});
+
+test('a setup stopped by a signal names the signal', () => {
+  const message = ended({ code: null, signal: 'SIGKILL' });
+  assert.ok(message.includes('the setup process was stopped by the signal SIGKILL'), message);
+  assert.ok(!message.includes('exit code'), message);
+});
+
+test('a setup that ended inside a step names the step in plain words, or the last step that finished', () => {
+  assert.ok(ended({ code: 1, step: 'setup.worktree' }).includes(' while making the working copy.'));
+  assert.ok(ended({ code: 1, step: 'setup.snapshot' }).includes(' while checking the snapshot.'));
+  assert.ok(ended({ code: 1, step: 'setup.copy' }).includes(' while copying the source.'));
+  const between = ended({ code: 1, finished: 'setup.copy' });
+  assert.ok(between.includes(' after copying the source.'), between);
+  assert.ok(!between.includes('setup.copy'), between);
+});
+
+test('a setup that ended before reporting any step says so', () => {
+  const message = ended({ code: 1, signal: null, step: '', finished: '' });
+  assert.ok(message.endsWith(' before reporting any step.'), message);
+});
+
+test('a setup that ended without a reason ends its message with the last line it wrote', () => {
+  const line = '{"phase":"setup.snapshot","boundary":"start"}',
+    message = ended({ code: 1, step: 'setup.snapshot', output: `${line}\n` });
+  assert.equal(
+    message,
+    `Setting up the attempt failed: the setup process ended with exit code 1 while checking the snapshot. Its last output line was: ${line}`,
+  );
+  assert.ok(!ended({ code: 1, output: '  ' }).includes('last output line'));
+});
+
+// runSourceSetup on a runtime that starts no process: the test writes the setup's output lines and ends it.
+function fakeSetup() {
+  const entry = {},
+    finished = [];
+  let complete,
+    nexts = 0;
+  const runtime = {
+    runNative(target, binary, args, prompt, readResult, options) {
+      target.child = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+      complete = options.onComplete;
+    },
+    startPhase: (target, phaseId) => ({ phaseId }),
+    store: { finishPhase: (phase, outcome, details) => finished.push([phase.phaseId, outcome, details.error]) },
+  };
+  runSourceSetup(runtime, entry, {}, () => nexts++);
+  return {
+    say: progress => entry.child.stdout.emit('data', JSON.stringify(progress) + '\n'),
+    stderr: text => entry.child.stderr.emit('data', text),
+    end: (code, signal = null) => complete(null, code, signal),
+    finished,
+    nexts: () => nexts,
+  };
+}
+
+test('a setup process that ends non-zero without a failed step or an error line fails with how it ended', () => {
+  const s = fakeSetup();
+  s.say({ phase: 'setup.worktree', boundary: 'start' });
+  assert.throws(
+    () => s.end(3221225794),
+    error => {
+      assert.ok(error.message.includes('exit code 3221225794'), error.message);
+      assert.ok(error.message.includes('0xC0000142'), error.message);
+      assert.ok(error.message.includes('while making the working copy'), error.message);
+      assert.ok(error.message.endsWith('Its last output line was: {"phase":"setup.worktree","boundary":"start"}'));
+      assert.ok(!error.message.includes('See the attempt log'), error.message);
+      return true;
+    },
+  );
+  assert.equal(s.nexts(), 0);
+  // Ended by a signal between steps: the last finished step is named, and no step is left open.
+  const between = fakeSetup();
+  between.say({ phase: 'setup.worktree', boundary: 'start' });
+  between.say({ phase: 'setup.worktree', boundary: 'finish', outcome: 'succeeded', durationMs: 3 });
+  assert.throws(() => between.end(null, 'SIGTERM'), {
+    message:
+      'Setting up the attempt failed: the setup process was stopped by the signal SIGTERM after making the working copy. ' +
+      'Its last output line was: {"phase":"setup.worktree","boundary":"finish","outcome":"succeeded","durationMs":3}',
+  });
+  assert.deepEqual(between.finished, [['setup.worktree', 'succeeded', undefined]]);
+});
+
+test('a setup step’s own failure comes before the last error line, which comes before how the process ended', () => {
+  const snapshotFailed = fakeSetup();
+  snapshotFailed.say({ phase: 'setup.worktree', boundary: 'start' });
+  snapshotFailed.say({ phase: 'setup.worktree', boundary: 'finish', outcome: 'succeeded', durationMs: 3 });
+  snapshotFailed.say({ phase: 'setup.snapshot', boundary: 'start' });
+  snapshotFailed.say({
+    phase: 'setup.snapshot',
+    boundary: 'finish',
+    outcome: 'failed',
+    durationMs: 2,
+    error: snapshotMismatch,
+  });
+  snapshotFailed.stderr('A later error line.\n');
+  assert.throws(() => snapshotFailed.end(1), { message: snapshotMismatch });
+  assert.deepEqual(snapshotFailed.finished.at(-1), ['setup.snapshot', 'failed', snapshotMismatch]);
+  const wrote = fakeSetup();
+  wrote.say({ phase: 'setup.copy', boundary: 'start' });
+  wrote.stderr('An earlier line.\n');
+  wrote.stderr('ENOSPC: no space left on device\n');
+  assert.throws(() => wrote.end(3221225794), { message: 'ENOSPC: no space left on device' });
+  // A setup that ends with code 0 goes on to the editor.
+  const done = fakeSetup();
+  for (const phase of ['setup.worktree', 'setup.snapshot', 'setup.copy']) {
+    done.say({ phase, boundary: 'start' });
+    done.say({ phase, boundary: 'finish', outcome: 'succeeded', durationMs: 1 });
+  }
+  done.end(0);
+  assert.equal(done.nexts(), 1);
+  assert.equal(done.finished.length, 3);
 });
