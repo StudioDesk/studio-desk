@@ -314,6 +314,12 @@ a:hover {
   background: var(--surface-2);
   color: var(--ink-2);
   white-space: nowrap;
+  /* A long path never runs past its container (November 1, 2026: the brief card); its title holds it whole. */
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 .sd-file--add {
   background: var(--add-soft);

@@ -174,7 +174,7 @@ export function BriefCard({
     summary = typeof task.summary === 'string' ? task.summary : '',
     chips = paths
       ? [
-          ...paths.files.map(path => ({ path, className: 'sd-file', label: path, title: undefined })),
+          ...paths.files.map(path => ({ path, className: 'sd-file', label: path, title: path })),
           ...paths.newFiles.map(path => ({
             path,
             className: 'sd-file sd-file--add',
@@ -185,7 +185,7 @@ export function BriefCard({
             path,
             className: 'sd-file sd-file--del',
             label: `− ${path}`,
-            title: 'A file to delete',
+            title: `${path}, a file to delete`,
           })),
         ]
       : [];
