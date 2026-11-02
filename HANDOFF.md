@@ -11,20 +11,23 @@ Studio desk is a local controller that runs AI agents (Claude Code and Codex CLI
 
 The dashboard (`dashboard/`, React with a Vite build) is served by the controller at its own address.
 
-## What 1.0 holds
+## What 1.1 holds
 
-- Projects for git repositories and for general work, started from the dashboard or from the Code and Writing samples.
-- Teams, agents and instructions at three levels (everyone, a team, one agent), each with drafts and published revisions; every attempt records the instructions, configuration and inputs it ran with.
-- Since 1.0.1 (in progress), agents made for one project, which work only there, and renaming and deleting agents (`src/core/project-agents.mjs`, the Teams and Agents pages).
-- Since 1.0.1 (in progress), candidate tests, integration verification and an idea's checks run in the built-in sandbox, Anthropic's sandbox runtime pinned in the lockfile (`src/adapters/built-in-sandbox*.mjs`, `src/adapters/source-test-sandbox.mjs`). Windows sets it up once from Settings → Candidate tests, Linux installs three system packages from there or by a command it shows, and macOS needs nothing; No sandbox is the director's explicit choice. Codex CLI's sandbox is for Codex agents only.
-- Ready → Working → Review → Accepted for every story and step, with independent review, send-back and retries that see earlier attempts.
-- House rules for what runs on its own and what waits for the director.
-- Recovery after a restart: interrupted attempts and integrations are reconciled from the dashboard, never replayed blindly.
+- Projects for git repositories and for general work, started from the dashboard or from the Code and Writing samples, each with its own agents (agents a project made work only there).
+- Teams, agents and instructions at three levels (everyone, a team, one agent), each with drafts and published revisions, edited in place on the Agents page; every attempt records the instructions, configuration and inputs it ran with.
+- Ready → Working → Review → Accepted for every story and step, with independent review, send-back and retries that see earlier attempts. An agent runs several attempts at once, within the studio's limits, and a code project's stories run side by side; one that conflicts with an earlier merge is rebuilt on the new tip.
+- Releases and lines (`src/connectors/source-lines.mjs`, `src/connectors/source-milestones.mjs`): milestones as releases, a patch on its release line carried forward to every newer line, a fix brought back to an older line at the director's word, Release, and Push to the remote, confirmed each time.
+- An agent asks the director a question and continues from its saved work with the answer (`src/core/questions.mjs`); an idea's planning is a conversation the director can reply to.
+- Try a story yourself in a copy of its own (`src/connectors/try-copy.mjs`), and the visual check, which photographs a story's pages for the reviewer (`src/connectors/visual-check.mjs`, Windows only for now).
+- The project library every attempt reads, the Artifacts page and snapshots (`src/core/library.mjs`, `src/core/snapshots.mjs`).
+- Candidate tests, integration verification and an idea's checks in the built-in sandbox, Anthropic's sandbox runtime pinned in the lockfile (`src/adapters/built-in-sandbox*.mjs`), on Windows, macOS and Linux; No sandbox is the director's explicit choice.
+- Every request needs the director's session or key (`src/director-access.mjs`).
+- House rules for what runs on its own and what waits for the director, and recovery after a restart: interrupted attempts, integrations and releases are reconciled from the dashboard, never replayed blindly.
 - A model-free test suite: `npm test`.
 
 ## What's next
 
-1.1 is releases and branches: milestones as releases, work on release branches with fixes carried forward (and, at the director's word, a fix that landed on a newer line brought back to an older one), stories running side by side, and pushing to your remote, confirmed each time. The [release notes](RELEASE-NOTES.md) list what else is planned after 1.0.
+1.2's core is the work as a graph the director shapes: any step given to any agent, team or role, more than one reviewer on a story, and loops, with today's flow as the default template. The [release notes](RELEASE-NOTES.md) list what else is planned.
 
 ## How to work on it
 
@@ -41,7 +44,7 @@ The dashboard (`dashboard/`, React with a Vite build) is served by the controlle
 | For | Read |
 | --- | --- |
 | Running and using it | [README.md](README.md) |
-| What 1.0 holds and its known limitations | [RELEASE-NOTES.md](RELEASE-NOTES.md) |
+| What each release holds and its known limitations | [RELEASE-NOTES.md](RELEASE-NOTES.md) |
 | Development rules and boundaries | [AGENTS.md](AGENTS.md) |
 | Contracts as implemented | [docs/module-contracts.md](docs/module-contracts.md) |
 | The controller | `src/server.mjs`, `src/core/` (orchestrator, projects, workflows, autonomy) |

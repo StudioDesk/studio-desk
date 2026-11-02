@@ -12,7 +12,7 @@ It works on code in your git repositories, and on anything else you can describe
 - **You stay in charge.** You decide what waits for your approval and what can go ahead on its own.
 - **Nothing happens behind your back.** Every step every agent takes is on the record, down to the commands it ran and why anything stopped.
 - **It runs on what you already pay for.** Your Claude Code or Codex CLI subscription. No API keys, no per-request bills.
-- **It stays on your computer.** No cloud, no hosting. Your code is committed locally and never pushed.
+- **It stays on your computer.** No cloud, no hosting. Your code is committed locally and reaches your remote only when you press Push.
 
 ## Your team, your way
 
@@ -22,16 +22,16 @@ Studio desk is a pipeline, not a fixed crew. Every project has a team, and every
 
 You'll need:
 
-- **Windows 10 or 11.** macOS and Linux aren't tested yet.
+- **Windows 10 or 11, macOS or Linux.** Windows has had the most use.
 - **[Node.js](https://nodejs.org/) 24 or later.**
 - **[Claude Code](https://docs.claude.com/en/docs/claude-code) or [Codex CLI](https://learn.chatgpt.com/docs/cli)**, signed in with a subscription rather than an API key. One is enough.
 - **Git**, for code projects.
 
 Then:
 
-1. Download the release and extract it somewhere you'll keep it (or clone the repository and check out `v1.0.1`).
+1. Download the release and extract it somewhere you'll keep it (or clone the repository and check out `v1.1.0`).
 2. Run `npm ci` in that folder, once.
-3. Double-click `start-studio.cmd`, or run `npm start`.
+3. Double-click `start-studio.cmd` on Windows, or run `npm start`.
 4. Open the link the controller's window prints, in Chrome or Edge. It starts with `http://127.0.0.1:4317/launch/` and signs your browser in, so programs on your computer, an agent's tests included, can't act as you. From then on **http://127.0.0.1:4317** opens it, restarts included.
 
 Keep the controller's window open while you work.
@@ -45,9 +45,12 @@ Studio desk opens with two samples to try: a small code library with its tests, 
 1. **You send an idea**, with reference files if they help.
 2. **The planner breaks it into stories** or steps.
 3. **You approve the plan.**
-4. **Agents do the work**, each in a copy of its own, and the tests run.
-5. **The reviewer checks it** and sends back anything that falls short.
+4. **Agents do the work**, each in a copy of its own, side by side, and the tests run.
+5. **The reviewer checks it**, pictures of the pages included, and sends back anything that falls short. Want a look yourself first? Try the change in a copy of your own before it lands.
 6. **It goes in.** Code is merged into your branch; other work is ready for you to read.
+7. **You release it** when the milestone is done.
+
+Agents can ask you a question when a call is yours to make, and pick up where they left off once you answer.
 
 ## You make the calls
 
@@ -67,6 +70,14 @@ Your repository needs a clean working tree and tests that run with Node's test r
 
 Not code? Start a project without a folder.
 
+## Releases, lines and Push
+
+Send ideas to a release. A milestone like 1.2.0 gathers the ideas you send it; when it's done, Release tags it, drafts its notes for you to approve and moves anything unfinished to the next one.
+
+Need to fix something people already run? Open a patch milestone like 1.1.1. Studio desk makes a release line from that version's tag, lands the fix there and carries it up to every newer line, so nobody loses it when they upgrade. When a line has had its day, retire it.
+
+Push sends a released line and its tag to your remote, with your own git sign-in. It asks every time.
+
 ## Safety
 
 Agents run commands on your computer through your CLI:
@@ -74,7 +85,7 @@ Agents run commands on your computer through your CLI:
 - **Codex CLI** runs in its own sandbox.
 - **Claude Code** has no sandbox on Windows. It runs only the commands you approve in Settings, unless you turn on auto mode, which lets Claude Code decide.
 
-Anything an agent runs has your account's access to your files and network, so **approve narrowly**. A change's tests are kept apart: they run in a disposable copy inside the built-in sandbox, as a separate Windows account that can change only that copy and can't reach past your computer. It needs a one-time setup from Settings, where Windows asks for an administrator. You can choose to run tests without it there, and they then have your account's access.
+Anything an agent runs has your account's access to your files and network, so **approve narrowly**. A change's tests are kept apart: they run in a disposable copy inside the built-in sandbox, which can change only that copy and can't reach past your computer. On Windows they run as a separate account, which needs a one-time setup from Settings where Windows asks for an administrator; on macOS and Linux your home folder is kept out of their reach. You can choose to run tests without it in Settings, and they then have your account's access.
 
 ## Good to know
 
@@ -86,11 +97,11 @@ Anything an agent runs has your account's access to your files and network, so *
 
 The [release notes](RELEASE-NOTES.md) have the full list. The big ones:
 
-- Only Windows has been tested.
-- Each agent works on one thing at a time, and a code project's stories go one after another.
 - Tests must run with Node's test runner.
+- Claude Code agents without auto mode run only the commands you approve, so one may hand off work it couldn't test; the studio's own checks still run every change's tests.
+- Pictures of a story's pages, and trying a change inside the sandbox, work on Windows only for now. Elsewhere a change is tried on your computer, once you've said yes.
 - On Windows, keep Studio desk inside your user folder. Installed somewhere else, such as `C:\StudioDesk`, the tests of a change can read its records.
-- Nothing is checked by eye: reviews read the code, tests and evidence.
+- macOS and Linux have had less use than Windows.
 
 ## For developers
 
