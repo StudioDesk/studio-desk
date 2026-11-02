@@ -275,7 +275,7 @@ test('once the plan is accepted and its stories proposed, the row shows its stor
   open();
   const { row, chip, meta } = await ideaRow('run-open');
   expect(meta).toMatch(/^Sent .+ · 2 stories · 0 of 2 accepted$/);
-  expect(chip.textContent).toBe('Your call · story 1 of 2');
+  expect(chip.textContent).toBe('Your call · 0 of 2 accepted');
   expect(chip.className).toBe('sd-chip sd-chip--you');
   expect(row.querySelector('.sd-rundots')?.getAttribute('aria-label')).toMatch(/^Story 1: .+, Story 2: .+$/);
   expect(row.querySelectorAll('.sd-rundots i')).toHaveLength(2);
