@@ -128,6 +128,106 @@ describe("your part in a story's Activity", () => {
     expect(parts.every(part => part.by === 'you')).toBe(true);
   });
 
+  it('names the failed checks you accepted over, with your reason, and leaves other acceptances as they were', () => {
+    const parts = yourPart(
+      story([
+        event(
+          'accepted',
+          'Director accepted the recorded result over a failed check (npm test): The flaky test is tracked separately.',
+          1,
+          'attempt-build',
+        ),
+        event(
+          'accepted',
+          'Director accepted the recorded result over 2 failed checks (npm test, lint): Both fail on main too.',
+          2,
+          'attempt-build',
+        ),
+        event(
+          'accepted',
+          'Director accepted the recorded result over a failed check (browser check): Not run here (no browser): checked by hand.',
+          3,
+          'attempt-review',
+        ),
+        event(
+          'accepted',
+          'Director accepted the recorded result over a failed check (lint): Autonomy policy revision 6 would refuse it.',
+          4,
+        ),
+        event('accepted', 'Director accepted the recorded result over a failed check: no list.', 5, 'attempt-build'),
+        event('accepted', 'Director accepted the recorded result.', 6, 'attempt-build'),
+        event(
+          'accepted',
+          'Accepted by autonomy policy revision 6: Candidate scope and measured tests passed.',
+          7,
+          'attempt-review',
+        ),
+      ]),
+      names,
+    );
+    expect(parts.map(({ by, lead, words }) => ({ by, lead, words }))).toEqual([
+      {
+        by: 'you',
+        lead: 'Accepted the build over a failed check: npm test',
+        words: 'The flaky test is tracked separately.',
+      },
+      { by: 'you', lead: 'Accepted the build over 2 failed checks: npm test, lint', words: 'Both fail on main too.' },
+      {
+        by: 'you',
+        lead: 'Accepted the review over a failed check: browser check',
+        words: 'Not run here (no browser): checked by hand.',
+      },
+      // Your reason may name a house rule; the acceptance is still yours.
+      {
+        by: 'you',
+        lead: 'Accepted the result over a failed check: lint',
+        words: 'Autonomy policy revision 6 would refuse it.',
+      },
+      // Wording it cannot read keeps the rest of the message rather than dropping it.
+      { by: 'you', lead: 'Accepted the build over a failed check', words: 'a failed check: no list.' },
+      { by: 'you', lead: 'Accepted the build', words: undefined },
+      { by: 'rule', lead: 'Accepted the review', words: 'Candidate scope and measured tests passed.' },
+    ]);
+  });
+
+  it('keeps the complete remaining message when several failed checks have no closing delimiter', () => {
+    const accepted = event(
+      'accepted',
+      'Director accepted the recorded result over 2 failed checks (npm test, lint: no closing delimiter.',
+      1,
+      'attempt-review',
+    );
+    expect(yourPart(story([accepted]), names)).toEqual([
+      {
+        key: `e${accepted.seq}`,
+        at: accepted.time,
+        by: 'you',
+        lead: 'Accepted the review over a failed check',
+        words: '2 failed checks (npm test, lint: no closing delimiter.',
+      },
+    ]);
+  });
+
+  it('preserves the exact parts of plain director and house-rule acceptances', () => {
+    const plain = event('accepted', 'Director accepted the recorded result.', 1, 'attempt-build');
+    const policy = event(
+      'accepted',
+      'Accepted by autonomy policy revision 6: Candidate scope and measured tests passed.',
+      2,
+      'attempt-review',
+    );
+    expect(yourPart(story([plain, policy]), names)).toStrictEqual([
+      { key: `e${plain.seq}`, at: plain.time, by: 'you', lead: 'Accepted the build' },
+      {
+        key: `e${policy.seq}`,
+        at: policy.time,
+        by: 'rule',
+        lead: 'Accepted the review',
+        words: 'Candidate scope and measured tests passed.',
+      },
+    ]);
+  });
+
   it('says what a house rule ran again, and why', () => {
     const parts = yourPart(
       story([
