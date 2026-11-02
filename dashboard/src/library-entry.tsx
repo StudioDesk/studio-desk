@@ -1,21 +1,17 @@
-// A library file's own view (1.2 step 6), opened by picking its card at the top of the Artifacts page: what the file
-// is for and its revisions, newest first, each with when it was added, where it came from, how many attempts read that
-// revision and Open, which opens its bytes in a new tab; then the ideas that left it out, among the runs the page's
-// records already hold (the live set's and every finished-ideas page read so far; none is read for this view). Add a
-// newer revision takes an upload or one of the accepted files. Edit, on a file whose newest revision is Markdown, plain
-// text, JSON, CSV or YAML, opens that revision's text in place, with a preview beside Markdown and What changed against
-// it before anything is sent, and saves the edit as the next revision under the same file name. Copy to another
-// project sends the newest revision to another project's library, and Remove from the library, once confirmed, stops
-// later work receiving the file while its record stays. Each command reads the library again afterwards, and a
+// A library file's own view (1.2 step 6), opened by picking its card at the top of the Artifacts page, in the panel a
+// picked file of the work uses (file-panel.tsx): its kind, name, what it is for and where its newest revision came
+// from; that revision read in place, or, for a kind the page cannot show, a note pointing at Download; its revisions,
+// newest first, each with when it was added, its file and size, how many attempts read it, where it came from, What
+// changed against the revision before for text and Open, which opens its bytes in a new tab; then the ideas that left
+// it out, among the runs the page's records already hold (the live set's and every finished-ideas page read so far;
+// none is read for this view); and its actions. Add a newer revision takes an upload or one of the accepted files.
+// Edit, on a file whose newest revision is Markdown, plain text, JSON, CSV or YAML, opens that revision's text in
+// place, with a preview beside Markdown and What changed against it before anything is sent, and saves the edit as the
+// next revision under the same file name. Copy to another project sends the newest revision to another project's
+// library, Remove from the library, once confirmed, stops later work receiving the file while its record stays and
+// closes the panel, and Download saves the newest revision. Each command reads the library again afterwards, and a
 // refusal shows where it was asked.
-import {
-  useIsMutating,
-  useMutation,
-  useQuery,
-  useQueryClient,
-  type InfiniteData,
-  type QueryClient,
-} from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type InfiniteData, type QueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useId, useMemo, useState } from 'react';
 import {
@@ -35,8 +31,9 @@ import {
   type ProjectArtifact,
   type RunRecord,
 } from './api';
-import { Modal } from './dialog';
-import { TextReader } from './files';
+import { readsInPlace } from './artifacts';
+import { PanelActions, PanelBody, PanelDownload, PanelFrame, PanelHead, PanelVersion } from './file-panel';
+import { imageFile, TextReader } from './files';
 import { encoded, fileSize } from './idea-composer';
 import {
   libraryAccept,
@@ -52,6 +49,7 @@ import { lineDiff, type LineDiff } from './line-diff';
 import { queryKeys } from './records';
 import { useToast } from './toast';
 import { quoted, when } from './today';
+import type { ComparisonTextSource } from './work-versions';
 
 // One command on the entry: its route under the entry, what it adds to the project in its body (an upload's is read
 // from its file when the command runs) and what the toast says once the controller accepts it.
@@ -61,7 +59,19 @@ interface Command {
   done: string;
 }
 type Panel = 'revision' | 'edit' | 'copy' | null;
-const commandKey = (projectId: string) => [...libraryKey(projectId), 'command'] as const;
+// A revision's bytes never change, so its text is read once under its own key, shared by the panel's reader, What
+// changed and Edit, and kept apart from the library's key, which every command reads again. A picture is read as
+// one under a key of its own.
+const revisionKey = (projectId: string, entryId: string, revision: number) =>
+  [projectId, 'library-revision', entryId, revision] as const;
+const pictureFile = (name: string) => imageFile(name) || name.endsWith('layout.json');
+// What changed compares two revisions when both are text the page reads in place.
+const textFile = (name: string) => readsInPlace(name) && !imageFile(name);
+const revisionSource = (projectId: string, entryId: string, revision: LibraryRevision): ComparisonTextSource => ({
+  url: libraryRevisionUrl(projectId, entryId, revision.revision),
+  queryKey: revisionKey(projectId, entryId, revision.revision),
+  label: `Revision ${revision.revision}`,
+});
 const fileKey = (file: ProjectArtifact) => `${file.attemptId}/${file.path}`;
 const refusalStyle = { margin: 0, color: 'var(--bad)' };
 const sectionStyle = { display: 'flex', flexDirection: 'column', gap: 'var(--space-8)' } as const;
@@ -95,7 +105,8 @@ const leavesOut = (run: RunRecord, entryId: string) =>
 const ideaWords = (run: RunRecord) =>
   typeof run.brief === 'string' && run.brief.trim() ? quoted(run.brief) : `Idea ${run.id}`;
 
-// The view over the page, named by the entry's name; no entry shows nothing. While a command runs it stays open.
+// The panel, named by the entry's name; no entry shows nothing. Close shows when the page supplies onClose, and waits
+// while a command runs.
 export function LibraryFile({
   projectId,
   entry,
@@ -105,14 +116,9 @@ export function LibraryFile({
   projectId: string;
   entry: LibraryEntry | null;
   names: LibraryNames;
-  onClose: () => void;
+  onClose?: (() => void) | undefined;
 }) {
-  const busy = useIsMutating({ mutationKey: commandKey(projectId) }) > 0;
-  return (
-    <Modal open={entry !== null} onClose={onClose} closable={!busy} title={entry?.name ?? ''}>
-      {entry && <EntryView key={entry.id} projectId={projectId} entry={entry} names={names} onClose={onClose} />}
-    </Modal>
-  );
+  return entry && <EntryView key={entry.id} projectId={projectId} entry={entry} names={names} onClose={onClose} />;
 }
 
 function EntryView({
@@ -124,28 +130,29 @@ function EntryView({
   projectId: string;
   entry: LibraryEntry;
   names: LibraryNames;
-  onClose: () => void;
+  onClose: (() => void) | undefined;
 }) {
   const client = useQueryClient(),
     toast = useToast(),
     [panel, setPanel] = useState<Panel>(null),
+    nameId = useId(),
     revisionsId = useId(),
     ideasId = useId();
-  // The card's own read of who read the entry, one attempt to a row with the revision it received.
+  // The panel's own read of who read the entry, one attempt to a row with the revision it received.
   const readers = useQuery({
     queryKey: [...libraryKey(projectId), entry.id, 'readers'],
     queryFn: ({ signal }) => getJSON<LibraryReader[]>(libraryReadersUrl(projectId, entry.id), signal),
   });
   const command = useMutation({
-    mutationKey: commandKey(projectId),
     mutationFn: async ({ action, body }: Command) =>
       send<LibraryEntry>(`${libraryUrl(projectId)}/${encodeURIComponent(entry.id)}/${action}`, {
         projectId,
         ...(await body()),
       }),
+    // Removed, the panel closes; without onClose the page drops it once the library read again no longer holds it.
     onSuccess: (_, { action, done }) => {
       toast(done);
-      if (action === 'remove') onClose();
+      if (action === 'remove') onClose?.();
       else setPanel(null);
     },
     // Library changes are not on the stream, so whatever the controller answered, the library is read again.
@@ -176,9 +183,77 @@ function EntryView({
     held = heldRuns(client, projectId, names.records?.runs ?? []),
     ideas = held.runs.filter(run => leavesOut(run, entry.id));
   return (
-    <div className="sd-dialog__scroll" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-14)' }}>
-      <p style={{ margin: 0, overflowWrap: 'anywhere' }}>{entry.purpose}</p>
-      <div className="sd-toolbar">
+    <PanelFrame nameId={nameId}>
+      <PanelHead nameId={nameId} path={newest?.file ?? entry.name} name={entry.name} onClose={onClose} closable={!busy}>
+        <p>{entry.purpose}</p>
+        {newest && (
+          <p className="sd-meta">
+            <Source projectId={projectId} source={newest.source} names={names} />
+          </p>
+        )}
+      </PanelHead>
+      {newest && (
+        <PanelBody
+          readable={readsInPlace(newest.file)}
+          url={libraryRevisionUrl(projectId, entry.id, newest.revision)}
+          queryKey={
+            pictureFile(newest.file)
+              ? [...revisionKey(projectId, entry.id, newest.revision), 'picture']
+              : revisionKey(projectId, entry.id, newest.revision)
+          }
+          item={{ path: newest.file, hash: newest.sha256 }}
+        />
+      )}
+      <section aria-labelledby={revisionsId} style={sectionStyle}>
+        <h3 id={revisionsId} className="sd-eyebrow">
+          Revisions
+        </h3>
+        <p className="sd-meta" style={{ margin: 0 }}>
+          Later work receives the newest.
+        </p>
+        {readers.error && (
+          <p className="sd-meta" style={{ margin: 0 }}>
+            Who read each revision could not be loaded: {readers.error.message}
+          </p>
+        )}
+        <ol className="sd-filepanel__versions" aria-label="Revisions">
+          {revisions.map((revision, index) => (
+            <Revision
+              key={revision.revision}
+              projectId={projectId}
+              entryId={entry.id}
+              revision={revision}
+              previous={revisions[index + 1]}
+              current={index === 0}
+              readers={readers.data ? (read.get(revision.revision) ?? 0) : null}
+              names={names}
+            />
+          ))}
+        </ol>
+      </section>
+      <section aria-labelledby={ideasId} style={sectionStyle}>
+        <h3 id={ideasId} className="sd-eyebrow">
+          Ideas that left it out
+        </h3>
+        <span className="sd-meta">{lookedThrough(held)}</span>
+        {ideas.length ? (
+          <ul
+            aria-label="Ideas that left it out"
+            style={{ margin: 0, paddingLeft: '18px', display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}
+          >
+            {ideas.map(run => (
+              <li key={run.id}>
+                <Link to="/p/$projectId/runs/$runId" params={{ projectId, runId: run.id }}>
+                  {ideaWords(run)}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p style={{ margin: 0 }}>None of them left it out.</p>
+        )}
+      </section>
+      <PanelActions>
         <button
           type="button"
           className="sd-btn sd-btn--sm"
@@ -211,7 +286,8 @@ function EntryView({
         <button type="button" className="sd-btn sd-btn--sm sd-btn--danger" disabled={busy} onClick={remove}>
           {busy && command.variables?.action === 'remove' ? 'Removing…' : 'Remove from the library'}
         </button>
-      </div>
+        {newest && <PanelDownload href={libraryRevisionUrl(projectId, entry.id, newest.revision)} />}
+      </PanelActions>
       {refusal('remove') && (
         <p role="alert" className="sd-meta" style={refusalStyle}>
           {refusal('remove')}
@@ -267,106 +343,71 @@ function EntryView({
           }
         />
       )}
-      <section aria-labelledby={revisionsId} style={sectionStyle}>
-        <h3 id={revisionsId} className="sd-eyebrow" style={{ margin: 0 }}>
-          Revisions
-        </h3>
-        <span className="sd-meta">Later work receives the newest.</span>
-        {readers.error && (
-          <p className="sd-meta" style={{ margin: 0 }}>
-            Who read each revision could not be loaded: {readers.error.message}
-          </p>
-        )}
-        <div className="sd-card sd-cardlist" role="list" aria-label="Revisions">
-          {revisions.map(revision => (
-            <Revision
-              key={revision.revision}
-              projectId={projectId}
-              entryId={entry.id}
-              revision={revision}
-              readers={readers.data ? (read.get(revision.revision) ?? 0) : null}
-              names={names}
-            />
-          ))}
-        </div>
-      </section>
-      <section aria-labelledby={ideasId} style={sectionStyle}>
-        <h3 id={ideasId} className="sd-eyebrow" style={{ margin: 0 }}>
-          Ideas that left it out
-        </h3>
-        <span className="sd-meta">{lookedThrough(held)}</span>
-        {ideas.length ? (
-          <ul
-            aria-label="Ideas that left it out"
-            style={{ margin: 0, paddingLeft: '18px', display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}
-          >
-            {ideas.map(run => (
-              <li key={run.id}>
-                <Link to="/p/$projectId/runs/$runId" params={{ projectId, runId: run.id }}>
-                  {ideaWords(run)}
-                </Link>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p style={{ margin: 0 }}>None of them left it out.</p>
-        )}
-      </section>
-    </div>
+    </PanelFrame>
   );
 }
 
-// One revision: its number, when it was added, its file and size, how many attempts read it, where it came from and
-// Open, which opens its bytes in a new tab.
+// One revision, the newest marked current: its number, when it was added, its file and size, how many attempts read
+// it, where it came from, What changed against the revision before when both are text, and Open, which opens its
+// bytes in a new tab.
 function Revision({
   projectId,
   entryId,
   revision,
+  previous,
+  current,
   readers,
   names,
 }: {
   projectId: string;
   entryId: string;
   revision: LibraryRevision;
+  previous: LibraryRevision | undefined;
+  current: boolean;
   readers: number | null;
   names: LibraryNames;
 }) {
   return (
-    <div role="listitem" className="sd-cardlist__row sd-cardlist__row--line">
-      <span
-        className="sd-cardlist__label"
-        style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', padding: '10px 0' }}
-      >
-        <span>{`Revision ${revision.revision}`}</span>
-        <span className="sd-cardlist__meta sd-meta" style={{ fontWeight: 400 }}>
-          <time dateTime={revision.at}>{when(revision.at)}</time>
-          <span aria-hidden="true">·</span>
-          <span className="sd-mono" style={{ overflowWrap: 'anywhere' }}>
-            {revision.file}
-          </span>
-          <span aria-hidden="true">·</span>
-          <span>{fileSize(revision.byteLength)}</span>
-          {readers !== null && (
-            <>
-              <span aria-hidden="true">·</span>
-              <span>{readBy(readers)}</span>
-            </>
-          )}
-        </span>
-        <span className="sd-meta" style={{ fontWeight: 400 }}>
-          <Source projectId={projectId} source={revision.source} names={names} />
-        </span>
+    <PanelVersion
+      label={`Revision ${revision.revision}`}
+      current={current}
+      compare={
+        previous && textFile(previous.file) && textFile(revision.file)
+          ? {
+              earlier: revisionSource(projectId, entryId, previous),
+              later: revisionSource(projectId, entryId, revision),
+            }
+          : undefined
+      }
+      actions={
+        <a
+          className="sd-btn sd-btn--sm sd-btn--ghost"
+          href={libraryRevisionUrl(projectId, entryId, revision.revision)}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`Open revision ${revision.revision}`}
+        >
+          Open
+        </a>
+      }
+    >
+      <span className="sd-cardlist__meta sd-meta">
+        <time dateTime={revision.at}>{when(revision.at)}</time>
+        <span aria-hidden="true">·</span>
+        <span className="sd-mono">{revision.file}</span>
+        <span aria-hidden="true">·</span>
+        <span>{fileSize(revision.byteLength)}</span>
+        {readers !== null && (
+          <>
+            <span aria-hidden="true">·</span>
+            <span>{readBy(readers)}</span>
+          </>
+        )}
       </span>
-      <a
-        className="sd-btn sd-btn--sm"
-        href={libraryRevisionUrl(projectId, entryId, revision.revision)}
-        target="_blank"
-        rel="noreferrer"
-        aria-label={`Open revision ${revision.revision}`}
-      >
-        Open
-      </a>
-    </div>
+      <span className="sd-meta">
+        <Source projectId={projectId} source={revision.source} names={names} />
+      </span>
+    </PanelVersion>
   );
 }
 
@@ -523,8 +564,9 @@ function EditText({
   const [draft, setDraft] = useState<string | null>(null),
     textId = useId(),
     previewId = useId();
+  // The revision's text as the panel's reader reads it, under the same key.
   const read = useQuery({
-    queryKey: [...libraryKey(projectId), entry.id, 'revisions', revision.revision],
+    queryKey: revisionKey(projectId, entry.id, revision.revision),
     queryFn: ({ signal }) => getText(libraryRevisionUrl(projectId, entry.id, revision.revision), signal),
     // A revision's bytes never change.
     staleTime: Infinity,

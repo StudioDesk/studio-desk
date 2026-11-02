@@ -1,9 +1,12 @@
-// A library file's own view (1.2 step 6), opened by picking its card on the Artifacts page: its revisions newest first,
-// each with when it was added, where it came from and how many attempts read it, Open in a new tab, the ideas that
-// left it out among the runs the page holds, and Add a newer revision, Edit on a text file (its newest revision's text
-// in place, a preview beside Markdown, What changed before saving it as the next revision), Copy to another project
-// and Remove from the library, each reading the library again afterwards with the controller's refusal shown in place.
-import { QueryClient } from '@tanstack/react-query';
+// A library file's own view (1.2 step 6), opened by picking its card on the Artifacts page, in the panel beside the
+// page (found as the complementary region named by the file): its newest revision read in place, or Download for a
+// kind the page cannot show, its revisions newest first, each with when it was added, where it came from, how many
+// attempts read it, What changed against the revision before and Open in a new tab, the ideas that left it out among
+// the runs the page holds, and Add a newer revision, Edit on a text file (its newest revision's text in place, a
+// preview beside Markdown, What changed before saving it as the next revision), Copy to another project, Remove from
+// the library and Download, each command reading the library again afterwards with the controller's refusal shown in
+// place.
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -19,6 +22,7 @@ import type {
 } from './api';
 import { App } from './app';
 import { libraryEditable } from './library';
+import { LibraryFile } from './library-entry';
 import { createAppRouter } from './router';
 import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
 import { when } from './today';
@@ -142,7 +146,7 @@ const open = (path = '/p/project-x/artifacts') => {
 };
 const pick = async (user: ReturnType<typeof userEvent.setup>, name: string) => {
   await user.click(await screen.findByRole('button', { name }));
-  return within(await screen.findByRole('dialog', { name }));
+  return within(await screen.findByRole('complementary', { name }));
 };
 const posted = () => controller.requests.filter(request => request.method !== 'GET');
 const entryUrl = '/api/projects/project-x/library/lib-brand';
@@ -221,7 +225,7 @@ test('picking a card shows its purpose and revisions newest first, each with whe
   expect(view.queryByRole('list', { name: 'Ideas that left it out' })).toBeNull();
   // Closing it and picking another card shows that one's revisions.
   await user.click(view.getByRole('button', { name: 'Close' }));
-  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Brand guide' })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Brand guide' })).toBeNull());
   const glossary = await pick(user, 'Glossary');
   expect(within(glossary.getByRole('list', { name: 'Revisions' })).getAllByRole('listitem')).toHaveLength(1);
   expect(await glossary.findByText('Not read yet')).toBeTruthy();
@@ -238,6 +242,154 @@ test("Open links each revision's bytes in a new tab", async () => {
     expect(link.getAttribute('target')).toBe('_blank');
     expect(link.getAttribute('rel')).toBe('noreferrer');
   }
+});
+
+test('picking a Markdown card reads its newest revision as a page in the panel below the cards, without a download', async () => {
+  const user = userEvent.setup();
+  controller.libraryTexts = { 'lib-brand/3': brandText, 'lib-brand/2': 'An older text.\n' };
+  const router = open();
+  const view = await pick(user, 'Brand guide');
+  // The panel stands below the library's cards, where the dialog used to open, and is no dialog.
+  const panel = screen.getByRole('complementary', { name: 'Brand guide' });
+  expect(
+    screen.getByRole('list', { name: 'Library files' }).compareDocumentPosition(panel) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(screen.queryByRole('dialog', { name: 'Brand guide' })).toBeNull();
+  // Its head: the kind's tile, the name, what it is for and where its newest revision came from.
+  const name = view.getByRole('heading', { name: 'Brand guide', level: 2 }),
+    head = within(name.parentElement!);
+  expect(view.getByText('MD').getAttribute('aria-hidden')).toBe('true');
+  expect(head.getByText('The colours and type every page uses.')).toBeTruthy();
+  expect(head.getByText('Copied from Project Y')).toBeTruthy();
+  // The newest revision drawn as a page.
+  const page = await view.findByRole('heading', { name: 'Brand', level: 1 });
+  expect(page.closest('.sd-reader__text')).toBeTruthy();
+  expect(view.getByText('Use blue.')).toBeTruthy();
+  expect(view.queryByText('An older text.')).toBeNull();
+  // Read through the library's own route for that revision alone, with nothing sent and no page left.
+  expect(controller.reads().filter(url => url.includes('/revisions/'))).toEqual([`${entryUrl}/revisions/3`]);
+  expect(posted()).toEqual([]);
+  expect(router.history.location.pathname).toBe('/p/project-x/artifacts');
+  // Edit reads the same revision from what the panel already read.
+  const { editor } = await editPanel(user, view, 'Brand guide');
+  expect(editor.value).toBe(brandText);
+  expect(controller.reads().filter(url => url.includes('/revisions/'))).toEqual([`${entryUrl}/revisions/3`]);
+});
+
+test("a PDF entry says it can't be shown here and offers Download of its newest revision, reading nothing", async () => {
+  const user = userEvent.setup();
+  const pdf = (number: number, at: string) => ({
+    ...revision(number, at, 9000, { type: 'upload' }),
+    file: 'brief.pdf',
+    mediaType: 'application/pdf',
+  });
+  controller.library = {
+    entries: [
+      entry('lib-brief', 'Client brief', 'What the client asked for.', [
+        pdf(1, '2026-01-10T12:00:00Z'),
+        pdf(2, '2026-02-10T12:00:00Z'),
+      ]),
+    ],
+    proposals: [],
+  };
+  open();
+  const view = await pick(user, 'Client brief');
+  expect(view.getByText('PDF').getAttribute('aria-hidden')).toBe('true');
+  expect(view.getByText("This file can't be shown here. Download it to look at the recorded file.")).toBeTruthy();
+  const download = view.getByRole('link', { name: 'Download' });
+  expect(download.hasAttribute('download')).toBe(true);
+  expect(download.getAttribute('href')).toBe('/api/projects/project-x/library/lib-brief/revisions/2');
+  expect(download.getAttribute('target')).toBeNull();
+  // Nothing to compare or edit as text, and nothing read.
+  expect(revisionRows(view)).toEqual(['Revision 2', 'Revision 1']);
+  expect(view.queryByRole('button', { name: /What changed/ })).toBeNull();
+  expect(view.queryByRole('button', { name: 'Edit' })).toBeNull();
+  expect(view.getByRole('button', { name: 'Add a newer revision' })).toBeTruthy();
+  expect(controller.reads().filter(url => url.includes('/revisions/'))).toEqual([]);
+});
+
+test('What changed on revision 2 shows the lines added and removed against revision 1, read only when opened', async () => {
+  const user = userEvent.setup();
+  controller.libraryTexts = {
+    'lib-brand/1': '# Brand\n\n- Use red.\n',
+    'lib-brand/2': brandText,
+    'lib-brand/3': brandEdited,
+  };
+  open();
+  const view = await pick(user, 'Brand guide');
+  await view.findByText('Use deep blue — #1d4ed8.');
+  const [third, second, first] = within(view.getByRole('list', { name: 'Revisions' }))
+    .getAllByRole('listitem')
+    .map(row => within(row));
+  // The first revision has none before it to compare.
+  expect(first!.queryByRole('button', { name: /What changed/ })).toBeNull();
+  expect(controller.reads().filter(url => url.includes('/revisions/'))).toEqual([`${entryUrl}/revisions/3`]);
+  const changed = second!.getByRole('button', { name: 'What changed in revision 2' });
+  expect(changed.getAttribute('aria-expanded')).toBe('false');
+  await user.click(changed);
+  expect(changed.getAttribute('aria-expanded')).toBe('true');
+  const lines = await second!.findByRole('list', { name: 'Lines added and removed in revision 2' });
+  expect(second!.getByText('Against revision 1: 2 lines added, 1 line removed')).toBeTruthy();
+  expect(
+    within(lines)
+      .getAllByRole('listitem')
+      .map(line => line.getAttribute('aria-label')),
+  ).toEqual(['Line 3 removed: - Use red.', 'Line 3 added: - Use blue.', 'Line 4 added: - Set type in Inter.']);
+  // The newest against the one before, from the revisions already read.
+  await user.click(third!.getByRole('button', { name: 'What changed in revision 3' }));
+  expect(await third!.findByText('Against revision 2: 1 line added, 1 line removed')).toBeTruthy();
+  expect(
+    controller
+      .reads()
+      .filter(url => url.includes('/revisions/'))
+      .sort(),
+  ).toEqual([1, 2, 3].map(number => `${entryUrl}/revisions/${number}`));
+  // Closed again, it shows no lines.
+  await user.click(changed);
+  expect(second!.queryByRole('list')).toBeNull();
+  expect(posted()).toEqual([]);
+});
+
+test("Download is a plain download of the newest revision's library file, and follows a newer revision", async () => {
+  const user = userEvent.setup();
+  controller.command = addsRevision('lib-brand');
+  open();
+  const view = await pick(user, 'Brand guide');
+  const download = () => view.getByRole('link', { name: 'Download' });
+  expect(download().hasAttribute('download')).toBe(true);
+  expect(download().getAttribute('href')).toBe(`${entryUrl}/revisions/3`);
+  expect(download().getAttribute('target')).toBeNull();
+  // It sits with the panel's actions, after them.
+  const actions = view.getByRole('button', { name: 'Add a newer revision' }).parentElement!;
+  expect(download().parentElement).toBe(actions);
+  expect(actions.lastElementChild).toBe(download());
+  await user.click(view.getByRole('button', { name: 'Add a newer revision' }));
+  const panel = within(view.getByRole('region', { name: 'Add a newer revision' }));
+  await user.upload(panel.getByLabelText('File'), new File(['# Brand\n'], 'brand.md', { type: '' }));
+  await user.click(panel.getByRole('button', { name: 'Add the revision' }));
+  await waitFor(() => expect(download().getAttribute('href')).toBe(`${entryUrl}/revisions/4`));
+});
+
+test('LibraryFile shows Close only when the page supplies onClose, and no entry shows nothing', async () => {
+  const user = userEvent.setup(),
+    client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } }),
+    names = { records: null },
+    glossary = controller.library.entries[1]!,
+    onClose = vi.fn();
+  const panel = (picked: LibraryEntry | null, close?: () => void) => (
+    <QueryClientProvider client={client}>
+      <LibraryFile projectId="project-x" entry={picked} names={names} onClose={close} />
+    </QueryClientProvider>
+  );
+  const view = render(panel(glossary));
+  const glossaryPanel = within(screen.getByRole('complementary', { name: 'Glossary' }));
+  expect(glossaryPanel.queryByRole('button', { name: 'Close' })).toBeNull();
+  view.rerender(panel(glossary, onClose));
+  await user.click(glossaryPanel.getByRole('button', { name: 'Close' }));
+  expect(onClose).toHaveBeenCalledOnce();
+  view.rerender(panel(null, onClose));
+  expect(screen.queryByRole('complementary')).toBeNull();
 });
 
 test('the ideas that left it out come from the live set and the finished pages read so far, each linking to its idea', async () => {
@@ -320,7 +472,7 @@ test('the ideas that left it out come from the live set and the finished pages r
   expect(view.getByText('Among every idea, open and finished.')).toBeTruthy();
   // Another entry lists only the ideas that left it out.
   await user.click(view.getByRole('button', { name: 'Close' }));
-  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Brand guide' })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole('complementary', { name: 'Brand guide' })).toBeNull());
   view = await pick(user, 'Glossary');
   expect(ideas().map(([, href]) => href)).toEqual(['/p/project-x/runs/run-other', '/p/project-x/runs/run-done']);
   // Each opens its idea.
@@ -541,7 +693,10 @@ test('a file whose newest revision is not text offers Add a newer revision and n
   expect(
     ['a.png', 'a.html', 'a.svg', 'a.css', 'a.xml', 'a.js', 'a.ts', 'a.md.png', 'md', 'README'].some(libraryEditable),
   ).toBe(false);
-  expect(controller.reads().filter(url => url.includes('/revisions/'))).toEqual([]);
+  // Only the panel's picture of the newest revision is read; no text is read to edit.
+  expect(controller.reads().filter(url => url.includes('/revisions/'))).toEqual([
+    '/api/projects/project-x/library/lib-logo/revisions/2',
+  ]);
 });
 
 test('an unchanged edit cannot be saved, even once typing is undone', async () => {
@@ -627,6 +782,8 @@ test('a revision that cannot be read shows why in the panel, and there is nothin
   const user = userEvent.setup();
   open();
   const view = await pick(user, 'Brand guide');
+  // The panel's reader says it first; Edit then asks for the revision again.
+  expect(await view.findByText(/^It cannot be shown here:/)).toBeTruthy();
   await user.click(view.getByRole('button', { name: 'Edit' }));
   const panel = within(view.getByRole('region', { name: 'Edit Brand guide' }));
   expect((await panel.findByRole('alert')).textContent).toBe(
@@ -682,7 +839,7 @@ test('Copy to another project offers the other projects and posts the chosen one
   expect(controller.reads()).toContain('/api/projects');
   expect(view.queryByRole('region', { name: 'Copy to another project' })).toBeNull();
   // The entry stays in this project's library.
-  expect(screen.getByRole('dialog', { name: 'Brand guide' })).toBeTruthy();
+  expect(screen.getByRole('complementary', { name: 'Brand guide' })).toBeTruthy();
 });
 
 test("a refused copy shows the controller's reason in the panel", async () => {
@@ -722,12 +879,12 @@ test('Remove from the library posts only once confirmed, and the card goes once 
     'Remove Brand guide from the library? Later work no longer receives it; its record stays.',
   );
   expect(posted()).toEqual([]);
-  expect(screen.getByRole('dialog', { name: 'Brand guide' })).toBeTruthy();
+  expect(screen.getByRole('complementary', { name: 'Brand guide' })).toBeTruthy();
   // Confirmed, it is sent, the view closes and the library read again no longer shows the card.
   await user.click(view.getByRole('button', { name: 'Remove from the library' }));
   await waitFor(() => expect(screen.queryByRole('button', { name: 'Brand guide' })).toBeNull());
   expect(posted()).toEqual([{ url: `${entryUrl}/remove`, method: 'POST', body: { projectId: 'project-x' } }]);
-  expect(screen.queryByRole('dialog', { name: 'Brand guide' })).toBeNull();
+  expect(screen.queryByRole('complementary', { name: 'Brand guide' })).toBeNull();
   expect(screen.getByText('Removed Brand guide from the library.')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Glossary' })).toBeTruthy();
 });
@@ -739,7 +896,7 @@ test("a refused removal shows the controller's reason and keeps the view and its
   const view = await pick(user, 'Brand guide');
   await user.click(view.getByRole('button', { name: 'Remove from the library' }));
   expect((await view.findByRole('alert')).textContent).toBe('Library entry not found.');
-  expect(screen.getByRole('dialog', { name: 'Brand guide' })).toBeTruthy();
+  expect(screen.getByRole('complementary', { name: 'Brand guide' })).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Brand guide' })).toBeTruthy();
   expect(posted()).toHaveLength(1);
 });
