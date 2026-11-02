@@ -1,13 +1,14 @@
 // A code story's setup runs in a process of its own (src/connectors/source-setup.mjs): the controller keeps answering
 // while the working copy is made, checked and copied, a stop ends that process and removes the working copy, and a
-// base commit other than the approved snapshot still fails the attempt with the same message.
+// base commit other than the approved snapshot still fails the attempt with the same message, which a test's wait for
+// the task then repeats with the end of the attempt's log.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
-import { waitFor } from './wait-for.mjs';
+import { waitFor, waitForTask } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import {
   createSourceWorktree,
@@ -185,6 +186,15 @@ test('a base commit that does not match the snapshot fails the attempt in its se
   assert.equal(fs.existsSync(a.sourceWorktree.path), false);
   assert.deepEqual(fs.readdirSync(path.join(store.directory, 'wt')), []);
   assert.equal(store.leases().length, 0);
+  // A wait for a status the failed task never reaches says why from the attempt's own records: its setup error (here
+  // also the task's reason) and the end of its log, which holds the lines the setup process wrote.
+  await assert.rejects(waitForTask(store, c.taskId, 'review', { limit: 50 }), error => {
+    const [status, log] = error.message.split('its log ends:');
+    assert.ok(status.includes(snapshotMismatch), error.message);
+    assert.ok(log?.includes('stdout: {"phase":"setup.snapshot"'), error.message);
+    assert.ok(log.includes(`stderr: ${snapshotMismatch}`), error.message);
+    return true;
+  });
 });
 
 test('the setup process leaves a listed worktree that was made again under its name since the controller listed it', async t => {
