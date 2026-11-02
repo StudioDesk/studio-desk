@@ -24,7 +24,42 @@ import {
   denyBuiltInSandboxData,
   denyBuiltInSandboxSecrets,
   readBuiltInSandboxStatus,
+  takeBuiltInSandboxSession,
 } from '../src/adapters/built-in-sandbox.mjs';
+
+test("the computer's built-in sandbox sessions are taken in turn, an ended holder's slot freed, and a waiter told once", async t => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-sessions-'));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  const live = new Set([101, 102, 103]),
+    take = (pid, extra = {}) =>
+      takeBuiltInSandboxSession(folder, { slots: 2, pid, alive: holder => live.has(holder), waitMs: 20, ...extra });
+  const first = await take(101),
+    second = await take(102);
+  assert.deepEqual(fs.readdirSync(folder).sort(), ['slot-0.lock', 'slot-1.lock']);
+  // A third waits while both are taken, is told so once, and takes the slot given back.
+  const waits = [];
+  let third = null;
+  const taking = take(103, { onWait: slots => waits.push(slots) }).then(release => (third = release));
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(third, null, 'still waiting');
+  assert.deepEqual(waits, [2]);
+  first();
+  await taking;
+  assert.equal(typeof third, 'function');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8')).pid, 103);
+  // Giving back is a holder's own: an old release leaves the slot's new holder alone.
+  first();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8')).pid, 103);
+  // A holder that ended without giving back (stopped hard) frees its slot.
+  live.delete(102);
+  const fourth = await take(104);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-1.lock'), 'utf8')).pid, 104);
+  second();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-1.lock'), 'utf8')).pid, 104);
+  third();
+  fourth();
+  assert.deepEqual(fs.readdirSync(folder), []);
+});
 
 test("before a Windows run the director's key and launch link above the copy are denied to the sandbox group, or the run stops", t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-secrets-')),

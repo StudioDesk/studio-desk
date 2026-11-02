@@ -371,6 +371,61 @@ export function denyBuiltInSandboxData(folder, run = spawnSync) {
   return folder;
 }
 
+// How many built-in sandbox sessions run at once on this computer (C-43, November 2). On Windows the runtime's network
+// proxy binds inside the loopback range its install permitted, 60080-60089 by default, at two ports a session, so a
+// sixth session failed at setup ("EADDRINUSE 127.0.0.1:60089") whenever five were running: the pipeline's agents' own
+// test runs, its checks and integrations, and npm run verify all start one. Four leave a session spare.
+export const builtInSandboxSessionsAtOnce = 4;
+// Where the computer's session slots are kept: beside the helper's shared copy, which every copy of Studio desk on this
+// computer uses, so the controller and npm run verify share them.
+export const builtInSandboxSessionFolder = files => path.join(path.dirname(files.sharedSrtWin), 'sessions');
+
+const holderAlive = pid => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+};
+
+// Takes one of the computer's session slots, waiting in turn while all are taken, and answers the function that gives
+// it back. A slot is a file made only if absent; a slot whose holder has ended (stopped hard, say) is free again. Two
+// waiters freeing the same ended slot at the same moment could share it, which the spare session above absorbs.
+export async function takeBuiltInSandboxSession(
+  folder,
+  { slots = builtInSandboxSessionsAtOnce, pid = process.pid, alive = holderAlive, waitMs = 500, onWait } = {},
+) {
+  fs.mkdirSync(folder, { recursive: true });
+  for (let waited = false; ; waited = true) {
+    for (let slot = 0; slot < slots; slot++) {
+      const file = path.join(folder, `slot-${slot}.lock`);
+      try {
+        fs.writeFileSync(file, JSON.stringify({ pid, since: new Date().toISOString() }), { flag: 'wx' });
+        return () => {
+          try {
+            if (JSON.parse(fs.readFileSync(file, 'utf8')).pid === pid) fs.rmSync(file, { force: true });
+          } catch {}
+        };
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+      }
+      let holder = null;
+      try {
+        holder = JSON.parse(fs.readFileSync(file, 'utf8'));
+      } catch {
+        // Being written, or just given back: the next pass looks again.
+      }
+      if (holder && Number.isInteger(holder.pid) && !alive(holder.pid)) {
+        fs.rmSync(file, { force: true });
+        slot--;
+      }
+    }
+    if (!waited) onWait?.(slots);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+}
+
 // The command line the runtime runs inside the sandbox, through cmd.exe on Windows and sh elsewhere. The test
 // command itself travels in the run's instructions file, so none of its arguments is quoted for a shell.
 export const builtInSandboxCommandLine = (node, launcher, instructions, platform = process.platform) =>

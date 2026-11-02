@@ -19,11 +19,13 @@ import {
   builtInSandboxPackages,
   builtInSandboxRuntimeEnvironment,
   builtInSandboxSecrets,
+  builtInSandboxSessionFolder,
   builtInSandboxSettings,
   denyBuiltInSandboxData,
   denyBuiltInSandboxSecrets,
   openBuiltInSandboxPassThrough,
   shareBuiltInSandboxHelper,
+  takeBuiltInSandboxSession,
 } from './built-in-sandbox.mjs';
 
 const windows = process.platform === 'win32';
@@ -91,6 +93,14 @@ fs.writeFileSync(
     },
   }),
 );
+// One of the computer's built-in sandbox sessions, which a sixth session at once on Windows could not set up (C-43):
+// this run waits in turn for one, shared with every other copy of Studio desk here, npm run verify included.
+const releaseSession = windows
+  ? await takeBuiltInSandboxSession(builtInSandboxSessionFolder(files), {
+      onWait: slots =>
+        console.error(`Waiting for a built-in sandbox session: all ${slots} are in use on this computer.`),
+    })
+  : () => {};
 const child = spawn(
   process.execPath,
   [files.cli, '--settings', settings, '-c', builtInSandboxCommandLine(node, launcher, instructions)],
@@ -111,5 +121,6 @@ function finish(message, code) {
   // tested once, so it is taken back now.
   if (windows) spawnSync(files.srtWin, ['acl', 'forget', root], { stdio: 'ignore', windowsHide: true, timeout: 60000 });
   fs.rmSync(runDirectory, { recursive: true, force: true });
+  releaseSession();
   process.exit(code);
 }

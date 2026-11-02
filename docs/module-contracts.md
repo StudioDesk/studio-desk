@@ -28,6 +28,10 @@ Every request needs the director's session or key (`src/director-access.mjs`).
     - The runtime's own grants to the copy and its packages are explicit, so they come before the inherited deny.
     - A path that can't be denied stops the run.
   - **Probed November 2** on data folders inside and outside the profile, with dummy files: the database, a tool key, the key, the launch link and the folder listing were refused; the copy was written and its packages read and loaded.
+- **The computer's sandbox sessions** (C-43): on Windows the runtime's network proxy binds in the loopback range its install permitted, 60080–60089 by default, two ports a session, so a sixth session at once failed at setup.
+  - **The cap:** each run takes one of `builtInSandboxSessionsAtOnce` (4) slots before the runtime starts (`takeBuiltInSandboxSession` in `built-in-sandbox-run.mjs`), and gives it back when it finishes. The slots are files made only if absent, beside the helper's shared copy in ProgramData, so every copy on the computer shares them: the controller's checks, candidates, integrations and agents' test runs, and `npm run verify`.
+  - **Waiting:** a run waits in turn and says once that it's waiting. A slot whose holder ended without giving it back is free again.
+  - **Elsewhere:** macOS and Linux have no such range and no cap.
 - **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
 
 ## The controller's own git (November 2026)
