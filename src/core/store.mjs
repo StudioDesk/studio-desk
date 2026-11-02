@@ -577,16 +577,13 @@ export class Store {
   // from the events' task index (November 2, 2026: finished ideas list newest finished first). A task with no event
   // is left out.
   lastTaskEvents(taskIds) {
-    const latest = new Map();
-    for (let start = 0; start < taskIds.length; start += 500) {
-      const ids = taskIds.slice(start, start + 500);
-      // SQLite takes the bare time from the row holding the greatest sequence.
-      const rows = this.db
-        .prepare(
-          `SELECT task_id, MAX(seq) AS seq, time FROM events WHERE task_id IN (${ids.map(() => '?').join(',')}) GROUP BY task_id`,
-        )
-        .all(...ids);
-      for (const row of rows) latest.set(row.task_id, { seq: row.seq, time: row.time });
+    // One step down the events' task index for each task: a GROUP BY over the same index read every event of every
+    // task, log lines included, and took half a second on the live history.
+    const last = this.db.prepare('SELECT seq, time FROM events WHERE task_id=? ORDER BY seq DESC LIMIT 1'),
+      latest = new Map();
+    for (const id of taskIds) {
+      const row = last.get(id);
+      if (row) latest.set(id, { seq: row.seq, time: row.time });
     }
     return latest;
   }
