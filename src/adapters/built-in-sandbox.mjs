@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { directorKeyName } from '../director-access.mjs';
+import { directorSecretNames } from '../director-access.mjs';
 
 export const builtInSandboxVersion = '0.0.81';
 const studioRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -198,14 +198,16 @@ export function builtInSandboxPackages(root) {
   return packages;
 }
 
-// The director's key of the data folder a copy sits in (C-01, src/director-access.mjs), found the way the packages
-// are: in a folder above the copy. On macOS and Linux it is denied by name, so a data folder kept outside the home
-// folder still hides it. On Windows the sandbox account cannot read a data folder inside the director's profile;
-// one outside the profile is the open question C-40 records.
+// The files of the data folder a copy sits in that let a program act as the director (C-01, src/director-access.mjs):
+// the key, and the launch link, whose code sets the session cookie. They are found the way the packages are, in a
+// folder above the copy. On macOS and Linux they are denied by name, so a data folder kept outside the home folder
+// still hides them. On Windows the sandbox account cannot read a data folder inside the director's profile; one
+// outside the profile gets them denied before each run (below).
 export function builtInSandboxSecrets(root) {
   const secrets = [];
   for (let folder = path.dirname(root); folder !== path.dirname(folder); folder = path.dirname(folder))
-    if (fs.existsSync(path.join(folder, directorKeyName))) secrets.push(path.join(folder, directorKeyName));
+    for (const name of directorSecretNames)
+      if (fs.existsSync(path.join(folder, name))) secrets.push(path.join(folder, name));
   return secrets;
 }
 
@@ -317,9 +319,10 @@ export function openBuiltInSandboxPassThrough(paths, files = builtInSandboxFiles
 
 // On Windows the sandbox account reads what every account may read, and a data folder outside the director's profile
 // (C:\StudioDesk, say) lets every signed-in account read it: a probe on November 1, 2026 read the director's key and
-// the database there (C-40). Before each run, the director's key above the copy is denied to the runtime's sandbox
-// group by an entry of its own, so the key stays the director's wherever the data folder is. A key that cannot be
-// denied stops the run rather than leaving it readable.
+// the database there (C-40), and on November 2 the launch link's file beside the key. Before each run, the director's
+// key and launch link above the copy are denied to the runtime's sandbox group by an entry of their own, so they stay
+// the director's wherever the data folder is. A file that cannot be denied stops the run rather than leaving it
+// readable.
 export function denyBuiltInSandboxSecrets(secrets, run = spawnSync) {
   for (const secret of secrets) {
     const result = run('icacls', [secret, '/deny', `${builtInSandboxGroup}:(R)`], {
@@ -329,7 +332,7 @@ export function denyBuiltInSandboxSecrets(secrets, run = spawnSync) {
     });
     if (result.status !== 0)
       throw new Error(
-        `The sandbox could not be kept from the director's key (${secret}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
+        `The sandbox could not be kept from the director's sign-in file (${secret}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
       );
   }
   return secrets;

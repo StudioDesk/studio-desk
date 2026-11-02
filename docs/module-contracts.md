@@ -9,16 +9,20 @@ Every request needs the director's session or key (`src/director-access.mjs`).
 - **Why it's needed:** anything on the computer reaches the loopback address, a candidate's tests inside the built-in sandbox included (the runtime lets every loopback port through on Windows, since test suites start servers).
 - **The key:** `<data>/director-key`, 64 hex characters, made the first time a data folder is used. Deleting it signs every browser out at the next start.
 - **The launch link:** each start prints `http://127.0.0.1:<port>/launch/<code>`, a new code each start, also written to `<data>/launch-url`. Opening it sets an HttpOnly, SameSite=Strict, `Path=/` cookie (`studio_desk_<id>`, its name derived from the key so controllers on other ports of the same address never share one), then redirects to `/`. The cookie lasts about a year and survives restarts, because the key does. A code from an earlier start answers 403 with a page that says so.
-- **What it covers:** pages, the API's reads and the change stream answer 401 without the cookie or the header `x-studio-key: <key>`: a sign-in page carrying no request token, or JSON whose `error` points at the launch link. Commands still also need the page's request token (`x-studio-token`), as before.
+- **What it covers:** pages, the API's reads and the change stream answer 401 without the cookie or the header `x-studio-key: <key>`: a sign-in page carrying no request token, or JSON whose `error` points at the launch link and the header.
+- **Commands (POST and PATCH):**
+  - **Signed in by the cookie:** a command also needs the page's request token (`x-studio-token`), on every route. The browser sends the cookie by itself, so the token keeps another page in that browser, another port of the same address included, from riding on it. Without it: 403, naming both the token and the key.
+  - **Sent with `x-studio-key`:** a command needs no token. No page can send that header without knowing the key, and anyone who knows it can read the token from the page anyway. Only the header counts (`director.keyed`); a cookie, query string or body never stands for the key. Each successful keyed command leaves a `director_key` event in its project's activity, naming the route and task, so a script's decisions can be told from the director's own.
+  - **Other cases:** a read on an unknown `/api` route answers 404, and any method other than GET, POST or PATCH answers 405 with `Allow: POST, PATCH`. The token is compared in constant time, like the key.
 - **What it doesn't cover:**
   - the built dashboard's `/assets/*` files, which hold no records
   - `POST /api/attempts/:id/tests`, an agent's own test run, which its attempt's token authorizes
-- **Local tools** that act as the director (development scripts, a coordinating session's reads) send the key.
+- **Local tools** that act as the director (development scripts, a coordinating session's reads and commands) send the key. The key is the director's: it is never handed to an agent the controller runs, and no page, route or export returns it.
 - **`createStudio({ access })`** is `'session'` by default. `'open'` asks for neither, and is passed only by `scripts/sample-studio.mjs`, whose seeded studio the visual check photographs. It is a trusted option of the code that starts the controller, never a setting, a variable or a request.
-- **The sandbox and the key:**
+- **The sandbox, the key and the launch link** (`directorSecretNames`: `director-key` and `launch-url`, whose code sets the session cookie):
   - On Windows, the sandbox account can't read a data folder inside the director's profile.
-  - On macOS and Linux, the sandbox denies the home folder and, by name, any `director-key` above the copy (`builtInSandboxSecrets`).
-  - Before each Windows run the key file above the copy is also denied to the runtime's sandbox group (`denyBuiltInSandboxSecrets`, `icacls /deny`), since a data folder outside the profile is readable by every signed-in account; a key that cannot be denied stops the run. The database in such a folder stays readable to the sandbox (C-40 in the notes).
+  - On macOS and Linux, the sandbox denies the home folder and, by name, both files above the copy (`builtInSandboxSecrets`).
+  - Before each Windows run both files above the copy are also denied to the runtime's sandbox group (`denyBuiltInSandboxSecrets`, `icacls /deny`), since a data folder outside the profile is readable by every signed-in account; a file that cannot be denied stops the run. The database in such a folder stays readable to the sandbox (C-40 in the notes).
 - **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
 
 ## Bounded project context and source checks

@@ -1,4 +1,5 @@
 import { createStudio as createController } from '../src/server.mjs';
+import { directorAccess } from '../src/director-access.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,18 +47,29 @@ const fixtureBuiltInSandbox = runner => ({
   setup: () => false,
 });
 // Every request needs the director's session or key (C-01, src/director-access.mjs). The suite's requests act as
-// the director, as a local tool does: fetch sends a started studio's key to that studio's own address, so every
-// test still passes through the check. A test of the check itself sends a request without it with
+// the director: fetch sends a started studio's credentials to that studio's own address, so every test still
+// passes through the check. A request that carries the page's request token acts as the dashboard does, signed in
+// by the session cookie, so the token is still weighed on every command the suite sends; any other request acts as
+// a local tool does, with the key. A test of the check itself sends a request without either with
 // `{ directorKey: false }`, or reaches the address with node:http.
 const studioKeys = new Map(),
   plainFetch = globalThis.fetch;
+const sessionCookie = key => directorAccess(key).sessionCookie.split(';')[0];
+// The same choice for a request a test hands the server some other way: the session cookie beside a request token,
+// the key otherwise.
+export const directorCredentials = (key, headers = {}) =>
+  Object.keys(headers).some(name => name.toLowerCase() === 'x-studio-token')
+    ? { cookie: sessionCookie(key) }
+    : { 'x-studio-key': key };
 globalThis.fetch = (input, init = {}) => {
   const { directorKey: sendKey = true, ...rest } = init,
     url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
     key = sendKey ? [...studioKeys].find(([origin]) => url === origin || url.startsWith(origin + '/'))?.[1] : null;
   if (!key) return plainFetch(input, rest);
   const headers = new Headers(rest.headers ?? (input instanceof Request ? input.headers : undefined));
-  if (!headers.has('x-studio-key')) headers.set('x-studio-key', key);
+  const signedIn = headers.has('x-studio-key') || headers.has('cookie');
+  if (!signedIn && headers.has('x-studio-token')) headers.set('cookie', sessionCookie(key));
+  else if (!signedIn) headers.set('x-studio-key', key);
   return plainFetch(input, { ...rest, headers });
 };
 // The key header for a request a test sends some other way (node:http, or straight to the server): empty for an

@@ -3,9 +3,12 @@
 // test suites start servers), so a request token the dashboard page hands to anyone who asks is not enough. The
 // director signs in once from the launch link the controller prints when it starts; the link sets a cookie that
 // keeps that browser signed in, across restarts too, because the key behind it is kept in the data folder. Local
-// tools that run as the director (a coordinating session's reads, the development scripts) send the key itself.
-// The key file sits in the data folder, which the sandbox account cannot read on Windows (the profile's own
-// permissions) and which the sandbox hides on macOS and Linux (the home folder, and the key file by name).
+// tools that run as the director (a coordinating session's reads, the development scripts) send the key itself,
+// which also lets their commands go without the page's request token: the token keeps another page in the
+// director's browser from riding on the cookie, and no page can send the key header without knowing it.
+// The key file and the launch link's file sit in the data folder, which the sandbox account cannot read on Windows
+// inside the profile (the profile's own permissions); each run denies both files to the sandbox by name as well,
+// for a data folder outside the profile or the home folder (C-40).
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -13,6 +16,8 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 export const directorKeyName = 'director-key';
 export const directorKeyFile = directory => path.join(directory, directorKeyName);
 export const launchFileName = 'launch-url';
+// What lets a program act as the director: the key, and this start's launch link, whose code sets the session cookie.
+export const directorSecretNames = [directorKeyName, launchFileName];
 
 const digest = text => createHash('sha256').update(text).digest('hex');
 const wellFormed = key => /^[0-9a-f]{64}$/.test(key);
@@ -42,7 +47,7 @@ export function directorKey(directory) {
 }
 
 // Compares in constant time; a value of another length is simply not the same.
-function same(given, expected) {
+export function sameSecret(given, expected) {
   if (typeof given !== 'string') return false;
   const a = Buffer.from(given),
     b = Buffer.from(expected);
@@ -69,14 +74,18 @@ export function directorAccess(key) {
     cookieName,
     launchCode,
     sessionCookie: `${cookieName}=${session}; Path=/; HttpOnly; SameSite=Strict; Max-Age=34560000`,
+    // The key in its header, and nowhere else: a cookie, a query string or a body never stands for it.
+    keyed: headers => sameSecret(headers['x-studio-key'], key),
     authenticated: headers =>
-      same(headers['x-studio-key'], key) || same(cookieValue(headers.cookie, cookieName), session),
-    launches: code => same(code, launchCode),
+      sameSecret(headers['x-studio-key'], key) || sameSecret(cookieValue(headers.cookie, cookieName), session),
+    launches: code => sameSecret(code, launchCode),
   };
 }
 
 export const signInMessage =
-  "Open Studio desk from the link its window printed when it started (it begins with /launch/). That link signs this browser in; programs on this computer, such as an agent's tests, cannot.";
+  "Open Studio desk from the link its window printed when it started (it begins with /launch/). That link signs this browser in; programs on this computer, such as an agent's tests, cannot. A local tool running as you sends the X-Studio-Key header.";
+export const commandTokenMessage =
+  "This command needs the dashboard's request token (X-Studio-Token) or, from a local tool, the director's key (X-Studio-Key). If the dashboard was open across a restart, reload it.";
 
 export const signInPage = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Studio desk</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:4rem auto;padding:0 1rem;color:#1d2433;background:#f7f8fa}@media (prefers-color-scheme:dark){body{color:#e6e9ef;background:#12151c}}code{font-size:.95em}</style><h1>Open Studio desk from its link</h1><p>When Studio desk starts, its window prints a link that begins with <code>/launch/</code>. Open that link once and this browser stays signed in, also after restarts.</p><p>The link keeps programs on this computer, such as an agent's tests, from acting as you.</p>`;
 

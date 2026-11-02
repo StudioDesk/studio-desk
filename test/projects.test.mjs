@@ -6,7 +6,7 @@ import { Readable, Writable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createStudio } from './model-free-studio.mjs';
+import { createStudio, directorCredentials } from './model-free-studio.mjs';
 import { sourceRepository } from './source-repository.mjs';
 import { waitForTask } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
@@ -181,8 +181,8 @@ async function attemptLogFixture(t, count = 1007, transport = 'store') {
               url: parsed.pathname + parsed.search,
               headers: {
                 host: '127.0.0.1:0',
-                // Requests reach the server directly, as the director's own tool would send them (C-01).
-                'x-studio-key': c.app.directorKey,
+                // Requests reach the server directly, as the dashboard or the director's own tool would send them (C-01).
+                ...directorCredentials(c.app.directorKey, headers),
                 ...Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value])),
               },
             });
@@ -1336,7 +1336,7 @@ async function fileIntakeProject(t) {
       Object.assign(req, {
         url,
         method,
-        headers: { host: '127.0.0.1:0', 'x-studio-key': c.app.directorKey, ...headers },
+        headers: { host: '127.0.0.1:0', ...directorCredentials(c.app.directorKey, headers), ...headers },
       });
       c.app.server.emit('request', req, res);
     });
@@ -2043,7 +2043,7 @@ test('idea intake rejects untrusted fields, invalid ideas, protected requests an
   assert.equal(forgedHostStatus, 403);
   assert.deepEqual(intakeRecords(store), before);
   assert.equal(c.app.runner.active.size, 0);
-  assert.equal((await fetch(c.origin + intakeUrl, { headers: { 'X-Studio-Token': c.token } })).status, 403);
+  assert.equal((await fetch(c.origin + intakeUrl, { headers: { 'X-Studio-Token': c.token } })).status, 404);
   assert.equal((await c.request(intakeUrl, valid, 'PATCH')).status, 404);
   assert.deepEqual(intakeRecords(store), before);
 });

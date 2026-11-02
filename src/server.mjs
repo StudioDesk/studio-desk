@@ -8,9 +8,11 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Store } from './store.mjs';
 import {
+  commandTokenMessage,
   directorAccess,
   directorKey,
   launchFileName,
+  sameSecret,
   signInMessage,
   signInPage,
   staleLaunchPage,
@@ -329,6 +331,25 @@ export function createStudio({
     lastBroadcast = 0,
     broadcastTimer = null;
   const origin = () => `http://127.0.0.1:${actualPort}`;
+  // The line a command sent with the director's key leaves in its project's activity: which route, and the task it
+  // names. A command for no known project leaves it in the activity that belongs to no project. A line that cannot
+  // be written never fails the command.
+  const keyedCommandRecorded = (method, route, parts, data) => {
+    try {
+      const named = typeof data?.projectId === 'string' ? data.projectId : parts[1] === 'projects' ? parts[2] : null,
+        projectId = named && store.projects().some(project => project.id === named) ? named : null,
+        task = typeof data?.taskId === 'string' && /^[\w.:-]{1,120}$/.test(data.taskId) ? ` for ${data.taskId}` : '';
+      store.event(
+        'director_key',
+        null,
+        null,
+        `A local tool sent ${method} ${route}${task} with the director's key.`,
+        projectId,
+      );
+    } catch (error) {
+      console.warn(`The command sent with the director's key was not recorded: ${error.message}`);
+    }
+  };
   // A code-editing employee's test command calls back here (connectors/employee-tests.mjs).
   runner.controllerOrigin = origin;
   runner.loadMeasures = measures;
@@ -988,8 +1009,18 @@ export function createStudio({
         return json(res, await runEmployeeTests(runner, entry, data));
       }
       if (parts[0] === 'api') {
-        if (req.headers['x-studio-token'] !== csrf || !['POST', 'PATCH'].includes(req.method))
-          fail('Invalid controller request.', 403);
+        // Every read route answered above, so a read that gets here names no route; a command is a POST or a PATCH.
+        if (req.method === 'GET' || req.method === 'HEAD') fail('Unknown controller route.', 404);
+        if (!['POST', 'PATCH'].includes(req.method)) {
+          res.setHeader('Allow', 'POST, PATCH');
+          fail('Commands are sent with POST or PATCH.', 405);
+        }
+        // The page's request token keeps another page in the director's browser from riding on the session cookie,
+        // which the browser sends by itself. The key in its header needs no token: no page can send it without
+        // knowing the key, and whoever knows the key can read the token from the page anyway (the November 2
+        // review). A request signed in by the cookie alone still needs the token, on every route.
+        const keyed = director.keyed(req.headers);
+        if (!keyed && !sameSecret(req.headers['x-studio-token'], csrf)) fail(commandTokenMessage, 403);
         if (closing) fail('Controller is stopping.', 503);
         // Idea intake: the Studio desk route, and the general one (1.0 item 11), which starts the
         // project's own intake: source checks and a breakdown for a source project, the planner for
@@ -1003,6 +1034,10 @@ export function createStudio({
           req,
           intake ? ideaInputLimits.wireBytes : libraryUpload ? libraryLimits.wireBytes + 64 * 1024 : undefined,
         );
+        // A command a local tool sends with the key leaves a line in its project's activity before it runs, so the
+        // director can tell a script's decisions from their own (the decisions themselves still say the director),
+        // and a command's answer still carries only the records the command made.
+        if (keyed) keyedCommandRecorded(req.method, url.pathname, parts, data);
         // The newest change's seq before the command runs: its answer's records are what was recorded after it.
         if (req.headers['x-studio-records'] === '1' && typeof data?.projectId === 'string')
           commands.set(res, { projectId: data.projectId, after: store.version });

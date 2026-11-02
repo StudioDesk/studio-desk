@@ -82,7 +82,8 @@ test('the launch link signs a browser in with a session cookie that opens the da
   });
   assert.equal(write.status, 200);
   assert.equal(app.store.organization().maxParallel, 3);
-  // The request token still guards every command, as it guards against other pages in the browser.
+  // The request token still guards every command the cookie signs in, as it guards against other pages in the
+  // browser, and the refusal names both ways in.
   const tokenless = await fetch(origin + '/api/control', {
     ...plain,
     method: 'POST',
@@ -90,6 +91,10 @@ test('the launch link signs a browser in with a session cookie that opens the da
     body: JSON.stringify({ maxParallel: 2 }),
   });
   assert.equal(tokenless.status, 403);
+  const refusal = (await tokenless.json()).error;
+  assert.match(refusal, /X-Studio-Token/);
+  assert.match(refusal, /X-Studio-Key/);
+  assert.equal(app.store.organization().maxParallel, 3);
   // A link that is not this start's, or a cookie made up, signs nothing in.
   const stale = await fetch(origin + '/launch/' + 'f'.repeat(48), plain);
   assert.equal(stale.status, 403);
@@ -110,6 +115,90 @@ test("local tools send the data folder's key; a wrong key is refused", async t =
     401,
   );
   assert.equal((await fetch(origin + '/api/projects', { ...plain, headers: { 'x-studio-key': 'é' } })).status, 401);
+});
+
+const keyedEvents = app =>
+  app.store.db.prepare("SELECT message FROM events WHERE kind='director_key' ORDER BY seq").all();
+
+test("a command sent with the director's key needs no request token, and leaves a line in the activity first", async t => {
+  const { app, origin } = await studio(t);
+  const sent = await fetch(origin + '/api/control', {
+    ...plain,
+    method: 'POST',
+    headers: { 'x-studio-key': app.directorKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ maxParallel: 3 }),
+  });
+  assert.equal(sent.status, 200);
+  assert.equal(app.store.organization().maxParallel, 3);
+  const [line] = keyedEvents(app);
+  assert.match(line.message, /^A local tool sent POST \/api\/control with the director's key\.$/);
+  // A command that is refused was still sent with the key, and says so.
+  const refused = await fetch(origin + '/api/no-such-command', {
+    ...plain,
+    method: 'POST',
+    headers: { 'x-studio-key': app.directorKey, 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(refused.status, 404);
+  assert.equal(keyedEvents(app)[1].message, "A local tool sent POST /api/no-such-command with the director's key.");
+});
+
+test('only the key header stands for the key, and the session cookie alone still needs the token', async t => {
+  const { app, origin } = await studio(t);
+  const cookie = (await fetch(app.launchUrl, { ...plain, redirect: 'manual' })).headers.get('set-cookie').split(';')[0];
+  const command = (headers, { query = '', body = { maxParallel: 5 } } = {}) =>
+    fetch(origin + '/api/control' + query, {
+      ...plain,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    });
+  // Signed in by the cookie, the key in a query string, a cookie or the body changes nothing: the token is needed.
+  for (const attempt of [
+    command({ cookie }, { query: '?key=' + app.directorKey }),
+    command({ cookie: `${cookie}; x-studio-key=${app.directorKey}` }),
+    command({ cookie }, { body: { maxParallel: 5, key: app.directorKey, 'x-studio-key': app.directorKey } }),
+  ])
+    assert.equal((await attempt).status, 403);
+  // Without the cookie, those are not signed in at all; a wrong key is refused before any token is weighed.
+  assert.equal((await command({}, { query: '?key=' + app.directorKey })).status, 401);
+  assert.equal((await command({ 'x-studio-key': 'b'.repeat(64) })).status, 401);
+  // Another page in the browser, even one that somehow knew the key, is refused for its origin first.
+  const crossOrigin = await command({ 'x-studio-key': app.directorKey, Origin: 'http://127.0.0.1:1' });
+  assert.equal(crossOrigin.status, 403);
+  assert.match((await crossOrigin.json()).error, /Cross-origin/);
+  assert.notEqual(app.store.organization().maxParallel, 5);
+});
+
+test('reads answer an unknown route with 404 and other methods with 405', async t => {
+  const { app, origin } = await studio(t);
+  const key = { ...plain, headers: { 'x-studio-key': app.directorKey } };
+  assert.equal((await fetch(origin + '/api/no-such-read', key)).status, 404);
+  const deleted = await fetch(origin + '/api/control', { ...key, method: 'DELETE' });
+  assert.equal(deleted.status, 405);
+  assert.equal(deleted.headers.get('allow'), 'POST, PATCH');
+  assert.match((await deleted.json()).error, /POST or PATCH/);
+});
+
+test("no page, read or export hands out the director's key", async t => {
+  const { app, origin } = await studio(t);
+  const key = { ...plain, headers: { 'x-studio-key': app.directorKey } };
+  const project = (await (await fetch(origin + '/api/projects', key)).json()).projects[0]?.id;
+  const routes = ['/', '/api/projects', '/api/templates', '/api/changes?after=0', '/api/state'];
+  if (project)
+    routes.push(
+      `/api/state?mode=dashboard&projectId=${encodeURIComponent(project)}`,
+      `/api/export?projectId=${encodeURIComponent(project)}`,
+    );
+  for (const route of routes) {
+    const answer = await fetch(origin + route, key);
+    assert.doesNotMatch(await answer.text(), new RegExp(app.directorKey), route);
+  }
+  for (const route of ['/', '/api/projects', app.launchUrl.slice(origin.length), '/launch/' + 'f'.repeat(48)]) {
+    const answer = await fetch(origin + route, { ...plain, redirect: 'manual' });
+    assert.ok(!(await answer.text()).includes(app.directorKey), route);
+    assert.ok(!(answer.headers.get('set-cookie') || '').includes(app.directorKey), route);
+  }
 });
 
 test('a browser stays signed in across a restart, and an old launch link stops working', async t => {

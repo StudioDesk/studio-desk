@@ -24,7 +24,7 @@ import {
   readBuiltInSandboxStatus,
 } from '../src/adapters/built-in-sandbox.mjs';
 
-test("before a Windows run the director's key above the copy is denied to the sandbox group, or the run stops", t => {
+test("before a Windows run the director's key and launch link above the copy are denied to the sandbox group, or the run stops", t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-secrets-')),
     root = path.join(directory, 'data', 'projects', 'p', 'jobs', 'a', 'copy');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -33,12 +33,17 @@ test("before a Windows run the director's key above the copy is denied to the sa
   const key = path.join(directory, 'data', 'director-key');
   fs.writeFileSync(key, 'a'.repeat(64));
   assert.deepEqual(builtInSandboxSecrets(root), [key]);
+  // The launch link beside it sets the director's session cookie, so it is denied as the key is.
+  const launch = path.join(directory, 'data', 'launch-url');
+  fs.writeFileSync(launch, 'http://127.0.0.1:4317/launch/' + 'c'.repeat(48));
+  assert.deepEqual(builtInSandboxSecrets(root), [key, launch]);
+  fs.rmSync(launch);
   const calls = [];
   denyBuiltInSandboxSecrets([key], (program, args) => (calls.push([program, args]), { status: 0 }));
   assert.deepEqual(calls, [['icacls', [key, '/deny', 'sandbox-runtime-users:(R)']]]);
   assert.throws(
     () => denyBuiltInSandboxSecrets([key], () => ({ status: 5, stderr: 'Access is denied.' })),
-    /could not be kept from the director's key .*Access is denied/,
+    /could not be kept from the director's sign-in file .*Access is denied/,
   );
 });
 
@@ -216,6 +221,14 @@ test('a run writes only the copy it tests, reads the packages above it, and reac
   const key = path.join(directory, 'data', 'director-key');
   fs.writeFileSync(key, 'a'.repeat(64));
   assert.deepEqual(builtInSandboxSettings({ ...run, platform: 'linux', home }).filesystem.denyRead, [home, key]);
+  const launch = path.join(directory, 'data', 'launch-url');
+  fs.writeFileSync(launch, 'http://127.0.0.1:4317/launch/' + 'c'.repeat(48));
+  assert.deepEqual(builtInSandboxSettings({ ...run, platform: 'linux', home }).filesystem.denyRead, [
+    home,
+    key,
+    launch,
+  ]);
+  fs.rmSync(launch);
   assert.deepEqual(builtInSandboxSettings({ ...run, platform: 'win32' }).filesystem.denyRead, []);
   fs.rmSync(key);
   assert.deepEqual(posix.filesystem.allowRead, [root, ...settings.filesystem.allowRead, run.seccomp]);
