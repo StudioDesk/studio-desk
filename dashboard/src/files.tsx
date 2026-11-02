@@ -1,9 +1,9 @@
 // Recorded files read in the dashboard (v1.0 item 14; app-work.js previews and readers): text and Markdown in
 // place through the shared reader (public/markdown-reader.js), images and logical layouts as pictures, a review
 // as its findings, and any file over the page beside its download. Candidate source is evidence and is read in
-// the source diff, never here. Each read is cached by its attempt, path and recorded hash.
+// the source diff, never here. Each read is cached by its attempt, path and recorded hash, or a caller's source key.
 import '../../public/markdown-reader.js';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, type QueryKey } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
 import type { AttemptSummary } from './api';
@@ -42,17 +42,33 @@ export const readableFile = (attempt: AttemptSummary, item: FileRecord) =>
 export const previewable = (attempt: AttemptSummary, item: FileRecord) =>
   !candidateSourceFile(attempt, item) && (imageFile(item.path) || item.path.endsWith('layout.json'));
 
+// A caller may name another recorded source (for example a library revision) with its own immutable cache key.
+// Existing idea readers keep their attempt/path/hash identities, separately for text and pictures.
+export type FileSource = { item: FileRecord } & (
+  | { projectId: string; attemptId: string; url?: never; queryKey?: never }
+  | { url: string; queryKey: QueryKey; projectId?: never; attemptId?: never }
+);
+
+function fileSource(source: FileSource, type: 'file' | 'picture' = 'file') {
+  return source.url !== undefined
+    ? { url: source.url, queryKey: source.queryKey }
+    : {
+        url: artifactUrl(source.projectId, source.attemptId, source.item.path),
+        queryKey: [source.projectId, type, source.attemptId, source.item.path, source.item.hash],
+      };
+}
+
 async function fetchFile(url: string, signal?: AbortSignal) {
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`The recorded file could not be read (${response.status}).`);
   return response;
 }
 
-function useFileText(projectId: string, attemptId: string, item: FileRecord, enabled = true) {
+function useFileText(source: FileSource) {
+  const { url, queryKey } = fileSource(source);
   return useQuery({
-    enabled,
-    queryKey: [projectId, 'file', attemptId, item.path, item.hash],
-    queryFn: async ({ signal }) => (await fetchFile(artifactUrl(projectId, attemptId, item.path), signal)).text(),
+    queryKey,
+    queryFn: async ({ signal }) => (await fetchFile(url, signal)).text(),
     staleTime: Infinity,
   });
 }
@@ -85,8 +101,9 @@ export function TextReader({ text, path = '', markdown = false }: { text: string
   );
 }
 
-export function FileText({ projectId, attemptId, item }: { projectId: string; attemptId: string; item: FileRecord }) {
-  const { data, error } = useFileText(projectId, attemptId, item);
+export function FileText(source: FileSource) {
+  const { item } = source,
+    { data, error } = useFileText(source);
   if (error)
     return (
       <p className="sd-meta" role="status" style={{ margin: 0, color: 'var(--bad)' }}>
@@ -218,7 +235,7 @@ function LayoutThumbnail({ layout }: { layout: Layout }) {
   );
 }
 
-function usePicture(url: string, name: string, key: unknown[]) {
+function usePicture(url: string, name: string, key: QueryKey) {
   return useQuery({
     queryKey: key,
     queryFn: async ({ signal }): Promise<Picture> => {
@@ -250,14 +267,10 @@ function PictureView({ picture, name }: { picture: ReturnType<typeof usePicture>
   );
 }
 
-export function Preview({ projectId, attemptId, item }: { projectId: string; attemptId: string; item: FileRecord }) {
-  const picture = usePicture(artifactUrl(projectId, attemptId, item.path), item.path, [
-    projectId,
-    'picture',
-    attemptId,
-    item.path,
-    item.hash,
-  ]);
+export function Preview(source: FileSource) {
+  const { item } = source,
+    { url, queryKey } = fileSource(source, 'picture'),
+    picture = usePicture(url, item.path, queryKey);
   return <PictureView picture={picture} name={item.path} />;
 }
 
@@ -369,15 +382,19 @@ function CsvTable({ text }: { text: string }) {
 
 // A recorded file read in place by its type: a picture framed, a review as its findings, other JSON formatted, a CSV
 // as a table, and any other text through the reader.
-export function FileBody({ projectId, attemptId, item }: { projectId: string; attemptId: string; item: FileRecord }) {
-  const picture = imageFile(item.path) || item.path.endsWith('layout.json'),
-    text = useFileText(projectId, attemptId, item, !picture);
-  if (picture)
+export function FileBody(source: FileSource) {
+  if (imageFile(source.item.path) || source.item.path.endsWith('layout.json'))
     return (
       <div className="sd-picture__frame sd-picture__frame--still">
-        <Preview projectId={projectId} attemptId={attemptId} item={item} />
+        <Preview {...source} />
       </div>
     );
+  return <TextBody {...source} />;
+}
+
+function TextBody(source: FileSource) {
+  const { item } = source,
+    text = useFileText(source);
   if (text.error)
     return (
       <p className="sd-meta" style={{ margin: 0 }}>

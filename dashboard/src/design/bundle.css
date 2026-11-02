@@ -4172,6 +4172,88 @@ button.sd-row[aria-pressed='true'] {
   }
 }
 
+/* The picked work file, beside the list or below its row on a phone. */
+.sd-filepanel {
+  min-width: 0;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  overflow-wrap: anywhere;
+}
+.sd-filepanel__head,
+.sd-filepanel__version-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-12);
+}
+.sd-filepanel__head {
+  flex-wrap: wrap;
+}
+.sd-filepanel__name {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.sd-filepanel__name h2 {
+  margin: 0;
+  font: 800 20px/1.2 var(--font-display);
+  letter-spacing: -0.02em;
+}
+.sd-filepanel__name p,
+.sd-filepanel__body > p,
+.sd-filepanel > section > h3 {
+  margin: 0;
+}
+.sd-filepanel__body {
+  min-width: 0;
+  overflow: auto;
+}
+.sd-filepanel > section {
+  min-width: 0;
+}
+.sd-filepanel__versions {
+  min-width: 0;
+  list-style: none;
+  margin: var(--space-8) 0 0;
+  padding: 0;
+}
+.sd-filepanel__version {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-10) 0;
+  border-top: 1.5px solid var(--line);
+}
+.sd-filepanel__version-head {
+  flex-wrap: wrap;
+  gap: var(--space-10);
+}
+.sd-filepanel__dot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--line-2);
+}
+.sd-filepanel__dot--current {
+  background: var(--brand);
+}
+.sd-filepanel__actions {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  padding-top: var(--space-10);
+  border-top: 1.5px solid var(--line);
+}
+
 /* Result: what a step returned, read in place. Its picture opens the file over the page; its summary and handoff;
    each file it returned with Download and View; a recorded text as Markdown or plain text, the first part until
    the director asks for the rest; how its phases ran; and a planner's proposed work */
