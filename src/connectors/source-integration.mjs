@@ -53,14 +53,21 @@ export function gitAsync(root, args, { raw = false } = {}) {
 // rather than overwrite uncommitted edits, so it leaves other local edits alone. Work on a
 // release line that is not checked out (src/connectors/source-lines.mjs) needs no branch
 // checked out (attached false; branch is then null when HEAD is detached).
+// Its answers take four git calls, where they took six: the top folder comes with the commit, and both identity settings
+// in one read. Integrations, carries and story starts each ask it, and its calls were a third of the synchronous git
+// time in the integration tests (C-20, November 2). A repository with no commit yet still answers as it did.
 export function repositoryState(root, action = 'integrating source', { clean = true, attached = true } = {}) {
-  let top;
+  let top, head;
   try {
-    top = git(root, ['rev-parse', '--show-toplevel']);
-  } catch (error) {
-    throw new Error(
-      gitRefusal(error, 'the live source') || `The live source must be a git repository before ${action}.`,
-    );
+    [top, head] = git(root, ['rev-parse', '--show-toplevel', 'HEAD']).split('\n');
+  } catch {
+    try {
+      top = git(root, ['rev-parse', '--show-toplevel']);
+    } catch (error) {
+      throw new Error(
+        gitRefusal(error, 'the live source') || `The live source must be a git repository before ${action}.`,
+      );
+    }
   }
   if (!samePath(top, root)) throw new Error('The live source must be the root of its git repository.');
   let branch = null;
@@ -71,16 +78,20 @@ export function repositoryState(root, action = 'integrating source', { clean = t
   }
   if (clean && git(root, ['status', '--porcelain', '--untracked-files=no']))
     throw new Error(`Commit or stash tracked changes in the live source before ${action}.`);
-  const configured = key => {
-    try {
-      return git(root, ['config', key]);
-    } catch {
-      return '';
+  // Each setting's last value counts, as `git config <key>` reads it: the repository's own after the global one. An
+  // empty value is listed as the key alone, and counts as unset, as it did.
+  const identity = {};
+  try {
+    for (const line of git(root, ['config', '--get-regexp', '^user\\.(name|email)$']).split('\n')) {
+      const at = line.indexOf(' ');
+      if (line) identity[at > 0 ? line.slice(0, at) : line.trim()] = at > 0 ? line.slice(at + 1).trim() : '';
     }
-  };
-  if (!configured('user.name') || !configured('user.email'))
+  } catch {
+    // Neither is set.
+  }
+  if (!identity['user.name'] || !identity['user.email'])
     throw new Error(`Configure git user.name and user.email before ${action}.`);
-  return { branch, head: git(root, ['rev-parse', 'HEAD']) };
+  return { branch, head: head ?? git(root, ['rev-parse', 'HEAD']) };
 }
 // What to say when git refuses a folder for a reason other than that no repository is there (another user's
 // repository without safe.directory, a broken configuration, no git at all), in git's own words; null otherwise.
