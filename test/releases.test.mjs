@@ -163,6 +163,45 @@ test('Release moves open work on when asked, the planner drafts the notes, and a
   assert.match((await release({})).data.error, /already released/);
 });
 
+test("a release's notes name the fixes carried to its line from another since its last release, once", async t => {
+  const c = await released(t),
+    store = c.app.store;
+  await make(c, '1.0.1');
+  const made = await c.request(`/api/projects/${project}/milestones`, {
+    projectId: project,
+    version: '1.1.0',
+    goal: 'New features.',
+  });
+  const feature = made.data.milestone;
+  c.taskId = await c.propose('feature');
+  assert.equal((await move(c, c.taskId, feature.id)).status, 200);
+  await c.start();
+  const review = await c.review(await c.wait(c.taskId));
+  await c.accept(review.taskId);
+  assert.equal((await c.integration(review)).status, 200);
+  await c.settled(review, ['integrated']);
+  // A fix of 1.0.1 carried to main, as the carry flow records one: its release names the line, not a milestone.
+  const { workflowReference, runReference, proposalReference, ...base } = store.task(c.taskId);
+  store.putTask({
+    ...base,
+    id: 'T-carried',
+    title: 'Carry to main: Accept a number written as text',
+    brief: 'Marking an item done accepts its number written as text.',
+    carryOf: { storyId: 'T-fix', line: 'main' },
+    release: { line: 'main', by: { type: 'carry', storyId: 'T-fix' } },
+  });
+  const started = await c.request(`/api/projects/${project}/milestones/${feature.id}/release`, { projectId: project });
+  assert.equal(started.status, 201, JSON.stringify(started.data));
+  const { brief } = started.data.task;
+  assert.match(brief, new RegExp(`- ${c.taskId}: Improve feature`));
+  assert.match(
+    brief,
+    /carried to this one; say so:\n- T-carried: Carry to main: Accept a number written as text \(Marking an item done/,
+  );
+  assert.match(brief, /whose goal is: New features\. Start with/, 'The goal ends the sentence with one full stop.');
+  assert.deepEqual(milestone(c, feature.id).release.carried, ['T-carried']);
+});
+
 test('the first release of a new major moves the older major to a line of its own, and its later minors land there', async t => {
   const c = await released(t),
     store = c.app.store;

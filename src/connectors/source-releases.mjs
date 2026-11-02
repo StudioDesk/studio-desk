@@ -127,17 +127,35 @@ export function startRelease(store, runtime, projectId, milestoneId, { moveOpen 
   if (!planner)
     throw new Error('Choose an enabled breakdown owner in Edit the teams; the planner drafts the release notes.');
   const line = lineOf(store, projectId, milestone),
-    list = stories
-      .map(
-        story =>
-          `- ${story.id}: ${story.title}${story.brief ? ` (${String(story.brief).split('\n').at(-1).slice(0, 300)})` : ''}`,
-      )
-      .join('\n');
+    item = story =>
+      `- ${story.id}: ${story.title}${story.brief ? ` (${String(story.brief).split('\n').at(-1).slice(0, 300)})` : ''}`,
+    list = stories.map(item).join('\n');
+  // The fixes carried or brought to this line from another since its last release: they belong to their own story's
+  // milestone, so this release's work leaves them out, and its notes named none of them (November 2, 2026, the live
+  // proof: 1.1.0's notes left out both of 1.0.1's fixes carried to main). Each release records them, so the next one
+  // on the line does not name them again.
+  const releasedHere = new Set(
+      projectMilestones(store, projectId)
+        .filter(other => other.release && lineOf(store, projectId, other) === line)
+        .flatMap(other => [...(other.release.stories ?? []), ...(other.release.carried ?? [])]),
+    ),
+    carried = store
+      .tasks()
+      .filter(
+        task =>
+          recordProject(task) === projectId &&
+          task.carryOf?.line === line &&
+          integrated(task) &&
+          !releasedHere.has(task.id) &&
+          !stories.includes(task),
+      ),
+    // The goal's own full stop, if it has one, ends the sentence it is quoted in.
+    goal = milestone.goal?.replace(/[.!?]+$/, '');
   const notes = {
     id: 'T-' + randomUUID().slice(0, 8),
     projectId,
     title: `Draft the ${milestone.version} release notes`,
-    brief: `Write release-notes.md: the release notes for ${milestone.version}${line ? ` (${line})` : ''}${milestone.goal ? `, whose goal is: ${milestone.goal}` : ''}. Start with the heading "## ${milestone.version}", then say in plain words what changed for the people who use it, from these integrated stories:\n${list}\nWrite for users: what they can now do or what was fixed, not how it was built, and no file names. The controller puts it at the top of RELEASE-NOTES.md when the director accepts it.`,
+    brief: `Write release-notes.md: the release notes for ${milestone.version}${line ? ` (${line})` : ''}${goal ? `, whose goal is: ${goal}` : ''}. Start with the heading "## ${milestone.version}", then say in plain words what changed for the people who use it, from these integrated stories:\n${list}\n${carried.length ? `It also holds these fixes, made on another line and carried to this one; say so:\n${carried.map(item).join('\n')}\n` : ''}Write for users: what they can now do or what was fixed, not how it was built, and no file names. The controller puts it at the top of RELEASE-NOTES.md when the director accepts it.`,
     acceptance: `release-notes.md starts with "## ${milestone.version}" and covers every story above in plain words.`,
     kind: 'general',
     workerId: planner.id,
@@ -170,6 +188,7 @@ export function startRelease(store, runtime, projectId, milestoneId, { moveOpen 
     line: line ?? null,
     tag,
     stories: stories.map(story => story.id),
+    ...(carried.length ? { carried: carried.map(task => task.id) } : {}),
     at: new Date().toISOString(),
   };
   fresh.save();
