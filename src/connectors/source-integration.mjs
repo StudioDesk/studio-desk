@@ -162,8 +162,9 @@ export function stopIntegrationProcess(runtime) {
   // they close.
   if (runtime.closing) turn?.release();
 }
-// The computer's turn for full test suites (core/test-turn.mjs), taken for the verification's test run alone under the
-// journal's identity, which holds the project's source too, so its time limit starts with the turn. Integrations,
+// The computer's turn for full test suites (core/test-turn.mjs), taken for the verification's install, build and test
+// run under the journal's identity, which holds the project's source too; each of those steps' time limits starts
+// once the turn is held. Integrations,
 // carries and releases all verify here. While it waits, the journal records { reason, since, holder } as a waiting
 // attempt does, until the turn is taken. It waits outside the attempts' first-come queue, which serves attempts only:
 // when a lease change frees the turn, it is tried once the change has settled and before that queue is served, since
@@ -541,7 +542,10 @@ export async function verifyIntegration(runtime, journal, directory, configurati
     if (outside.length) throw new Error(`The formatter changed ${outside.join(', ')}, outside the reviewed files.`);
     if (files.some(file => fs.existsSync(path.join(worktree, file)) !== kept.includes(file)))
       throw new Error('The merged source does not hold exactly the reviewed files.');
-    return await observeIntegrationPhase(runtime, journal, 'integration.verification', async phase => {
+    // The verification holds the computer's test turn from its install through its tests (C-10's interim, November
+    // 2026): the packages are installed for one lockfile at a time in the data folder, so another line's install never
+    // replaces them under a suite that is running. The turn is given back however the verification ends.
+    const verifyHeld = async phase => {
       const plan = sourcePlan(worktree, profile);
       // The merged source gets its installed packages first (MP-026), outside the test sandbox.
       const install = installStep(runtime, worktree, installsPackages(profile));
@@ -625,20 +629,13 @@ export async function verifyIntegration(runtime, journal, directory, configurati
       const test = runtime.sourceCheckCommand || candidateTestCommand(plan, configuration);
       // Same command-local test profile and copied-harness marker as candidate tests.
       environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-      // The test run alone takes the computer's test turn, and gives it back however it ends.
-      const turn = await takeVerificationTurn(runtime, journal);
-      let tested;
-      try {
-        tested = await run(runtime, test.executable, test.args, {
-          cwd: worktree,
-          environment,
-          timeoutMs: testTimeoutMs,
-          phase,
-          record: path.join(directory, 'test-output-full.txt'),
-        });
-      } finally {
-        turn.release();
-      }
+      const tested = await run(runtime, test.executable, test.args, {
+        cwd: worktree,
+        environment,
+        timeoutMs: testTimeoutMs,
+        phase,
+        record: path.join(directory, 'test-output-full.txt'),
+      });
       fs.writeFileSync(path.join(directory, 'test-output.txt'), tested.stdout);
       fs.writeFileSync(path.join(directory, 'test-errors.txt'), tested.stderr);
       if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash)
@@ -685,6 +682,14 @@ export async function verifyIntegration(runtime, journal, directory, configurati
         startedAt,
         finishedAt: new Date().toISOString(),
       };
+    };
+    return await observeIntegrationPhase(runtime, journal, 'integration.verification', async phase => {
+      const turn = await takeVerificationTurn(runtime, journal);
+      try {
+        return await verifyHeld(phase);
+      } finally {
+        turn.release();
+      }
     });
   } catch (error) {
     return {

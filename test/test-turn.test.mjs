@@ -114,11 +114,9 @@ test("an idea's checks wait for a candidate's test run, then run and pass; the w
   runner.sourceCheckCommand = command('pass');
   const check = runner.start(addChecks(c, 'T-check-a')).attemptId;
   const waiting = await waitFor(() => store.attempt(check).testTurn, 'the checks to wait for the turn');
-  // The checks installed their packages and wait to start their test process.
-  assert.deepEqual(
-    phases(store, check, 'install').map(event => event.payload.boundary),
-    ['start', 'finish'],
-  );
+  // The checks wait before they install their packages (C-10's interim): the data folder holds one lockfile's packages
+  // at a time, so an install while another suite runs could replace the packages under it.
+  assert.deepEqual(phases(store, check, 'install'), [], 'Nothing is installed while it waits.');
   assert.deepEqual(phases(store, check, 'test'), [], 'No test process starts while it waits.');
   assert.equal(store.attempt(check).pid, null);
   assert.equal(store.attempt(check).status, 'running');
@@ -135,8 +133,10 @@ test("an idea's checks wait for a candidate's test run, then run and pass; the w
   assert.equal(done.result.checks[0].status, 'pass');
   assert.equal(turnEvents(store, check).length, 1);
   const ended = phases(store, story, 'test').at(-1),
+    installed = phases(store, check, 'install')[0],
     began = phases(store, check, 'test')[0];
   assert.equal(ended.payload.boundary, 'finish');
+  assert.ok(installed.seq > ended.seq, "The checks' install starts once the candidate's tests have ended.");
   assert.ok(began.seq > ended.seq, "The checks' tests start once the candidate's have ended.");
   assert.equal((await c.wait(c.taskId)).id, story);
   assert.equal(holder(store), null);
@@ -178,7 +178,7 @@ test("a candidate's test run waits while an idea's checks run their tests, thoug
   assert.equal(holder(store), null);
 });
 
-test('the turn is held only while tests run: free while editing and installing, and after a failing or stopped run', async t => {
+test('the turn is held from the install through the tests: free while editing, and after a failing or stopped run', async t => {
   const c = await setup(t, 'fail', ['src/core/workflows.mjs'], {}, true),
     store = c.app.store,
     runner = c.app.runner,
@@ -196,7 +196,8 @@ test('the turn is held only while tests run: free while editing and installing, 
     seen.filter(([id, phaseId]) => id === story && phaseId !== 'attempt').map(([, phaseId, held]) => [phaseId, held]),
   );
   assert.equal(during['source.edit'], null);
-  assert.equal(during.install, null);
+  // Held through the install, so another lockfile's install never replaces the packages under this run (C-10).
+  assert.equal(during.install, story);
   assert.equal(during.test, story);
   assert.equal(holder(store), null, 'A failing run gives the turn back.');
   // A run stopped while it holds the turn gives it back, and a stopped waiter leaves the queue without it.

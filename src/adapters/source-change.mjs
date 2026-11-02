@@ -535,9 +535,10 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     // Only the copied test harness consumes this marker. Controller runtime
     // code never selects a termination policy from an environment variable.
     environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-    // The candidate gets its installed packages first (MP-026), then its build (1.1), then the tests run on it. The test
-    // run alone waits for the computer's test turn.
-    const tests = () => takeTestTurn(runtime, entry, { limitMs, start: runTests });
+    // The candidate waits for the computer's test turn, then, holding it, gets its installed packages (MP-026), its
+    // build (1.1) and its tests: the packages are installed for one lockfile at a time in the data folder, so another
+    // line's install never replaces them under a suite that is running (C-10's interim, November 2026).
+    const tests = () => runTests();
     const runTests = () => {
       let stdout = '',
         stderr = '';
@@ -746,7 +747,11 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
           output = (output + chunk).slice(-buildOutputBytes);
         });
     };
-    runInstallStep(runtime, entry, candidate, installsPackages(profileOf(scope.source)), environment, buildStep);
+    takeTestTurn(runtime, entry, {
+      limitMs,
+      start: () =>
+        runInstallStep(runtime, entry, candidate, installsPackages(profileOf(scope.source)), environment, buildStep),
+    });
   };
 }
 

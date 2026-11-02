@@ -92,14 +92,17 @@ function testSnapshot(runtime, entry, a, snapshot) {
   for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
   // In a sandbox the copied harness runs as candidate tests do; only it reads this marker.
   if (sandboxed) environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-  // The copy gets its installed packages first (MP-026), then the tests run on it. The test run alone waits for the
-  // computer's test turn, and the attempt's time limit starts again with it.
-  runInstallStep(runtime, entry, snapshot, installsPackages(profileOf(a.sourceCheck)), environment, () =>
-    takeTestTurn(runtime, entry, {
-      limitMs: a.assignment?.maxSeconds * 1000,
-      start: () => runTests(runtime, entry, a, command, snapshot, environment),
-    }),
-  );
+  // The checks wait for the computer's test turn, and the attempt's time limit starts again with it. Holding the turn,
+  // the copy gets its installed packages (MP-026), then the tests run on it: the packages are installed for one
+  // lockfile at a time in the data folder, so another line's install never replaces them under a suite that is
+  // running (C-10's interim, November 2026).
+  takeTestTurn(runtime, entry, {
+    limitMs: a.assignment?.maxSeconds * 1000,
+    start: () =>
+      runInstallStep(runtime, entry, snapshot, installsPackages(profileOf(a.sourceCheck)), environment, () =>
+        runTests(runtime, entry, a, command, snapshot, environment),
+      ),
+  });
 }
 
 function runTests(runtime, entry, a, command, snapshot, environment) {
