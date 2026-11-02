@@ -13,6 +13,7 @@ import {
   builtInSandbox,
   builtInSandboxCommand,
   builtInSandboxCommandLine,
+  builtInSandboxDataFolder,
   builtInSandboxEnvironment,
   builtInSandboxRunner,
   builtInSandboxRuntimeEnvironment,
@@ -20,6 +21,7 @@ import {
   builtInSandboxSettings,
   builtInSandboxState,
   builtInSandboxVersion,
+  denyBuiltInSandboxData,
   denyBuiltInSandboxSecrets,
   readBuiltInSandboxStatus,
 } from '../src/adapters/built-in-sandbox.mjs';
@@ -44,6 +46,39 @@ test("before a Windows run the director's key and launch link above the copy are
   assert.throws(
     () => denyBuiltInSandboxSecrets([key], () => ({ status: 5, stderr: 'Access is denied.' })),
     /could not be kept from the director's sign-in file .*Access is denied/,
+  );
+  // The tools' keys are a folder: its entry reaches every key in it.
+  const toolKeys = path.join(directory, 'data', 'tool-keys');
+  fs.mkdirSync(toolKeys);
+  assert.deepEqual(builtInSandboxSecrets(root), [key, toolKeys]);
+  calls.length = 0;
+  denyBuiltInSandboxSecrets([key, toolKeys], (program, args) => (calls.push([program, args]), { status: 0 }));
+  assert.deepEqual(calls, [
+    ['icacls', [key, '/deny', 'sandbox-runtime-users:(R)']],
+    ['icacls', [toolKeys, '/deny', 'sandbox-runtime-users:(OI)(CI)(R)']],
+  ]);
+});
+
+test('before a Windows run the rest of the data folder is denied to the sandbox group, its copy let back in by its grant', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-data-')),
+    data = path.join(directory, 'data'),
+    root = path.join(data, 'projects', 'p', 'jobs', 'a', 'copy');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.mkdirSync(root, { recursive: true });
+  assert.equal(builtInSandboxDataFolder(root), null, 'a copy outside any data folder has none to deny');
+  const calls = [],
+    run = (program, args) => (calls.push([program, args]), { status: 0 });
+  assert.equal(denyBuiltInSandboxData(null, run), null);
+  assert.deepEqual(calls, []);
+  fs.writeFileSync(path.join(data, 'director-key'), 'a'.repeat(64));
+  assert.equal(builtInSandboxDataFolder(root), data);
+  // Reading what anything in it holds, its own listing included; looking at a folder stays allowed, as Node looks at
+  // each folder on the way to the copy.
+  assert.equal(denyBuiltInSandboxData(data, run), data);
+  assert.deepEqual(calls, [['icacls', [data, '/deny', 'sandbox-runtime-users:(OI)(CI)(RD)']]]);
+  assert.throws(
+    () => denyBuiltInSandboxData(data, () => ({ status: 5, stderr: 'Access is denied.' })),
+    /could not be kept from the data folder .*Access is denied/,
   );
 });
 
@@ -216,15 +251,18 @@ test('a run writes only the copy it tests, reads the packages above it, and reac
     posix = builtInSandboxSettings({ ...run, platform: 'linux', home });
   assert.deepEqual(posix.network, settings.network);
   assert.deepEqual(posix.filesystem.denyRead, [home]);
-  // The director's key of the data folder above the copy (C-01) is denied by name there, so a data folder kept
-  // outside the home folder still hides it; Windows' account reads nothing in the profile it is not given.
-  const key = path.join(directory, 'data', 'director-key');
+  // The data folder above the copy (C-40) and the director's key in it (C-01) are denied there by name, so a data
+  // folder kept outside the home folder still hides them, the copy and its packages let back in below; Windows'
+  // account reads nothing in the profile it is not given.
+  const data = path.join(directory, 'data'),
+    key = path.join(data, 'director-key');
   fs.writeFileSync(key, 'a'.repeat(64));
-  assert.deepEqual(builtInSandboxSettings({ ...run, platform: 'linux', home }).filesystem.denyRead, [home, key]);
+  assert.deepEqual(builtInSandboxSettings({ ...run, platform: 'linux', home }).filesystem.denyRead, [home, data, key]);
   const launch = path.join(directory, 'data', 'launch-url');
   fs.writeFileSync(launch, 'http://127.0.0.1:4317/launch/' + 'c'.repeat(48));
   assert.deepEqual(builtInSandboxSettings({ ...run, platform: 'linux', home }).filesystem.denyRead, [
     home,
+    data,
     key,
     launch,
   ]);

@@ -19,10 +19,15 @@ Every request needs the director's session or key (`src/director-access.mjs`).
   - `POST /api/attempts/:id/tests`, an agent's own test run, which its attempt's token authorizes
 - **Local tools** that act as the director (development scripts, a coordinating session's reads and commands) send the key. The key is the director's: it is never handed to an agent the controller runs, and no page, route or export returns it.
 - **`createStudio({ access })`** is `'session'` by default. `'open'` asks for neither, and is passed only by `scripts/sample-studio.mjs`, whose seeded studio the visual check photographs. It is a trusted option of the code that starts the controller, never a setting, a variable or a request.
-- **The sandbox, the key and the launch link** (`directorSecretNames`: `director-key` and `launch-url`, whose code sets the session cookie):
-  - On Windows, the sandbox account can't read a data folder inside the director's profile.
-  - On macOS and Linux, the sandbox denies the home folder and, by name, both files above the copy (`builtInSandboxSecrets`).
-  - Before each Windows run both files above the copy are also denied to the runtime's sandbox group (`denyBuiltInSandboxSecrets`, `icacls /deny`), since a data folder outside the profile is readable by every signed-in account; a file that cannot be denied stops the run. The database in such a folder stays readable to the sandbox (C-40 in the notes).
+- **The sandbox and the data folder.** The secrets are `directorSecretNames`: `director-key`, `launch-url`, whose code sets the session cookie, and the `tool-keys` folder. The data folder is the nearest folder above the copy holding the key (`builtInSandboxDataFolder`).
+  - On Windows, the sandbox account can't read a data folder inside the director's profile anyway.
+  - On macOS and Linux, the sandbox denies the home folder, the data folder and, by name, the secrets above the copy (`builtInSandboxSecrets`). The copy and its packages are let back in by the run's allow list.
+  - **Before each Windows run:**
+    - The secrets are denied to the runtime's sandbox group (`denyBuiltInSandboxSecrets`, `icacls /deny`, a folder's entry reaching everything in it). This matters because a data folder outside the profile is readable by every signed-in account.
+    - The rest of the data folder is denied too (`denyBuiltInSandboxData`): reading what anything in it holds, its own listing included, by one entry everything inherits (`(OI)(CI)(RD)`). Looking at a folder stays allowed, since Node looks at each folder on the way to the copy.
+    - The runtime's own grants to the copy and its packages are explicit, so they come before the inherited deny.
+    - A path that can't be denied stops the run.
+  - **Probed November 2** on data folders inside and outside the profile, with dummy files: the database, a tool key, the key, the launch link and the folder listing were refused; the copy was written and its packages read and loaded.
 - **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
 
 ## The controller's own git (November 2026)

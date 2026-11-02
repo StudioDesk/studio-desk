@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   builtInSandboxCommandLine,
+  builtInSandboxDataFolder,
   builtInSandboxEnvironment,
   builtInSandboxFiles,
   builtInSandboxGitConfiguration,
@@ -19,6 +20,7 @@ import {
   builtInSandboxRuntimeEnvironment,
   builtInSandboxSecrets,
   builtInSandboxSettings,
+  denyBuiltInSandboxData,
   denyBuiltInSandboxSecrets,
   openBuiltInSandboxPassThrough,
   shareBuiltInSandboxHelper,
@@ -53,6 +55,7 @@ if (windows) {
     files,
   );
   denyBuiltInSandboxSecrets(builtInSandboxSecrets(root));
+  denyBuiltInSandboxData(builtInSandboxDataFolder(root));
 } else for (const folder of [home, gitTemplates]) fs.mkdirSync(folder, { recursive: true });
 fs.writeFileSync(
   settings,
