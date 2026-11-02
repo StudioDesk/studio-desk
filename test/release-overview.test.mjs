@@ -48,6 +48,8 @@ test('the Releases page reads each line, what landed on it since its last releas
   git(c.root, ['update-ref', 'refs/remotes/origin/main', git(c.root, ['rev-parse', 'main~1'])]);
   const view = await overview(c);
   assert.equal(view.available, true);
+  assert.equal('shipsTo' in view, false);
+  assert.ok(view.lines.every(line => !('version' in line) && !('released' in line)));
   assert.deepEqual(view.copy, { branch: 'main', clean: true });
   assert.deepEqual(view.remote, { name: 'origin', url: 'https://example.invalid/studio.git' });
   assert.deepEqual(
@@ -102,6 +104,27 @@ test('the Releases page reads each line, what landed on it since its last releas
     { line: 'main', state: 'waiting' },
     { line: 'release/0.9', state: 'waiting', back: true, after: ['T-earlier'] },
   ]);
+});
+
+test('a released milestone without a line keeps the branch its release was made on', async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    previous = await make(c, '1.0.0');
+  const all = projectMilestones(store, project);
+  all.find(item => item.id === previous.id).state = 'released';
+  all.find(item => item.id === previous.id).release = { repository: { branch: 'main' } };
+  store.putSetting('milestones:' + project, all);
+  git(c.root, ['tag', 'v1.0.0']);
+  await make(c, '1.1.0');
+  git(c.root, ['branch', 'next']);
+  store.putProject({ ...store.project(project), lines: [{ branch: 'main' }, { branch: 'next' }] });
+  assert.deepEqual(
+    (await overview(c)).milestones.map(item => [item.version, item.line]),
+    [
+      ['1.0.0', 'main'],
+      ['1.1.0', 'next'],
+    ],
+  );
 });
 
 test('waiting ideas keep the order the director gives them and move between milestones', async t => {

@@ -100,6 +100,36 @@ function versionLineTarget(project, version, tags) {
   return { line: branch, from: older.at(-1)?.branch ?? project.shipsTo };
 }
 
+// Reads the switch's destination, milestones to move and unfinished source work without changing records or git.
+export function versionLinesReadiness(store, projectId, runtime) {
+  const root = sourceRoot(store, projectId, runtime),
+    shipsTo = projectLines(store.project(projectId)).at(-1)?.branch ?? checkedOut(root),
+    milestones = projectMilestones(store, projectId),
+    moving = milestones
+      .filter(item => open(item) && item.line === null)
+      .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)));
+  // A story done before stories had stages (October 13 and 14) finished with nothing left to integrate.
+  const finished = task =>
+    task.kind === 'studio-development:change' && task.status === 'done' && task.sourceStage
+      ? ['integrated', 'closed'].includes(task.sourceStage.current) ||
+        task.sourceStage.integration?.state === 'integrated'
+      : ['done', 'denied', 'cancelled'].includes(task.status);
+  const busy = store
+    .tasks()
+    .filter(
+      task => recordProject(task) === projectId && task.kind?.startsWith('studio-development:') && !finished(task),
+    );
+  const needs = [];
+  if (!moving.length) needs.push({ kind: 'next-version' });
+  if (busy.length)
+    needs.push({
+      kind: 'open-work',
+      tasks: busy.slice(0, 5).map(task => ({ id: task.id, title: task.title })),
+      count: busy.length,
+    });
+  return { shipsTo, milestones, moving, busy, ready: needs.length === 0, needs };
+}
+
 // Switches a project to version lines: releases ship to `shipsTo`, which stops being a line work lands on, and each
 // open milestone on it gets a line of its own, in version order, each made from the one before (the first from
 // `shipsTo`'s tip); a branch of that name that already exists is used as it is. Refused while work on `shipsTo` is
@@ -114,25 +144,10 @@ export function useVersionLines(store, projectId, runtime, { shipsTo } = {}) {
   } catch {
     throw new Error(`The repository has no branch named ${shipsTo}.`);
   }
-  const current = projectLines(project).at(-1)?.branch ?? checkedOut(root);
+  const { shipsTo: current, milestones: all, moving, busy } = versionLinesReadiness(store, projectId, runtime);
   if (current !== shipsTo)
     throw new Error(`New releases are made on ${current}, so that is the branch they ship to. Name ${current}.`);
-  const all = projectMilestones(store, projectId),
-    moving = all
-      .filter(item => open(item) && item.line === null)
-      .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)));
   if (!moving.length) throw new Error("Make the next version's milestone first, so new work has a line to land on.");
-  // A story done before stories had stages (October 13 and 14) finished with nothing left to integrate.
-  const finished = task =>
-    task.kind === 'studio-development:change' && task.status === 'done' && task.sourceStage
-      ? ['integrated', 'closed'].includes(task.sourceStage.current) ||
-        task.sourceStage.integration?.state === 'integrated'
-      : ['done', 'denied', 'cancelled'].includes(task.status);
-  const busy = store
-    .tasks()
-    .filter(
-      task => recordProject(task) === projectId && task.kind?.startsWith('studio-development:') && !finished(task),
-    );
   if (busy.length)
     throw new Error(
       `Finish or close the open work first (${busy

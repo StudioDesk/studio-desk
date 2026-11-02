@@ -4,7 +4,13 @@
 // repository are read; nothing reaches the remote, so "on the remote" means as of the last fetch or push.
 import { git } from './source-integration.mjs';
 import { branchCommit, checkedOut, projectLines } from './source-lines.mjs';
-import { compareVersions, projectMilestones, releaseTags, versionText } from './source-milestones.mjs';
+import {
+  compareVersions,
+  projectMilestones,
+  releaseTags,
+  versionLinesReadiness,
+  versionText,
+} from './source-milestones.mjs';
 import { projectSource } from './source-projects.mjs';
 import { projectCatalog } from '../core/project-organization.mjs';
 import { runIdOf } from '../core/graph.mjs';
@@ -98,22 +104,29 @@ export function releaseOverview(store, projectId, runtime) {
     copy = checkedOut(root),
     remote = remoteOf(root),
     recorded = projectLines(project),
-    lines = (recorded.length ? recorded : copy ? [{ branch: copy, state: 'maintained' }] : []).map(
-      (line, index, all) => {
+    lines = (recorded.length ? recorded : copy ? [{ branch: copy, state: 'maintained' }] : [])
+      .filter(line => line.branch !== project.shipsTo)
+      .map((line, index, all) => {
         const head = tries(() => branchCommit(root, line.branch)),
-          last = head ? lastRelease(root, tags, head) : null;
+          last = head ? lastRelease(root, tags, head) : null,
+          version = project.shipsTo ? /^release\/(\d+)\.(\d+)$/.exec(line.branch)?.slice(1) : null;
         return {
           branch: line.branch,
           state: line.state ?? 'maintained',
           newest: index === all.length - 1,
           ...(line.from ? { from: line.from } : {}),
+          ...(version
+            ? {
+                version: version.join('.'),
+                released: tags.some(tag => compareVersions(tag.version, [...version.map(Number), 0]) === 0),
+              }
+            : {}),
           head: head ? head.slice(0, 12) : null,
           lastRelease: last,
           landed: head ? landed(root, last?.name, head) : null,
           onRemote: head ? lineOnRemote(root, remote, line.branch, head) : null,
         };
-      },
-    );
+      });
   const newest = lines.at(-1)?.branch ?? null,
     runs = store.runs(projectId),
     stories = store.tasks().filter(task => task.kind === story && recordProject(task) === projectId),
@@ -147,7 +160,8 @@ export function releaseOverview(store, projectId, runtime) {
       return {
         id: milestone.id,
         version: milestone.version,
-        line: milestone.line ?? newest,
+        line:
+          milestone.line ?? (milestone.state === 'released' ? milestone.release?.repository?.branch : null) ?? newest,
         goal: milestone.goal,
         state: milestone.state,
         waiting: milestone.waiting,
@@ -163,6 +177,8 @@ export function releaseOverview(store, projectId, runtime) {
         },
       };
     });
+  const shippingHead = project.shipsTo ? tries(() => branchCommit(root, project.shipsTo)) : null,
+    readiness = project.shipsTo ? null : versionLinesReadiness(store, projectId, runtime);
   return {
     available: true,
     copy: {
@@ -170,6 +186,16 @@ export function releaseOverview(store, projectId, runtime) {
       clean: !git(root, ['status', '--porcelain', '--untracked-files=no']),
     },
     remote,
+    ...(project.shipsTo
+      ? {
+          shipsTo: {
+            branch: project.shipsTo,
+            head: shippingHead ? shippingHead.slice(0, 12) : null,
+            lastRelease: shippingHead ? lastRelease(root, tags, shippingHead) : null,
+            onRemote: shippingHead ? lineOnRemote(root, remote, project.shipsTo, shippingHead) : null,
+          },
+        }
+      : { versionLines: { shipsTo: readiness.shipsTo, ready: readiness.ready, needs: readiness.needs } }),
     lines,
     milestones,
     tags: tags

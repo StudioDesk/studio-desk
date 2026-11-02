@@ -10,15 +10,21 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { setup } from './source-story-setup.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
-import { ideaRelease, projectMilestones } from '../src/connectors/source-milestones.mjs';
+import {
+  ideaRelease,
+  makeMilestone,
+  projectMilestones,
+  versionLinesReadiness,
+} from '../src/connectors/source-milestones.mjs';
 import { projectLines } from '../src/connectors/source-lines.mjs';
+import { releaseOverview } from '../src/connectors/release-overview.mjs';
 import { shipAgain, shipRelease } from '../src/connectors/source-releases.mjs';
 import { saveProjectOrganization } from '../src/core/project-organization.mjs';
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
 
 const project = 'project-legacy';
-async function released(t) {
-  const c = await setup(t),
+async function released(t, backendOnly = false) {
+  const c = await setup(t, 'pass', undefined, {}, backendOnly),
     store = c.app.store;
   saveProjectOrganization(store, c.app.runner.registries, project, developmentOrganization(store.organization()));
   fs.writeFileSync(path.join(c.root, 'package.json'), '{\n  "name": "fixture",\n  "version": "1.0.0"\n}\n');
@@ -36,6 +42,11 @@ const make = async (c, version) => {
   return made.data.milestone;
 };
 const switchTo = (c, shipsTo) => c.request(`/api/projects/${project}/version-lines`, { projectId: project, shipsTo });
+const overview = async c => {
+  const response = await fetch(`${c.origin}/api/projects/${project}/releases`);
+  assert.equal(response.status, 200);
+  return response.json();
+};
 const tip = (c, ref) => git(c.root, ['rev-parse', ref]);
 // A commit on a branch that is not checked out, made with an index of its own, without touching the folder.
 function commitOn(c, branch, file, text) {
@@ -77,6 +88,137 @@ function releasedAt(c, milestoneId, branch, commit, tag) {
   };
   c.app.store.putSetting('milestones:' + project, all);
 }
+
+test('the overview keeps past releases on main and reads the shipping branch apart from version lines', async t => {
+  const c = await released(t),
+    store = c.app.store,
+    main = tip(c, 'main'),
+    previous = await make(c, '1.1.0');
+  releasedAt(c, previous.id, 'main', main, 'v1.1.0');
+  const next = await make(c, '1.2.0');
+  git(c.root, ['remote', 'add', 'origin', 'https://example.invalid/studio.git']);
+  git(c.root, ['update-ref', 'refs/remotes/origin/main', main]);
+  assert.deepEqual((await overview(c)).versionLines, { shipsTo: 'main', ready: true, needs: [] });
+  assert.equal((await switchTo(c, 'main')).status, 200);
+  const view = await overview(c);
+  assert.deepEqual(view.shipsTo, {
+    branch: 'main',
+    head: main.slice(0, 12),
+    lastRelease: { name: 'v1.1.0', version: '1.1.0' },
+    onRemote: { known: true, ahead: 0, behind: 0 },
+  });
+  assert.equal('versionLines' in view, false);
+  assert.deepEqual(
+    view.lines.map(line => line.branch),
+    ['release/1.2'],
+  );
+  assert.deepEqual(
+    view.milestones.map(item => [item.id, item.line]),
+    [
+      [previous.id, 'main'],
+      [next.id, 'release/1.2'],
+    ],
+  );
+  assert.equal(view.lines[0].version, '1.2');
+  assert.equal(view.lines[0].released, false, "An inherited release is not this version's first release.");
+  const commit = commitOn(c, 'release/1.2', 'next.txt', 'next\n');
+  // Both supported tag spellings identify the version, even before a release record is written.
+  git(c.root, ['tag', '1.2.0', commit]);
+  assert.equal((await overview(c)).lines[0].released, true);
+  git(c.root, ['tag', '-d', '1.2.0']);
+  git(c.root, ['tag', 'v1.2.0', commit]);
+  assert.equal((await overview(c)).lines[0].released, true);
+});
+
+test('readiness lists missing milestones before open work and agrees with the unchanged switch refusals', async t => {
+  const c = await released(t),
+    store = c.app.store;
+  assert.deepEqual((await overview(c)).versionLines, {
+    shipsTo: 'main',
+    ready: false,
+    needs: [{ kind: 'next-version' }],
+  });
+  const noMilestone = await switchTo(c, 'main');
+  assert.equal(noMilestone.status, 400);
+  assert.equal(noMilestone.data.error, "Make the next version's milestone first, so new work has a line to land on.");
+  const waiting = store.task(c.waiting);
+  store.putTask({ ...waiting, status: 'ready' });
+  const work = { kind: 'open-work', tasks: [{ id: waiting.id, title: waiting.title }], count: 1 };
+  assert.deepEqual((await overview(c)).versionLines.needs, [{ kind: 'next-version' }, work]);
+  assert.equal((await switchTo(c, 'main')).data.error, noMilestone.data.error);
+  await make(c, '1.2.0');
+  assert.deepEqual((await overview(c)).versionLines, { shipsTo: 'main', ready: false, needs: [work] });
+  const openWork = await switchTo(c, 'main');
+  assert.equal(openWork.status, 400);
+  assert.equal(
+    openWork.data.error,
+    `Finish or close the open work first (${waiting.id}): it would be left on main without a line.`,
+  );
+  store.putTask({ ...waiting, status: 'cancelled' });
+  assert.deepEqual((await overview(c)).versionLines, { shipsTo: 'main', ready: true, needs: [] });
+  assert.equal((await switchTo(c, 'main')).status, 200);
+  assert.equal('versionLines' in (await overview(c)), false);
+});
+
+test('readiness is read-only, follows the recorded newest line, and counts unfinished source work', async t => {
+  const c = await released(t, true),
+    store = c.app.store;
+  const next = makeMilestone(store, project, c.app.runner, { version: '1.2.0' }),
+    patch = makeMilestone(store, project, c.app.runner, { version: '1.0.1' });
+  // The checked-out branch is not necessarily the newest recorded line.
+  git(c.root, ['checkout', '--quiet', 'release/1.0']);
+  const waiting = store.task(c.waiting);
+  for (const [index, sourceStage] of [
+    { current: 'review' },
+    { current: 'integration' },
+    { current: 'build' },
+    { current: 'review' },
+    { current: 'integration' },
+    { current: 'build' },
+  ].entries())
+    store.putTask({ ...waiting, id: `T-open-${index}`, title: `Open story ${index}`, status: 'done', sourceStage });
+  for (const [index, sourceStage] of [
+    undefined,
+    { current: 'integrated' },
+    { current: 'closed' },
+    { integration: { state: 'integrated' } },
+  ].entries())
+    store.putTask({ ...waiting, id: `T-finished-${index}`, status: 'done', sourceStage });
+  store.putTask({ ...waiting, id: 'T-unrelated-kind', kind: 'general', status: 'ready' });
+  store.putTask({ ...waiting, id: 'T-other-project', projectId: 'project-other', status: 'ready' });
+  const snapshot = () =>
+    JSON.stringify({
+      project: store.project(project),
+      milestones: projectMilestones(store, project),
+      tasks: store.tasks(),
+      events: store.events(),
+      refs: git(c.root, ['show-ref']),
+      copy: git(c.root, ['status', '--porcelain', '--branch']),
+    });
+  const before = snapshot(),
+    readiness = versionLinesReadiness(store, project, c.app.runner);
+  assert.equal(snapshot(), before, 'Reading readiness writes no records, branches or working files.');
+  assert.equal(readiness.shipsTo, 'main');
+  assert.deepEqual(
+    readiness.moving.map(item => item.id),
+    [next.id],
+    'The patch keeps its existing line.',
+  );
+  assert.ok(!readiness.moving.some(item => item.id === patch.id));
+  assert.equal(readiness.ready, false);
+  assert.deepEqual(readiness.needs, [
+    {
+      kind: 'open-work',
+      count: 6,
+      tasks: Array.from({ length: 5 }, (_, index) => ({ id: `T-open-${index}`, title: `Open story ${index}` })),
+    },
+  ]);
+  assert.deepEqual(releaseOverview(store, project, c.app.runner).versionLines, {
+    shipsTo: 'main',
+    ready: false,
+    needs: readiness.needs,
+  });
+});
 
 test('switching gives each open version its own line, in version order, and new work lands on the lowest open version', async t => {
   const c = await released(t),
