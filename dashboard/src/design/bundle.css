@@ -2631,17 +2631,34 @@ button.sd-row[aria-pressed='true'] {
 .sd-agentspage .sd-agentgrid {
   gap: var(--space-16);
 }
-/* Above 1200px, beside the flow: the editor's column stays in view as the window scrolls, scrolling on its own when
-   it is taller than the window; the team editor's bar sticks to the foot of the column. */
-.sd-agents[data-layout='beside'] > .sd-agents__editor {
-  position: sticky;
-  top: var(--space-20);
-  max-height: calc(100vh - var(--space-20));
-  overflow-y: auto;
-  box-sizing: border-box;
-  padding-bottom: var(--space-16);
+/* The complete editor stays in view only when it fits, measured again as its content or the viewport changes.
+   Taller editors use unrestricted page scrolling. The top and bottom gutters are included in the fit check. */
+.sd-agentspage .sd-agents__editor,
+.sd-agentspage .sd-agents__flow {
+  scroll-margin-top: var(--space-20);
 }
-/* From 861px to 1200px, under the flow: one column, the editor at full width before what they're told */
+.sd-agentspage .sd-agents__editor {
+  top: var(--space-20);
+}
+.sd-agentspage .sd-agents[data-layout='beside'] > .sd-agents__editor[data-sticky='true'] {
+  position: sticky;
+}
+/* Every stacked layout uses a full-width editor immediately after the picked card. */
+.sd-agentspage .sd-agents__picked {
+  flex: 1 1 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-10);
+  scroll-margin-top: var(--space-16);
+}
+.sd-agentspage .sd-agents__picked > * {
+  flex: none;
+}
+.sd-agentspage .sd-agents__close {
+  align-self: flex-end;
+}
+/* From 861px to 1200px, one column, with What they're told following the flow. */
 .sd-agents[data-layout='under'] {
   flex-direction: column;
   align-items: stretch;
@@ -2806,20 +2823,6 @@ button.sd-row[aria-pressed='true'] {
   /* The Agents page on a phone (agents-page.tsx): the picked agent's or team's editor in the flow, under its card at
      the full width of its team's agents row or step, or a new team's under the page's buttons, with Close at its top.
      It scrolls with the page, neither sticky nor scrolling on its own, and its cards are tighter to fit the width. */
-  .sd-agentspage .sd-agents__picked {
-    flex: 1 1 100%;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-10);
-    scroll-margin-top: var(--space-16);
-  }
-  .sd-agentspage .sd-agents__picked > * {
-    flex: none;
-  }
-  .sd-agentspage .sd-agents__close {
-    align-self: flex-end;
-  }
   .sd-agentspage .sd-agents__picked .sd-agentdetail,
   .sd-agentspage .sd-agents__picked .sd-agentgrid {
     gap: var(--space-12);
