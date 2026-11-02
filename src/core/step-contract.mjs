@@ -10,16 +10,17 @@ export const STEP_KINDS = Object.freeze(['work', 'review', 'plan', 'decide', 'ga
 export const LIBRARY_DELIVERY = Object.freeze(['current', 'same-as-inputs', 'none']);
 
 // What each kind does unless its contract says otherwise. Only an agent's step proposes files for the library; a step
-// the studio runs itself, or a decision, has no agent to propose them.
+// the studio runs itself, or a decision, has no agent to propose them. The director may accept any recorded result over
+// a failed check, with a reason (decided November 2, 2026); a decision, a gate, a for-each or a join records none.
 const kindDefaults = Object.freeze({
-  work: { receives: { library: 'current' }, proposes: { library: true } },
-  review: { receives: { library: 'same-as-inputs' }, proposes: { library: false } },
-  plan: { receives: { library: 'current' }, proposes: { library: true } },
-  decide: { receives: { library: 'none' }, proposes: { library: false } },
-  gate: { receives: { library: 'none' }, proposes: { library: false } },
-  operation: { receives: { library: 'current' }, proposes: { library: false } },
-  'for-each': { receives: { library: 'none' }, proposes: { library: false } },
-  join: { receives: { library: 'none' }, proposes: { library: false } },
+  work: { receives: { library: 'current' }, proposes: { library: true }, acceptance: { acceptOver: true } },
+  review: { receives: { library: 'same-as-inputs' }, proposes: { library: false }, acceptance: { acceptOver: true } },
+  plan: { receives: { library: 'current' }, proposes: { library: true }, acceptance: { acceptOver: true } },
+  decide: { receives: { library: 'none' }, proposes: { library: false }, acceptance: { acceptOver: false } },
+  gate: { receives: { library: 'none' }, proposes: { library: false }, acceptance: { acceptOver: false } },
+  operation: { receives: { library: 'current' }, proposes: { library: false }, acceptance: { acceptOver: true } },
+  'for-each': { receives: { library: 'none' }, proposes: { library: false }, acceptance: { acceptOver: false } },
+  join: { receives: { library: 'none' }, proposes: { library: false }, acceptance: { acceptOver: false } },
 });
 
 function closed(value, allowed, label) {
@@ -34,7 +35,7 @@ function closed(value, allowed, label) {
 
 // A task type's or a node's contract, checked: its kind from the catalog, and any of the fields it overrides.
 export function validateStep(step, label = 'A step') {
-  closed(step, ['kind', 'receives', 'proposes'], label);
+  closed(step, ['kind', 'receives', 'proposes', 'acceptance'], label);
   if (!STEP_KINDS.includes(step.kind)) throw new Error(`${label}'s kind is one of ${STEP_KINDS.join(', ')}.`);
   if (step.receives !== undefined) {
     closed(step.receives, ['library'], `${label}'s receives`);
@@ -45,6 +46,11 @@ export function validateStep(step, label = 'A step') {
     closed(step.proposes, ['library'], `${label}'s proposes`);
     if (step.proposes.library !== undefined && typeof step.proposes.library !== 'boolean')
       throw new Error(`${label}'s library proposals are true or false.`);
+  }
+  if (step.acceptance !== undefined) {
+    closed(step.acceptance, ['acceptOver'], `${label}'s acceptance`);
+    if (step.acceptance.acceptOver !== undefined && typeof step.acceptance.acceptOver !== 'boolean')
+      throw new Error(`${label}'s acceptance over a failed check is true or false.`);
   }
   return step;
 }
@@ -58,5 +64,6 @@ export function stepContract(definition) {
     kind: step.kind,
     receives: { ...base.receives, ...step.receives },
     proposes: { ...base.proposes, ...step.proposes },
+    acceptance: { ...base.acceptance, ...step.acceptance },
   };
 }

@@ -44,13 +44,15 @@ test('a contract takes only a kind from the catalog and the fields it overrides'
     kind: 'review',
     receives: { library: 'same-as-inputs' },
     proposes: { library: false },
+    acceptance: { acceptOver: true },
   });
+  assert.deepEqual(stepContract({ step: { kind: 'gate' } }).acceptance, { acceptOver: false });
   assert.deepEqual(stepContract({ step: { kind: 'work', proposes: { library: false } } }).proposes, { library: false });
   // A task type that declares none is work.
   assert.equal(stepContract({}).kind, 'work');
   for (const [step, message] of [
     [{ kind: 'critique' }, /kind is one of/],
-    [{ kind: 'work', owner: 'W-1' }, /takes only kind, receives, proposes/],
+    [{ kind: 'work', owner: 'W-1' }, /takes only kind, receives, proposes, acceptance/],
     [{ kind: 'work', receives: { library: 'some' } }, /receives the library as one of/],
     [{ kind: 'work', receives: { files: true } }, /receives takes only library/],
     [{ kind: 'work', proposes: { library: 'yes' } }, /true or false/],
@@ -87,4 +89,82 @@ test('the library-proposal layer follows the step contract, not the name', async
   assert.ok(titles('general:plan').includes('Proposing a library file'));
   assert.ok(!titles('general:review').includes('Proposing a library file'));
   assert.ok(!titles('studio-development:change').includes('Proposing a library file'));
+});
+
+test("the director accepts over a failed check with a reason, where the step's contract allows it", async t => {
+  const { setup } = await import('./studio-setup.mjs');
+  const c = await setup(t),
+    { store } = c.app,
+    worker = store.organization().workers.find(item => item.enabled);
+  const reviewed = (id, checks) => {
+    store.putTask({
+      id,
+      projectId: 'project-legacy',
+      kind: 'general',
+      title: 'A guide',
+      status: 'review',
+      lastAttemptId: `attempt-${id}`,
+      workerId: worker.id,
+      team: worker.team,
+      dependencies: [],
+      resources: [],
+    });
+    store.insertAttempt(
+      {
+        id: `attempt-${id}`,
+        taskId: id,
+        projectId: 'project-legacy',
+        workerId: worker.id,
+        status: 'review',
+        artifacts: [],
+        result: { taskId: id, outcome: 'completed', summary: 'Done.', artifacts: [], checks, issues: [], handoff: '' },
+      },
+      { layers: [] },
+    );
+  };
+  const refused = { name: 'Primary source read', status: 'fail', evidence: 'The publisher answered 403.' };
+  reviewed('T-over', [refused, { name: 'Every figure dated', status: 'pass', evidence: 'All 12.' }]);
+  const accept = (id, body = {}) => c.request(`/api/tasks/${id}/accept`, { projectId: 'project-legacy', ...body });
+  // Without a reason it is still refused, and the refusal says how to go on.
+  let answer = await accept('T-over');
+  assert.equal(answer.status, 400);
+  assert.match(answer.data.error, /Accept over it with a reason, or request a revision/);
+  assert.equal((await accept('T-over', { overReason: '   ' })).status, 400);
+  assert.equal((await accept('T-over', { overReason: 'Fine.', note: 'x' })).status, 400);
+  // With one, it is accepted, and the reason and the checks it went over are recorded.
+  answer = await accept('T-over', { overReason: 'The gap is stated in the file; a retry cannot reach the source.' });
+  assert.equal(answer.status, 200);
+  const attempt = store.attempt('attempt-T-over');
+  assert.equal(attempt.status, 'accepted');
+  assert.deepEqual(attempt.acceptedBy, {
+    type: 'director',
+    over: {
+      reason: 'The gap is stated in the file; a retry cannot reach the source.',
+      checks: ['Primary source read'],
+    },
+  });
+  assert.equal(store.task('T-over').status, 'done');
+  const event = store.events().find(item => item.kind === 'accepted' && item.task_id === 'T-over');
+  assert.match(event.message, /over a failed check \(Primary source read\): The gap is stated/);
+  // Nothing failed: no reason is taken.
+  reviewed('T-clean', [{ name: 'Every figure dated', status: 'pass', evidence: 'All 12.' }]);
+  answer = await accept('T-clean', { overReason: 'Just in case.' });
+  assert.equal(answer.status, 400);
+  assert.match(answer.data.error, /No check failed/);
+  assert.equal((await accept('T-clean')).status, 200);
+  // A step whose contract does not take it refuses.
+  const { acceptAttempt } = await import('../src/core/acceptance.mjs');
+  const registries = c.app.runner.registries,
+    general = registries.workflows.get('general');
+  registries.workflows.register({
+    id: 'contract-fixture',
+    version: 'contract-fixture-v1',
+    tasks: [{ ...general, kind: 'contract-fixture:strict', step: { kind: 'work', acceptance: { acceptOver: false } } }],
+  });
+  reviewed('T-strict', [refused]);
+  store.putTask({ ...store.task('T-strict'), kind: 'contract-fixture:strict' });
+  assert.throws(
+    () => acceptAttempt(store, registries, store.task('T-strict'), { type: 'director', over: { reason: 'Please.' } }),
+    /does not take acceptance over a failed check/,
+  );
 });
