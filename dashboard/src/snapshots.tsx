@@ -1,4 +1,4 @@
-// Snapshots (1.2 step 6, decision 12), below the accepted files on the Artifacts page of a project that is not code: a
+// Snapshots (1.2 step 6, decision 12), a card below the work on the Artifacts page of a project that is not code: a
 // named set of its accepted files at one moment, such as what was sent to a client, its counterpart to a code project's
 // release. Each snapshot, newest first, shows when it was made, how many files it holds and how many changed since,
 // counted here by task and path against the accepted files listed now. What changed opens the controller's own changes
@@ -70,23 +70,20 @@ export function Snapshots({ projectId, files }: { projectId: string; files: Proj
     .map((snapshot, index, all) => ({ snapshot, previous: index ? all[index - 1] : undefined }))
     .toReversed();
   return (
-    <section aria-labelledby={titleId} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 'var(--space-10)' }}>
-        <h2 id={titleId} className="sd-section-title sd-section-title--sm">
+    <section aria-labelledby={titleId} className="sd-card sd-workcard">
+      <div className="sd-workcard__head">
+        <h2 id={titleId} className="sd-workcard__title">
           Snapshots
         </h2>
         {shown.length > 0 && (
           <span className="sd-meta">{`${shown.length} snapshot${shown.length === 1 ? '' : 's'}`}</span>
         )}
-        <button
-          type="button"
-          className="sd-btn sd-btn--sm"
-          style={{ marginLeft: 'auto' }}
-          disabled={!files.length}
-          onClick={() => setMaking(true)}
-        >
-          New snapshot
-        </button>
+        <span className="sd-meta">a set of these files at one moment, such as what you sent out</span>
+        <span className="sd-workcard__tools">
+          <button type="button" className="sd-btn sd-btn--sm" disabled={!files.length} onClick={() => setMaking(true)}>
+            New snapshot
+          </button>
+        </span>
       </div>
       {error ? (
         <p role="alert" style={{ margin: 0 }}>
@@ -97,7 +94,7 @@ export function Snapshots({ projectId, files }: { projectId: string; files: Proj
           Loading the snapshots…
         </p>
       ) : shown.length === 0 ? (
-        <div className="sd-card sd-empty">
+        <div className="sd-empty">
           <b>No snapshots yet.</b>
           <span>
             Name the accepted files as they are now, such as what you sent to a client, to see later what changed since
@@ -107,8 +104,7 @@ export function Snapshots({ projectId, files }: { projectId: string; files: Proj
       ) : (
         <ul
           aria-label="Snapshots"
-          className="sd-card sd-cardlist"
-          style={{ listStyle: 'none', margin: 0, display: 'flex', flexDirection: 'column' }}
+          style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column' }}
         >
           {shown.map(({ snapshot, previous }) => (
             <Item key={snapshot.id} projectId={projectId} snapshot={snapshot} previous={previous} files={files} />

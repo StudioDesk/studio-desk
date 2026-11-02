@@ -1,11 +1,12 @@
-// The project's library, pinned at the top of the Artifacts page (1.2 step 6): the files its later work should follow,
-// each a card with what it is for, its name, its newest revision and that revision's size, how many attempts read it
-// and where it came from, under the library's total against what every attempt receives in full. Upload a file adds
-// one from the director's computer, and Add to the library, on each accepted file, adds one that accepted work handed
-// back; the controller's refusals show in the dialog. Library changes are not task changes on the stream, so each
-// successful command reads the library again. Picking a card opens that file's own view (library-entry.tsx).
+// The project's library on the Artifacts page (1.2 step 6): the files its later work should follow, under the
+// library's total against what every attempt receives in full, each a card with its kind, its name, what it is for, its
+// newest revision and that revision's size and how many attempts read it. The page's Upload a file adds one from the
+// director's computer (UploadToLibrary), and Add to the library, on each accepted file, adds one that accepted work
+// handed back; the controller's refusals show in the dialog. Library changes are not task changes on the stream, so
+// each successful command reads the library again. Picking a card shows that file's own view (library-entry.tsx) in
+// the page's panel, which on a phone the page hands back to open under the picked card.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useId, useState } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import {
   getJSON,
   libraryReadersUrl,
@@ -14,7 +15,6 @@ import {
   type LibraryEntry,
   type LibraryIndex,
   type LibraryReader,
-  type LibrarySource,
   type ProjectArtifact,
   type RunRecord,
   type Shell,
@@ -22,7 +22,7 @@ import {
 } from './api';
 import { Modal } from './dialog';
 import { encoded, fileSize } from './idea-composer';
-import { LibraryFile } from './library-entry';
+import { KindTile } from './kind-tile';
 import { useStreamReady } from './stream-context';
 import { useToast } from './toast';
 
@@ -83,45 +83,76 @@ export const storyTitle = (taskId: string, { files, records }: LibraryNames) =>
   taskId;
 export const projectName = (projectId: string, { records }: LibraryNames) =>
   records?.projects.find(item => item.id === projectId)?.name ?? projectId;
-function sourceWords(source: LibrarySource, names: LibraryNames) {
-  if (source.type === 'upload') return 'Uploaded';
-  if (source.type === 'accepted') return `From accepted work: ${storyTitle(source.taskId, names)}`;
-  return `Copied from ${projectName(source.projectId, names)}`;
-}
 export const readBy = (count: number) =>
   count === 0 ? 'Not read yet' : `Read by ${count} attempt${count === 1 ? '' : 's'}`;
 const counted = (count: number) => `${count} file${count === 1 ? '' : 's'}`;
+// A card's foot after its revision: "1.5 KiB · read by 3 attempts", the size alone while its readers load.
+export function cardFacts(byteLength: number | undefined, readers: number | null, failed = false) {
+  const read = failed
+    ? 'its readers could not be loaded'
+    : readers === null
+      ? null
+      : readers === 0
+        ? 'not read yet'
+        : `read by ${readers} attempt${readers === 1 ? '' : 's'}`;
+  return [byteLength === undefined ? null : fileSize(byteLength), read].filter(Boolean).join(' · ');
+}
 
-export function Library({ projectId, names }: { projectId: string; names: LibraryNames }) {
-  const [uploading, setUploading] = useState(false),
-    [pickedId, setPickedId] = useState<string | null>(null),
-    titleId = useId();
-  // Read on each visit, since attempts that started while the page was away read it.
-  const { data, error } = useQuery({
+// The library's index, read on each visit, since attempts that started while the page was away read it. The page
+// reads it too, for the file it shows in its panel; one read serves both.
+export function useLibrary(projectId: string) {
+  return useQuery({
     enabled: useStreamReady(),
     queryKey: libraryKey(projectId),
     queryFn: ({ signal }) => getJSON<LibraryIndex>(libraryUrl(projectId), signal),
     refetchOnMount: 'always',
   });
+}
+
+// The library: its heading, its total against what every attempt receives in full, and a card for each current entry.
+// The page owns which card is picked; on a phone it hands back the picked file's panel, which opens under that card.
+// The section keeps the landmark name Library while its heading reads The library.
+export function Library({
+  projectId,
+  pickedId = null,
+  onPick = () => {},
+  under = null,
+}: {
+  projectId: string;
+  pickedId?: string | null;
+  onPick?: (entryId: string) => void;
+  under?: ReactNode;
+}) {
+  const titleId = useId(),
+    { data, error } = useLibrary(projectId);
   const entries = data ? currentEntries(data) : [],
-    total = entries.reduce((sum, entry) => sum + (newest(entry)?.byteLength ?? 0), 0),
-    // The picked file as the library reads now: its view closes once the entry is removed.
-    picked = entries.find(entry => entry.id === pickedId) ?? null;
+    total = entries.reduce((sum, entry) => sum + (newest(entry)?.byteLength ?? 0), 0);
   return (
-    <section aria-labelledby={titleId} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 'var(--space-10)' }}>
-        <h2 id={titleId} className="sd-section-title sd-section-title--sm">
-          Library
-        </h2>
-        {entries.length > 0 && <span className="sd-meta">{counted(entries.length)}</span>}
-        <button
-          type="button"
-          className="sd-btn sd-btn--sm"
-          style={{ marginLeft: 'auto' }}
-          onClick={() => setUploading(true)}
-        >
-          Upload a file
-        </button>
+    <section aria-label="Library" className="sd-library">
+      <div className="sd-library__head">
+        <div className="sd-library__title">
+          <h2 id={titleId} className="sd-section-title sd-section-title--sm">
+            The library
+          </h2>
+          <span className="sd-meta">every agent in the project follows these</span>
+        </div>
+        {entries.length > 0 && (
+          <div className="sd-library__total">
+            <b>{`${counted(entries.length)} · ${fileSize(total)}`}</b>
+            <span className="sd-bar sd-library__bar" aria-hidden="true">
+              <span
+                className="sd-bar__part sd-bar__part--brand"
+                style={{ width: `${Math.min(100, (total / libraryDeliveryBytes) * 100)}%` }}
+              ></span>
+            </span>
+            <span className="sd-meta">{`of the ${delivery} every attempt receives in full`}</span>
+          </div>
+        )}
+        {total > libraryDeliveryBytes && (
+          <p className="sd-meta" style={{ margin: 0 }}>
+            {`That is more than ${delivery}: in the library's order, the files past it go in each attempt's index only, named with what they are for.`}
+          </p>
+        )}
       </div>
       {error ? (
         <p role="alert" style={{ margin: 0 }}>
@@ -141,91 +172,78 @@ export function Library({ projectId, names }: { projectId: string; names: Librar
           </span>
         </div>
       ) : (
-        <>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-            <span className="sd-meta">{`${fileSize(total)} in all, of the ${delivery} every attempt receives in full`}</span>
-            <span className="sd-bar sd-bar--thin" aria-hidden="true">
-              <span
-                className="sd-bar__part sd-bar__part--brand"
-                style={{ width: `${Math.min(100, (total / libraryDeliveryBytes) * 100)}%` }}
-              ></span>
-            </span>
-            {total > libraryDeliveryBytes && (
-              <p className="sd-meta" style={{ margin: 0 }}>
-                {`That is more than ${delivery}: in the library's order, the files past it go in each attempt's index only, named with what they are for.`}
-              </p>
-            )}
-          </div>
-          <ul
-            aria-label="Library files"
-            style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexWrap: 'wrap', gap: '12px' }}
-          >
-            {entries.map(entry => (
-              <Card key={entry.id} projectId={projectId} entry={entry} names={names} onPick={setPickedId} />
-            ))}
-          </ul>
-        </>
+        <ul aria-label="Library files" className="sd-libgrid">
+          {entries.map(entry => (
+            <Card
+              key={entry.id}
+              projectId={projectId}
+              entry={entry}
+              picked={entry.id === pickedId}
+              onPick={onPick}
+              under={entry.id === pickedId ? under : null}
+            />
+          ))}
+        </ul>
       )}
-      <EntryDialog projectId={projectId} open={uploading} onClose={() => setUploading(false)} />
-      <LibraryFile projectId={projectId} entry={picked} names={names} onClose={() => setPickedId(null)} />
     </section>
   );
 }
 
-// One entry's card, named by its name and described by the rest; it reads the attempts that read the entry itself.
-// Picking it opens the entry's own view.
+// One entry's card, a button named by its entry's name (first, for its reading order; the kind's tile sits beside it)
+// and described by what it is for and its foot; it reads the attempts that read the entry itself. Picking it shows the
+// entry's own view in the page's panel; on a phone that panel follows the card as an item of its own across the grid.
 function Card({
   projectId,
   entry,
-  names,
+  picked,
   onPick,
+  under,
 }: {
   projectId: string;
   entry: LibraryEntry;
-  names: LibraryNames;
+  picked: boolean;
   onPick: (entryId: string) => void;
+  under: ReactNode;
 }) {
   const nameId = useId(),
-    detailsId = useId(),
+    purposeId = useId(),
+    footId = useId(),
     revision = newest(entry);
   const readers = useQuery({
     queryKey: [...libraryKey(projectId), entry.id, 'readers'],
     queryFn: ({ signal }) => getJSON<LibraryReader[]>(libraryReadersUrl(projectId, entry.id), signal),
     refetchOnMount: 'always',
   });
-  const facts = [
-    revision && `Revision ${revision.revision}`,
-    revision && fileSize(revision.byteLength),
-    readers.data ? readBy(readers.data.length) : readers.error ? 'Its readers could not be loaded' : null,
-  ].filter((fact): fact is string => !!fact);
   return (
-    <li style={{ display: 'flex', flex: '1 1 260px', minWidth: 0 }}>
-      <button
-        type="button"
-        className="sd-tile sd-tile--raised"
-        style={{ flex: 1 }}
-        aria-labelledby={nameId}
-        aria-describedby={detailsId}
-        aria-haspopup="dialog"
-        onClick={() => onPick(entry.id)}
-      >
-        <span id={nameId} style={{ fontWeight: 700, overflowWrap: 'anywhere' }}>
-          {entry.name}
-        </span>
-        <span id={detailsId} style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-          <span style={{ color: 'var(--ink-2)', overflowWrap: 'anywhere' }}>{entry.purpose}</span>
-          <span className="sd-meta" style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-6)' }}>
-            {facts.map((fact, index) => (
-              <span key={fact} style={{ display: 'contents' }}>
-                {index > 0 && <span aria-hidden="true">·</span>}
-                <span>{fact}</span>
-              </span>
-            ))}
+    <>
+      <li className="sd-libgrid__item">
+        <button
+          type="button"
+          className="sd-libcard"
+          aria-labelledby={nameId}
+          aria-describedby={`${purposeId} ${footId}`}
+          aria-pressed={picked}
+          onClick={() => onPick(entry.id)}
+        >
+          <span id={nameId} className="sd-libcard__name">
+            {entry.name}
           </span>
-          {revision && <span className="sd-meta">{sourceWords(revision.source, names)}</span>}
-        </span>
-      </button>
-    </li>
+          <KindTile path={revision?.file ?? entry.name} />
+          <span id={purposeId} className="sd-libcard__purpose">
+            {entry.purpose}
+          </span>
+          <span id={footId} className="sd-libcard__foot">
+            {revision && (
+              <span className="sd-chip sd-chip--inline sd-chip--brand">{`revision ${revision.revision}`}</span>
+            )}
+            <span className="sd-meta">
+              {cardFacts(revision?.byteLength, readers.data ? readers.data.length : null, !!readers.error)}
+            </span>
+          </span>
+        </button>
+      </li>
+      {under && <li className="sd-libgrid__under">{under}</li>}
+    </>
   );
 }
 
@@ -240,6 +258,19 @@ export function AddToLibrary({
   onClose: () => void;
 }) {
   return <EntryDialog projectId={projectId} open={file !== null} accepted={file} onClose={onClose} />;
+}
+
+// Upload a file, which the page opens from its header: a new entry from the director's computer.
+export function UploadToLibrary({
+  projectId,
+  open,
+  onClose,
+}: {
+  projectId: string;
+  open: boolean;
+  onClose: () => void;
+}) {
+  return <EntryDialog projectId={projectId} open={open} onClose={onClose} />;
 }
 
 // A new entry: an accepted file, or without one an upload, which asks for the file too. The dialog stays open with the

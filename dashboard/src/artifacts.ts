@@ -1,6 +1,6 @@
 // What the Artifacts page reads from what the project's work made (GET …/work, 1.2 step 6): each file's readable
-// name, its kind, its one line and its versions' words, the All, Documents and Images filter with the idea and agent
-// choices, and the words for the records and the visual checks' pictures.
+// name, its kind, its one line and its versions' words, the All, Documents N and Images N filter with the idea and
+// agent choices, and the words for the records and the visual checks' pictures.
 import type { Live, ProjectArtifact, ProjectWork, Shell, WorkFile, WorkPictures, WorkVersion } from './api';
 import { imageFile } from './files';
 import { workerName } from './names';
@@ -95,6 +95,14 @@ export const workShows: { value: WorkShow; label: string }[] = [
   { value: 'documents', label: 'Documents' },
   { value: 'images', label: 'Images' },
 ];
+const showsKind: Record<WorkShow, WorkKind | null> = { all: null, documents: 'Document', images: 'Image' };
+// The filter's words with how many of the work's files each kind holds: All, Documents 3, Images 1.
+export function workShowChoices(rows: Pick<WorkRow, 'kind'>[]): { value: WorkShow; label: string }[] {
+  return workShows.map(show => {
+    const kind = showsKind[show.value];
+    return kind ? { ...show, label: `${show.label} ${rows.filter(row => row.kind === kind).length}` } : show;
+  });
+}
 export interface WorkFilter {
   show?: WorkShow;
   idea?: string;
@@ -165,7 +173,6 @@ export function workChoices(rows: WorkRow[], facet: 'idea' | 'agent'): Choice[] 
   ];
 }
 
-const showsKind: Record<WorkShow, WorkKind | null> = { all: null, documents: 'Document', images: 'Image' };
 export function matchingWork(rows: WorkRow[], filter: WorkFilter) {
   const kind = showsKind[filter.show ?? 'all'];
   return rows.filter(
@@ -191,13 +198,21 @@ export const versionCount = (file: Pick<WorkFile, 'versions'>) =>
 export const versionWhy = (version: Pick<WorkVersion, 'n' | 'why'>) =>
   version.n === 1 ? 'The first version' : version.why?.trim() || 'Nothing was recorded about why it was made.';
 
-// The line under the work: how many records of how it was done there are and where they stay, in a code project's
-// words or any other project's; none has no line.
-export function recordsSentence(records: ProjectWork['records'], code: boolean) {
+// The line at the foot of the work's card: how many records of how it was done there are, and where they stay, in a
+// code project's words or any other project's; none has no line.
+export function recordsWords(records: ProjectWork['records'], code: boolean) {
   if (!records.count) return null;
   return code
-    ? `${plural(records.count, 'record')} of how the stories were built. Reviews, test results, plans and the copies of changed files stay on each story's Changes, Checks and Activity. They are never listed here.`
-    : `${plural(records.count, 'record')} of how the work was done. The plans, reviews and check results stay on each idea and story, where they explain the work. They are never listed here.`;
+    ? {
+        title: `${plural(records.count, 'record')} of how the stories were built`,
+        detail:
+          "Reviews, test results, plans and the copies of changed files stay on each story's Changes, Checks and Activity. They are never listed here.",
+      }
+    : {
+        title: `${plural(records.count, 'record')} of how the work was done`,
+        detail:
+          'The plans, reviews and check results stay on each idea and story, where they explain the work. They are never listed here.',
+      };
 }
 
 // A code story's visual check as its row reads: "The visual check · “the story's title” · Oct 20 · 4 pictures".

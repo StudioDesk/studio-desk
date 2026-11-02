@@ -1,7 +1,7 @@
-// The library at the top of the Artifacts page (1.2 step 6): a card for each current entry with what it is for, its
-// newest revision and size, how many attempts read it and where it came from, the total against what every attempt
-// receives in full, Upload a file, and Add to the library on each file of the work the library does not hold, with the
-// controller's refusals shown in the dialog.
+// The library at the top of the Artifacts page (1.2 step 6): a card for each current entry with its kind, what it is
+// for, its newest revision and size and how many attempts read it, where it came from in its panel once picked, the
+// total against what every attempt receives in full, Upload a file in the page's header, and Add to the library on
+// each file of the work the library does not hold, with the controller's refusals shown in the dialog.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -125,6 +125,12 @@ const posted = () => controller.requests.filter(request => request.method !== 'G
 const card = (name: string) => within(screen.getByRole('button', { name }));
 const dialog = async (name: string) => within(await screen.findByRole('dialog', { name }));
 const library = () => within(screen.getByRole('region', { name: 'Library' }));
+// Picks a card and returns the head of the panel that shows its file, which says where its newest revision came from.
+const pick = async (user: ReturnType<typeof userEvent.setup>, name: string) => {
+  await user.click(await screen.findByRole('button', { name }));
+  const panel = within(await screen.findByRole('complementary', { name }));
+  return within(panel.getByRole('heading', { level: 2, name }).parentElement!);
+};
 const libraryUrl = '/api/projects/project-x/library';
 // What the controller answers an added entry with, after adding it to the library it serves.
 const adds = (made: LibraryEntry) => (url: string) => {
@@ -133,7 +139,8 @@ const adds = (made: LibraryEntry) => (url: string) => {
   return made;
 };
 
-test('each current entry shows as a card with its purpose, revision, size, readers and source, under the total', async () => {
+test('each current entry shows as a card with its kind, purpose, revision, size and readers, under the total', async () => {
+  const user = userEvent.setup();
   open();
   const list = await screen.findByRole('list', { name: 'Library files' });
   // In the library's order, each card a button named by its entry, for picking it.
@@ -143,21 +150,19 @@ test('each current entry shows as a card with its purpose, revision, size, reade
       .map(item => item.querySelector('button > span')?.textContent),
   ).toEqual(['Brand guide', 'Launch copy']);
   const brand = card('Brand guide');
+  expect(brand.getByText('MD')).toBeTruthy();
   expect(brand.getByText('The colours and type every page uses.')).toBeTruthy();
-  expect(brand.getByText('Revision 2')).toBeTruthy();
-  expect(brand.getByText('1.5 KiB')).toBeTruthy();
-  expect(await brand.findByText('Read by 3 attempts')).toBeTruthy();
-  expect(brand.getByText('Uploaded')).toBeTruthy();
+  expect(brand.getByText('revision 2')).toBeTruthy();
+  expect(await brand.findByText('1.5 KiB · read by 3 attempts')).toBeTruthy();
   const copy = card('Launch copy');
   expect(copy.getByText('The words the launch page says.')).toBeTruthy();
-  expect(copy.getByText('Revision 1')).toBeTruthy();
-  expect(copy.getByText('512 B')).toBeTruthy();
-  expect(await copy.findByText('Read by 1 attempt')).toBeTruthy();
-  // An accepted file names its story.
-  expect(copy.getByText('From accepted work: Story T-1')).toBeTruthy();
+  expect(copy.getByText('revision 1')).toBeTruthy();
+  expect(await copy.findByText('512 B · read by 1 attempt')).toBeTruthy();
   // The total is each current entry's newest revision, against what every attempt receives in full.
-  expect(library().getByText('2 files')).toBeTruthy();
-  expect(screen.getByText('2.0 KiB in all, of the 20 MiB every attempt receives in full')).toBeTruthy();
+  expect(library().getByRole('heading', { level: 2, name: 'The library' })).toBeTruthy();
+  expect(library().getByText('every agent in the project follows these')).toBeTruthy();
+  expect(library().getByText('2 files · 2.0 KiB')).toBeTruthy();
+  expect(library().getByText('of the 20 MiB every attempt receives in full')).toBeTruthy();
   expect(screen.queryByText(/index only/)).toBeNull();
   // A removed entry shows no card, and its readers are not read.
   expect(screen.queryByText('Old notes')).toBeNull();
@@ -168,6 +173,11 @@ test('each current entry shows as a card with its purpose, revision, size, reade
   // The library sits above the work.
   const files = screen.getByRole('list', { name: 'The work' });
   expect(list.compareDocumentPosition(files) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // Where each came from shows in its panel: an upload, and an accepted file naming its story.
+  expect((await pick(user, 'Brand guide')).getByText('Uploaded')).toBeTruthy();
+  const launch = await pick(user, 'Launch copy');
+  expect(launch.getByText('From accepted work:')).toBeTruthy();
+  expect(launch.getByRole('link', { name: 'Story T-1' })).toBeTruthy();
 });
 
 test('a library past what every attempt receives says the rest go in the index only, and a copy names its project', async () => {
@@ -184,13 +194,15 @@ test('a library past what every attempt receives says the rest go in the index o
     ],
   };
   controller.libraryReaders = {};
+  const user = userEvent.setup();
   open();
   await screen.findByRole('list', { name: 'Library files' });
-  expect(screen.getByText('22.0 MiB in all, of the 20 MiB every attempt receives in full')).toBeTruthy();
+  expect(screen.getByText('5 files · 22.0 MiB')).toBeTruthy();
+  expect(screen.getByText('of the 20 MiB every attempt receives in full')).toBeTruthy();
   expect(screen.getByText(/the files past it go in each attempt's index only/)).toBeTruthy();
   const palette = card('Shared palette');
-  expect(palette.getByText('Copied from Project Y')).toBeTruthy();
-  expect(await palette.findByText('Not read yet')).toBeTruthy();
+  expect(await palette.findByText('2.0 MiB · not read yet')).toBeTruthy();
+  expect((await pick(user, 'Shared palette')).getByText('Copied from Project Y')).toBeTruthy();
 });
 
 test('an empty library says what it is for', async () => {
@@ -244,8 +256,8 @@ test('Upload a file posts the file in base64 with its name and purpose, and the 
   ]);
   expect(screen.queryByRole('dialog', { name: 'Upload a file' })).toBeNull();
   expect(screen.getByText('Added Tokens to the library.')).toBeTruthy();
-  expect(library().getByText('3 files')).toBeTruthy();
-  expect(await card('Tokens').findByText('Not read yet')).toBeTruthy();
+  expect(library().getByText('3 files · 2.0 KiB')).toBeTruthy();
+  expect(await card('Tokens').findByText('13 B · not read yet')).toBeTruthy();
 });
 
 test('Add to the library on a file of the work posts where it came from, and the new card names its story', async () => {
@@ -273,7 +285,10 @@ test('Add to the library on a file of the work posts where it came from, and the
   await user.type(add.getByLabelText('Name'), 'Plan');
   await user.type(add.getByLabelText('What it is for'), 'The plan every story follows.');
   await user.click(add.getByRole('button', { name: 'Add to the library' }));
-  expect(await card('Plan').findByText('From accepted work: Story T-2')).toBeTruthy();
+  // Its panel names the story it came from.
+  const plan = await pick(user, 'Plan');
+  expect(plan.getByText('From accepted work:')).toBeTruthy();
+  expect(plan.getByRole('link', { name: 'Story T-2' })).toBeTruthy();
   expect(posted()).toEqual([
     {
       url: libraryUrl,

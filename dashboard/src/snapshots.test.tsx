@@ -1,4 +1,4 @@
-// Snapshots below the work on the Artifacts page of a project that is not code (1.2 step 6): each named set,
+// Snapshots, a card below the work on the Artifacts page of a project that is not code (1.2 step 6): each named set,
 // newest first, with when it was made, how many files it holds and how many changed since against the files listed
 // now, What changed with the controller's own changes, Download to its zip, and New snapshot of every accepted file or
 // the chosen ones, with the controller's refusals shown in its dialog. A code project shows none.
@@ -165,6 +165,10 @@ test('the snapshots list newest first, each with its name, time, file count and 
   const files = screen.getByRole('list', { name: 'The work' }),
     section = screen.getByRole('region', { name: 'Snapshots' });
   expect(files.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // A card of its own after the work's card, with New snapshot in its heading row.
+  expect(screen.getByRole('region', { name: 'The work' }).contains(section)).toBe(false);
+  expect(within(section).getByRole('button', { name: 'New snapshot' })).toBeTruthy();
+  expect(within(section).getByText('a set of these files at one moment, such as what you sent out')).toBeTruthy();
 });
 
 test('a snapshot whose files are all as listed says nothing changed since', async () => {

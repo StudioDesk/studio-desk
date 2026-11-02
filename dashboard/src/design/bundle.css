@@ -4381,6 +4381,300 @@ button.sd-row[aria-pressed='true'] {
   border-top: 1.5px solid var(--line);
 }
 
+/* The Artifacts page: the library and the work beside the picked file's panel, which stays in view as the list
+   scrolls; on a phone, or wherever both columns do not fit, the panel opens under the picked card or row instead */
+.sd-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  align-items: flex-start;
+}
+.sd-artifacts__main {
+  flex: 3 1 440px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+}
+.sd-artifacts__side {
+  flex: 1 1 300px;
+  min-width: 0;
+  position: sticky;
+  top: var(--space-16);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.sd-artifacts__under {
+  min-width: 0;
+  margin-top: var(--space-10);
+  scroll-margin-top: var(--space-16);
+}
+
+/* The library: its heading and total, then a grid of its files, each a card picked to read it */
+.sd-library {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.sd-library__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+.sd-library__title,
+.sd-library__total {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-10);
+}
+.sd-library__total {
+  align-items: center;
+  gap: 12px;
+}
+.sd-library__bar {
+  flex: 1 1 200px;
+  max-width: 320px;
+}
+.sd-libgrid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.sd-libgrid__item {
+  min-width: 0;
+  display: flex;
+}
+.sd-libgrid__under {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.sd-libgrid__under > .sd-artifacts__under {
+  margin-top: 0;
+}
+.sd-libcard {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas: 'tile name' 'tile purpose' 'foot foot';
+  align-content: start;
+  column-gap: 12px;
+  row-gap: 2px;
+  padding: var(--space-14) var(--space-16);
+  border-radius: 18px;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sd-libcard:hover {
+  border-color: var(--line-2);
+}
+.sd-libcard[aria-pressed='true'] {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 2px var(--brand);
+}
+.sd-libcard > .sd-kindtile {
+  grid-area: tile;
+}
+.sd-libcard__name {
+  grid-area: name;
+  font-size: 16px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.sd-libcard__purpose {
+  grid-area: purpose;
+  color: var(--ink-2);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.sd-libcard__foot {
+  grid-area: foot;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-6);
+  margin-top: var(--space-8);
+}
+
+/* A card of files, such as the work and the snapshots: its heading row with its count and tools, then its rows */
+.sd-workcard {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: 18px 20px;
+}
+.sd-workcard__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-10);
+  padding-bottom: var(--space-10);
+}
+.sd-workcard__title {
+  margin: 0;
+  font: 800 20px/1.2 var(--font-display);
+  letter-spacing: -0.02em;
+}
+.sd-workcard__tools {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-6);
+}
+.sd-filerow {
+  min-width: 0;
+  padding: var(--space-10) 0;
+  border-top: 1.5px solid var(--line);
+}
+.sd-filerow__head {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-10);
+  cursor: pointer;
+}
+.sd-filerow__name {
+  flex: 1 1 260px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-wrap: anywhere;
+}
+a.sd-filerow__name {
+  font-weight: 600;
+}
+.sd-filerow--picked .sd-filerow__name > b {
+  color: var(--brand-text);
+}
+.sd-filerow__versions {
+  min-width: 0;
+  margin-top: var(--space-8);
+}
+/* The records of how the work was done, at the foot of its card */
+.sd-records {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: var(--space-8);
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--surface-2);
+  border: 1.5px dashed var(--line-2);
+}
+.sd-records__text {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* A code project's card: its code is in the repository */
+.sd-coderef {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+}
+.sd-coderef__icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand-soft);
+  color: var(--brand-text);
+}
+.sd-coderef__text {
+  flex: 1 1 380px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sd-coderef__text > b {
+  font-size: 16px;
+}
+.sd-coderef__text > span {
+  color: var(--ink-2);
+  font-size: 14.5px;
+}
+/* A filter's segmented choice: smaller, its chosen part in the brand's soft colour */
+.sd-segmented--filter {
+  padding: 2px;
+  border-color: var(--line-2);
+  background: transparent;
+}
+.sd-segmented--filter > button {
+  min-height: 0;
+  padding: 5px 11px;
+  font: 600 13px/1.2 var(--font-sans);
+}
+.sd-segmented--filter > button[aria-pressed='true'] {
+  background: var(--brand-soft);
+  color: var(--brand-text);
+}
+/* A choice drawn as a chip: as wide as its chosen words and never stretched across its row; chosen, in the brand's
+   soft colour */
+.sd-chipselect {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  max-width: 100%;
+  color: var(--wait);
+}
+.sd-chipselect > select {
+  appearance: none;
+  field-sizing: content;
+  max-width: 16em;
+  height: var(--chip-height);
+  padding: 0 26px 0 10px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--wait-soft);
+  color: inherit;
+  font: 700 12.5px/1 var(--font-sans);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.sd-chipselect::after {
+  content: '';
+  position: absolute;
+  right: 11px;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin-top: -4px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+.sd-chipselect--on {
+  color: var(--brand-text);
+}
+.sd-chipselect--on > select {
+  background: var(--brand-soft);
+}
+
 /* Result: what a step returned, read in place. Its picture opens the file over the page; its summary and handoff;
    each file it returned with Download and View; a recorded text as Markdown or plain text, the first part until
    the director asks for the rest; how its phases ran; and a planner's proposed work */

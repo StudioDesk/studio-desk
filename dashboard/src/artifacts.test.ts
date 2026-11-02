@@ -1,7 +1,7 @@
 // What the redesigned Artifacts page reads from a project's work (artifacts.ts): each file's readable name, kind and
-// one line, the All, Documents and Images filter with the idea and agent choices, the counts of files and versions,
-// each version's why, the records sentence for each kind of project and a visual check's row, from the records alone;
-// and the work as it reaches the stand-in controller. Model-free; no page shows any of it yet.
+// one line, the All, Documents N and Images N filter with the idea and agent choices, the counts of files and
+// versions, each version's why, the records line's words for each kind of project and a visual check's row, from the
+// records alone; and the work as it reaches the stand-in controller. Model-free.
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { getJSON, workUrl, type ProjectWork, type WorkFile, type WorkPictures, type WorkVersion } from './api';
 import {
@@ -12,7 +12,7 @@ import {
   picturesLine,
   readableName,
   readsInPlace,
-  recordsSentence,
+  recordsWords,
   versionCount,
   versionWhy,
   workChoices,
@@ -20,6 +20,7 @@ import {
   workKind,
   workLine,
   workRows,
+  workShowChoices,
   workShows,
   type ArtifactRecords,
 } from './artifacts';
@@ -224,6 +225,13 @@ test('All, Documents and Images, any idea and any agent, and a chosen idea or ag
   const rows = workRows(files, records),
     names = (filter: Parameters<typeof matchingWork>[1]) => matchingWork(rows, filter).map(row => row.name);
   expect(workShows.map(show => show.label)).toEqual(['All', 'Documents', 'Images']);
+  // The choice's words count the work's own files of each kind.
+  expect(workShowChoices(rows)).toEqual([
+    { value: 'all', label: 'All' },
+    { value: 'documents', label: 'Documents 3' },
+    { value: 'images', label: 'Images 1' },
+  ]);
+  expect(workShowChoices([]).map(show => show.label)).toEqual(['All', 'Documents 0', 'Images 0']);
   expect(names({})).toEqual(['Launch page', 'Hero banner', 'Pricing table', 'NOTES']);
   expect(names({ show: 'all' })).toEqual(['Launch page', 'Hero banner', 'Pricing table', 'NOTES']);
   expect(names({ show: 'documents' })).toEqual(['Launch page', 'Pricing table', 'NOTES']);
@@ -267,20 +275,21 @@ test('the first version reads as the first, and a later one in its recorded word
   expect(versionWhy(second!)).toBe('Nothing was recorded about why it was made.');
 });
 
-test("the records sentence counts a project's records in its own words, and none has no sentence", () => {
-  expect(recordsSentence({ count: 17, kinds: { plan: 9, review: 8 } }, false)).toBe(
-    '17 records of how the work was done. The plans, reviews and check results stay on each idea and story, where ' +
-      'they explain the work. They are never listed here.',
-  );
-  expect(recordsSentence({ count: 653, kinds: { 'source-file': 653 } }, true)).toBe(
-    "653 records of how the stories were built. Reviews, test results, plans and the copies of changed files stay on each story's Changes, Checks and Activity. They are never listed here.",
-  );
-  expect(recordsSentence({ count: 1, kinds: { plan: 1 } }, false)).toMatch(/^1 record of how the work was done\. /);
-  expect(recordsSentence({ count: 1, kinds: { review: 1 } }, true)).toMatch(
-    /^1 record of how the stories were built\. /,
-  );
-  expect(recordsSentence({ count: 0, kinds: {} }, false)).toBeNull();
-  expect(recordsSentence({ count: 0, kinds: {} }, true)).toBeNull();
+test("the records line counts a project's records in its own words, and none has no line", () => {
+  expect(recordsWords({ count: 17, kinds: { plan: 9, review: 8 } }, false)).toEqual({
+    title: '17 records of how the work was done',
+    detail:
+      'The plans, reviews and check results stay on each idea and story, where they explain the work. They are never listed here.',
+  });
+  expect(recordsWords({ count: 653, kinds: { 'source-file': 653 } }, true)).toEqual({
+    title: '653 records of how the stories were built',
+    detail:
+      "Reviews, test results, plans and the copies of changed files stay on each story's Changes, Checks and Activity. They are never listed here.",
+  });
+  expect(recordsWords({ count: 1, kinds: { plan: 1 } }, false)?.title).toBe('1 record of how the work was done');
+  expect(recordsWords({ count: 1, kinds: { review: 1 } }, true)?.title).toBe('1 record of how the stories were built');
+  expect(recordsWords({ count: 0, kinds: {} }, false)).toBeNull();
+  expect(recordsWords({ count: 0, kinds: {} }, true)).toBeNull();
 });
 
 test("a visual check's row reads its story's title quoted, its date and how many pictures it took", () => {
