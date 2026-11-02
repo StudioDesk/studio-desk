@@ -28,11 +28,14 @@ export const browserNote =
 
 const failure = (message, status = 400) => Object.assign(new Error(message), { status });
 
-// The pages a story's next check captures: the director's, once changed, otherwise those its proposal named.
+// The pages a story's next check captures: the director's, once changed, otherwise those its proposal named, read
+// through the same check as the director's so each page has its steps list ([] when it gave none). The proposal's
+// stored bytes are left as they were.
 export function storyPages(store, task) {
   if (task.pages) return task.pages;
   try {
-    return proposedStory(store, task)?.pages || [];
+    const pages = proposedStory(store, task)?.pages;
+    return pages ? validateStoryPages(pages) : [];
   } catch {
     return [];
   }

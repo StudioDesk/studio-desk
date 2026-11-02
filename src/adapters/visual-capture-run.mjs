@@ -156,7 +156,8 @@ try {
           if (navigated.result?.errorText) image.problem = `the page did not open: ${navigated.result.errorText}`;
           await Promise.race([loaded, sleep(10000)]);
           await sleep(plan.settleMs);
-          for (const step of image.problem ? [] : page.steps) {
+          // A page with no steps is pictured as it opens.
+          for (const step of image.problem ? [] : (page.steps ?? [])) {
             const ran = await send('Runtime.evaluate', {
               expression: stepScript(step),
               awaitPromise: true,
