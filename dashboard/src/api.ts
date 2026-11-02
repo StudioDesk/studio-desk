@@ -927,9 +927,16 @@ async function readServedToken() {
   }
 }
 
-// The controller's answer to a command whose token is not this start's.
+// The controller's answer to a command whose token is not this start's (src/server.mjs), and the ones controllers
+// from before it told a missing token from an earlier one still give: the general refusal, and the one that also
+// named the director's key.
+const staleTokenErrors = [
+  "This command's X-Studio-Token is from an earlier start of the controller. Reload the page, or read the token from it again.",
+  'Invalid controller request.',
+  "This command needs the dashboard's request token (X-Studio-Token) or, from a local tool, the director's key (X-Studio-Key). If the dashboard was open across a restart, reload it.",
+];
 const staleToken = (response: Response, result: { error?: unknown } | null) =>
-  response.status === 403 && result?.error === 'Invalid controller request.';
+  response.status === 403 && staleTokenErrors.some(error => result?.error === error);
 const restarted = 'The controller restarted. Reload this page to continue.';
 
 export type RecordsListener = (records: CommandRecords) => void;

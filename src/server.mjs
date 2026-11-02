@@ -8,7 +8,6 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Store } from './store.mjs';
 import {
-  commandTokenMessage,
   directorAccess,
   directorKey,
   launchFileName,
@@ -181,6 +180,13 @@ const dashboardTypes = {
 // tools read from the main address.
 const dashboardNotBuilt =
   '<!doctype html><meta charset="utf-8"><meta name="studio-token" content="%STUDIO_TOKEN%"><title>Studio desk</title><h1>The dashboard is not built</h1><p>Run <code>npm ci</code> in the controller\'s folder, then restart it: <code>npm start</code> builds the dashboard. A release includes it already built.</p>';
+// A command signed in by the session cookie alone is refused without this start's request token, saying which header
+// it lacks and where its value comes from, or, for a token that is not this start's, that the controller restarted.
+// The dashboard reads the second as a restart and reads the token again (dashboard/src/api.ts staleToken).
+const missingTokenMessage =
+  "This command needs the X-Studio-Token header: this start's request token, which the dashboard page the controller serves carries in its studio-token meta tag. The dashboard sends it with every command; a local tool sends the director's key (X-Studio-Key) instead.";
+const earlierTokenMessage =
+  "This command's X-Studio-Token is from an earlier start of the controller. Reload the page, or read the token from it again.";
 // A refusal the page can act on may carry fields beside its message, such as the files that keep the try copy from
 // moving (1.2 step 7).
 function fail(message, status = 400, fields) {
@@ -1020,9 +1026,15 @@ export function createStudio({
         // The page's request token keeps another page in the director's browser from riding on the session cookie,
         // which the browser sends by itself. The key in its header needs no token: no page can send it without
         // knowing the key, and whoever knows the key can read the token from the page anyway (the November 2
-        // review). A request signed in by the cookie alone still needs the token, on every route.
+        // review). A request signed in by the cookie alone still needs the token, on every route. Its refusal says
+        // whether the header is missing or carries a token from an earlier start, which the dashboard reads as a
+        // restart (dashboard/src/api.ts staleToken).
         const keyed = director.keyed(req.headers);
-        if (!keyed && !sameSecret(req.headers['x-studio-token'], csrf)) fail(commandTokenMessage, 403);
+        if (!keyed) {
+          const token = req.headers['x-studio-token'];
+          if (token === undefined) fail(missingTokenMessage, 403);
+          if (!sameSecret(token, csrf)) fail(earlierTokenMessage, 403);
+        }
         if (closing) fail('Controller is stopping.', 503);
         // Idea intake: the Studio desk route, and the general one (1.0 item 11), which starts the
         // project's own intake: source checks and a breakdown for a source project, the planner for

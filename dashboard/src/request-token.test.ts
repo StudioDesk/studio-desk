@@ -28,7 +28,30 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const stale = { error: 'Invalid controller request.' },
+// The controller's answer to a token from an earlier start (src/server.mjs), and the ones controllers from before it
+// told a missing token from an earlier one give to both: the general refusal, and the one that also named the key.
+const stale = {
+    error:
+      "This command's X-Studio-Token is from an earlier start of the controller. Reload the page, or read the token from it again.",
+  },
+  staleAnswers: [string, { error: string }][] = [
+    ['the earlier-start message', stale],
+    ['the general refusal of a controller from before it', { error: 'Invalid controller request.' }],
+    [
+      'the refusal that named the key, of a controller from before it',
+      {
+        error:
+          "This command needs the dashboard's request token (X-Studio-Token) or, from a local tool, the director's key (X-Studio-Key). If the dashboard was open across a restart, reload it.",
+      },
+    ],
+  ],
+  staleCommands = staleAnswers.flatMap(([name, refused]) =>
+    (['POST', 'PATCH'] as const).map((method): ['POST' | 'PATCH', string, { error: string }] => [
+      method,
+      name,
+      refused,
+    ]),
+  ),
   restarted = 'The controller restarted. Reload this page to continue.',
   page = (token: string) =>
     `<!doctype html><html><head><meta charset="utf-8" /><meta name="studio-token" content="${token}" /><title>Studio desk</title></head><body><div id="root"></div></body></html>`,
@@ -65,15 +88,15 @@ const refusal = (promise: Promise<unknown>) =>
     (error: Error) => error.message,
   );
 
-test.each(['POST', 'PATCH'] as const)(
-  'a %s refused for a stale token reads the new token from the page and is sent once more with it',
-  async method => {
+test.each(staleCommands)(
+  'a %s refused for a stale token with %s reads the new token from the page and is sent once more with it',
+  async (method, _, refused) => {
     let commands = 0;
     answer(request =>
       request.method === 'GET'
         ? reply(200, page('new'))
         : ++commands === 1
-          ? reply(403, stale)
+          ? reply(403, refused)
           : reply(200, { ok: true }),
     );
     const body = JSON.stringify({ projectId: 'project-x', title: 'Renamed' });
@@ -87,14 +110,26 @@ test.each(['POST', 'PATCH'] as const)(
   },
 );
 
-test('a command refused again with the new token asks for a reload, and is not sent a third time', async () => {
-  answer(request => (request.method === 'GET' ? reply(200, page('new')) : reply(403, stale)));
-  expect(await refusal(send('/api/intake', { projectId: 'project-x', idea: 'Add a page.' }))).toBe(restarted);
-  expect(requests.map(request => [request.method, request.token])).toEqual([
-    ['POST', 'old'],
-    ['GET', undefined],
-    ['POST', 'new'],
-  ]);
+test.each(staleAnswers)(
+  'a command refused again with %s asks for a reload, and is not sent a third time',
+  async (_, refused) => {
+    answer(request => (request.method === 'GET' ? reply(200, page('new')) : reply(403, refused)));
+    expect(await refusal(send('/api/intake', { projectId: 'project-x', idea: 'Add a page.' }))).toBe(restarted);
+    expect(requests.map(request => [request.method, request.token])).toEqual([
+      ['POST', 'old'],
+      ['GET', undefined],
+      ['POST', 'new'],
+    ]);
+  },
+);
+
+// A command without the header at all is not a restart: reading the page again would not help.
+test('a 403 for a missing token header is not sent again and keeps its own message', async () => {
+  const error =
+    "This command needs the X-Studio-Token header: this start's request token, which the dashboard page the controller serves carries in its studio-token meta tag. The dashboard sends it with every command; a local tool sends the director's key (X-Studio-Key) instead.";
+  answer(() => reply(403, { error }));
+  expect(await refusal(send('/api/tasks', { projectId: 'project-x' }))).toBe(error);
+  expect(requests).toHaveLength(1);
 });
 
 const unreadable: [string, () => unknown][] = [

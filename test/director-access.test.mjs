@@ -83,18 +83,35 @@ test('the launch link signs a browser in with a session cookie that opens the da
   assert.equal(write.status, 200);
   assert.equal(app.store.organization().maxParallel, 3);
   // The request token still guards every command the cookie signs in, as it guards against other pages in the
-  // browser, and the refusal names both ways in.
-  const tokenless = await fetch(origin + '/api/control', {
-    ...plain,
-    method: 'POST',
-    headers: { cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ maxParallel: 2 }),
-  });
+  // browser. A command without the header is told which header it lacks, where its value comes from, and that a local
+  // tool sends the key instead.
+  const command = headers =>
+    fetch(origin + '/api/control', {
+      ...plain,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ maxParallel: 2 }),
+    });
+  const tokenless = await command({ cookie });
   assert.equal(tokenless.status, 403);
   const refusal = (await tokenless.json()).error;
-  assert.match(refusal, /X-Studio-Token/);
+  assert.match(refusal, /X-Studio-Token header/);
+  assert.match(refusal, /studio-token meta tag/);
   assert.match(refusal, /X-Studio-Key/);
-  assert.equal(app.store.organization().maxParallel, 3);
+  // One whose token is not this start's is told it is from an earlier start, in the words the dashboard reads as a
+  // restart (dashboard/src/api.ts staleToken).
+  const wrong = await command({ cookie, 'X-Studio-Token': 'f'.repeat(48) });
+  assert.equal(wrong.status, 403);
+  const earlier = (await wrong.json()).error;
+  assert.match(earlier, /from an earlier start of the controller/);
+  assert.match(earlier, /Reload the page/);
+  const dashboardApi = fs.readFileSync(new URL('../dashboard/src/api.ts', import.meta.url), 'utf8');
+  assert.ok(dashboardApi.includes(earlier), 'the dashboard recognises the earlier-start message');
+  // An empty header carries a token too, just not this start's: the dashboard sends one when its page has none.
+  const empty = await command({ cookie, 'X-Studio-Token': '' });
+  assert.equal(empty.status, 403);
+  assert.equal((await empty.json()).error, earlier);
+  assert.equal(app.store.organization().maxParallel, 3, 'no refused command changed anything');
   // A link that is not this start's, or a cookie made up, signs nothing in.
   const stale = await fetch(origin + '/launch/' + 'f'.repeat(48), plain);
   assert.equal(stale.status, 403);
