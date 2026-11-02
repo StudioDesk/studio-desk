@@ -3,13 +3,14 @@
 // open work moved on, and Push asked for every time.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { Milestone, ReleaseOverview } from './api';
 import { App } from './app';
+import { queryKeys } from './records';
 import { createAppRouter } from './router';
-import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
+import { createStream, fakeController, FakeSource, latest, taskFixture, type Controller } from './test-controller';
 
 let controller: Controller;
 const milestone = (version: string, line: string, extra: Partial<Milestone> = {}): Milestone => ({
@@ -103,18 +104,21 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const open = (path: string) => {
+const newClient = () => new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+const open = (path: string, client = newClient()) => {
   const router = createAppRouter(createMemoryHistory({ initialEntries: [path] }));
-  render(
-    <App
-      router={router}
-      queryClient={new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })}
-      createStream={createStream}
-    />,
-  );
+  render(<App router={router} queryClient={client} createStream={createStream} />);
   return router;
 };
 const commands = () => controller.requests.filter(request => request.method !== 'GET');
+const releasesRead = '/api/projects/project-x/releases';
+// A change the controller reports on the project's stream, after the hello's version 1.
+const change = (version: number, ...changes: object[]) =>
+  latest().emit('change', {
+    version,
+    start: 'start-a',
+    changes: changes.map((item, index) => ({ seq: version + index, ...item })),
+  });
 
 test('each line shows its last release, what landed since and its milestones, which open to their stories', async () => {
   open('/p/project-x/releases?milestone=1.0.1');
@@ -423,4 +427,98 @@ test('a project whose shell cannot be read still shows its releases, as the cont
   open('/p/project-x/releases');
   expect(await screen.findByRole('region', { name: 'release/1.0' })).toBeTruthy();
   expect(screen.queryByText(/Releases are for code projects/)).toBeNull();
+});
+
+// The page reads its releases again whenever the studio reports a change to them, and stays where it is.
+test('a milestone change the studio reports shows on the open page: a waiting idea moved on, then a milestone released', async () => {
+  const router = open('/p/project-x/releases?milestone=1.0.1');
+  const patchLine = await screen.findByRole('region', { name: 'release/1.0' });
+  expect(within(patchLine).getByText('Keep the folder browser quick')).toBeTruthy();
+  // Elsewhere, the first waiting idea moves to 1.1.0; the controller reports the milestones' setting.
+  const moved = overview(),
+    [patch, next] = moved.milestones!;
+  next!.waiting = [patch!.waiting[0]!];
+  patch!.waiting = [patch!.waiting[1]!];
+  controller.releases = moved;
+  change(2, { type: 'setting', id: 'milestones:project-x', projectId: 'project-x' });
+  const mainLine = screen.getByRole('region', { name: 'main' });
+  expect(await within(mainLine).findByText('Keep the folder browser quick')).toBeTruthy();
+  expect(within(patchLine).queryByText('Keep the folder browser quick')).toBeNull();
+  expect(within(patchLine).getByText('Hash snapshots without holding up the controller')).toBeTruthy();
+  // Then 1.0.1 is released, its open work moved on.
+  const released = structuredClone(moved),
+    [shipped, after] = released.milestones!;
+  after!.waiting = [...after!.waiting, ...shipped!.waiting];
+  released.milestones![0] = {
+    ...shipped!,
+    state: 'released',
+    waiting: [],
+    release: { state: 'released', tag: 'v1.0.1' },
+  };
+  released.lines![0]!.lastRelease = { name: 'v1.0.1', version: '1.0.1' };
+  controller.releases = released;
+  change(3, { type: 'setting', id: 'milestones:project-x', projectId: 'project-x' });
+  const shippedCard = within(await screen.findByRole('region', { name: 'Released' }));
+  expect(shippedCard.getByText('1.0.1')).toBeTruthy();
+  expect(shippedCard.getByText('Tagged v1.0.1')).toBeTruthy();
+  expect(within(patchLine).getByText('No open milestone on this line.')).toBeTruthy();
+  expect(within(mainLine).getByText('Hash snapshots without holding up the controller')).toBeTruthy();
+  expect(router.state.location.pathname).toBe('/p/project-x/releases');
+  expect(router.state.location.search).toEqual({ milestone: '1.0.1' });
+});
+
+test('a line retired elsewhere shows on the open page once the studio reports the project changed', async () => {
+  open('/p/project-x/releases?milestone=1.0.1');
+  expect(await screen.findByRole('region', { name: 'release/1.0' })).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Retired lines' })).toBeNull();
+  controller.releases!.lines![0]!.state = 'retired';
+  change(2, { type: 'projects' });
+  const retired = within(await screen.findByRole('region', { name: 'Retired lines' }));
+  expect(retired.getByRole('button', { name: 'Maintain it again' })).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'release/1.0' })).toBeNull();
+});
+
+test('a reload the stream asks for brings the changed releases, and so does a change to one of their stories', async () => {
+  open('/p/project-x/releases?milestone=1.0.1');
+  const patchLine = await screen.findByRole('region', { name: 'release/1.0' });
+  // A milestone made while the stream was away, which the controller can no longer say: the stream reloads.
+  controller.releases!.milestones!.push(milestone('1.2.0', 'main'));
+  latest().emit('change', { version: 5, start: 'start-a', reload: true });
+  const mainLine = screen.getByRole('region', { name: 'main' });
+  expect(
+    await within(mainLine).findByText(
+      'New features. Each minor or major release is made here: 1.1.0 next, then 1.2.0.',
+    ),
+  ).toBeTruthy();
+  // One of the milestone's stories goes to review; the change names its task.
+  const story = within(patchLine).getByRole('link', { name: 'Choose the sandbox in Settings' }).parentElement!;
+  expect(within(story).getByText('Ready')).toBeTruthy();
+  controller.releases!.milestones![0]!.ideas[0]!.stories[1]!.status = 'review';
+  controller.tasks = [taskFixture('T-settings', { title: 'Choose the sandbox in Settings', status: 'review' })];
+  change(6, { type: 'task', id: 'T-settings', projectId: 'project-x' });
+  expect(await within(story).findByText('In review')).toBeTruthy();
+});
+
+test('the page asks for no releases until the stream says where the controller is, and reads them when it is offline', async () => {
+  // The project's shell is already held, as after another of its pages, so only the stream holds the read back.
+  FakeSource.hello = null;
+  const client = newClient();
+  client.setQueryData(queryKeys.shell('project-x'), controller.shell);
+  open('/p/project-x/releases', client);
+  expect(await screen.findByText('Loading the releases…')).toBeTruthy();
+  await waitFor(() => expect(FakeSource.all.some(source => !source.closed)).toBe(true));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(controller.reads()).not.toContain(releasesRead);
+  latest().emit('change', { version: 1, start: 'start-a' });
+  expect(await screen.findByRole('region', { name: 'release/1.0' })).toBeTruthy();
+  expect(controller.reads().filter(url => url === releasesRead)).toHaveLength(1);
+  cleanup();
+  // A stream that cannot open leaves the page to show what the controller answers.
+  controller.requests = [];
+  open('/p/project-x/releases');
+  await waitFor(() => expect(FakeSource.all.some(source => !source.closed)).toBe(true));
+  expect(controller.reads()).not.toContain(releasesRead);
+  latest().emit('error');
+  expect(await screen.findByRole('region', { name: 'release/1.0' })).toBeTruthy();
+  expect(controller.reads()).toContain(releasesRead);
 });

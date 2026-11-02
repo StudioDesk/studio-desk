@@ -23,22 +23,26 @@ import { Dialog } from './design/dialog';
 import { Icon } from './design/icons';
 import { isCodeProject } from './frame';
 import { Heading } from './layout';
-import { useShell, useStudio } from './records';
+import { queryKeys, useShell, useStudio } from './records';
 import { byVersion, runOfTask, StoryReleaseChip } from './release-chip';
+import { useStreamReady } from './stream-context';
 import type { StudioState } from './studio-runs';
 import { useToast } from './toast';
 import { useNarrow } from './use-narrow';
 
 // Only a code project has releases. The page asks for them once the project's shell says it is one, so a project of
 // another kind never does: its address points back to the project's Today page instead. The shell alone decides, not
-// the live records, and a shell that cannot be read leaves the page to show whatever the controller answers.
+// the live records, and a shell that cannot be read leaves the page to show whatever the controller answers. Like the
+// project's other records, it reads once the live stream has said where the controller is, so every change after the
+// read reaches it.
 export function ReleasesPage({ projectId, milestone }: { projectId: string; milestone?: string }) {
   const shell = useShell(projectId),
+    ready = useStreamReady(),
     code = shell.data ? isCodeProject(shell.data) : undefined;
   const { data, error } = useQuery({
-    queryKey: ['releases', projectId],
+    queryKey: queryKeys.releases(projectId),
     queryFn: ({ signal }) => getJSON<ReleaseOverview>(releasesUrl(projectId), signal),
-    enabled: code ?? shell.isError,
+    enabled: ready && (code ?? shell.isError),
   });
   if (code === false)
     return (
@@ -86,7 +90,7 @@ function useReleaseAction(projectId: string) {
     }) => send(url, { projectId, ...body }, method),
     onSuccess: (_, { done }) => {
       if (done) toast(done);
-      void client.invalidateQueries({ queryKey: ['releases', projectId] });
+      void client.invalidateQueries({ queryKey: queryKeys.releases(projectId) });
     },
     onError: error => toast(error.message),
   });

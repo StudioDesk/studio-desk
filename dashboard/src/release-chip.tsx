@@ -41,10 +41,10 @@ export interface ReleaseChoice {
 }
 
 // The project's releases, read once for every chip on a page and with the Releases page; only a project on a git
-// repository has them.
+// repository has them. They are read again with the project's other records when the studio reports a change to them.
 export function useReleases(projectId: string, enabled = true) {
   return useQuery({
-    queryKey: ['releases', projectId],
+    queryKey: queryKeys.releases(projectId),
     queryFn: ({ signal }) => getJSON<ReleaseOverview>(releasesUrl(projectId), signal),
     enabled,
     staleTime: 30_000,
@@ -285,7 +285,7 @@ export function StoryReleaseChip({
         toast(`${task.title} moves to ${choice.version}.`);
         void client.invalidateQueries({ queryKey: queryKeys.task(projectId, task.id) });
         void client.invalidateQueries({ queryKey: queryKeys.live(projectId) });
-        void client.invalidateQueries({ queryKey: ['releases', projectId] });
+        void client.invalidateQueries({ queryKey: queryKeys.releases(projectId) });
       },
       onError: error => toast(error.message),
     });

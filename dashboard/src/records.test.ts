@@ -10,12 +10,15 @@ import {
   finishedUrl,
   getJSON,
   liveUrl,
+  releasesUrl,
   send,
   taskUrl,
   type Change,
+  type ChangeMessage,
   type CommandRecords,
   type FinishedPage,
   type Live,
+  type ReleaseOverview,
   type Task,
   type TaskPage,
 } from './api';
@@ -296,5 +299,93 @@ test("a project's pages take its commands' answers before send() resolves, until
   controller.command = () => ({ ok: true, records: titled('After closing') });
   await send('/api/tasks/T-1/approve-work', { projectId: 'project-x' });
   expect(live().tasks.map(task => task.title)).toEqual(['Approved']);
+  expect(controller.reads()).toEqual([]);
+});
+
+// A page holding the project's releases, as the Releases page and the release chips do: one milestone, whose idea's
+// story is T-old and whose release notes are T-notes's.
+async function holdReleases() {
+  const story = (id: string) => ({ id, title: id, status: 'done', started: true, integration: null, carries: [] });
+  controller.releases = {
+    available: true,
+    lines: [],
+    milestones: [
+      {
+        id: 'milestone-1.0.1',
+        version: '1.0.1',
+        line: null,
+        goal: '',
+        state: 'open',
+        waiting: [],
+        release: { state: 'drafting', notesTaskId: 'T-notes' },
+        ideas: [{ runId: 'run-1', idea: 'An idea', at: null, by: 'director', stories: [story('T-old')], movedOut: [] }],
+        movedIn: [],
+        counts: { ideas: 1, waiting: 0, stories: 1, integrated: 0, started: 1 },
+      },
+    ],
+  };
+  const releases = new QueryObserver(client, {
+    queryKey: queryKeys.releases('project-x'),
+    queryFn: () => getJSON<ReleaseOverview>(releasesUrl('project-x')),
+  });
+  unsubscribe.push(releases.subscribe(() => {}));
+  await vi.waitFor(() => expect(client.getQueryData(queryKeys.releases('project-x'))).toBeDefined());
+  controller.requests.length = 0;
+}
+// What one message reads, from no reads.
+const readsFor = async (message: ChangeMessage) => {
+  controller.requests.length = 0;
+  await sync.apply(message);
+  return controller.reads();
+};
+const releasesRead = '/api/projects/project-x/releases';
+const changes = (...list: Omit<Change, 'seq'>[]) => ({
+  version: 2,
+  start: 's',
+  changes: list.map((change, i) => ({ seq: 2 + i, ...change })),
+});
+
+test('the releases are named under their project, so a reload reads them again with its other records', async () => {
+  expect(queryKeys.releases('project-x')).toEqual(['project-x', 'releases']);
+  await holdReleases();
+  expect(await readsFor({ version: 2, start: 's', reload: true })).toEqual([releasesRead]);
+  controller.requests.length = 0;
+  await sync.answer({ projectId: 'project-x', version: 3, start: 's', reload: true });
+  expect(controller.reads()).toEqual([releasesRead]);
+  // Another project's reload leaves them.
+  controller.requests.length = 0;
+  await sync.answer({ projectId: 'project-y', version: 4, start: 's', reload: true });
+  expect(controller.requests).toEqual([]);
+});
+
+test('a milestone, a line, a run or a story they name changing reads the releases again; an event or an attempt alone does not', async () => {
+  await holdReleases();
+  // Milestones are a project setting; retiring or adding a line changes the project's record.
+  expect(await readsFor(changes({ type: 'setting', id: 'milestones:project-x', projectId: 'project-x' }))).toEqual([
+    releasesRead,
+  ]);
+  expect(await readsFor(changes({ type: 'projects' }))).toEqual([releasesRead]);
+  expect(await readsFor(changes({ type: 'run', id: 'run-1' }))).toEqual([releasesRead]);
+  expect(await readsFor(changes({ type: 'task', id: 'T-old' }))).toEqual([releasesRead]);
+  expect(await readsFor(changes({ type: 'task', id: 'T-notes' }))).toEqual([releasesRead]);
+  // A task they do not name leaves them, as nothing is fetched for a task no page holds.
+  expect(await readsFor(changes({ type: 'task', id: 'T-1' }))).toEqual([]);
+  // Each phase an attempt logs, and the attempt's own record, leave them, as do both together.
+  expect(
+    await readsFor(
+      changes(
+        { type: 'event', kind: 'phase', taskId: 'T-old', attemptId: 'attempt-1' },
+        { type: 'event', kind: 'log', taskId: 'T-old' },
+        { type: 'attempt', id: 'attempt-1', taskId: 'T-old' },
+      ),
+    ),
+  ).toEqual([]);
+  // A command's answer that supplies the page of a story they name reads them again too, and one that does not leaves
+  // them.
+  controller.requests.length = 0;
+  await sync.answer(answered([controller.tasks[1]!]));
+  expect(controller.reads()).toEqual([releasesRead]);
+  controller.requests.length = 0;
+  await sync.answer(answered([controller.tasks[0]!]));
   expect(controller.reads()).toEqual([]);
 });

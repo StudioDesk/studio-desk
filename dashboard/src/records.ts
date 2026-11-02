@@ -19,6 +19,7 @@ import {
   type FinishedPage,
   type Live,
   type PeopleSummary,
+  type ReleaseOverview,
   type SettledKind,
   type SettledFilter,
   type SettledPage,
@@ -49,10 +50,23 @@ export const queryKeys = {
   activity: (projectId: string) => [projectId, 'activity'] as const,
   story: (projectId: string, taskId: string) => [projectId, 'story', taskId] as const,
   settledCounts: (projectId: string) => [projectId, 'settled', 'counts'] as const,
+  // The project's release lines and milestones, for the Releases page and every release chip.
+  releases: (projectId: string) => [projectId, 'releases'] as const,
 };
 
 const taskTypes = new Set(['task', 'attempt', 'event']);
 export type RunItem = FinishedPage['runs'][number];
+
+// The tasks the project's releases name: each milestone's stories, those moved in or out of it, and its release notes.
+function releaseTasks(overview?: ReleaseOverview) {
+  const ids = new Set<string>();
+  for (const milestone of overview?.milestones ?? []) {
+    for (const idea of milestone.ideas) for (const story of [...idea.stories, ...idea.movedOut]) ids.add(story.id);
+    for (const story of milestone.movedIn) ids.add(story.id);
+    if (milestone.release?.notesTaskId) ids.add(milestone.release.notesTaskId);
+  }
+  return ids;
+}
 
 // One task's record and attempts in place of the ones the live set holds, or added to it.
 function patched(live: Live, page: TaskPage): Live {
@@ -107,12 +121,15 @@ export class RecordSync {
     const { client, projectId } = this;
     const given = new Set(supplied.map(page => page.task.id)),
       read = new Set<string>();
+    // The tasks whose own records changed, as opposed to their attempts' or events'.
+    const tasks = new Set(given);
     let runs = false,
       shell = false,
       events = false;
     for (const change of changes) {
       const taskId = change.type === 'task' && change.id !== undefined ? String(change.id) : change.taskId;
       if (change.type === 'event') events = true;
+      if (change.type === 'task' && taskId) tasks.add(taskId);
       if (taskTypes.has(change.type)) {
         if (taskId && !given.has(taskId)) read.add(taskId);
       } else if (change.type === 'run') runs = true;
@@ -147,6 +164,12 @@ export class RecordSync {
         client.invalidateQueries({ queryKey: queryKeys.instructions(projectId) }),
         client.invalidateQueries({ queryKey: [projectId, 'story'] }),
       );
+    // The releases follow their milestones and lines (settings and projects), the ideas sent to them and the stories
+    // they name. Reading them reads git, so an event or an attempt alone, such as each phase an attempt logs, leaves
+    // them, and so does a task they do not name, as nothing is fetched for a task no page holds.
+    const named = releaseTasks(client.getQueryData<ReleaseOverview>(queryKeys.releases(projectId)));
+    if (shell || runs || [...tasks].some(id => named.has(id)))
+      work.push(client.invalidateQueries({ queryKey: queryKeys.releases(projectId) }));
     if (runs || reload) work.push(this.reloadLive());
     if (runs)
       work.push(
