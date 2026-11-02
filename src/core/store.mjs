@@ -54,6 +54,18 @@ const phaseNames = {
 // A few attempts' phase events are read through their attempts; more, such as a whole project's, through every phase
 // event, which one pass over the phase index reads faster than as many lookups.
 const phaseIdsPerQuery = 200;
+// The task IDs one query of lastFinished reads, well under SQLite's limit on a statement's parameters.
+const taskIdsPerQuery = 500;
+
+// A task's or an attempt's project as the projects' indexes read it, by recordProject's rule (core/projects.mjs): the
+// record's own projectId, or for the legacy project also a record that names none. json_type is NULL only when the
+// record has no projectId at all; a projectId of JSON null names no project. Both terms are read through the index on
+// json_extract(data, '$.projectId'), so a project's records are found without reading the others. Its one parameter
+// is the project's ID.
+const projectWhere = projectId =>
+  projectId === LEGACY_PROJECT
+    ? `(json_extract(data, '$.projectId') = ? OR (json_extract(data, '$.projectId') IS NULL AND json_type(data, '$.projectId') IS NULL))`
+    : `json_extract(data, '$.projectId') = ?`;
 
 // An attempt's own reservation (MP-033), held from its start until it ends or is reconciled, as its agent's was before
 // an agent could run several attempts at once. Its name is the attempt's alone, so it never makes other work wait; it
@@ -80,14 +92,18 @@ export class Store {
     // Attempts by their status and by their integration's state (October 28): the scheduler counts the running
     // attempts on every pass and a code story's start reads what integrations committed, and parsing every recorded
     // attempt for that (a code story's record is about 190 KB) froze the controller for seconds as each story started.
+    // Tasks and attempts by their project (November 2): every page of a project parsed every task the studio ever had
+    // and filtered its attempts by an expression no index covered, so one project's pages slowed with every other's.
     this.db.exec(`CREATE INDEX IF NOT EXISTS events_by_attempt ON events (attempt_id, seq);
       CREATE INDEX IF NOT EXISTS events_by_task ON events (task_id, seq);
       CREATE INDEX IF NOT EXISTS events_by_kind ON events (kind, seq);
       CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts (task_id);
       CREATE INDEX IF NOT EXISTS attempts_by_status ON attempts (json_extract(data, '$.status'));
       CREATE INDEX IF NOT EXISTS attempts_by_integration ON attempts (json_extract(data, '$.sourceIntegration.state'));
+      CREATE INDEX IF NOT EXISTS attempts_by_project ON attempts (json_extract(data, '$.projectId'));
       CREATE INDEX IF NOT EXISTS tasks_by_status ON tasks (json_extract(data, '$.status'));
-      CREATE INDEX IF NOT EXISTS tasks_by_queued ON tasks (json_extract(data, '$.queued'));`);
+      CREATE INDEX IF NOT EXISTS tasks_by_queued ON tasks (json_extract(data, '$.queued'));
+      CREATE INDEX IF NOT EXISTS tasks_by_project ON tasks (json_extract(data, '$.projectId'));`);
     // Every write raises the version and calls onChange with what changed (MP-026): the dashboard's
     // cache tags and change events follow it, and the scheduler runs on it. Each event also reaches
     // onEvent, so a tab watching an attempt receives its lines. A log line is not a change: the compact
@@ -256,6 +272,14 @@ export class Store {
       .all()
       .map(r => JSON.parse(r.data));
   }
+  // One project's tasks in record order, read through the project index: the same records tasks() filtered by
+  // recordProject gives, without parsing another project's.
+  projectTasks(projectId) {
+    return this.db
+      .prepare(`SELECT data FROM tasks WHERE ${projectWhere(projectId)} ORDER BY rowid`)
+      .all(projectId)
+      .map(r => JSON.parse(r.data));
+  }
   // The tasks a scheduler pass weighs, read through the status and queued indexes (C-19): a pass after nearly every
   // write parsed every task the project ever had, three times.
   tasksWithStatus(...statuses) {
@@ -275,16 +299,21 @@ export class Store {
   anyQueued() {
     return !!this.db.prepare("SELECT 1 FROM tasks WHERE json_extract(data, '$.queued') = 1 LIMIT 1").get();
   }
-  // When each task's attempts last finished, read without parsing any attempt, to list settled work newest first.
-  lastFinished() {
-    return new Map(
-      this.db
+  // When each of these tasks' attempts last finished, read without parsing any attempt, to list settled work newest
+  // first. Only these tasks' attempts are read, through the attempts' task index; a task with no attempt is left out.
+  lastFinished(taskIds) {
+    const latest = new Map();
+    for (let start = 0; start < taskIds.length; start += taskIdsPerQuery) {
+      const chunk = taskIds.slice(start, start + taskIdsPerQuery);
+      for (const row of this.db
         .prepare(
-          "SELECT task_id AS taskId, MAX(json_extract(data, '$.finishedAt')) AS at FROM attempts GROUP BY task_id",
+          `SELECT task_id AS taskId, MAX(json_extract(data, '$.finishedAt')) AS at FROM attempts
+          WHERE task_id IN (${chunk.map(() => '?').join(',')}) GROUP BY task_id`,
         )
-        .all()
-        .map(row => [row.taskId, row.at]),
-    );
+        .all(...chunk))
+        latest.set(row.taskId, row.at);
+    }
+    return latest;
   }
   task(id) {
     const r = this.db.prepare('SELECT data FROM tasks WHERE id=?').get(id);
@@ -569,11 +598,7 @@ export class Store {
   // event of the project's tasks, one tagged with the project, or an untagged one with no task, as the
   // compact state reads them. The sequence is the row ID, so each page reads only back from its cursor.
   activity(projectId, { before = null, limit = 50 } = {}) {
-    const ids = new Set(
-        this.tasks()
-          .filter(task => recordProject(task) === projectId)
-          .map(task => task.id),
-      ),
+    const ids = new Set(this.projectTasks(projectId).map(task => task.id)),
       read = this.db.prepare("SELECT * FROM events WHERE kind<>'log' AND seq<? ORDER BY seq DESC LIMIT 200"),
       events = [];
     let cursor = before ?? Number.MAX_SAFE_INTEGER,
@@ -651,13 +676,14 @@ export class Store {
     const tasks = taskId === undefined ? null : [taskId].flat();
     // Neither this query nor the timing query selects the snapshot column. Only
     // data is parsed, and no full attempt or phase history is constructed.
+    // A project's attempts are found through the project index; a few tasks' through their own, which the planner
+    // would otherwise pass over for the project's and read every attempt of the project to find them.
     const rows = this.db
       .prepare(
-        `SELECT data FROM attempts
-      WHERE CASE WHEN json_type(data, '$.projectId') IS NULL THEN ?
-        ELSE json_extract(data, '$.projectId') END = ?${tasks ? ` AND task_id IN (${tasks.map(() => '?').join(',')})` : ''} ORDER BY rowid`,
+        `SELECT data FROM attempts${tasks ? ' INDEXED BY attempts_by_task' : ''}
+      WHERE ${projectWhere(projectId)}${tasks ? ` AND task_id IN (${tasks.map(() => '?').join(',')})` : ''} ORDER BY rowid`,
       )
-      .all(LEGACY_PROJECT, projectId, ...(tasks || []))
+      .all(projectId, ...(tasks || []))
       .map(row => JSON.parse(row.data));
     // The same pass reads a working attempt's inner phases, so Today can say what it is doing. A few attempts'
     // phase events are read through their attempts and many through the phase index, rather than by scanning the

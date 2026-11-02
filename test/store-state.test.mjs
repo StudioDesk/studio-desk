@@ -9,6 +9,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { createStudio } from './model-free-studio.mjs';
 import { dashboardAttempt } from '../src/core/dashboard-state.mjs';
+import { LEGACY_PROJECT, recordProject } from '../src/core/projects.mjs';
 import { leftoverWorktrees } from '../src/connectors/source-worktrees.mjs';
 
 test("the dashboard state reads every attempt's phase events with one query, whatever the attempt count", async t => {
@@ -782,11 +783,13 @@ test("a task's attempt summaries read its own attempts' phases through their ind
     .map(row => `${row.tableName}.${row.name}`);
   assert.deepEqual(indexes, [
     'attempts.attempts_by_integration',
+    'attempts.attempts_by_project',
     'attempts.attempts_by_status',
     'attempts.attempts_by_task',
     'events.events_by_attempt',
     'events.events_by_kind',
     'events.events_by_task',
+    'tasks.tasks_by_project',
     'tasks.tasks_by_queued',
     'tasks.tasks_by_status',
   ]);
@@ -827,6 +830,187 @@ test("a task's attempt summaries read its own attempts' phases through their ind
   assert.equal(typeof one[0].executionTiming.durationMs, 'number', 'Its timing still comes from its own phases.');
   assert.match(plans[0], /USING INDEX events_by_attempt/);
   assert.match(plans[1], /USING INDEX events_by_kind/);
+});
+
+test("a project's tasks and attempt summaries read through the project indexes, the legacy project's unmarked records included", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-state-projects-')),
+    app = createStudio({ directory, port: 0 }),
+    store = app.store,
+    second = 'project-second';
+  t.after(async () => {
+    await app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  store.putProject({ id: second, name: 'Second', goal: '', direction: '', revision: 1 });
+  // November 2: each page of a project parsed every task of every project and filtered attempts by an expression no
+  // index covered. Records of both projects are interleaved, and older ones name no project (the legacy project's)
+  // or a JSON null one (no project's).
+  const task = (id, fields = {}) => ({
+      id,
+      title: id,
+      kind: 'general',
+      team: 'Design',
+      workerId: 'W-01',
+      status: 'done',
+      dependencies: [],
+      resources: [],
+      brief: 'Fixture.',
+      acceptance: 'Fixture.',
+      maxAttempts: 1,
+      maxSeconds: 60,
+      ...fields,
+    }),
+    attempt = (id, taskId, fields = {}) => ({ id, taskId, workerId: 'W-01', status: 'accepted', ...fields });
+  for (const record of [
+    task('P-legacy-1'),
+    task('P-second-1', { projectId: second }),
+    task('P-legacy-2', { projectId: LEGACY_PROJECT }),
+    task('P-none', { projectId: null }),
+    task('P-second-2', { projectId: second, status: 'blocked' }),
+    task('P-legacy-3', { status: 'failed' }),
+  ])
+    store.putTask(record);
+  // Saving a record again keeps its place in record order.
+  store.putTask(task('P-legacy-1', { status: 'denied' }));
+  for (const record of [
+    attempt('A-legacy-1', 'P-legacy-1', { finishedAt: '2026-11-01T10:00:00.000Z' }),
+    attempt('A-second-1', 'P-second-1', { projectId: second, finishedAt: '2026-11-01T12:00:00.000Z' }),
+    attempt('A-legacy-2', 'P-legacy-2', { projectId: LEGACY_PROJECT, status: 'review' }),
+    attempt('A-none', 'P-none', { projectId: null, finishedAt: '2026-11-01T13:00:00.000Z' }),
+    attempt('A-second-2', 'P-second-1', { projectId: second, finishedAt: '2026-11-01T11:00:00.000Z' }),
+    attempt('A-legacy-3', 'P-legacy-1', { status: 'running' }),
+  ])
+    store.insertAttempt(record, { text: 'Fixture instructions', hash: 'fixture' });
+  // Nothing below may read an instruction snapshot: one that is not JSON would fail any read that parsed it.
+  store.db.prepare('UPDATE attempts SET snapshot=?').run('not JSON: instruction snapshot');
+  // The filters these reads replace: every task parsed and filtered by recordProject, and the attempts' project by
+  // the expression that no index covers.
+  const previousTasks = projectId => store.tasks().filter(record => recordProject(record) === projectId),
+    previousAttempts = (projectId, taskIds = null) =>
+      store.db
+        .prepare(
+          `SELECT data FROM attempts
+          WHERE CASE WHEN json_type(data, '$.projectId') IS NULL THEN ? ELSE json_extract(data, '$.projectId') END = ?${
+            taskIds ? ` AND task_id IN (${taskIds.map(() => '?').join(',')})` : ''
+          } ORDER BY rowid`,
+        )
+        .all(LEGACY_PROJECT, projectId, ...(taskIds || []))
+        .map(row => dashboardAttempt(JSON.parse(row.data), undefined, null)),
+    previousFinished = taskIds =>
+      new Map(
+        store.db
+          .prepare(
+            "SELECT task_id AS taskId, MAX(json_extract(data, '$.finishedAt')) AS at FROM attempts GROUP BY task_id",
+          )
+          .all()
+          .filter(row => taskIds.includes(row.taskId))
+          .map(row => [row.taskId, row.at]),
+      ),
+    expected = {
+      [LEGACY_PROJECT]: previousTasks(LEGACY_PROJECT),
+      [second]: previousTasks(second),
+      'project-empty': [],
+    },
+    expectedAttempts = {
+      [LEGACY_PROJECT]: previousAttempts(LEGACY_PROJECT),
+      [second]: previousAttempts(second),
+      'project-empty': [],
+    },
+    ids = records => records.map(record => record.id),
+    lastFinishedIds = [
+      'P-legacy-1',
+      'P-second-1',
+      'P-legacy-3',
+      'P-none',
+      ...Array.from({ length: 600 }, (_, i) => `missing-${i}`),
+    ];
+  const prepare = store.db.prepare.bind(store.db),
+    plans = [];
+  t.mock.method(store.db, 'prepare', sql => {
+    const statement = prepare(sql);
+    if (!/FROM (tasks|attempts)\b/.test(sql)) return statement;
+    if (/FROM attempts/.test(sql)) assert.ok(!/snapshot|SELECT\s+\*/i.test(sql), sql);
+    return {
+      all: (...values) => {
+        plans.push(
+          prepare(`EXPLAIN QUERY PLAN ${sql}`)
+            .all(...values)
+            .map(row => row.detail)
+            .join('; '),
+        );
+        return statement.all(...values);
+      },
+    };
+  });
+  const read = projectId => {
+    const from = plans.length,
+      tasks = store.projectTasks(projectId),
+      afterTasks = plans.length,
+      attempts = store.dashboardAttempts(projectId),
+      afterAttempts = plans.length,
+      own = store.dashboardAttempts(projectId, ['P-legacy-1', 'P-second-1', 'P-none']);
+    return {
+      tasks,
+      attempts,
+      own,
+      plans: {
+        tasks: plans.slice(from, afterTasks),
+        attempts: plans.slice(afterTasks, afterAttempts),
+        own: plans.slice(afterAttempts),
+      },
+    };
+  };
+  const legacy = read(LEGACY_PROJECT),
+    secondRead = read(second),
+    empty = read('project-empty'),
+    plansBeforeFinished = plans.length,
+    finished = store.lastFinished(lastFinishedIds),
+    finishedPlans = plans.slice(plansBeforeFinished);
+  store.db.prepare.mock.restore();
+  // Exactly the records, fields and order the previous filters read, the legacy project's unmarked records included.
+  for (const [projectId, answer] of [
+    [LEGACY_PROJECT, legacy],
+    [second, secondRead],
+    ['project-empty', empty],
+  ]) {
+    assert.deepEqual(answer.tasks, expected[projectId], projectId);
+    assert.deepEqual(answer.attempts, expectedAttempts[projectId], projectId);
+    assert.deepEqual(answer.own, previousAttempts(projectId, ['P-legacy-1', 'P-second-1', 'P-none']), projectId);
+  }
+  assert.deepEqual(
+    ids(legacy.tasks).filter(id => id.startsWith('P-')),
+    ['P-legacy-1', 'P-legacy-2', 'P-legacy-3'],
+  );
+  assert.equal(legacy.tasks.find(record => record.id === 'P-legacy-1').status, 'denied');
+  assert.ok(
+    legacy.tasks.some(record => record.id === 'D-001'),
+    'The starter tasks name no project: they are legacy.',
+  );
+  assert.deepEqual(ids(secondRead.tasks), ['P-second-1', 'P-second-2']);
+  assert.deepEqual(ids(legacy.attempts), ['A-legacy-1', 'A-legacy-2', 'A-legacy-3']);
+  assert.deepEqual(ids(secondRead.attempts), ['A-second-1', 'A-second-2']);
+  assert.deepEqual(ids(legacy.own), ['A-legacy-1', 'A-legacy-3'], "Another project's task gives none of its attempts.");
+  assert.deepEqual(ids(secondRead.own), ['A-second-1', 'A-second-2']);
+  // When the tasks asked for last finished, from their own attempts only, as the whole history's grouping says.
+  assert.deepEqual(finished, previousFinished(lastFinishedIds));
+  assert.deepEqual([...finished].sort(), [
+    ['P-legacy-1', '2026-11-01T10:00:00.000Z'],
+    ['P-none', '2026-11-01T13:00:00.000Z'],
+    ['P-second-1', '2026-11-01T12:00:00.000Z'],
+  ]);
+  assert.deepEqual(store.lastFinished([]), new Map());
+  // Each read goes through its index and none scans the tasks or the attempts.
+  for (const answer of [legacy, secondRead, empty]) {
+    assert.equal(answer.plans.tasks.length, 1);
+    assert.match(answer.plans.tasks[0], /SEARCH tasks USING INDEX tasks_by_project/);
+    assert.equal(answer.plans.attempts.length, 1);
+    assert.match(answer.plans.attempts[0], /SEARCH attempts USING INDEX attempts_by_project/);
+    assert.equal(answer.plans.own.length, 1);
+    assert.match(answer.plans.own[0], /SEARCH attempts USING INDEX attempts_by_task/);
+  }
+  assert.equal(finishedPlans.length, 2, 'More task IDs than one query takes are read in turns.');
+  for (const plan of finishedPlans) assert.match(plan, /SEARCH attempts USING INDEX attempts_by_task/);
+  for (const plan of plans) assert.doesNotMatch(plan, /\bSCAN (tasks|attempts)\b/, plan);
 });
 
 test("a story's start reads the live attempts, the integrations and the reviews of its work without parsing the whole history", async t => {

@@ -412,7 +412,7 @@ export function setRunArchived(store, registries, projectId, runId, archived, ow
   });
 }
 
-export function projectRuns(store, projectId, tasks = store.tasks().filter(task => recordProject(task) === projectId)) {
+export function projectRuns(store, projectId, tasks = store.projectTasks(projectId)) {
   const recorded = store.runs(projectId);
   return [...recorded, ...legacyRuns(tasks, new Set(recorded.map(run => run.id)))]
     .map(run => ({

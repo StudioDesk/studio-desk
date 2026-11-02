@@ -4,7 +4,6 @@
 // a page at a time, newest first, each with its tasks and attempt summaries, and any one run on its own.
 import { directorInputsOf } from './idea-inputs.mjs';
 import { projectRuns } from './graph.mjs';
-import { recordProject } from './projects.mjs';
 
 // A settled task needs nothing more: closed, denied, or accepted with nothing left to integrate. A source story
 // is accepted while it waits for integration (public/runs.js integrationReview), and so is a passing review in
@@ -56,7 +55,8 @@ export function runMembership(tasks) {
 }
 
 const withInputs = record => ({ ...record, directorInputs: directorInputsOf(record) });
-const projectTasks = (store, projectId) => store.tasks().filter(task => recordProject(task) === projectId);
+// A project's tasks in record order, read through the project index (core/store.mjs).
+const projectTasks = (store, projectId) => store.projectTasks(projectId);
 
 // A finished run's records as its story reads them (public/runs.js): without each task's direction, brief,
 // acceptance text and accepted inputs, or each attempt's input references, files and review notes, which a
@@ -198,7 +198,8 @@ export function settledTasks(store, projectId, { kind, before = null, limit = 12
       task => (workerId === null || task.workerId === workerId) && (team === null || task.team === team),
     ),
     done = reviewReader(store, projectId, tasks),
-    finished = store.lastFinished(),
+    // When these tasks last finished, from their own attempts rather than every attempt of every project.
+    finished = store.lastFinished(tasks.map(task => task.id)),
     when = task => finished.get(task.id) || task.createdAt || '',
     groups = {
       accepted: tasks.filter(task => done(task) && task.status === 'done' && !task.closed),

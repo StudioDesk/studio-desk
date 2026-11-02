@@ -397,3 +397,94 @@ test("the activity log reads a project's recorded events newest first, a page at
     assert.equal(messages.includes(hidden), false, hidden);
   assert.equal((await read('/api/projects/project-legacy/activity?before=soon')).status, 400);
 });
+
+test('each page read of a project answers exactly what it did before a second project had work of its own', async t => {
+  const { read, store } = await records(t);
+  store.insertAttempt(
+    { id: 'attempt-late', taskId: 'T-accepted', status: 'accepted', finishedAt: '2026-10-23T00:00:00.000Z' },
+    {},
+  );
+  store.event('accepted', 'T-r3', null, 'Accepted.', 'project-legacy', '2026-10-22T09:00:00.000Z');
+  store.event('note', 'T-open', null, 'A task of this project');
+  for (let index = 0; index < 55; index++)
+    store.event('note', null, null, `Controller note ${index}`, 'project-legacy');
+  const project = 'project-legacy',
+    ok = async path => {
+      const answer = await read(`/api/projects/${project}/${path}`);
+      assert.equal(answer.status, 200, path);
+      return answer.body;
+    };
+  // Every read the project's pages make, with each next page read from its cursor.
+  const reads = async () => {
+    const runs = await ok('runs?limit=2'),
+      accepted = await ok('settled?kind=accepted&limit=2'),
+      activity = await ok('activity');
+    assert.ok(runs.next && accepted.next && activity.next, 'Each list has a next page.');
+    return {
+      live: await ok('live'),
+      runs,
+      runsNext: await ok(`runs?limit=2&before=${runs.next}`),
+      openRun: await ok('runs/run-open'),
+      finishedRun: await ok('runs/run-a'),
+      accepted,
+      acceptedNext: await ok(`settled?kind=accepted&limit=2&before=${accepted.next}`),
+      counts: await ok('settled?kind=accepted&limit=0'),
+      closed: await ok('settled?kind=closed'),
+      theirs: await ok('settled?kind=accepted&workerId=W-01'),
+      team: await ok('settled?kind=accepted&team=Design'),
+      people: await ok('people'),
+      activity,
+      activityNext: await ok(`activity?before=${activity.next}`),
+    };
+  };
+  const before = await reads();
+  // A second project with work in every state, by the same employee and team, whose attempts finished later and
+  // whose events are newer than any of the first project's.
+  const second = 'project-second',
+    theirs = { projectId: second };
+  store.putProject({ id: second, name: 'Second', goal: '', direction: '', revision: 1 });
+  for (const record of [
+    task('T-s-open', 'failed', null, theirs),
+    task('T-s-done', 'done', 'run-s-open', theirs),
+    task('T-s-working', 'running', 'run-s-open', theirs),
+    task('T-s-a', 'done', 'run-s-finished', theirs),
+    task('T-s-b', 'denied', 'run-s-finished', theirs),
+    task('T-s-closed', 'done', 'run-s-closed', { ...theirs, closed: true }),
+    task('T-s-waits', 'blocked', null, { ...theirs, dependencies: ['T-s-a'] }),
+  ])
+    store.putTask(record);
+  for (const [id, taskId, status] of [
+    ['attempt-s-live', 'T-s-working', 'running'],
+    ['attempt-s-a', 'T-s-a', 'accepted'],
+    ['attempt-s-done', 'T-s-done', 'accepted'],
+    ['attempt-s-closed', 'T-s-closed', 'accepted'],
+  ])
+    store.insertAttempt({ id, taskId, projectId: second, status, finishedAt: '2026-10-30T00:00:00.000Z' }, {});
+  store.event('accepted', 'T-s-a', null, 'Accepted.', second, '2026-10-30T00:00:00.000Z');
+  store.event('log', 'T-s-working', 'attempt-s-live', 'An agent line of the second project');
+  for (let index = 0; index < 5; index++) store.event('note', null, null, `Second project note ${index}`, second);
+  assert.deepEqual(await reads(), before);
+  // The second project reads its own work and none of the first project's.
+  const live = (await read(`/api/projects/${second}/live`)).body;
+  assert.deepEqual(live.tasks.map(item => item.id).sort(), [
+    'T-s-a',
+    'T-s-done',
+    'T-s-open',
+    'T-s-waits',
+    'T-s-working',
+  ]);
+  assert.deepEqual(live.attempts.map(attempt => attempt.id).sort(), [
+    'attempt-s-a',
+    'attempt-s-done',
+    'attempt-s-live',
+  ]);
+  assert.deepEqual((await read(`/api/projects/${second}/runs`)).body.runs.map(item => item.run.id).sort(), [
+    'run-s-closed',
+    'run-s-finished',
+  ]);
+  assert.deepEqual((await read(`/api/projects/${second}/settled?kind=accepted&limit=0`)).body.counts, {
+    accepted: 2,
+    closed: 2,
+  });
+  assert.equal((await read(`/api/projects/${second}/people`)).body.tasks, 7);
+});
