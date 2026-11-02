@@ -13,7 +13,13 @@ export interface AttemptSummary {
   finishedAt?: string | null;
   acceptedAt?: string;
   error?: string;
-  result?: { outcome?: string; summary?: string; issues?: string[] };
+  // The result the agent returned, with its own checks: each one's name, pass, fail or not-run, and its evidence.
+  result?: {
+    outcome?: string;
+    summary?: string;
+    issues?: string[];
+    checks?: { name: string; status: string; evidence?: string }[];
+  };
   executionTiming?: { durationMs: number | null; activeStart: string | null };
   candidateReviewVerdict?: string;
   workReviewVerdict?: string;
@@ -247,6 +253,10 @@ export interface TaskKind {
   scopeRequestLabel?: string;
   integrationLabel?: string;
   proposesWork?: boolean;
+  // How a failed check meets acceptance, as the controller's acceptAttempt decides it: whether the type accepts its
+  // result plainly anyway, and whether its step contract lets the director accept over one with a reason.
+  acceptsFailedChecks?: boolean;
+  acceptOver?: boolean;
   requiredResources?: string[];
   operation?: {
     connector?: string;

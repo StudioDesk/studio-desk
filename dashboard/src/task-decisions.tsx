@@ -5,7 +5,7 @@
 import { useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useEffect, useId, useRef, useState } from 'react';
-import { send, type Task } from './api';
+import { send, type AttemptSummary, type Task } from './api';
 import { BringBack } from './bring-back';
 import { decisionState, fileRequest } from './decisions';
 import { Icon } from './design/icons';
@@ -65,6 +65,11 @@ interface Asking {
   limit?: number;
   send: (note: string) => void;
 }
+
+// The checks a result's own report failed, each named once, as the controller's acceptAttempt finds them.
+const failedChecks = (attempt: AttemptSummary) => [
+  ...new Set((attempt.result?.checks ?? []).filter(check => check.status === 'fail').map(check => check.name)),
+];
 
 // The decisions "Where it stands" offers, on their own row, primary first as the design orders them; the closing
 // actions behind More actions, each saying what it does; and Try it in its own strip under them.
@@ -245,6 +250,13 @@ export function TaskDecisions({
       onClick: () => act('cancel', {}, () => 'Cancellation requested.'),
     });
   if (task.status === 'review' && latest) {
+    // A result whose own checks failed is accepted over them with the director's reason, as the controller requires,
+    // unless its task type accepts failed checks plainly. A type whose step contract takes no acceptance over a failed
+    // check keeps the plain Accept, and the controller's refusal names the way forward. The type is the one the attempt
+    // ran as, as acceptAttempt reads it for a story's stage.
+    const failed = plan ? [] : failedChecks(latest),
+      type = studio.taskKinds[(latest.assignment as { kind?: string } | undefined)?.kind ?? task.kind],
+      over = failed.length > 0 && !type?.acceptsFailedChecks && type?.acceptOver !== false;
     actions.push(
       plan
         ? {
@@ -253,12 +265,29 @@ export function TaskDecisions({
             emphasis: 'primary',
             onClick: () => act('accept-proposal', { attemptId: latest.id, proposalHash: plan.hash }),
           }
-        : {
-            key: 'accept',
-            label: 'Accept result',
-            emphasis: 'primary',
-            onClick: () => act('accept', {}, () => 'Result accepted.'),
-          },
+        : over
+          ? {
+              key: 'accept',
+              label: 'Accept over a failed check…',
+              emphasis: 'primary',
+              onClick: () =>
+                setAsking({
+                  title: 'Accept over a failed check?',
+                  text: `Its own ${failed.length === 1 ? 'check' : 'checks'} failed: ${failed.join(', ')}. Your reason is recorded with the acceptance.`,
+                  label: 'Why accept it anyway',
+                  submit: 'Accept over a failed check',
+                  required: true,
+                  // The controller records a reason of up to 2000 characters.
+                  limit: 2000,
+                  send: note => act('accept', { overReason: note }, () => 'Accepted over a failed check.'),
+                }),
+            }
+          : {
+              key: 'accept',
+              label: 'Accept result',
+              emphasis: 'primary',
+              onClick: () => act('accept', {}, () => 'Result accepted.'),
+            },
     );
     if (task.kind !== 'unreal-integration')
       actions.push({

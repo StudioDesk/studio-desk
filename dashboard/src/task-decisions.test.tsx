@@ -143,20 +143,134 @@ test('once the attempt is reconciled, Reconcile is gone and Start assignment is 
   expect(isPrimary(region.getByRole('button', { name: 'Start assignment' }))).toBe(true);
 });
 
-// A result in review, with the direction its task recorded.
-const inReview = () => {
+// A result in review, with the direction its task recorded and any checks its own report recorded.
+const inReview = (checks?: NonNullable<AttemptSummary['result']>['checks']) => {
   controller.attempts = [
     {
       id: 'attempt-1',
       taskId: 'T-1',
       status: 'review',
       workerId: 'W-1',
-      result: { outcome: 'completed', summary: 'Ready.' },
+      result: { outcome: 'completed', summary: 'Ready.', ...(checks ? { checks } : {}) },
     },
   ];
   open(taskFixture('T-1', { status: 'review', lastAttemptId: 'attempt-1', direction: 'Recorded direction.' }));
 };
 const revision = async () => within(await screen.findByRole('dialog', { name: 'Request a revision?' }));
+// A result whose own checks failed twice over, one named twice, beside a check that passed and one not run.
+const failedChecks = [
+  { name: 'Unit tests', status: 'fail', evidence: '2 of 40 failed.' },
+  { name: 'Lint', status: 'fail' },
+  { name: 'Unit tests', status: 'fail', evidence: 'Run again: 2 of 40 failed.' },
+  { name: 'Build', status: 'pass' },
+  { name: 'Visual check', status: 'not-run', evidence: 'No browser.' },
+];
+const acceptOver = async () => within(await screen.findByRole('dialog', { name: 'Accept over a failed check?' }));
+
+test('a result whose own checks failed is accepted over them with a reason, with Request revision beside it', async () => {
+  const user = userEvent.setup();
+  inReview(failedChecks);
+  const region = await decisions(),
+    decided = row(region);
+  expect(names(decided)).toEqual(['Accept over a failed check…', 'Request revision', 'More actions']);
+  const accept = decided.getByRole('button', { name: 'Accept over a failed check…' });
+  expect(isPrimary(accept)).toBe(true);
+  expect(isPrimary(decided.getByRole('button', { name: 'Request revision' }))).toBe(false);
+  expect(region.queryByRole('button', { name: 'Accept result' })).toBeNull();
+  await user.click(accept);
+  // The acceptance waits for the director's reason, and the box names each failed check once.
+  const dialog = await acceptOver();
+  expect(posted()).toEqual([]);
+  expect(
+    dialog.getByText('Its own checks failed: Unit tests, Lint. Your reason is recorded with the acceptance.'),
+  ).toBeTruthy();
+  const reason = dialog.getByLabelText('Why accept it anyway') as HTMLTextAreaElement;
+  expect(reason.value).toBe('');
+  expect(reason.maxLength).toBe(2000);
+  // The controller needs a reason: an empty one, or only spaces, sends nothing.
+  const submit = dialog.getByRole('button', { name: 'Accept over a failed check' }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  await user.click(submit);
+  await user.type(reason, '   ');
+  expect(submit.disabled).toBe(true);
+  await user.click(submit);
+  expect(posted()).toEqual([]);
+  await user.clear(reason);
+  await user.type(reason, 'The two failures are a known flaky test.');
+  await user.click(submit);
+  // The accept route takes only the project and the reason.
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-1/accept',
+        method: 'POST',
+        body: { projectId: 'project-x', overReason: 'The two failures are a known flaky test.' },
+      },
+    ]),
+  );
+  expect(screen.queryByRole('dialog', { name: 'Accept over a failed check?' })).toBeNull();
+  await waitFor(() => expect(toast().textContent).toBe('Accepted over a failed check.'));
+});
+
+test('one failed check is named on its own, and Cancel sends nothing', async () => {
+  const user = userEvent.setup();
+  inReview([{ name: 'Lint', status: 'fail' }]);
+  const region = await decisions();
+  await user.click(region.getByRole('button', { name: 'Accept over a failed check…' }));
+  const dialog = await acceptOver();
+  expect(dialog.getByText('Its own check failed: Lint. Your reason is recorded with the acceptance.')).toBeTruthy();
+  await user.click(dialog.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('dialog', { name: 'Accept over a failed check?' })).toBeNull();
+  expect(posted()).toEqual([]);
+});
+
+test('a result whose own checks all passed keeps Accept result, which sends no reason', async () => {
+  const user = userEvent.setup();
+  inReview(failedChecks.filter(check => check.status !== 'fail'));
+  const region = await decisions();
+  expect(names(row(region))).toEqual(['Accept result', 'Request revision', 'More actions']);
+  await user.click(region.getByRole('button', { name: 'Accept result' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([{ url: '/api/tasks/T-1/accept', method: 'POST', body: { projectId: 'project-x' } }]),
+  );
+  expect(screen.queryByRole('dialog', { name: 'Accept over a failed check?' })).toBeNull();
+  await waitFor(() => expect(toast().textContent).toBe('Result accepted.'));
+});
+
+test.each([
+  ['accepts failed checks plainly', { acceptsFailedChecks: true, acceptOver: true }],
+  ['takes no acceptance over a failed check', { acceptsFailedChecks: false, acceptOver: false }],
+])('a task type that %s keeps Accept result over a failed check, which sends no reason', async (_, facts) => {
+  const user = userEvent.setup();
+  controller.shell.taskKinds = { general: { label: 'General task', cardLabel: 'Task', ...facts } };
+  inReview(failedChecks);
+  const region = await decisions();
+  expect(names(row(region))).toEqual(['Accept result', 'Request revision', 'More actions']);
+  await user.click(region.getByRole('button', { name: 'Accept result' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([{ url: '/api/tasks/T-1/accept', method: 'POST', body: { projectId: 'project-x' } }]),
+  );
+});
+
+test('the type the attempt ran as decides, as the controller reads it for a stage', async () => {
+  // The story's own type would take an acceptance over the failed check; the step it ran as accepts it plainly.
+  controller.shell.taskKinds = {
+    general: { label: 'General task', acceptsFailedChecks: false, acceptOver: true },
+    'general:stage': { label: 'A stage', acceptsFailedChecks: true, acceptOver: true },
+  };
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'review',
+      workerId: 'W-1',
+      assignment: { kind: 'general:stage' },
+      result: { outcome: 'completed', summary: 'Ready.', checks: failedChecks },
+    },
+  ];
+  open(taskFixture('T-1', { status: 'review', lastAttemptId: 'attempt-1' }));
+  expect(names(row(await decisions()))).toEqual(['Accept result', 'Request revision', 'More actions']);
+});
 
 test("a result in review is accepted, or sent for revision with a note that starts from the page's direction draft", async () => {
   const user = userEvent.setup();
