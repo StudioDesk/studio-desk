@@ -185,6 +185,29 @@ test('finished runs come newest first, a page at a time, each with its tasks and
   assert.equal((await read('/api/projects/project-missing/runs')).status, 400);
 });
 
+test('finished runs list by when they finished, newest first, each saying when; ones with nothing recorded follow', async t => {
+  const { store, read } = await records(t);
+  // run-a was sent first and finished last; run-b finished before it; run-c has nothing recorded on its tasks.
+  store.event('accepted', 'T-r3', null, 'Accepted.', 'project-legacy', '2026-10-22T09:00:00.000Z');
+  store.event('accepted', 'T-r2-b', null, 'Denied.', 'project-legacy', '2026-10-22T10:00:00.000Z');
+  store.event('accepted', 'T-r2-a', null, 'Accepted.', 'project-legacy', '2026-10-22T11:00:00.000Z');
+  const first = await read('/api/projects/project-legacy/runs?limit=2');
+  assert.deepEqual(
+    first.body.runs.map(item => [item.run.id, item.run.finishedAt]),
+    [
+      ['run-a', '2026-10-22T11:00:00.000Z'],
+      ['run-b', '2026-10-22T09:00:00.000Z'],
+    ],
+  );
+  assert.equal(first.body.next, 'run-b');
+  const second = await read('/api/projects/project-legacy/runs?limit=2&before=run-b');
+  assert.deepEqual(
+    second.body.runs.map(item => item.run.id),
+    ['run-c'],
+  );
+  assert.equal('finishedAt' in second.body.runs[0].run, false);
+});
+
 test('any one run, open or finished, reads on its own with its tasks and attempts', async t => {
   const { read } = await records(t);
   const finished = await read('/api/projects/project-legacy/runs/run-a');

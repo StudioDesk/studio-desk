@@ -125,7 +125,22 @@ export function finishedRuns(store, projectId, { before = null, limit = 10 } = {
     if (!members.has(runId)) members.set(runId, []);
     members.get(runId).push(task);
   }
-  const finished = projectRuns(store, projectId, tasks).filter(run => members.get(run.id)?.every(done));
+  // Newest finished first, each with when it finished (November 2, 2026, the drift audit's D15): an idea sent days
+  // ago that finished tonight comes before one sent today that finished this morning, so Today's Shipped today reads
+  // it. An idea finished when the last thing was recorded on any of its tasks; one with nothing recorded keeps its
+  // place among the others in the order they were sent, after them.
+  const sent = projectRuns(store, projectId, tasks).filter(run => members.get(run.id)?.every(done)),
+    last = store.lastTaskEvents(sent.flatMap(run => members.get(run.id).map(task => task.id))),
+    ended = new Map(
+      sent.map(run => [
+        run.id,
+        members
+          .get(run.id)
+          .map(task => last.get(task.id))
+          .reduce((latest, event) => (event && event.seq > (latest?.seq ?? 0) ? event : latest), null),
+      ]),
+    ),
+    finished = sent.sort((a, b) => (ended.get(b.id)?.seq ?? 0) - (ended.get(a.id)?.seq ?? 0));
   const from = before === null ? 0 : finished.findIndex(run => run.id === before) + 1;
   if (from === 0 && before !== null)
     throw Object.assign(new Error('That page of runs no longer exists.'), { status: 404 });
@@ -134,9 +149,10 @@ export function finishedRuns(store, projectId, { before = null, limit = 10 } = {
     attempts = ids.length ? store.dashboardAttempts(projectId, ids) : [];
   return {
     runs: page.map(run => {
-      const own = new Set(members.get(run.id).map(task => task.id));
+      const own = new Set(members.get(run.id).map(task => task.id)),
+        finishedAt = ended.get(run.id)?.time;
       return {
-        run: { ...run, directorInputs: directorInputsOf(store.run(run.id)) },
+        run: { ...run, directorInputs: directorInputsOf(store.run(run.id)), ...(finishedAt ? { finishedAt } : {}) },
         tasks: members.get(run.id).map(storyTask),
         attempts: attempts.filter(attempt => own.has(attempt.taskId)).map(storyAttempt),
       };

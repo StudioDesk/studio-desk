@@ -3,7 +3,7 @@
 // floor and what shipped today. Every action asks the controller for the same recorded step the task page would.
 import { notifyManager, useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
-import { useId, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import { send, type AttemptSummary, type Task, type Worker } from './api';
 import { askedPaths, commandRequest, decisionState, fileRequest } from './decisions';
 import { plural, took, totalsOf, diffStatOf, sandboxed, openPhaseOf, testingPhases } from './evidence';
@@ -1335,9 +1335,17 @@ function Moving({
 
 export function TodayPage({ projectId }: { projectId: string }) {
   const { state, error, shell } = useStudio(projectId),
-    finished = useFinished(projectId, 3);
+    finished = useFinished(projectId, 5),
+    // Finished ideas come newest finished first. While the last one read finished today, the next page may hold more
+    // that shipped today (November 2, 2026: Today counted three of the five that shipped).
+    lastEnded = finished.data?.pages.at(-1)?.runs.at(-1)?.run.finishedAt,
+    readOn = !!lastEnded && new Date(lastEnded).toDateString() === new Date().toDateString(),
+    { hasNextPage, isFetchingNextPage, fetchNextPage } = finished;
+  useEffect(() => {
+    if (readOn && hasNextPage && !isFetchingNextPage) void fetchNextPage();
+  }, [readOn, hasNextPage, isFetchingNextPage, fetchNextPage]);
   const earlier = useMemo(
-    () => (shell && finished.data ? finishedState(shell, finished.data.pages.slice(0, 1)) : null),
+    () => (shell && finished.data ? finishedState(shell, finished.data.pages) : null),
     [shell, finished.data],
   );
   const finishedStories = useMemo(() => (earlier ? runStories(earlier) : []), [earlier]);

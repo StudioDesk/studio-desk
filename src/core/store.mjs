@@ -573,6 +573,23 @@ export class Store {
         : null;
     return { events, next };
   }
+  // When each of these tasks last had anything recorded: its last event's place in the history and its time, read
+  // from the events' task index (November 2, 2026: finished ideas list newest finished first). A task with no event
+  // is left out.
+  lastTaskEvents(taskIds) {
+    const latest = new Map();
+    for (let start = 0; start < taskIds.length; start += 500) {
+      const ids = taskIds.slice(start, start + 500);
+      // SQLite takes the bare time from the row holding the greatest sequence.
+      const rows = this.db
+        .prepare(
+          `SELECT task_id, MAX(seq) AS seq, time FROM events WHERE task_id IN (${ids.map(() => '?').join(',')}) GROUP BY task_id`,
+        )
+        .all(...ids);
+      for (const row of rows) latest.set(row.task_id, { seq: row.seq, time: row.time });
+    }
+    return latest;
+  }
   // A task's recorded events without agent output or phases, oldest first (a story's Activity). Events have no
   // index on their task, so the read starts at the first event recorded a few minutes before the task was created,
   // found by a search on the sequence (whose times only grow), rather than at the start of the history.

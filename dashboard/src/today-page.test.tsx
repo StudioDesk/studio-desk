@@ -546,8 +546,44 @@ test('Today reads the first page of finished runs once, for what shipped today',
   open();
   expect(await screen.findByText('Nothing has shipped yet today.')).toBeTruthy();
   expect(controller.reads().filter(url => url.startsWith('/api/projects/project-x/runs'))).toEqual([
-    '/api/projects/project-x/runs?limit=3',
+    '/api/projects/project-x/runs?limit=5',
   ]);
+});
+
+// A finished idea as the controller's list sends it, finished at the time given (November 2, 2026).
+const ended = (id: string, finishedAt: string) => ({
+  run: {
+    id,
+    createdAt: '2026-10-20T09:00:00Z',
+    brief: `The ${id} idea.`,
+    workflow: { id: 'workflow-1', name: 'Fixture flow', version: 1 },
+    revisions: [],
+    nodes: [],
+    archive: { archived: false },
+    finishedAt,
+  },
+  tasks: [],
+  attempts: [],
+});
+
+test('Today reads on while the finished ideas it has read finished today, and stops at the first that did not', async () => {
+  const now = new Date().toISOString(),
+    yesterday = new Date(Date.now() - 86_400_000).toISOString();
+  controller.finished = {
+    runs: ['run-1', 'run-2', 'run-3', 'run-4', 'run-5'].map(id => ended(id, now)),
+    next: 'run-5',
+  };
+  controller.olderRuns['run-5'] = { runs: [ended('run-6', now), ended('run-7', yesterday)], next: 'run-7' };
+  open();
+  await waitFor(() =>
+    expect(controller.reads().filter(url => url.startsWith('/api/projects/project-x/runs'))).toEqual([
+      '/api/projects/project-x/runs?limit=5',
+      '/api/projects/project-x/runs?limit=5&before=run-5',
+    ]),
+  );
+  // run-7 finished yesterday, so the page after it is never read.
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(controller.reads().filter(url => url.includes('before=run-7'))).toEqual([]);
 });
 
 test('an idea and its files go to the intake as one request, and Today opens the run it started', async () => {

@@ -442,6 +442,8 @@ export interface ToldView {
 export interface RunRecord {
   id: string;
   createdAt?: string;
+  // A finished idea's list says when it finished: the last thing recorded on any of its tasks.
+  finishedAt?: string;
   archive?: { archived?: boolean } | null;
   [field: string]: unknown;
 }
