@@ -80,6 +80,94 @@ export function milestoneTarget(root, lines, version, tags = releaseTags(root), 
   return lines.some(line => line.branch === branch) ? { line: branch } : { line: branch, from: newest.name };
 }
 
+// On version lines (decided by the director, November 2, 2026) a minor or major version has a line of its own,
+// release/x.y, made when its milestone is: from the newest line of an older version, so it holds that version's work
+// still to ship, or from the branch releases ship to when there is none.
+const series = branch => /^release\/(\d+)\.(\d+)$/.exec(branch)?.slice(1).map(Number);
+function versionLineTarget(project, version, tags) {
+  const text = versionText(version);
+  if (tags.some(tag => compareVersions(tag.version, version) === 0)) throw new Error(`${text} is already released.`);
+  const newest = tags.at(-1);
+  if (newest && compareVersions(newest.version, version) > 0)
+    throw new Error(`${text} is older than ${versionText(newest.version)}, the newest release.`);
+  const branch = `release/${version[0]}.${version[1]}`,
+    lines = projectLines(project);
+  if (lines.some(line => line.branch === branch)) return { line: branch };
+  const older = lines.filter(line => {
+    const theirs = series(line.branch);
+    return theirs && (theirs[0] - version[0] || theirs[1] - version[1]) < 0;
+  });
+  return { line: branch, from: older.at(-1)?.branch ?? project.shipsTo };
+}
+
+// Switches a project to version lines: releases ship to `shipsTo`, which stops being a line work lands on, and each
+// open milestone on it gets a line of its own, in version order, each made from the one before (the first from
+// `shipsTo`'s tip); a branch of that name that already exists is used as it is. Refused while work on `shipsTo` is
+// still open, which would be left without a line, and with no open version to land new work on.
+export function useVersionLines(store, projectId, runtime, { shipsTo } = {}) {
+  const root = sourceRoot(store, projectId, runtime),
+    project = store.project(projectId);
+  if (project.shipsTo) throw new Error(`This project already ships to ${project.shipsTo}.`);
+  if (typeof shipsTo !== 'string' || !shipsTo) throw new Error('Name the branch releases ship to, such as main.');
+  try {
+    branchCommit(root, shipsTo);
+  } catch {
+    throw new Error(`The repository has no branch named ${shipsTo}.`);
+  }
+  const current = projectLines(project).at(-1)?.branch ?? checkedOut(root);
+  if (current !== shipsTo)
+    throw new Error(`New releases are made on ${current}, so that is the branch they ship to. Name ${current}.`);
+  const all = projectMilestones(store, projectId),
+    moving = all
+      .filter(item => open(item) && item.line === null)
+      .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)));
+  if (!moving.length) throw new Error("Make the next version's milestone first, so new work has a line to land on.");
+  const finished = task =>
+    task.kind === 'studio-development:change' && task.status === 'done'
+      ? ['integrated', 'closed'].includes(task.sourceStage?.current) ||
+        task.sourceStage?.integration?.state === 'integrated'
+      : ['done', 'denied', 'cancelled'].includes(task.status);
+  const busy = store
+    .tasks()
+    .filter(
+      task => recordProject(task) === projectId && task.kind?.startsWith('studio-development:') && !finished(task),
+    );
+  if (busy.length)
+    throw new Error(
+      `Finish or close the open work first (${busy
+        .slice(0, 5)
+        .map(task => task.id)
+        .join(', ')}${busy.length > 5 ? ', …' : ''}): it would be left on ${shipsTo} without a line.`,
+    );
+  project.shipsTo = shipsTo;
+  project.lines = projectLines(project).filter(line => line.branch !== shipsTo);
+  store.putProject(project);
+  let from = shipsTo;
+  for (const milestone of moving) {
+    const version = parseVersion(milestone.version),
+      branch = `release/${version[0]}.${version[1]}`;
+    let exists = true;
+    try {
+      branchCommit(root, branch);
+    } catch {
+      exists = false;
+    }
+    if (!projectLines(store.project(projectId)).some(line => line.branch === branch))
+      addProjectLine(store, projectId, runtime, exists ? { branch } : { branch, from });
+    milestone.line = branch;
+    from = branch;
+  }
+  save(store, projectId, all);
+  store.event(
+    'version_lines',
+    null,
+    null,
+    `Each version now has its own line, and releases ship to ${shipsTo}: ${moving.map(item => `${item.version} on ${item.line}`).join(', ')}.`,
+    projectId,
+  );
+  return { shipsTo, lines: projectLines(store.project(projectId)), milestones: projectMilestones(store, projectId) };
+}
+
 // The milestone for a version, made with its line when it does not exist yet. `by` says who asked for it.
 export function makeMilestone(store, projectId, runtime, { version, goal = '', by = { type: 'director' } }) {
   const root = sourceRoot(store, projectId, runtime),
@@ -89,13 +177,11 @@ export function makeMilestone(store, projectId, runtime, { version, goal = '', b
     throw new Error('A milestone goal is text of at most 2000 characters.');
   const existing = projectMilestones(store, projectId).find(item => item.version === versionText(parsed));
   if (existing) return existing;
-  const target = milestoneTarget(
-    root,
-    projectLines(store.project(projectId)),
-    parsed,
-    releaseTags(root),
-    projectMilestones(store, projectId),
-  );
+  const project = store.project(projectId),
+    target =
+      project.shipsTo && parsed[2] === 0
+        ? versionLineTarget(project, parsed, releaseTags(root))
+        : milestoneTarget(root, projectLines(project), parsed, releaseTags(root), projectMilestones(store, projectId));
   // Start 2.0: the older major continues on its own line, made from the newest line's tip, with its open milestones.
   if (target.major) {
     const newest = projectLine(store, projectId, undefined) ?? checkedOut(root);
@@ -177,10 +263,11 @@ function findMilestone(store, projectId, named) {
   return milestone;
 }
 const open = milestone => milestone.state === 'open';
-// The next release on the newest line: its lowest open milestone, if any.
-const nextRelease = milestones =>
+// The next release on the newest line: its lowest open milestone, if any. On version lines it is the lowest open
+// minor or major version, on whichever line it has.
+const nextRelease = (milestones, shipsTo) =>
   milestones
-    .filter(item => open(item) && item.line === null)
+    .filter(item => open(item) && (shipsTo ? parseVersion(item.version)[2] === 0 : item.line === null))
     .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
 
 // The release and line a new idea takes (intake): the milestone or line the director picked, otherwise the current
@@ -206,7 +293,7 @@ export function ideaRelease(store, projectId, runtime, { milestone, line }) {
     const branch = ideaLine(store, projectId, runtime, line),
       newest = branch === undefined || branch === projectLine(store, projectId, undefined),
       picked = newest
-        ? nextRelease(milestones)
+        ? nextRelease(milestones, store.project(projectId).shipsTo)
         : milestones
             .filter(item => open(item) && item.line === branch)
             .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
@@ -215,9 +302,9 @@ export function ideaRelease(store, projectId, runtime, { milestone, line }) {
       release: picked ? { milestoneId: picked.id, version: picked.version, by: { type: 'director' } } : undefined,
     };
   }
-  const next = nextRelease(milestones);
+  const next = nextRelease(milestones, store.project(projectId).shipsTo);
   return {
-    line: ideaLine(store, projectId, runtime, undefined),
+    line: ideaLine(store, projectId, runtime, next?.line ?? undefined),
     release: next ? { milestoneId: next.id, version: next.version, by: { type: 'default' } } : undefined,
   };
 }

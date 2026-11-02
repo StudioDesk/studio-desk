@@ -38,7 +38,7 @@ import {
   ideaBringBackTargets,
   skipCarry,
 } from './connectors/source-carries.mjs';
-import { pushRelease, releaseAgain, startRelease } from './connectors/source-releases.mjs';
+import { pushRelease, releaseAgain, shipAgain, startRelease } from './connectors/source-releases.mjs';
 import {
   addWaitingIdea,
   editMilestone,
@@ -48,6 +48,7 @@ import {
   orderWaitingIdea,
   projectMilestones,
   takeWaitingIdea,
+  useVersionLines,
 } from './connectors/source-milestones.mjs';
 import { releaseOverview } from './connectors/release-overview.mjs';
 import { listFolders } from './connectors/folders.mjs';
@@ -1473,6 +1474,18 @@ export function createStudio({
             fail(error.message);
           }
         }
+        // Version lines (decided by the director, November 2, 2026): each version has its own line and releases ship to
+        // shipsTo, which moves only when one is released.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'version-lines' && !parts[4] && req.method === 'POST') {
+          if (parts[2] !== projectId) fail('Select this project before changing how it releases.');
+          if (Object.keys(data).some(key => !['projectId', 'shipsTo'].includes(key)))
+            fail('Version lines take shipsTo, the branch releases ship to.');
+          try {
+            return json(res, useVersionLines(store, projectId, runner, { shipsTo: data.shipsTo }));
+          } catch (error) {
+            fail(error.message);
+          }
+        }
         // A project's milestones (1.1 step 2a): one made for a version (POST) and its goal edited (PATCH); an idea
         // written into one to send later, and a waiting idea sent now or dropped.
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'milestones') {
@@ -1517,6 +1530,11 @@ export function createStudio({
               runner.autonomy.tryReleases();
               return json(res, release, 202);
             }
+          }
+          // Ship again, after a release's shipping to the branch releases ship to stopped (version lines).
+          if (parts[4] && parts[5] === 'ship' && !parts[6] && req.method === 'POST') {
+            if (Object.keys(data).some(key => key !== 'projectId')) fail('Ship again takes no fields.');
+            return json(res, { shipped: settle(() => shipAgain(store, projectId, parts[4])) });
           }
           if (parts[4] && parts[5] === 'push' && !parts[6] && req.method === 'POST') {
             if (Object.keys(data).some(key => !['projectId', 'confirm'].includes(key)))
