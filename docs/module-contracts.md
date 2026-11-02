@@ -48,6 +48,25 @@ Every git command the controller runs goes through `src/git.mjs` (`runGit`), exc
   - **Still synchronous:** integration, carries, worktrees and story starts interleave git with the records and their journals step by step. Moving them off the thread means deciding what may change between two steps, so it waits for C-31's decision on that boundary. No read the dashboard's pages make calls git synchronously now; a count over every page read on the source fixture found none.
 - **Tests:** `test/git-trust.test.mjs`. A repository whose hooks and fsmonitor command leave marker files: the director's own git runs them, and the controller's reads, commits, worktrees and checkouts run none.
 
+## The director's secrets and the agents' CLIs (November 2026)
+
+The secrets are the data folder's `director-key`, `launch-url` and `tool-keys` (`directorSecretNames`). `src/adapters/agent-secrets.mjs` keeps them from each agent CLI in the way that CLI allows.
+
+- **Claude:** workspace attempts pass deny rules after the unbounded tools (`claudeSecretRules`). Each is a `Read(//…)` rule in the form Claude Code matches: POSIX, a Windows drive as `/c`, glob characters taken literally, a folder with `/**`.
+  - They cover Claude's file tools, the shell's file commands it recognizes (`cat`, `head`, `<`), and Edit and Write on the same paths.
+  - They don't cover a script that opens a file itself. That would need an OS boundary for Claude agents (C-08 in the notes).
+- **Codex on Windows** defaults to its elevated sandbox. It runs in an account group of its own (`CodexSandboxUsers`), which is denied each secret before every elevated attempt (`denyCodexSecrets`, `icacls /deny`). A secret that can't be denied stops the attempt.
+  - **Without elevated setup:** a computer without Codex's elevated setup is told so, with what to run (`codexElevatedMissing`). The check runs once per start of the controller.
+  - **MXC:** setting `STUDIO_CODEX_WINDOWS_SANDBOX=mxc` picks Codex's MXC sandbox. It runs as the director and can be denied nothing. Codex's status says so, and each MXC attempt's log does too (`codexMxcWarning`).
+- **Codex on macOS and Linux:** its sandbox reads the whole disk, so nothing is denied there.
+- **The isolation check** (`scripts/check-codex-sandbox.mjs`, which runs before steps that need verified isolation) also reads a stand-in secret, denied as the real ones are.
+  - **Elevated:** if the stand-in is readable, the check fails, so a Codex update can't quietly reopen the secrets.
+  - **MXC and off Windows:** the check reports `secretsDenied: false` with a warning.
+- **Tests:**
+  - `test/agent-secrets.test.mjs` covers the rules, the denies, the setup message and the MXC warning.
+  - `test/sandbox.test.mjs` covers the check's stand-in, including an elevated sandbox opened to it.
+  - The suite's studios record Codex's deny instead of making it (`codexSecretDenies` in `test/model-free-studio.mjs`).
+
 ## Every stop says why (November 2026)
 
 A graceful stop, an ended controller and an ended supervisor used to look alike in the controller's window.

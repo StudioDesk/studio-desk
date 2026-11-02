@@ -42,6 +42,8 @@ export const fixtureNpm = {
 // without the suite ever running it, and otherwise not available, so a test that measures a real suite stops
 // unless it chooses No sandbox. A test of the sandbox's own states passes its own.
 export const readyBuiltInSandbox = { status: () => ({ state: 'ready' }), setup: () => false };
+// The data folders whose secrets an elevated Codex attempt asked to have denied to Codex's sandbox.
+export const codexSecretDenies = [];
 const fixtureBuiltInSandbox = runner => ({
   status: () => ({ state: runner()?.sourceCheckCommand ? 'ready' : 'unsupported' }),
   setup: () => false,
@@ -96,6 +98,10 @@ export function createStudio(options = {}) {
     runnerOptions: {
       packageInstallCommand: fixtureNpm,
       builtInSandbox: fixtureBuiltInSandbox(() => app?.runner),
+      // Codex's elevated Windows sandbox as the suite sees it, never this computer's: set up, and its deny of the
+      // director's secrets recorded rather than made (C-42; test/agent-secrets.test.mjs covers the deny itself).
+      codexElevatedReady: () => true,
+      denyCodexSecrets: directory => (codexSecretDenies.push(directory), []),
       ...fixtureOptions,
       ...options.runnerOptions,
     },

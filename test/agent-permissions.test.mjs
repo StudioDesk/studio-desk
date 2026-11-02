@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createStudio } from './model-free-studio.mjs';
 import { describeTask, waitFor } from './wait-for.mjs';
 import { CLAUDE_UNBOUNDED_TOOLS } from '../src/adapters/claude.mjs';
+import { claudeSecretRules } from '../src/adapters/agent-secrets.mjs';
 import {
   MAX_COMMAND_DENIALS,
   agentPermissions,
@@ -194,7 +195,19 @@ test('Claude employees run with the approved commands and auto mode from the Set
   // An attempt is one bounded turn: nothing it schedules or starts in the background outlives its result
   // (the stand-in also refuses to run unless background tasks are off).
   assert.deepEqual(argv.slice(at + 6, at + 12), CLAUDE_UNBOUNDED_TOOLS);
-  assert.equal(argv[at + 12], '--add-dir');
+  // The director's key and launch link in the data folder are kept from Claude's file tools (C-42), by absolute
+  // rules in the form Claude Code matches.
+  const addDir = argv.indexOf('--add-dir'),
+    secretRules = argv.slice(at + 12, addDir);
+  assert.deepEqual(secretRules, claudeSecretRules(c.app.store.directory));
+  assert.ok(
+    secretRules.some(rule => /^Read\(\/\/.*director-key\)$/.test(rule)),
+    secretRules.join(' '),
+  );
+  assert.ok(
+    secretRules.some(rule => /^Read\(\/\/.*launch-url\)$/.test(rule)),
+    secretRules.join(' '),
+  );
 
   // A task's own choice wins for its future attempts; null follows the Settings again.
   const off = await c.create('Auto off here');
