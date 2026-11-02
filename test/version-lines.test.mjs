@@ -93,6 +93,8 @@ test('switching gives each open version its own line, in version order, and new 
     new RegExp(`Finish or close the open work first \\(${c.waiting}\\)`),
   );
   store.putTask({ ...store.task(c.waiting), status: 'cancelled' });
+  // A story done before stories had stages has nothing left to integrate, so it is not open work.
+  store.putTask({ ...store.task(c.waiting), id: 'T-before-stages', status: 'done' });
   assert.match((await switchTo(c, 'trunk')).data.error, /no branch named trunk/);
   git(c.root, ['branch', 'trunk']);
   assert.match((await switchTo(c, 'trunk')).data.error, /made on main, so that is the branch they ship to/);

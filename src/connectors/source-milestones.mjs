@@ -122,10 +122,11 @@ export function useVersionLines(store, projectId, runtime, { shipsTo } = {}) {
       .filter(item => open(item) && item.line === null)
       .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)));
   if (!moving.length) throw new Error("Make the next version's milestone first, so new work has a line to land on.");
+  // A story done before stories had stages (October 13 and 14) finished with nothing left to integrate.
   const finished = task =>
-    task.kind === 'studio-development:change' && task.status === 'done'
-      ? ['integrated', 'closed'].includes(task.sourceStage?.current) ||
-        task.sourceStage?.integration?.state === 'integrated'
+    task.kind === 'studio-development:change' && task.status === 'done' && task.sourceStage
+      ? ['integrated', 'closed'].includes(task.sourceStage.current) ||
+        task.sourceStage.integration?.state === 'integrated'
       : ['done', 'denied', 'cancelled'].includes(task.status);
   const busy = store
     .tasks()
