@@ -117,21 +117,28 @@ test('every write raises the version and notifies; a log line changes neither an
     calls.schedule++;
     schedule();
   };
-  const step = (label, write, changes) => {
+  // A change wakes the scheduler unless no task's readiness depends on it: an event row or an attempt's trace (C-19).
+  const step = (label, write, changes, scheduled = changes) => {
     const before = { version: store.version, change: calls.change, schedule: calls.schedule };
     write();
     assert.equal(store.version - before.version, changes, `${label} raises the version ${changes} time(s)`);
     assert.equal(calls.change - before.change, changes, `${label} notifies ${changes} time(s)`);
-    assert.equal(calls.schedule - before.schedule, changes, `${label} runs the scheduler ${changes} time(s)`);
+    assert.equal(calls.schedule - before.schedule, scheduled, `${label} runs the scheduler ${scheduled} time(s)`);
   };
   const task = store.tasks()[0];
   step('a setting', () => store.putSetting('change-stream-test', { value: 1 }), 1);
   step('a task', () => store.putTask(task), 1);
   step('the organization', () => store.setOrganization(store.organization()), 1);
   step('an attempt', () => store.updateAttempt(store.attempt('attempt-watch-a')), 1);
+  step(
+    "an attempt's speech bubble",
+    () => store.updateAttempt(store.attempt('attempt-watch-a'), { trace: true }),
+    1,
+    0,
+  );
   step('a claim', () => store.claim(['local:change-stream'], 'attempt-watch-a'), 1);
   step('a release', () => store.release('attempt-watch-a'), 1);
-  step('a recorded event', () => store.event('note', 'T-watch', 'attempt-watch-a', 'Something happened.'), 1);
+  step('a recorded event', () => store.event('note', 'T-watch', 'attempt-watch-a', 'Something happened.'), 1, 0);
   step('a log line', () => store.event('log', 'T-watch', 'attempt-watch-a', 'stdout: working'), 0);
   const versionBefore = store.version;
   store.release('attempt-watch-a');
@@ -153,6 +160,7 @@ test('every write raises the version and notifies; a log line changes neither an
       { type: 'task', id: task.id, projectId: 'project-legacy' },
       { type: 'organization' },
       { type: 'attempt', id: 'attempt-watch-a', taskId: 'T-watch', projectId: 'project-legacy' },
+      { type: 'attempt', id: 'attempt-watch-a', taskId: 'T-watch', projectId: 'project-legacy', trace: true },
       { type: 'leases' },
       { type: 'leases' },
       { type: 'event', id: noteSeq, kind: 'note', taskId: 'T-watch', attemptId: 'attempt-watch-a', projectId: null },

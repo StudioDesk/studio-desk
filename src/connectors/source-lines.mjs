@@ -267,7 +267,9 @@ export function addProjectLine(store, projectId, runtime, { branch, from } = {})
   const project = store.project(projectId),
     at = new Date().toISOString();
   let lines = projectLines(project);
-  if (!lines.length) {
+  if (project.shipsTo && branch === project.shipsTo)
+    throw new Error(`Releases ship to ${branch}, so it is not a line work lands on.`);
+  if (!lines.length && !project.shipsTo) {
     const current = checkedOut(root);
     if (!current) throw new Error('Check out the branch new releases are made on before adding a line.');
     lines = [{ branch: current, state: 'maintained', at }];
@@ -308,12 +310,16 @@ export function addProjectLine(store, projectId, runtime, { branch, from } = {})
         })
       : -1,
     at_ = newer < 0 ? older.length : newer;
-  project.lines = [
-    ...older.slice(0, at_),
-    { branch, state: 'maintained', at, ...(from !== undefined ? { from } : {}) },
-    ...older.slice(at_),
-    lines.at(-1),
-  ];
+  const added = { branch, state: 'maintained', at, ...(from !== undefined ? { from } : {}) };
+  // A project on version lines keeps every line in version order, so the newest version's line is the newest line;
+  // a branch that is not a version's line goes before them.
+  project.lines = project.shipsTo
+    ? [...lines, added].sort((a, b) => {
+        const left = series(a.branch),
+          right = series(b.branch);
+        return !left || !right ? (left ? 1 : 0) - (right ? 1 : 0) : left[0] - right[0] || left[1] - right[1];
+      })
+    : [...older.slice(0, at_), added, ...older.slice(at_), lines.at(-1)];
   store.putProject(project);
   store.event(
     'project_line',

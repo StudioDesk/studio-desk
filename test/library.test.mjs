@@ -343,11 +343,19 @@ test('files past the size limit are in the index alone, and a review receives th
   const reviewed = { libraryReferences: references.slice(0, 2), libraryLeftOut: [{ entryId: 'lib-x', name: 'Gone' }] };
   const fake = { ...store, attempt: id => (id === 'attempt-reviewed' ? reviewed : store.attempt(id)) };
   Object.setPrototypeOf(fake, Object.getPrototypeOf(store));
-  const review = libraryFor(fake, { projectId: project, kind: 'studio-development:change-review' }, [
-    { taskId: 'T-1', attemptId: 'attempt-reviewed' },
-  ]);
+  // The step contract decides it (receives.library), not the step's name: a design pass named any way receives them.
+  const inputs = [{ taskId: 'T-1', attemptId: 'attempt-reviewed' }];
+  const review = libraryFor(fake, { projectId: project, kind: 'design-pass' }, inputs, { delivery: 'same-as-inputs' });
   assert.deepEqual(review.references, reviewed.libraryReferences);
   assert.deepEqual(review.leftOut, reviewed.libraryLeftOut);
+  assert.deepEqual(
+    libraryFor(fake, { projectId: project, kind: 'studio-development:change-review' }, inputs).references,
+    references,
+  );
+  assert.deepEqual(libraryFor(fake, { projectId: project, kind: 'general' }, inputs, { delivery: 'none' }), {
+    references: [],
+    leftOut: [],
+  });
 });
 
 test("the director leaves named files out of an idea's work, and each attempt records what it left out", async t => {

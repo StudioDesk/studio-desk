@@ -1,3 +1,4 @@
+import { stepContract } from './step-contract.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -310,15 +311,14 @@ export class Runner {
   dispatchQueued() {
     if (this.closing || this.dispatching || !this.store.organization().pipelineEnabled) return;
     this.dispatching = true;
+    const began = performance.now();
     try {
       // The pass measures each live source once for all its checks, and again after each start (measuringPass).
       measuringPass(() => {
         this.refreshReadiness();
         for (const task of this.store
-          .tasks()
-          .filter(
-            task => task.queued && task.status === 'ready' && !this.store.project(recordProject(task)).dispatchPaused,
-          )) {
+          .queuedTasks()
+          .filter(task => task.status === 'ready' && !this.store.project(recordProject(task)).dispatchPaused)) {
           // Refresh after each claim, so later jobs observe the same slots and leases.
           this.refreshReadiness();
           if (this.store.task(task.id).status !== 'ready') continue;
@@ -338,7 +338,7 @@ export class Runner {
             }
           }
         }
-        if (!this.store.tasks().some(task => task.queued)) {
+        if (!this.store.anyQueued()) {
           const org = this.store.organization();
           org.pipelineEnabled = false;
           this.store.setOrganization(org);
@@ -347,6 +347,8 @@ export class Runner {
       });
     } finally {
       this.dispatching = false;
+      // Each pass's time, for the controller's own measures (C-18).
+      this.loadMeasures?.pass(performance.now() - began);
     }
   }
   // The tier a task requests: its own, else its task type's default.
@@ -537,6 +539,7 @@ export class Runner {
   ) {
     return compileInstructions(org, worker, task, attemptId, workspace, inputs, {
       ...this.instructionContext(org, worker, task),
+      libraryProposals: stepContract(this.workflows.find(task.kind)).proposes.library,
       directorInputReferences: directorReferences,
       ...(library ? { library } : {}),
       ...(history ? { history: { reference: history.reference, attempts: history.attempts } } : {}),
@@ -556,16 +559,18 @@ export class Runner {
     measuringPass(() => this.refreshEach());
   }
   refreshEach() {
+    // What every waiting task is weighed against, read once for the pass (C-19): weighing a task writes only that task,
+    // never an attempt or a lease.
+    const slotsTaken = this.store.liveAttempts().length >= this.store.organization().maxParallel,
+      leases = this.store.leases();
     for (const t of this.store
-      .tasks()
-      .filter(t => t.status === 'ready' || (t.status === 'blocked' && t.controllerWait))) {
-      // The live attempts only, through the status index: this runs for every waiting task on every pass.
-      const slotsTaken = this.store.liveAttempts().length >= this.store.organization().maxParallel;
+      .tasksWithStatus('ready', 'blocked')
+      .filter(t => t.status === 'ready' || t.controllerWait)) {
       let resources = null;
       try {
         resources = this.workflows.requirements(this.workflows.stageView(t), { store: this.store }).resources;
       } catch {} // blockReason says why
-      const taken = slotsTaken || (!!resources && this.store.leases().some(l => resources.includes(l.resource)));
+      const taken = slotsTaken || (!!resources && leases.some(l => resources.includes(l.resource)));
       let reason = this.blockReason(t, false, { quick: taken }),
         conflict;
       // Queued work whose own prerequisites are met waits for the director to resume its project,
@@ -576,7 +581,7 @@ export class Runner {
         // An agent is not reserved (MP-033): it runs as many attempts at once as the limits allow, so only the
         // work's own resources can make it wait.
         const execution = this.workflows.stageView(t);
-        const held = this.store.leases().find(l => resources?.includes(l.resource));
+        const held = leases.find(l => resources?.includes(l.resource));
         if (held) {
           conflict = this.store.resourceConflict(held.resource, held.attemptId);
           reason = conflict.reason;
@@ -765,7 +770,9 @@ export class Runner {
     // Earlier attempts on this work, as bounded unaccepted reference data (never inputs).
     const history = buildAttemptHistory(store, task, { attemptId: id });
     // The project's library (1.2 step 6): its index and the files that fit beside the work, recorded by hash.
-    const library = libraryFor(store, { ...task, projectId }, references);
+    const library = libraryFor(store, { ...task, projectId }, references, {
+      delivery: stepContract(this.workflows.find(task.kind)).receives.library,
+    });
     const snapshot = this.compileInstructions(
       org,
       worker,

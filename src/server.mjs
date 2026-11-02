@@ -38,7 +38,7 @@ import {
   ideaBringBackTargets,
   skipCarry,
 } from './connectors/source-carries.mjs';
-import { pushRelease, releaseAgain, startRelease } from './connectors/source-releases.mjs';
+import { pushRelease, releaseAgain, shipAgain, startRelease } from './connectors/source-releases.mjs';
 import {
   addWaitingIdea,
   editMilestone,
@@ -48,6 +48,7 @@ import {
   orderWaitingIdea,
   projectMilestones,
   takeWaitingIdea,
+  useVersionLines,
 } from './connectors/source-milestones.mjs';
 import { releaseOverview } from './connectors/release-overview.mjs';
 import { listFolders } from './connectors/folders.mjs';
@@ -148,6 +149,7 @@ import {
 import { developmentOrganization } from './organizations/studio-development/project.mjs';
 import { toldView } from './core/instructions.mjs';
 import { formatRules } from './core/rules.mjs';
+import { createLoadMeasures } from './core/load-measures.mjs';
 
 // The most attempts the studio-wide limit allows at once (MP-033).
 const mostAttemptsAtOnce = 16;
@@ -290,6 +292,7 @@ export function createStudio({
   const key = directorKey(store.directory),
     director = directorAccess(key);
   let runner;
+  const measures = createLoadMeasures();
   const planningContext = (org, repair, projectId) =>
     registries.workflows.planningContext(org, repair, registries.adapters, store.project(projectId));
   try {
@@ -328,6 +331,7 @@ export function createStudio({
   const origin = () => `http://127.0.0.1:${actualPort}`;
   // A code-editing employee's test command calls back here (connectors/employee-tests.mjs).
   runner.controllerOrigin = origin;
+  runner.loadMeasures = measures;
   // A burst of writes reaches each tab as one change event, at most four a second, naming each changed
   // record of the tab's project and every shared one, with the store's version. Log lines are not
   // changes: they go only to the tabs watching their attempt. Recent changes stay in a capped list in
@@ -358,7 +362,8 @@ export function createStudio({
     }
   };
   const notify = change => {
-    runner.schedule();
+    // An event row or an attempt's speech bubble changes no task's readiness, so it starts no scheduler pass (C-19).
+    if (change.type !== 'event' && !change.trace) runner.schedule();
     journal.push(change);
     if (journal.length > journalLimit) journal.shift();
     pending.push(change);
@@ -506,6 +511,10 @@ export function createStudio({
     );
   };
   const server = http.createServer(async (req, res) => {
+    // How long each request takes, for the controller's own measures (C-18); the change stream stays open, so not it.
+    const began = performance.now();
+    if (!req.url.startsWith('/api/events') && typeof res.on === 'function')
+      res.on('finish', () => measures.request(performance.now() - began));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     try {
@@ -809,6 +818,8 @@ export function createStudio({
         if (parts[3]) return json(res, storyActivity(store, record));
         return json(res, taskPage(queryProject, record));
       }
+      // The controller's own measures (C-18): event-loop delay, scheduler passes, requests, memory and record sizes.
+      if (url.pathname === '/api/health/load' && req.method === 'GET') return json(res, measures.snapshot(store));
       if (url.pathname === '/api/state' && req.method === 'GET') {
         const mode = url.searchParams.get('mode') ?? 'full';
         if (mode !== 'dashboard') return json(res, state(queryProject, { mode }));
@@ -1473,6 +1484,18 @@ export function createStudio({
             fail(error.message);
           }
         }
+        // Version lines (decided by the director, November 2, 2026): each version has its own line and releases ship to
+        // shipsTo, which moves only when one is released.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'version-lines' && !parts[4] && req.method === 'POST') {
+          if (parts[2] !== projectId) fail('Select this project before changing how it releases.');
+          if (Object.keys(data).some(key => !['projectId', 'shipsTo'].includes(key)))
+            fail('Version lines take shipsTo, the branch releases ship to.');
+          try {
+            return json(res, useVersionLines(store, projectId, runner, { shipsTo: data.shipsTo }));
+          } catch (error) {
+            fail(error.message);
+          }
+        }
         // A project's milestones (1.1 step 2a): one made for a version (POST) and its goal edited (PATCH); an idea
         // written into one to send later, and a waiting idea sent now or dropped.
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'milestones') {
@@ -1517,6 +1540,11 @@ export function createStudio({
               runner.autonomy.tryReleases();
               return json(res, release, 202);
             }
+          }
+          // Ship again, after a release's shipping to the branch releases ship to stopped (version lines).
+          if (parts[4] && parts[5] === 'ship' && !parts[6] && req.method === 'POST') {
+            if (Object.keys(data).some(key => key !== 'projectId')) fail('Ship again takes no fields.');
+            return json(res, { shipped: settle(() => shipAgain(store, projectId, parts[4])) });
           }
           if (parts[4] && parts[5] === 'push' && !parts[6] && req.method === 'POST') {
             if (Object.keys(data).some(key => !['projectId', 'confirm'].includes(key)))
@@ -2291,7 +2319,20 @@ export function createStudio({
             return json(res, { ok: true, taskIds: t.materializedTaskIds });
           }
           if (action === 'accept') {
-            const accepted = acceptAttempt(store, registries, t);
+            // Over a failed check, with the director's reason, where the step's contract allows it (November 2, 2026).
+            if (Object.keys(data).some(key => !['projectId', 'overReason'].includes(key)))
+              fail('Accepting takes only a reason, to accept over a failed check.');
+            const accepted = acceptAttempt(
+              store,
+              registries,
+              t,
+              data.overReason !== undefined
+                ? {
+                    type: 'director',
+                    over: { reason: text(data.overReason, 'Reason for accepting over a failed check', 2000, true) },
+                  }
+                : { type: 'director' },
+            );
             runner.autonomy.accepted(t.id);
             return json(res, { ok: true, proposedTaskIds: accepted.proposedTaskIds });
           }
@@ -2634,6 +2675,7 @@ export function createStudio({
       closing = true;
       closePromise = (async () => {
         await runner.shutdown();
+        measures.close();
         clearTimeout(broadcastTimer);
         for (const client of clients) client.res.end();
         // Node's close ends only the connections idle at that moment and stops timing out headers and requests. A

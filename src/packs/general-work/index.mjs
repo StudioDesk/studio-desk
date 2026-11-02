@@ -129,6 +129,7 @@ export const generalWorkPack = {
   tasks: [
     {
       kind: 'general:split',
+      step: { kind: 'plan' },
       version: 'general-split-v1',
       label: 'Split work into items',
       cardLabel: 'Split',
@@ -176,6 +177,7 @@ export const generalWorkPack = {
     },
     {
       kind: 'general:plan',
+      step: { kind: 'plan' },
       version: 'general-plan-v1',
       label: 'Plan the work',
       cardLabel: 'Plan',
@@ -212,6 +214,7 @@ export const generalWorkPack = {
     },
     {
       kind: 'general:work',
+      step: { kind: 'work' },
       version: 'general-work-v1',
       label: 'Do the work',
       cardLabel: 'Work',
@@ -280,6 +283,7 @@ export const generalWorkPack = {
     },
     {
       kind: 'general:review',
+      step: { kind: 'review' },
       version: 'general-review-v1',
       label: 'Review the work independently',
       cardLabel: 'Review',

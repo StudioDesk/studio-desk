@@ -369,10 +369,11 @@ export const libraryDeliveryBytes = 20 * 1024 * 1024;
 // What one attempt receives from the library, recorded with it: each entry's newest revision with its hash and where it
 // sits (../library/<entry>-r<revision><ext> beside the work, read-only), whether it was delivered, and the entries its
 // idea left out. A review or check receives exactly what the work it reviews received, so it checks against the same
-// revisions (v1.0 item 26).
-export function libraryFor(store, task, inputs = []) {
+// revisions (v1.0 item 26). `delivery` is the step contract's (`receives.library`), whatever the step's kind is called.
+export function libraryFor(store, task, inputs = [], { delivery = 'current' } = {}) {
   const projectId = task.projectId;
-  if (/review|check/i.test(task.kind || ''))
+  if (delivery === 'none') return { references: [], leftOut: [] };
+  if (delivery === 'same-as-inputs')
     for (const input of inputs) {
       if (!input.attemptId) continue;
       let reviewed;
