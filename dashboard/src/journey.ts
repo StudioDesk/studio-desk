@@ -3,7 +3,7 @@
 // the run's own tasks and attempts. Nothing here sends anything.
 import type { AttemptSummary, Task } from './api';
 import { plural, reviewOf, spoken, totalsOf } from './evidence';
-import { workerName } from './names';
+import { namingRoles, workerName } from './names';
 import { changeableAnswer, exchange, waitingQuestion } from './questions';
 import { cliName, isSourceStory, standing, storySteps } from './story';
 import { active, type GraphNode, type Outcome, type RunStory, type StudioState } from './studio-runs';
@@ -382,7 +382,8 @@ export function happened(run: RunStory, state: StudioState): HappenedGroup[] {
           tone: 'ok',
           lead: `${who} planned it as ${stories.length} ${plural(stories.length, 'story', 'stories')}`,
           text: `${stories.length > 1 && serial ? 'that run one after another, ' : ''}in ${time}.`,
-          quote: attempt.result?.summary ? clip(attempt.result.summary, 320) : undefined,
+          // The planner's summary, with the role IDs it names in words.
+          quote: attempt.result?.summary ? clip(namingRoles(state, attempt.result.summary), 320) : undefined,
           taskId: task.id,
         });
       } else

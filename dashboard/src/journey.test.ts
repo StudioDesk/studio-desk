@@ -258,6 +258,36 @@ test('what happened is told in plain sentences, with its stops and decisions mar
   ]);
 });
 
+test("the plan's quote names the roles its planner wrote as IDs, and leaves other words as written", () => {
+  const planned = (summary: string, studio: Partial<StudioState> = {}) =>
+    happened(run, {
+      ...state,
+      ...studio,
+      attempts: attempts.map(item => (item.id === 'a-plan' ? { ...item, result: { summary } } : item)),
+    } as StudioState)[0]!.entries.find(entry => entry.lead.startsWith('Mara planned it'))!.quote;
+  const roles = {
+    roles: [
+      { id: 'markets-researcher', label: 'Markets researcher' },
+      { id: 'engineer', label: 'Software engineer' },
+    ],
+    // A role an agent holds with no label in the studio's roles reads as its ID in words.
+    workers: [...state.workers, { id: 'W-5', displayName: 'Kit', roles: ['data_analyst'] }],
+  } as Partial<StudioState>;
+  expect(
+    planned(
+      'The markets-researcher compares prices for the data_analyst. The engineer checks a well-known shop, ' +
+        'T-markets-researcher and the markets-researchers list (markets-researcher).',
+      roles,
+    ),
+  ).toBe(
+    'The markets researcher compares prices for the data analyst. The engineer checks a well-known shop, ' +
+      'T-markets-researcher and the markets-researchers list (markets researcher).',
+  );
+  // Without role IDs, or without roles the studio knows, the summary reads as recorded.
+  expect(planned('The engineer checks a well-known shop.', roles)).toBe('The engineer checks a well-known shop.');
+  expect(planned('The markets-researcher compares prices.')).toBe('The markets-researcher compares prices.');
+});
+
 // Graph test 0a (October 25): a review of other work that asked for changes read "passed the review with no
 // blocking findings", since only a code candidate's review verdict was read.
 test("other work's review that asked for changes says so, with its finding, before the review that passed", () => {

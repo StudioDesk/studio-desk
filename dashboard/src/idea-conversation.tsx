@@ -20,7 +20,7 @@ import { artifactUrl, TextReader } from './files';
 import { projectColor } from './frame';
 import { fileSize } from './idea-composer';
 import { clockOf } from './journey';
-import { workerName } from './names';
+import { namingRoles, roleName, workerName } from './names';
 import { waitingSteps } from './plan-talk';
 import { AnswerBox, QuestionCard } from './question-card';
 import { waitingQuestion } from './questions';
@@ -71,8 +71,7 @@ function builderOf(state: StudioState, card: MarkedCard) {
   if (card.builderIs === 'worker') return workerName(state, card.builder);
   const holding = holders(state, card.builder);
   if (holding.length === 1) return workerName(state, holding[0]!.id);
-  const label = state.roles?.find(role => role.id === card.builder)?.label ?? card.builder.replace(/[-_]+/g, ' ');
-  return withArticle(label.toLowerCase());
+  return withArticle(roleName(state, card.builder));
 }
 
 // Who reviews the cards: the project's one reviewer, else a reviewer.
@@ -454,16 +453,17 @@ function Message({
       );
     case 'checks':
       return <li className="sd-event sd-event--center">{entry.text}</li>;
-    case 'planner':
+    case 'planner': {
+      const summary = namingRoles(state, entry.summary);
       return (
         <li className="sd-say" aria-label={`${entry.name}'s plan`}>
           {face(entry.workerId)}
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--space-10)' }}>
             <div className="sd-bubble">
               <span className="sd-bubble__lead">{entry.name}</span>
-              {entry.summary && (
-                <Folded text={entry.summary} lines={4}>
-                  <span className="sd-bubble__words">{entry.summary}</span>
+              {summary && (
+                <Folded text={summary} lines={4}>
+                  <span className="sd-bubble__words">{summary}</span>
                 </Folded>
               )}
               <div className="sd-meta" style={{ marginTop: '2px' }}>
@@ -486,6 +486,7 @@ function Message({
                   <PlanCard
                     key={card.key}
                     card={card}
+                    summary={card.summary ? namingRoles(state, card.summary) : ''}
                     word={word}
                     builder={builderOf(state, card)}
                     reviewer={reviewer}
@@ -500,6 +501,7 @@ function Message({
           </div>
         </li>
       );
+    }
     case 'question': {
       const task = entry.waiting ? records.tasks.find(item => item.id === entry.taskId) : undefined,
         asking = task && records.attempts.find(attempt => attempt.id === entry.attemptId);
@@ -637,11 +639,14 @@ function Folded({ text, lines, children }: { text: string; lines: number; childr
 // reviews it and what it builds on.
 function PlanCard({
   card,
+  summary,
   word,
   builder,
   reviewer,
 }: {
   card: MarkedCard;
+  // What it does in the planner's plain words, with its role IDs named (names.ts namingRoles).
+  summary: string;
   word: string;
   builder: string;
   reviewer: string;
@@ -656,9 +661,9 @@ function PlanCard({
         {card.changed && <span className="sd-chip sd-chip--brand sd-chip--inline">Changed after your reply</span>}
       </span>
       <span className="sd-storycard__title">{card.title}</span>
-      {card.summary ? (
+      {summary ? (
         <>
-          <span style={{ color: 'var(--ink-2)', fontSize: '14px' }}>{card.summary}</span>
+          <span style={{ color: 'var(--ink-2)', fontSize: '14px' }}>{summary}</span>
           {does && (
             <details className="sd-more">
               <summary>What it does in full</summary>
