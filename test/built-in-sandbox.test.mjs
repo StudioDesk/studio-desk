@@ -16,11 +16,31 @@ import {
   builtInSandboxEnvironment,
   builtInSandboxRunner,
   builtInSandboxRuntimeEnvironment,
+  builtInSandboxSecrets,
   builtInSandboxSettings,
   builtInSandboxState,
   builtInSandboxVersion,
+  denyBuiltInSandboxSecrets,
   readBuiltInSandboxStatus,
 } from '../src/adapters/built-in-sandbox.mjs';
+
+test("before a Windows run the director's key above the copy is denied to the sandbox group, or the run stops", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-secrets-')),
+    root = path.join(directory, 'data', 'projects', 'p', 'jobs', 'a', 'copy');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.mkdirSync(root, { recursive: true });
+  assert.deepEqual(builtInSandboxSecrets(root), [], 'a data folder without a key has nothing to deny');
+  const key = path.join(directory, 'data', 'director-key');
+  fs.writeFileSync(key, 'a'.repeat(64));
+  assert.deepEqual(builtInSandboxSecrets(root), [key]);
+  const calls = [];
+  denyBuiltInSandboxSecrets([key], (program, args) => (calls.push([program, args]), { status: 0 }));
+  assert.deepEqual(calls, [['icacls', [key, '/deny', 'sandbox-runtime-users:(R)']]]);
+  assert.throws(
+    () => denyBuiltInSandboxSecrets([key], () => ({ status: 5, stderr: 'Access is denied.' })),
+    /could not be kept from the director's key .*Access is denied/,
+  );
+});
 
 const claudeFixture = fileURLToPath(new URL('./fixture-claude.mjs', import.meta.url)),
   plan = { root: '/candidate', command: { executable: process.execPath, args: ['--test', 'test/a.test.mjs'] } };

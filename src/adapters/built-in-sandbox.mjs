@@ -315,6 +315,26 @@ export function openBuiltInSandboxPassThrough(paths, files = builtInSandboxFiles
   return changed;
 }
 
+// On Windows the sandbox account reads what every account may read, and a data folder outside the director's profile
+// (C:\StudioDesk, say) lets every signed-in account read it: a probe on November 1, 2026 read the director's key and
+// the database there (C-40). Before each run, the director's key above the copy is denied to the runtime's sandbox
+// group by an entry of its own, so the key stays the director's wherever the data folder is. A key that cannot be
+// denied stops the run rather than leaving it readable.
+export function denyBuiltInSandboxSecrets(secrets, run = spawnSync) {
+  for (const secret of secrets) {
+    const result = run('icacls', [secret, '/deny', `${builtInSandboxGroup}:(R)`], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000,
+    });
+    if (result.status !== 0)
+      throw new Error(
+        `The sandbox could not be kept from the director's key (${secret}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
+      );
+  }
+  return secrets;
+}
+
 // The command line the runtime runs inside the sandbox, through cmd.exe on Windows and sh elsewhere. The test
 // command itself travels in the run's instructions file, so none of its arguments is quoted for a shell.
 export const builtInSandboxCommandLine = (node, launcher, instructions, platform = process.platform) =>

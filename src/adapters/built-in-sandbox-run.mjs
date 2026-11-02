@@ -17,7 +17,9 @@ import {
   builtInSandboxGitConfiguration,
   builtInSandboxPackages,
   builtInSandboxRuntimeEnvironment,
+  builtInSandboxSecrets,
   builtInSandboxSettings,
+  denyBuiltInSandboxSecrets,
   openBuiltInSandboxPassThrough,
   shareBuiltInSandboxHelper,
 } from './built-in-sandbox.mjs';
@@ -50,6 +52,7 @@ if (windows) {
     [root, path.dirname(node), path.dirname(launcher), runDirectory, ...builtInSandboxPackages(root)],
     files,
   );
+  denyBuiltInSandboxSecrets(builtInSandboxSecrets(root));
 } else for (const folder of [home, gitTemplates]) fs.mkdirSync(folder, { recursive: true });
 fs.writeFileSync(
   settings,

@@ -18,7 +18,7 @@ Every request needs the director's session or key (`src/director-access.mjs`).
 - **The sandbox and the key:**
   - On Windows, the sandbox account can't read a data folder inside the director's profile.
   - On macOS and Linux, the sandbox denies the home folder and, by name, any `director-key` above the copy (`builtInSandboxSecrets`).
-  - A Windows data folder outside the profile is an open question (C-40 in the notes).
+  - Before each Windows run the key file above the copy is also denied to the runtime's sandbox group (`denyBuiltInSandboxSecrets`, `icacls /deny`), since a data folder outside the profile is readable by every signed-in account; a key that cannot be denied stops the run. The database in such a folder stays readable to the sandbox (C-40 in the notes).
 - **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
 
 ## Bounded project context and source checks
