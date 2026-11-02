@@ -683,7 +683,7 @@ function MilestoneCard({
             {counts.ideas} idea{counts.ideas === 1 ? '' : 's'} sent · {counts.stories} stor
             {counts.stories === 1 ? 'y' : 'ies'} · {counts.integrated} integrated · {counts.waiting} waiting
           </span>
-          <details className="sd-milestone__inside" open={isOpen || undefined}>
+          <details className="sd-milestone__inside sd-more" open={isOpen || undefined}>
             <summary>Its ideas and their stories</summary>
             {milestone.ideas.map(idea => (
               <div key={idea.runId} className="sd-ideablock">

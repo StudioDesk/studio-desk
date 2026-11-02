@@ -4,6 +4,7 @@
 // answers, Answer while it waits and Change the answer for auto mode's. And the checks' and the plan's own pages,
 // linked under Checks and plan and, on a phone, under the stops. And where the conversation with the planner shows
 // once the plan is accepted: before the stories while they all wait for approval, at the page's foot once one moves.
+// And What it produced on a code idea, whose changes link to their stories, with no empty pane beside them.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -683,4 +684,43 @@ test("an accepted plan's talk shows before its stories while they all wait, at t
     expect(follows(document.querySelector('.sd-lane')!, region)).toBe(true);
     expect(follows(screen.getByRole('region', { name: 'What happened' }), region)).toBe(true);
   }
+});
+
+// A landed story whose candidate changed two files, and whose review left the files given (November 2, 2026).
+const changed = (reviewFiles: NonNullable<AttemptSummary['artifacts']>) => {
+  const story = landed('T-1', 'First', 'a1b2c3d4e5');
+  story.sourceStage = { ...story.sourceStage, candidate: { attemptId: 'candidate-T-1' } };
+  controller.attempts.push({
+    id: 'candidate-T-1',
+    taskId: 'T-1',
+    status: 'accepted',
+    workerId: 'W-1',
+    startedAt: '2026-10-27T09:30:00Z',
+    finishedAt: '2026-10-27T09:50:00Z',
+    assignment: { kind: change },
+    sourceCandidate: { diffStat: { files: 2, added: 10, removed: 3 } },
+  } as AttemptSummary);
+  controller.attempts.find(attempt => attempt.id === 'attempt-T-1')!.artifacts = reviewFiles;
+  return story;
+};
+const produced = async () => within(await screen.findByRole('region', { name: 'What it produced' }, { timeout: 5000 }));
+
+test("a code idea's changes stand alone in What it produced while nothing there is a file to read", async () => {
+  open([changed([])]);
+  const made = await produced();
+  expect(made.getByRole('link', { name: /Story 1's change/ })).toBeTruthy();
+  // No pane waits beside the list for a file that isn't there.
+  expect(made.queryByRole('region', { name: 'No file open' })).toBeNull();
+  expect(made.queryByText('Each of these opens its story.')).toBeNull();
+});
+
+test('beside changes that link to their stories, the pane points to the review whose file reads there', async () => {
+  const user = userEvent.setup();
+  controller.artifacts['attempt-T-1/source-change-review.json'] = JSON.stringify({ verdict: 'pass', findings: [] });
+  open([changed([{ path: 'source-change-review.json', hash: 'h-review', kind: 'source-change-review' }])]);
+  const made = await produced(),
+    pane = made.getByRole('region', { name: 'No file open' });
+  expect(within(pane).getByText('Each of these opens its story.')).toBeTruthy();
+  await user.click(within(pane).getByRole('button', { name: 'Reviews · 1' }));
+  expect(await made.findByRole('heading', { level: 3, name: 'source-change-review.json' })).toBeTruthy();
 });

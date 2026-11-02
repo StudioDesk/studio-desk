@@ -672,7 +672,8 @@ const groups: [FileGroup, string][] = [
 ];
 
 // The Viewer: the files in a list beside the one open, which is read in place with Download. On a phone the list
-// stands alone and a file opens over the page. Nothing is read until a file is open.
+// stands alone and a file opens over the page. Nothing is read until a file is open. A list with no file to read,
+// such as a code idea's changes, stands alone too (November 2, 2026: an empty pane beside it read as broken).
 export function FileViewer({ projectId, entries }: { projectId: string; entries: ViewerEntry[] }) {
   const narrow = useNarrow(),
     counts = Object.fromEntries(groups.map(([group]) => [group, entries.filter(e => e.group === group).length])),
@@ -682,9 +683,12 @@ export function FileViewer({ projectId, entries }: { projectId: string; entries:
     [openKey, setOpenKey] = useState<string | null>(null),
     [sheet, setSheet] = useState<ViewerEntry | null>(null),
     listed = entries.filter(entry => entry.group === group),
-    open = narrow ? undefined : (listed.find(entry => entry.key === openKey) ?? listed.find(entry => entry.file));
+    open = narrow ? undefined : (listed.find(entry => entry.key === openKey) ?? listed.find(entry => entry.file)),
+    // The filters holding a file to read in the pane; with none, there is no pane.
+    readable = groups.filter(([key]) => entries.some(entry => entry.group === key && entry.file)),
+    layout = !readable.length ? ' sd-viewer--list' : !open ? ' sd-viewer--quiet' : '';
   return (
-    <div className="sd-viewer">
+    <div className={`sd-viewer${layout}`}>
       <div className="sd-viewer__side">
         <div className="sd-filters sd-viewer__filters" role="group" aria-label="Show">
           {groups
@@ -737,7 +741,7 @@ export function FileViewer({ projectId, entries }: { projectId: string; entries:
           })}
         </ul>
       </div>
-      {!narrow && (
+      {!narrow && readable.length > 0 && (
         <section className="sd-viewer__pane" aria-label={open?.name ?? 'No file open'}>
           {open?.file ? (
             <>
@@ -772,7 +776,26 @@ export function FileViewer({ projectId, entries }: { projectId: string; entries:
               </div>
             </>
           ) : (
-            <div className="sd-viewer__empty">Choose a file to read it here.</div>
+            // Only links are listed, each to its story: say so, and offer the filters whose files read here.
+            <div className="sd-viewer__empty">
+              <p>Each of these opens its story.</p>
+              <div className="sd-viewer__goto" role="group" aria-label="Read a file here">
+                <span>Read a file here from</span>
+                {readable.map(([key, label]) => (
+                  <button
+                    type="button"
+                    key={key}
+                    className="sd-btn sd-btn--sm"
+                    onClick={() => {
+                      setGroup(key);
+                      setOpenKey(null);
+                    }}
+                  >
+                    {label} · {counts[key]}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </section>
       )}

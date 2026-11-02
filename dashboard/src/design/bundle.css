@@ -5387,10 +5387,33 @@ a.sd-filerow__name {
 .sd-viewer__empty {
   display: grid;
   place-items: center;
+  align-content: center;
+  gap: var(--space-10);
   flex: 1;
   padding: var(--space-28);
   color: var(--ink-2);
   text-align: center;
+}
+.sd-viewer__empty > p {
+  margin: 0;
+}
+.sd-viewer__goto {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-8);
+}
+/* A list with no file to read stands alone, and a filter of links leaves no tall empty pane (November 2, 2026) */
+.sd-viewer--list {
+  grid-template-columns: minmax(0, 1fr);
+}
+.sd-viewer--list,
+.sd-viewer--quiet {
+  min-height: 0;
+}
+.sd-viewer--list .sd-viewer__side {
+  border-right: 0;
 }
 @media (max-width: 860px) {
   .sd-viewer {
@@ -7383,15 +7406,6 @@ button.sd-tab {
 }
 .sd-milestone__inside > * + * {
   margin-top: 8px;
-}
-.sd-milestone__inside > summary {
-  cursor: pointer;
-  font-weight: 700;
-  font-size: 14px;
-  color: var(--ink-2);
-  min-height: 32px;
-  display: flex;
-  align-items: center;
 }
 .sd-milestone__actions {
   display: flex;
