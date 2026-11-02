@@ -795,6 +795,7 @@ test("a task's attempt summaries read its own attempts' phases through their ind
     'events.events_by_attempt',
     'events.events_by_kind',
     'events.events_by_task',
+    'messages.messages_by_channel',
     'tasks.tasks_by_project',
     'tasks.tasks_by_queued',
     'tasks.tasks_by_status',

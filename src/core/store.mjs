@@ -9,6 +9,31 @@ import { assertUnchangedDirectorInputs, directorInputsOf } from './idea-inputs.m
 import { dashboardAttempt, dashboardOpenPhases, dashboardTimings } from './dashboard-state.mjs';
 import { testTurnResource, visualTurnResource } from './test-turn.mjs';
 import { runMembership, settled } from './project-records.mjs';
+import { messageChannelTypes, messageLimits } from './messages.mjs';
+
+// A chat message's channel as its row keeps it: the project's own channel has no ID, a run's or a task's names it.
+function messageChannel(channel) {
+  if (!messageChannelTypes.includes(channel?.type))
+    throw Object.assign(new Error("A message's channel is the project, a run or a task."), { status: 400 });
+  if (channel.type === 'project') return ['project', null];
+  if (typeof channel.id !== 'string' || !channel.id)
+    throw Object.assign(new Error("A run's or a task's channel names it."), { status: 400 });
+  return [channel.type, channel.id];
+}
+// A message as it reads back: its row's place, channel, reply and time, and what it holds.
+const messageOf = row => ({
+  ...JSON.parse(row.data),
+  seq: row.seq,
+  id: row.id,
+  projectId: row.project_id,
+  channel: { type: row.channel_type, id: row.channel_id },
+  replyTo: row.reply_to,
+  time: row.time,
+});
+function pageBound(name, value, minimum, maximum) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum)
+    throw Object.assign(new Error(`${name} must be an integer from ${minimum} to ${maximum}.`), { status: 400 });
+}
 
 const attemptChange = a => ({ type: 'attempt', id: a.id, taskId: a.taskId, projectId: recordProject(a) });
 // A setting's change names a run or workflow as its own record, and its project when the setting has one:
@@ -91,7 +116,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, snapshot TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS leases (resource TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, token INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS counters (resource TEXT PRIMARY KEY, value INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT, attempt_id TEXT, message TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT, attempt_id TEXT, message TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, channel_type TEXT NOT NULL, channel_id TEXT, reply_to TEXT, time TEXT NOT NULL, data TEXT NOT NULL);`);
     // Lookups for what the pages read most (October 27): an attempt's events and phases, a task's events, one kind of
     // event such as every phase, and a task's attempts. Without them every read scanned the whole history, log lines
     // included, and grew slower each day. Adding them changes no record; the first start after they arrive builds
@@ -111,6 +137,11 @@ export class Store {
       CREATE INDEX IF NOT EXISTS tasks_by_status ON tasks (json_extract(data, '$.status'));
       CREATE INDEX IF NOT EXISTS tasks_by_queued ON tasks (json_extract(data, '$.queued'));
       CREATE INDEX IF NOT EXISTS tasks_by_project ON tasks (json_extract(data, '$.projectId'));`);
+    // Chat messages (team chat, November 2): one channel's messages read in order, a page back from a sequence or
+    // onward from one. The table and its lookup are new beside the records above, which none of them moves.
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS messages_by_channel ON messages (project_id, channel_type, channel_id, seq);',
+    );
     // Every write raises the version and calls onChange with what changed (MP-026): the dashboard's
     // cache tags and change events follow it, and the scheduler runs on it. Each event also reaches
     // onEvent, so a tab watching an attempt receives its lines. A log line is not a change: the compact
@@ -202,8 +233,8 @@ export class Store {
     this.putSetting('projects', projects);
   }
   // Removes a project and every record kept under it (deleting a project, v1.0 item 24): its tasks and attempts, the
-  // events of either, its runs, workflows, teams, house rules and run archives, and its resource counters. The
-  // caller checks nothing of it runs and removes its folders after the commit.
+  // events of either, its runs, workflows, teams, house rules and run archives, its resource counters and its chat
+  // messages. The caller checks nothing of it runs and removes its folders after the commit.
   deleteProjectRecords(projectId, taskIds, attemptIds) {
     const each = (sql, ids) => {
       const statement = this.db.prepare(sql);
@@ -231,6 +262,7 @@ export class Store {
       this.db.prepare('DELETE FROM settings WHERE id=?').run(prefix + projectId);
     this.db.prepare('DELETE FROM settings WHERE id LIKE ?').run(`run-archive:${projectId}:%`);
     this.db.prepare('DELETE FROM counters WHERE resource LIKE ?').run(`source:${projectId}:%`);
+    this.db.prepare('DELETE FROM messages WHERE project_id=?').run(projectId);
     this.putSetting(
       'projects',
       this.projects().filter(project => project.id !== projectId),
@@ -803,6 +835,65 @@ export class Store {
       .all(attemptId, after, snapshot, limit);
     const last = events.at(-1)?.seq;
     return { events, total: summary.total, snapshot, nextCursor: last < snapshot ? last : null };
+  }
+  // Chat messages (team chat, November 2). core/messages.mjs checks what a message holds before it is inserted; the
+  // store keeps it in its channel (the project's own, a run's or a task's) under its sequence, which only grows and
+  // is the cursor a reader pages back from or resumes after. Each insert and outcome is a change of its own.
+  insertMessage({ id, projectId, channel, replyTo = null, time, ...data }) {
+    const [type, channelId] = messageChannel(channel);
+    this.db
+      .prepare(
+        'INSERT INTO messages (id, project_id, channel_type, channel_id, reply_to, time, data) VALUES (?,?,?,?,?,?,?)',
+      )
+      .run(id, projectId, type, channelId, replyTo, time, JSON.stringify(data));
+    this.changed({ type: 'message', id, projectId, channel: { type, id: channelId } });
+    return this.message(id);
+  }
+  // A message by its ID, or null when there is none.
+  message(id) {
+    const row = this.db.prepare('SELECT * FROM messages WHERE id=?').get(id);
+    return row ? messageOf(row) : null;
+  }
+  // At most `limit` of a channel's messages before a sequence (the newest when there is none), newest last, and
+  // whether older ones exist.
+  messagePage(projectId, channel, { before = null, limit = messageLimits.page } = {}) {
+    const [type, channelId] = messageChannel(channel);
+    pageBound('limit', limit, 1, messageLimits.pageMax);
+    if (before !== null) pageBound('before', before, 0, Number.MAX_SAFE_INTEGER);
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM messages WHERE project_id=? AND channel_type=? AND channel_id IS ? AND seq<? ORDER BY seq DESC LIMIT ?',
+      )
+      .all(projectId, type, channelId, before ?? Number.MAX_SAFE_INTEGER, limit + 1);
+    return { messages: rows.slice(0, limit).reverse().map(messageOf), older: rows.length > limit };
+  }
+  // At most `limit` of a channel's messages after a sequence, oldest first, for a reader resuming where it stopped,
+  // and whether newer ones exist.
+  messagesAfter(projectId, channel, after = 0, { limit = messageLimits.page } = {}) {
+    const [type, channelId] = messageChannel(channel);
+    pageBound('after', after, 0, Number.MAX_SAFE_INTEGER);
+    pageBound('limit', limit, 1, messageLimits.pageMax);
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM messages WHERE project_id=? AND channel_type=? AND channel_id IS ? AND seq>? ORDER BY seq LIMIT ?',
+      )
+      .all(projectId, type, channelId, after, limit + 1);
+    return { messages: rows.slice(0, limit).map(messageOf), newer: rows.length > limit };
+  }
+  // Records what a message led to; its words, sender and place stay as they were.
+  setMessageOutcome(id, outcome) {
+    const row = this.db.prepare('SELECT * FROM messages WHERE id=?').get(id);
+    if (!row) throw Object.assign(new Error('Message not found.'), { status: 404 });
+    this.db
+      .prepare('UPDATE messages SET data=? WHERE id=?')
+      .run(JSON.stringify({ ...JSON.parse(row.data), outcome }), id);
+    this.changed({
+      type: 'message',
+      id,
+      projectId: row.project_id,
+      channel: { type: row.channel_type, id: row.channel_id },
+    });
+    return this.message(id);
   }
   // What every page of a project shares (MP-026): no tasks, attempts, events or instruction text.
   shell(projectId = LEGACY_PROJECT) {
