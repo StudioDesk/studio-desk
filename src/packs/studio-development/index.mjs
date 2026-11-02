@@ -282,6 +282,7 @@ export const studioDevelopmentPack = {
   tasks: [
     {
       kind: 'studio-development:checks',
+      step: { kind: 'operation' },
       role: 'tester',
       produces: ['source-check-report-v1', 'source-context-v1'],
       version: 'source-check-report-v1',
@@ -351,6 +352,7 @@ export const studioDevelopmentPack = {
     },
     {
       kind: 'studio-development:review',
+      step: { kind: 'review' },
       role: 'reviewer',
       tier: 'standard',
       consumes: ['source-check-report-v1'],
@@ -487,6 +489,7 @@ export const studioDevelopmentPack = {
     },
     {
       kind: 'studio-development:change',
+      step: { kind: 'work', proposes: { library: false } },
       role: 'engineer',
       tier: 'deep',
       version: 'source-change-v1',
@@ -652,6 +655,7 @@ export const studioDevelopmentPack = {
     },
     {
       kind: 'studio-development:change-review',
+      step: { kind: 'review' },
       role: 'reviewer',
       tier: 'standard',
       distinctFromInputs: true,
@@ -720,6 +724,7 @@ export const studioDevelopmentPack = {
     },
     {
       kind: 'studio-development:breakdown',
+      step: { kind: 'plan', proposes: { library: false } },
       executionAdapter: 'source-breakdown',
       role: 'product-owner',
       tier: 'deep',

@@ -1,5 +1,6 @@
 // Registries contain explicitly imported, trusted local code. They do not load
 // arbitrary plugins and are not a permission sandbox.
+import { validateStep } from './step-contract.mjs';
 import { FormatRegistry, validatePorts } from './formats.mjs';
 import { isRoleId } from './staffing.mjs';
 import { graphProposalFormat } from './planning.mjs';
@@ -179,6 +180,8 @@ export class WorkflowRegistry {
       )
         throw new Error('Invalid or duplicate task definition.');
       kinds.add(task.kind);
+      // Its step contract (graph step 1a): a kind from the catalog and what it overrides.
+      if (task.step !== undefined) validateStep(task.step, `${task.kind}'s step`);
       validatePorts(this.formats, task);
       if (task.operation) {
         if (!this.connectors) throw new Error('An operation binding requires a connector registry.');
