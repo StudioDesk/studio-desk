@@ -21,12 +21,14 @@ async function close() {
   console.log(JSON.stringify({ closed: true, evidenceDirectory: directory }));
 }
 try {
+  // This script acts as the director, as a local tool does: it sends the data folder's key (C-01).
   const origin = await app.start(),
-    token = (await (await fetch(origin)).text()).match(/name="studio-token" content="([^"]+)"/)[1];
+    key = { 'X-Studio-Key': app.directorKey },
+    token = (await (await fetch(origin, { headers: key })).text()).match(/name="studio-token" content="([^"]+)"/)[1];
   const api = async (url, data = {}) => {
     const response = await fetch(origin + url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Studio-Token': token },
+      headers: { 'Content-Type': 'application/json', 'X-Studio-Token': token, ...key },
       body: JSON.stringify(data),
     });
     const result = await response.json();

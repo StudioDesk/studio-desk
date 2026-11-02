@@ -167,6 +167,8 @@ export async function startSampleStudio({ base = root, port = samplePort, build 
       port,
       runnerOptions: { registries },
       bootstrap: { organizationPreset: 'first-run', workflowPresets: [] },
+      // Seeded sample data only, photographed by the visual check, which has no session to sign in with (C-01).
+      access: 'open',
     });
   await seedSampleStudio({ store: studio.store, runner: studio.runner, registries, directory });
   const address = await studio.start();

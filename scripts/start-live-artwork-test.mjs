@@ -49,12 +49,14 @@ try {
   for (const worker of org.workers) worker.enabled = ['W-01', 'W-05', 'W-07'].includes(worker.id);
   app.store.setOrganization(org);
   const origin = await app.start();
-  const html = await (await fetch(origin)).text(),
+  // This script acts as the director, as a local tool does: it sends the data folder's key (C-01).
+  const key = { 'X-Studio-Key': app.directorKey },
+    html = await (await fetch(origin, { headers: key })).text(),
     token = html.match(/name="studio-token" content="([^"]+)"/)[1];
   const api = async (url, data, method = 'POST') => {
     const res = await fetch(origin + url, {
       method,
-      headers: { 'Content-Type': 'application/json', 'X-Studio-Token': token },
+      headers: { 'Content-Type': 'application/json', 'X-Studio-Token': token, ...key },
       body: JSON.stringify(data),
     });
     const value = await res.json();

@@ -2,6 +2,25 @@
 
 October 11, 2026. Compatible extraction, bounded fixture composition and the approved Studio desk development workflow in the v0.1.8 runtime; no schema migration.
 
+## Who may use the controller (November 2026)
+
+Every request needs the director's session or key (`src/director-access.mjs`).
+
+- **Why it's needed:** anything on the computer reaches the loopback address, a candidate's tests inside the built-in sandbox included (the runtime lets every loopback port through on Windows, since test suites start servers).
+- **The key:** `<data>/director-key`, 64 hex characters, made the first time a data folder is used. Deleting it signs every browser out at the next start.
+- **The launch link:** each start prints `http://127.0.0.1:<port>/launch/<code>`, a new code each start, also written to `<data>/launch-url`. Opening it sets an HttpOnly, SameSite=Strict, `Path=/` cookie (`studio_desk_<id>`, its name derived from the key so controllers on other ports of the same address never share one), then redirects to `/`. The cookie lasts about a year and survives restarts, because the key does. A code from an earlier start answers 403 with a page that says so.
+- **What it covers:** pages, the API's reads and the change stream answer 401 without the cookie or the header `x-studio-key: <key>`: a sign-in page carrying no request token, or JSON whose `error` points at the launch link. Commands still also need the page's request token (`x-studio-token`), as before.
+- **What it doesn't cover:**
+  - the built dashboard's `/assets/*` files, which hold no records
+  - `POST /api/attempts/:id/tests`, an agent's own test run, which its attempt's token authorizes
+- **Local tools** that act as the director (development scripts, a coordinating session's reads) send the key.
+- **`createStudio({ access })`** is `'session'` by default. `'open'` asks for neither, and is passed only by `scripts/sample-studio.mjs`, whose seeded studio the visual check photographs. It is a trusted option of the code that starts the controller, never a setting, a variable or a request.
+- **The sandbox and the key:**
+  - On Windows, the sandbox account can't read a data folder inside the director's profile.
+  - On macOS and Linux, the sandbox denies the home folder and, by name, any `director-key` above the copy (`builtInSandboxSecrets`).
+  - A Windows data folder outside the profile is an open question (C-40 in the notes).
+- **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
+
 ## Bounded project context and source checks
 
 The director approved using Studio desk on its own source in a separate selectable project. The existing partial project/workflow modules are now connected to the dashboard and covered by behavioral tests. Projects/workflows use additive settings records in the same SQLite database. `recordProject()` maps only missing project IDs to `project-legacy` at read time. Old task/attempt JSON, job paths and instruction snapshots are not rewritten. New project attempts use `projects/<project-id>/jobs/<attempt-id>` inside the controller data directory.
@@ -366,7 +385,7 @@ Decision MP-015 makes graph-shaped work a set of platform primitives for any org
 - **Sending work back** (`sendBackWork`, `POST /api/tasks/:id/send-back` with an optional `note`, October 19). When a later stage returned findings (`returnable`), the director sends the accepted work back: the `retry` hook rewinds it, the next attempt's direction becomes the findings and the note, the autonomy note is cleared, a `sent_back` event is recorded, and the task is started as by Start (queued if it must wait; the response reports a Start that could not happen). The director may always do this; autonomy does the same within its retry budget. A Studio desk story is returnable when its accepted current independent review requested changes; its findings are that review's summary and findings.
 - **Graded reviews and the director's override (MP-019, `df36483`).** Candidate review contract v2 (`source-change-review-v2`) has `findings`, blocking defects, and `notes`, non-blocking observations (arrays of at most 20 plain strings each); a review passes exactly when `findings` is empty, and notes never send a story back. `validateChangeReview` applies v1's rules to attempts whose recorded contract is v1. The verdict, findings and notes are kept on the review attempt (`candidateReviewVerdict`, `candidateReviewFindings`, `candidateReviewNotes`) and listed on the story. The director may integrate over an accepted review that requested changes: `POST /api/tasks/:id/integrate-source` with `overrideReason` (1–2000 characters) passes `{ override: { reason } }` through the autonomy request to `integrateSource`, which records `journal.reviewOverride` (director, verdict, reason, time) and names it in the integration event and commit message. The override covers the review's verdict and its own failed checks; candidate tests, the candidate commit check and full verification still apply. Autonomy never passes an override.
 - `revalidateOnAccept` reruns `validateOutput` at acceptance for evidence that can change after validation. `exactProposals` on a proposer makes every approval recheck the proposed task's recorded content, limits, sibling prerequisites and pinned inputs.
-- The core imports no connector or pack. The application passes the Runner its integration operation (`integrate`) and `integration: { target, failed, stop, resources }` (`src/server.mjs`); without them, integration is unavailable.
+- The application passes the Runner its integration operation (`integrate`) and `integration: { target, failed, stop, resources }` (`src/server.mjs`); without them, integration is unavailable. The core was meant to import no connector or pack, but it does today: `src/core/orchestrator.mjs`, `autonomy-runtime.mjs`, `idea-intake.mjs`, `project-creation.mjs` and `project-templates.mjs` import code-workflow modules. Moving that behind the workflow registry is planned with MP-034.
 
 **Implemented (G1, October 15, 2026):**
 

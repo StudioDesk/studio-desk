@@ -1000,6 +1000,8 @@ test('idea files sent with an idea are kept byte for byte and served only as dow
         method: options.method || 'GET',
         headers: {
           host: '127.0.0.1:0',
+          // Requests reach the server directly, as the director's own tool would send them (C-01).
+          'x-studio-key': app.directorKey,
           ...Object.fromEntries(
             Object.entries(options.headers || {}).map(([key, value]) => [key.toLowerCase(), value]),
           ),

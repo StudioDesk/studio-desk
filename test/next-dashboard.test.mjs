@@ -7,7 +7,7 @@ import http from 'node:http';
 import os from 'node:os';
 import zlib from 'node:zlib';
 import path from 'node:path';
-import { createStudio } from './model-free-studio.mjs';
+import { createStudio, directorHeaders } from './model-free-studio.mjs';
 import { buildDashboard, dashboardSourceHash, dashboardSources } from '../scripts/build-dashboard.mjs';
 
 const temporary = (t, prefix) => {
@@ -84,7 +84,7 @@ test('every page address gets the built page with this start’s token; content-
 const raw = (url, gzip) =>
   new Promise((resolve, reject) =>
     http
-      .get(url, { headers: gzip ? { 'Accept-Encoding': 'gzip' } : {} }, response => {
+      .get(url, { headers: { ...directorHeaders(url), ...(gzip ? { 'Accept-Encoding': 'gzip' } : {}) } }, response => {
         const chunks = [];
         response.on('data', chunk => chunks.push(chunk));
         response.on('end', () => resolve({ headers: response.headers, body: Buffer.concat(chunks) }));

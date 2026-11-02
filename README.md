@@ -32,7 +32,7 @@ Then:
 1. Download the release and extract it somewhere you'll keep it (or clone the repository and check out `v1.0.1`).
 2. Run `npm ci` in that folder, once.
 3. Double-click `start-studio.cmd`, or run `npm start`.
-4. Open **http://127.0.0.1:4317** in Chrome or Edge.
+4. Open the link the controller's window prints, in Chrome or Edge. It starts with `http://127.0.0.1:4317/launch/` and signs your browser in, so programs on your computer, an agent's tests included, can't act as you. From then on **http://127.0.0.1:4317** opens it, restarts included.
 
 Keep the controller's window open while you work.
 

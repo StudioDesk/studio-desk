@@ -45,6 +45,27 @@ const fixtureBuiltInSandbox = runner => ({
   status: () => ({ state: runner()?.sourceCheckCommand ? 'ready' : 'unsupported' }),
   setup: () => false,
 });
+// Every request needs the director's session or key (C-01, src/director-access.mjs). The suite's requests act as
+// the director, as a local tool does: fetch sends a started studio's key to that studio's own address, so every
+// test still passes through the check. A test of the check itself sends a request without it with
+// `{ directorKey: false }`, or reaches the address with node:http.
+const studioKeys = new Map(),
+  plainFetch = globalThis.fetch;
+globalThis.fetch = (input, init = {}) => {
+  const { directorKey: sendKey = true, ...rest } = init,
+    url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
+    key = sendKey ? [...studioKeys].find(([origin]) => url === origin || url.startsWith(origin + '/'))?.[1] : null;
+  if (!key) return plainFetch(input, rest);
+  const headers = new Headers(rest.headers ?? (input instanceof Request ? input.headers : undefined));
+  if (!headers.has('x-studio-key')) headers.set('x-studio-key', key);
+  return plainFetch(input, { ...rest, headers });
+};
+// The key header for a request a test sends some other way (node:http, or straight to the server): empty for an
+// address no started studio of this file listens on.
+export const directorHeaders = url => {
+  const key = [...studioKeys].find(([origin]) => url === origin || url.startsWith(origin + '/'))?.[1];
+  return key ? { 'x-studio-key': key } : {};
+};
 export function createStudio(options = {}) {
   const fixtureOptions =
     process.env.STUDIO_MODEL_FREE_LEAF_FIXTURES === '1'
@@ -62,5 +83,17 @@ export function createStudio(options = {}) {
       ...options.runnerOptions,
     },
   });
+  const start = app.start,
+    close = app.close;
+  let origin = null;
+  app.start = async function () {
+    origin = await start.call(this);
+    studioKeys.set(origin, app.directorKey);
+    return origin;
+  };
+  app.close = function () {
+    if (origin) studioKeys.delete(origin);
+    return close.call(this);
+  };
   return app;
 }

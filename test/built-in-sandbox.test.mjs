@@ -191,6 +191,13 @@ test('a run writes only the copy it tests, reads the packages above it, and reac
     posix = builtInSandboxSettings({ ...run, platform: 'linux', home });
   assert.deepEqual(posix.network, settings.network);
   assert.deepEqual(posix.filesystem.denyRead, [home]);
+  // The director's key of the data folder above the copy (C-01) is denied by name there, so a data folder kept
+  // outside the home folder still hides it; Windows' account reads nothing in the profile it is not given.
+  const key = path.join(directory, 'data', 'director-key');
+  fs.writeFileSync(key, 'a'.repeat(64));
+  assert.deepEqual(builtInSandboxSettings({ ...run, platform: 'linux', home }).filesystem.denyRead, [home, key]);
+  assert.deepEqual(builtInSandboxSettings({ ...run, platform: 'win32' }).filesystem.denyRead, []);
+  fs.rmSync(key);
   assert.deepEqual(posix.filesystem.allowRead, [root, ...settings.filesystem.allowRead, run.seccomp]);
   assert.deepEqual(posix.filesystem.allowWrite, [root, run.temporary]);
   assert.equal(posix.windows, undefined);

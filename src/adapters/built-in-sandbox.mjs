@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { directorKeyName } from '../director-access.mjs';
 
 export const builtInSandboxVersion = '0.0.81';
 const studioRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -197,6 +198,17 @@ export function builtInSandboxPackages(root) {
   return packages;
 }
 
+// The director's key of the data folder a copy sits in (C-01, src/director-access.mjs), found the way the packages
+// are: in a folder above the copy. On macOS and Linux it is denied by name, so a data folder kept outside the home
+// folder still hides it. On Windows the sandbox account cannot read a data folder inside the director's profile;
+// one outside the profile is the open question C-40 records.
+export function builtInSandboxSecrets(root) {
+  const secrets = [];
+  for (let folder = path.dirname(root); folder !== path.dirname(folder); folder = path.dirname(folder))
+    if (fs.existsSync(path.join(folder, directorKeyName))) secrets.push(path.join(folder, directorKeyName));
+  return secrets;
+}
+
 // What one test run may touch. It writes only the copy it runs on; it reads Node, the packages installed for
 // the copy, the launcher and the run's own instructions; it reaches no network beyond this computer. Git for
 // Windows and Windows' own folders are readable to every account already. On macOS and Linux the tests run as
@@ -226,7 +238,7 @@ export function builtInSandboxSettings({
     return {
       network,
       filesystem: {
-        denyRead: [home],
+        denyRead: [home, ...builtInSandboxSecrets(root)],
         allowRead: [root, ...reads, seccomp, ...(fs.existsSync(npm) ? [npm] : [])],
         allowWrite: [root, temporary],
         denyWrite: [],

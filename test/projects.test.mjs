@@ -181,6 +181,8 @@ async function attemptLogFixture(t, count = 1007, transport = 'store') {
               url: parsed.pathname + parsed.search,
               headers: {
                 host: '127.0.0.1:0',
+                // Requests reach the server directly, as the director's own tool would send them (C-01).
+                'x-studio-key': c.app.directorKey,
                 ...Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value])),
               },
             });
@@ -1331,7 +1333,11 @@ async function fileIntakeProject(t) {
             });
           },
         };
-      Object.assign(req, { url, method, headers: { host: '127.0.0.1:0', ...headers } });
+      Object.assign(req, {
+        url,
+        method,
+        headers: { host: '127.0.0.1:0', 'x-studio-key': c.app.directorKey, ...headers },
+      });
       c.app.server.emit('request', req, res);
     });
   c.refreshToken = async () => {

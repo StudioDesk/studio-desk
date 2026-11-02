@@ -33,8 +33,8 @@ The dashboard (`dashboard/`, React with a Vite build) is served by the controlle
 - `npm test` runs the model-free suite, the dashboard's typecheck, lint, tests and build among it, with the same command the pipeline runs.
 - `npm run verify` tests a commit exactly as the pipeline will: in a worktree and the built-in sandbox, or with `--as checks` as an idea's first checks run (add `--sandbox none` when Settings → Candidate tests is No sandbox). Before merging by hand, run it once for each of those; a change to `dashboard/` alone needs only `node --test test/dashboard-tools.test.mjs test/next-dashboard.test.mjs`, and a change to documents alone needs no tests.
 - Run `npm run format` (Prettier 3.3.3 through npx) before committing.
-- Never commit `data/`, the controller's runtime records. Read live state through the controller's GET routes, such as `/api/state?mode=dashboard&projectId=<id>`.
-- Check the interface in a real browser: `node scripts/screenshot.mjs`, or a throwaway controller (`STUDIO_DATA_DIR` and `STUDIO_PORT`) for anything that writes. Never start a second controller on a data folder that is already in use.
+- Never commit `data/`, the controller's runtime records. Read live state through the controller's GET routes, such as `/api/state?mode=dashboard&projectId=<id>`. Every request needs the director's session or key (`src/director-access.mjs`): a local tool sends the header `x-studio-key` with the contents of `<data>/director-key`, and a browser signs in once from the launch link the controller prints, which `<data>/launch-url` also holds.
+- Check the interface in a real browser: `node scripts/screenshot.mjs` with the launch link of a throwaway controller (`STUDIO_DATA_DIR` and `STUDIO_PORT`) as its address. Never start a second controller on a data folder that is already in use.
 
 ## Where to look
 

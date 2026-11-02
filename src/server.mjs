@@ -7,6 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Store } from './store.mjs';
+import {
+  directorAccess,
+  directorKey,
+  launchFileName,
+  signInMessage,
+  signInPage,
+  staleLaunchPage,
+} from './director-access.mjs';
 import { Runner, artifactPath, acceptedReference, validateAcceptedReferences } from './runner.mjs';
 import { hash, complexityPolicy, validateComplexity } from './core/contracts.mjs';
 import {
@@ -148,6 +156,16 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const publicRoot = path.join(root, 'public');
 // The version Settings shows is the app's own, from its package.json.
 const appVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+// The security policy of every page the controller serves: the dashboard and the sign-in pages (C-01). Images may
+// also come from blob: URLs, which only the dashboard's own scripts create: the idea composer's thumbnails of files
+// the director selected or pasted.
+const pagePolicy =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const signInHeaders = {
+  'Content-Type': 'text/html; charset=utf-8',
+  'Cache-Control': 'no-store',
+  'Content-Security-Policy': pagePolicy,
+};
 const dashboardTypes = {
   js: 'text/javascript; charset=utf-8',
   css: 'text/css; charset=utf-8',
@@ -224,6 +242,11 @@ export function createStudio({
   restart = null,
   // The built dashboard (MP-026).
   dashboardDirectory = path.join(root, 'dist'),
+  // Who may use it (C-01, src/director-access.mjs): 'session', the default, asks every request for the director's
+  // session cookie or key; 'open' asks for neither, for a studio of seeded sample data that the visual check
+  // photographs (scripts/sample-studio.mjs). A trusted option of the code that starts the controller, never a
+  // setting, a variable or a request.
+  access = 'session',
   // A fresh data folder starts at No projects yet (v1.0 item 24); the game organization and its starter tasks are
   // the `game-studio` preset, chosen with STUDIO_ORGANIZATION_PRESET.
   bootstrap = {
@@ -238,6 +261,7 @@ export function createStudio({
             .filter(Boolean),
   },
 } = {}) {
+  if (!['session', 'open'].includes(access)) throw new Error('Access must be session or open.');
   const registries = runnerOptions.registries || createRegistries();
   const store = new Store(directory, bootstrapFactory(registries, bootstrap)),
     owner = { id: randomUUID(), pid: process.pid };
@@ -263,6 +287,8 @@ export function createStudio({
     throw err;
   }
   packageBoundary(store.directory);
+  const key = directorKey(store.directory),
+    director = directorAccess(key);
   let runner;
   const planningContext = (org, repair, projectId) =>
     registries.workflows.planningContext(org, repair, registries.adapters, store.project(projectId));
@@ -489,6 +515,30 @@ export function createStudio({
         fail('Cross-origin requests are not accepted.', 403);
       const url = new URL(req.url, origin()),
         parts = url.pathname.split('/').filter(Boolean);
+      // The launch link this start printed signs a browser in (C-01): it sets the session cookie and opens the
+      // dashboard. A link from an earlier start says so.
+      if (parts[0] === 'launch' && parts.length === 2 && req.method === 'GET') {
+        if (!director.launches(parts[1])) {
+          res.writeHead(403, signInHeaders);
+          return res.end(staleLaunchPage);
+        }
+        res.writeHead(303, { Location: '/', 'Set-Cookie': director.sessionCookie, 'Cache-Control': 'no-store' });
+        return res.end();
+      }
+      // Every other request needs the director's session or key, reads and the change stream included, apart from
+      // the built dashboard's files (they hold no records) and an agent's own test run, which its attempt's token
+      // authorizes below.
+      const attemptTests = parts[0] === 'api' && parts[1] === 'attempts' && parts[3] === 'tests' && parts.length === 4;
+      if (
+        access === 'session' &&
+        !attemptTests &&
+        !url.pathname.startsWith('/assets/') &&
+        !director.authenticated(req.headers)
+      ) {
+        if (parts[0] === 'api') fail(signInMessage, 401);
+        res.writeHead(401, signInHeaders);
+        return res.end(signInPage);
+      }
       const queryProject = url.searchParams.get('projectId') || LEGACY_PROJECT;
       // The project a tab follows; none on a fresh install's No projects yet, where it follows only the changes that
       // belong to no project (a project appearing, the agents).
@@ -2498,12 +2548,7 @@ export function createStudio({
         fail('Unknown controller route.', 404);
       }
       if (req.method !== 'GET') fail('Method not allowed.', 405);
-      // Images may also come from blob: URLs, which only this page's own scripts create: the idea
-      // composer's thumbnails of files the director selected or pasted.
-      res.setHeader(
-        'Content-Security-Policy',
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-      );
+      res.setHeader('Content-Security-Policy', pagePolicy);
       // The saved light or dark appearance applies before the dashboard draws, so it never flashes. It is
       // revalidated by content, not downloaded again on every load.
       if (url.pathname === '/theme.js') {
@@ -2568,12 +2613,20 @@ export function createStudio({
     store,
     runner,
     server,
+    // The data folder's key, which local tools send as `x-studio-key` (C-01).
+    directorKey: key,
+    // This start's launch link, which signs a browser in. It is also written to <data>/launch-url for the scripts
+    // that open one, and changes with every start.
+    get launchUrl() {
+      return `${origin()}/launch/${director.launchCode}`;
+    },
     async start() {
       await new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(port, '127.0.0.1', resolve);
       });
       actualPort = server.address().port;
+      fs.writeFileSync(path.join(store.directory, launchFileName), this.launchUrl + '\n', { mode: 0o600 });
       return origin();
     },
     close() {
@@ -2644,7 +2697,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   try {
     const url = await app.start();
     console.log(
-      `Studio desk: ${url}\nLocal records: ${app.store.directory}\nDeveloping: ${app.runner.sourceChangeRoot}${app.runner.selfHosted ? ' (this copy; integrations restart the controller)' : ' (separate development copy)'}\nOpen the URL in your browser. Press Ctrl+C to stop. Approve a pipeline or start assignments individually. Restarts pause queued dispatch.${supervised ? '' : '\nRun through npm start or start-studio to allow planned restarts after source integration.'}`,
+      `Studio desk: ${app.launchUrl}\nLocal records: ${app.store.directory}\nDeveloping: ${app.runner.sourceChangeRoot}${app.runner.selfHosted ? ' (this copy; integrations restart the controller)' : ' (separate development copy)'}\nOpen the link above in your browser once: it signs that browser in, and ${url} then opens the dashboard, also after restarts. Press Ctrl+C to stop. Approve a pipeline or start assignments individually. Restarts pause queued dispatch.${supervised ? '' : '\nRun through npm start or start-studio to allow planned restarts after source integration.'}`,
     );
   } catch (err) {
     console.error(`Cannot start: ${err.message}`);
