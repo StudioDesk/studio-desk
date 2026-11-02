@@ -1,7 +1,7 @@
 // Agents' library proposals at the top of the Artifacts page (1.2 step 6): each waiting proposal with its name, what
 // it is for, the agent who proposed it, its story and whether it is a new file or a newer revision; Add to the library
 // and Not now, each sent with the project alone, after which the library is read again; Read it first, which opens
-// the proposed file; and a proposal the library could not take, with its problem.
+// the proposed file; and a proposal the library could not take, as a plain note saying why.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
@@ -216,23 +216,52 @@ test('Not now sends the rejection with the project alone, and the proposal leave
   expect(screen.getByRole('article', { name: 'Voice notes' })).toBeTruthy();
 });
 
-test('approved and rejected proposals are not waiting, and one the library could not take shows its problem once', async () => {
+// A proposal the library could not take reads as a plain note: no alert and nothing in the error color.
+const plainNote = (list: HTMLElement) => {
+  expect(within(list).queryByRole('alert')).toBeNull();
+  expect(list.closest('[role="alert"]')).toBeNull();
+  expect(list.outerHTML).not.toContain('--bad');
+};
+
+test('approved and rejected proposals are not waiting, and one the library could not take reads as a plain note saying why, once', async () => {
   open();
   await card('Voice notes');
   expect(screen.queryByRole('article', { name: 'Brand guide' })).toBeNull();
   expect(screen.queryByRole('article', { name: 'Scratch notes' })).toBeNull();
   expect(screen.queryByText('Scratch notes')).toBeNull();
   expect(screen.queryByRole('article', { name: 'Launch video' })).toBeNull();
-  const refused = within(screen.getByRole('list', { name: 'Proposals the library could not take' }));
+  const list = screen.getByRole('list', { name: 'Proposals the library could not take' }),
+    refused = within(list);
   expect(refused.getAllByRole('listitem')).toHaveLength(1);
-  expect(refused.getByText('Launch video')).toBeTruthy();
-  expect(refused.getByText(problem)).toBeTruthy();
-  // Nothing is left to decide for it, and its problem is said once on the page.
+  // Its name and that the library could not take it, then its problem in the controller's words.
+  expect(refused.getAllByRole('listitem')[0]!.textContent).toBe(`The library could not take Launch video. ${problem}`);
+  expect(refused.getByText(problem).closest('.sd-meta')).toBeTruthy();
+  plainNote(list);
+  // Nothing is left to decide for it, and the note is said once on the page.
   expect(refused.queryByRole('button')).toBeNull();
+  expect(screen.getAllByText('The library could not take Launch video.')).toHaveLength(1);
   expect(screen.getAllByText(problem)).toHaveLength(1);
 });
 
-test('an approval the library cannot take moves the proposal to its problem, said once', async () => {
+test('a proposal the library could not take with no problem recorded says the library gave no reason', async () => {
+  controller.library = {
+    entries: [],
+    proposals: [
+      proposal('libprop-video', 'Launch video', 'The video on the launch page.', 'T-1', 'launch.mp4', {
+        state: 'refused',
+        ...decided,
+      }),
+    ],
+  };
+  open();
+  const list = await screen.findByRole('list', { name: 'Proposals the library could not take' });
+  expect(list.textContent).toBe('The library could not take Launch video. The library gave no reason.');
+  plainNote(list);
+  // Nothing waits, so the section says nothing of waiting.
+  expect(screen.queryByText(/waiting on you/)).toBeNull();
+});
+
+test('an approval the library cannot take moves the proposal to a plain note saying why, said once', async () => {
   const user = userEvent.setup();
   const tooBig = 'The library holds at most 20 files.';
   controller.command = url =>
@@ -242,11 +271,17 @@ test('an approval the library cannot take moves the proposal to its problem, sai
   open();
   await user.click((await card('Voice notes')).getByRole('button', { name: 'Add to the library' }));
   await waitFor(() => expect(screen.queryByRole('article', { name: 'Voice notes' })).toBeNull());
-  const refused = within(screen.getByRole('list', { name: 'Proposals the library could not take' }));
-  expect(refused.getByText('Voice notes')).toBeTruthy();
-  expect(refused.getByText(tooBig)).toBeTruthy();
+  const list = screen.getByRole('list', { name: 'Proposals the library could not take' }),
+    refused = within(list);
+  expect(refused.getAllByRole('listitem').map(item => item.textContent)).toEqual([
+    `The library could not take Voice notes. ${tooBig}`,
+    `The library could not take Launch video. ${problem}`,
+  ]);
+  plainNote(list);
   expect(screen.getAllByText(tooBig)).toHaveLength(1);
-  expect(screen.getByText('The library could not take Voice notes.')).toBeTruthy();
+  // The toast says the same, and the note stays once it goes.
+  expect(screen.getByText('The library could not take Voice notes.', { selector: '.sd-toast' })).toBeTruthy();
+  expect(refused.getAllByText('The library could not take Voice notes.')).toHaveLength(1);
   expect(screen.queryByRole('button', { name: 'Voice notes' })).toBeNull();
 });
 

@@ -1,9 +1,10 @@
 // Artifacts (1.2 step 6), as the director's frames draw it: the heading with Upload a file, the files agents proposed
 // for the library, then two columns. On the left the library, a card for each file every agent follows, then The work
 // in one card, read from the work (GET …/work): each file's kind tile, readable name and its line (agent, idea or step,
-// latest date), In the library or Add to the library, how many versions it has, which folds them open under the row
-// (work-versions.tsx), and Open, or Download for a file the page cannot show, with the All, Documents N and Images N
-// choice and the idea and agent choices, and at its foot the records of how the work was done with Open the ideas.
+// latest date), In the library or Add to the library, with the note of a proposal of the file the library could not
+// take under its line, how many versions it has, which folds them open under the row (work-versions.tsx), and Open,
+// or Download for a file the page cannot show, with the All, Documents N and Images N choice and the idea and agent
+// choices, and at its foot the records of how the work was done with Open the ideas.
 // A project that is not code names sets of the accepted files as snapshots in a card below. On the right, the panel:
 // the picked library card (library-entry.tsx) or file of the work (file-panel.tsx), read in place, and before any pick
 // a line saying to pick one. Picking is the page's own state, so a visit starts with nothing picked. On a phone, or
@@ -15,7 +16,15 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCallback, useEffect, useId, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import { artifactsUrl, getJSON, workUrl, type ProjectArtifact, type ProjectWork, type WorkPictures } from './api';
+import {
+  artifactsUrl,
+  getJSON,
+  workUrl,
+  type LibraryProposal,
+  type ProjectArtifact,
+  type ProjectWork,
+  type WorkPictures,
+} from './api';
 import {
   acceptedFile,
   matchingWork,
@@ -40,7 +49,7 @@ import { KindTile } from './kind-tile';
 import { Heading } from './layout';
 import { AddToLibrary, currentEntries, Library, UploadToLibrary, useLibrary } from './library';
 import { LibraryFile } from './library-entry';
-import { LibraryProposals } from './library-proposals';
+import { LibraryProposals, RefusedNote, refusedFor } from './library-proposals';
 import { useStudio } from './records';
 import { Snapshots } from './snapshots';
 import { useLiveStream, useStreamReady } from './stream-context';
@@ -78,8 +87,8 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
     queryFn: ({ signal }) => getJSON<ProjectWork>(workUrl(projectId), signal),
     refetchOnMount: 'always',
   });
-  // The library's own read, which its cards share: the picked entry as the library reads now, so its panel closes once
-  // the entry is removed.
+  // The library's own read, which its cards and its proposals share: the picked entry as the library reads now, so its
+  // panel closes once the entry is removed, and the proposals it could not take, which the rows of their files note.
   const library = useLibrary(projectId);
   // Work accepted while the page is open changes its task, and both are read again then. A library change moves which
   // file the library holds, so the work is read again for it too.
@@ -132,6 +141,7 @@ export function ArtifactsPage({ projectId }: { projectId: string }) {
     under: pickedRow ? phonePanel : null,
     onPick: row => setPicked({ work: row.key }),
     onAdd: add,
+    refused: row => refusedFor(library.data, row.file),
   };
   // Snapshots hold the accepted files, so they wait for them; a code project has none.
   const snapshots =
@@ -230,13 +240,14 @@ function PhonePanel({ children }: { children: ReactNode }) {
 }
 
 // What each row of the work needs from the page to be picked: which one is, the panel that follows it on a phone,
-// picking it and Add to the library.
+// picking it and Add to the library, and the proposals of its file the library could not take.
 interface RowPicking {
   projectId: string;
   pickedKey: string | null;
   under: ReactNode;
   onPick: (row: WorkRow) => void;
   onAdd: (row: WorkRow) => void;
+  refused: (row: WorkRow) => LibraryProposal[];
 }
 
 // The work of a project that is not code: its heading and count with the kind, idea and agent choices, its rows, and
@@ -451,16 +462,19 @@ const plainClick = (event: MouseEvent) =>
 
 // One file of the work: its kind tile, readable name and line, In the library or Add to the library, how many
 // versions it has when it was made more than once, which folds them open under the row, and Open, which shows its
-// newest version in the panel, or, for a kind the page cannot show, Download. Clicking the row away from its buttons
-// picks it too. On a phone its panel follows it.
+// newest version in the panel, or, for a kind the page cannot show, Download. A file the library does not hold whose
+// proposal it could not take says so under its line, beside Add to the library, which that note describes. Clicking
+// the row away from its buttons picks it too. On a phone its panel follows it.
 function FileRow({ row, picking }: { row: WorkRow; picking: RowPicking }) {
   const [open, setOpen] = useState(false),
     versionsId = useId(),
+    refusedId = useId(),
     versions = versionCount(row.file),
     { projectId, onPick, onAdd } = picking,
     picked = picking.pickedKey === row.key,
     path = row.file.path,
-    url = artifactUrl(projectId, newestAttemptId(row.file), path);
+    url = artifactUrl(projectId, newestAttemptId(row.file), path),
+    refused = row.file.libraryEntryId ? [] : picking.refused(row);
   return (
     <div
       role="listitem"
@@ -477,6 +491,13 @@ function FileRow({ row, picking }: { row: WorkRow; picking: RowPicking }) {
         <span className="sd-filerow__name">
           <b title={path}>{row.name}</b>
           <span className="sd-meta">{workLine(row)}</span>
+          {refused.length > 0 && (
+            <span id={refusedId}>
+              {refused.map(proposal => (
+                <RefusedNote key={proposal.id} proposal={proposal} />
+              ))}
+            </span>
+          )}
         </span>
         {row.file.libraryEntryId ? (
           <span className="sd-chip sd-chip--inline sd-chip--ok">In the library</span>
@@ -485,6 +506,7 @@ function FileRow({ row, picking }: { row: WorkRow; picking: RowPicking }) {
             type="button"
             className="sd-btn sd-btn--sm"
             aria-label={`Add ${path} to the library`}
+            aria-describedby={refused.length ? refusedId : undefined}
             onClick={() => onAdd(row)}
           >
             Add to the library

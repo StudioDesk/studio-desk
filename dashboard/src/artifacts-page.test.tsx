@@ -1,18 +1,26 @@
 // The Artifacts page of a project that is not code (1.2 step 6), as the director's frames draw it: Upload a file in
 // its header, the library at the top, then The work in one card, one row per file the work made with its kind tile,
-// readable name, agent, idea or step and latest date, In the library or Add to the library, its versions and Open (or
-// Download), the All, Documents N and Images N choice with the idea and agent choices, and at the card's foot the line
-// counting the records of how the work was done with Open the ideas. Beside them the panel: picking a library card, a
-// row or Open reads that file there, and on a phone the panel opens under what was picked. A code project's page: the
-// card saying its code is in the repository with Open Releases, the library, and what the work made that isn't code
-// with each story's visual check opening the story on its Pages tab and its records line with Open the board, and no
-// snapshots.
+// readable name, agent, idea or step and latest date, In the library or Add to the library, with the note of a proposal
+// of the file the library could not take, its versions and Open (or Download), the All, Documents N and Images N
+// choice with the idea and agent choices, and at the card's foot the line counting the records of how the work was
+// done with Open the ideas. Beside them the panel: picking a library card, a row or Open reads that file there, and on
+// a phone the panel opens under what was picked. A code project's page: the card saying its code is in the repository
+// with Open Releases, the library, and what the work made that isn't code with each story's visual check opening the
+// story on its Pages tab and its records line with Open the board, and no snapshots.
 import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { LibraryEntry, LibraryReader, ProjectWork, WorkFile, WorkPictures, WorkVersion } from './api';
+import type {
+  LibraryEntry,
+  LibraryProposal,
+  LibraryReader,
+  ProjectWork,
+  WorkFile,
+  WorkPictures,
+  WorkVersion,
+} from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, type Controller } from './test-controller';
@@ -475,6 +483,134 @@ test('a code project whose work has made nothing that is not code says so plainl
     `The visual check · “Board cards show their stage” · ${when('2026-10-22T12:00:00Z')} · 1 picture`,
   );
   expect(screen.queryByText('Nothing has been made yet.')).toBeNull();
+});
+
+// A proposal the autonomy policy approved and the library could not take, of one story's file from one attempt.
+const refusedProposal = (
+  id: string,
+  name: string,
+  from: LibraryProposal['from'],
+  problem?: string,
+): LibraryProposal => ({
+  id,
+  name,
+  purpose: `What ${name} is for.`,
+  path: from.path,
+  from,
+  proposedBy: 'W-2',
+  at: '2026-10-24T12:00:00Z',
+  state: 'refused',
+  decidedAt: '2026-10-24T12:05:00Z',
+  decidedBy: { type: 'policy', revision: 1 },
+  ...(problem ? { problem } : {}),
+});
+const refusedList = () => screen.findByRole('list', { name: 'Proposals the library could not take' });
+const libraryReads = () => controller.reads().filter(url => url === '/api/projects/project-x/library').length;
+const tooBig = 'A library file is at most 5 MiB.';
+
+test("a proposal the library could not take is noted on its file's row beside Add to the library, which opens for that file", async () => {
+  const user = userEvent.setup();
+  // The launch copy is not in the library here; its refused proposal came from its second version.
+  controller.projectWork.work[0]!.libraryEntryId = null;
+  controller.library = {
+    entries: [],
+    proposals: [
+      refusedProposal(
+        'libprop-hero',
+        'Hero banner art',
+        { taskId: 'T-hero', attemptId: 'attempt-T-hero-1', path: 'art/hero_banner.png' },
+        tooBig,
+      ),
+      refusedProposal('libprop-copy', 'Launch copy', {
+        taskId: 'T-copy',
+        attemptId: 'attempt-T-copy-2',
+        path: 'copy/launch-page.md',
+      }),
+    ],
+  };
+  open();
+  await screen.findByRole('list', { name: 'The work' });
+  const hero = row('art/hero_banner.png'),
+    note = 'The library could not take Hero banner art.';
+  // At the top as at any time, and on the file's row as the same plain note, under its line.
+  expect(within(await refusedList()).getByText(note)).toBeTruthy();
+  expect(await hero.findByText(note)).toBeTruthy();
+  expect(hero.getByText(tooBig)).toBeTruthy();
+  expect(screen.getAllByText(tooBig)).toHaveLength(2);
+  const line = hero.getByText(`Ada · “Make the launch page” · ${when('2026-10-22T12:00:00Z')}`);
+  expect(line.compareDocumentPosition(hero.getByText(note)) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(rowItem('art/hero_banner.png').querySelector('[role="alert"]')).toBeNull();
+  expect(rowItem('art/hero_banner.png').outerHTML).not.toContain('--bad');
+  // Beside Add to the library, which the note describes.
+  const add = hero.getByRole('button', { name: 'Add art/hero_banner.png to the library' });
+  expect(document.getElementById(add.getAttribute('aria-describedby')!)?.textContent).toBe(`${note} ${tooBig}`);
+  // A proposal from an earlier version of a file is noted on its row too, and one with no problem recorded says so.
+  expect(
+    row('copy/launch-page.md').getByText('The library could not take Launch copy.').parentElement?.textContent,
+  ).toBe('The library could not take Launch copy. The library gave no reason.');
+  // Rows no proposal names say nothing of one, and the library was read once for the page.
+  for (const path of ['pricing-table.csv', 'notes/release_notes.md'])
+    expect(row(path).queryByText(/could not take/)).toBeNull();
+  expect(libraryReads()).toBe(1);
+
+  // Add to the library opens for that file.
+  await user.click(add);
+  const adding = within(await screen.findByRole('dialog', { name: 'Add to the library' }));
+  expect(adding.getByText('art/hero_banner.png')).toBeTruthy();
+  await user.click(adding.getByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Add to the library' })).toBeNull());
+});
+
+test('a proposal the library could not take whose file the work does not list, or the library holds, is noted only at the top', async () => {
+  controller.library = {
+    entries: [],
+    proposals: [
+      // Another story's file of the same path, another path of the same story, and an attempt that is not one of the
+      // file's versions.
+      refusedProposal(
+        'libprop-elsewhere',
+        'Banner from elsewhere',
+        { taskId: 'T-other', attemptId: 'attempt-T-hero-1', path: 'art/hero_banner.png' },
+        tooBig,
+      ),
+      refusedProposal('libprop-sketch', 'Banner sketch', {
+        taskId: 'T-hero',
+        attemptId: 'attempt-T-hero-1',
+        path: 'art/hero_sketch.png',
+      }),
+      refusedProposal('libprop-old', 'Old pricing', {
+        taskId: 'T-price',
+        attemptId: 'attempt-T-price-0',
+        path: 'pricing-table.csv',
+      }),
+      // The launch copy is in the library, so its row has no Add to the library to note.
+      refusedProposal('libprop-held', 'Launch copy', {
+        taskId: 'T-copy',
+        attemptId: 'attempt-T-copy-3',
+        path: 'copy/launch-page.md',
+      }),
+    ],
+  };
+  open();
+  const top = await refusedList();
+  await screen.findByRole('list', { name: 'The work' });
+  expect(
+    within(top)
+      .getAllByRole('listitem')
+      .map(item => item.textContent),
+  ).toEqual([
+    `The library could not take Banner from elsewhere. ${tooBig}`,
+    'The library could not take Banner sketch. The library gave no reason.',
+    'The library could not take Old pricing. The library gave no reason.',
+    'The library could not take Launch copy. The library gave no reason.',
+  ]);
+  for (const item of rows()) expect(item.textContent).not.toContain('could not take');
+  expect(screen.getAllByText(/^The library could not take /)).toHaveLength(4);
+  expect(
+    row('art/hero_banner.png')
+      .getByRole('button', { name: 'Add art/hero_banner.png to the library' })
+      .getAttribute('aria-describedby'),
+  ).toBeNull();
 });
 
 // The library a project's agents follow: brand guidelines at their second revision, which six attempts read, and a

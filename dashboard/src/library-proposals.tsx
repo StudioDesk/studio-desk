@@ -1,9 +1,10 @@
 // Agents' proposals for the project's library (1.2 step 6), at the top of the Artifacts page: each proposal waiting for
 // the director, with its name, what it is for, the agent who proposed it, the story it came from and whether it adds a
 // new file or a newer revision of an entry. Add to the library approves it, Read it first opens the proposed file in a
-// new tab, and Not now rejects it. A proposal approved that the library could not take shows its problem, with nothing
-// left to decide. Library changes are not task changes on the stream, so each decision reads the library again, as
-// does each library event the controller records. Today names what the autonomy policy added to the library today.
+// new tab, and Not now rejects it. A proposal approved that the library could not take reads as a plain note saying
+// why, with nothing left to decide; the page also shows it on its file's row in the work, beside Add to the library.
+// Library changes are not task changes on the stream, so each decision reads the library again, as does each library
+// event the controller records. Today names what the autonomy policy added to the library today.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useId } from 'react';
@@ -17,6 +18,7 @@ import {
   type ProjectArtifact,
   type Shell,
   type Task,
+  type WorkFile,
 } from './api';
 import { artifactUrl } from './files';
 import { libraryKey } from './library';
@@ -59,6 +61,34 @@ export const policyAddedToday = (library: LibraryIndex | undefined, now = new Da
       new Date(proposal.decidedAt).toDateString() === now.toDateString(),
   );
 
+// The proposals the library could not take, in the order they were recorded.
+export const refusedProposals = (library: LibraryIndex | undefined) =>
+  (library?.proposals ?? []).filter(proposal => proposal.state === 'refused');
+
+// Those proposing a file of the work: the same story and path, from its accepted attempt or one of its versions. The
+// page reads them from the index LibraryProposals reads, so the library is read once.
+export const refusedFor = (
+  library: LibraryIndex | undefined,
+  file: Pick<WorkFile, 'taskId' | 'path' | 'attemptId' | 'versions'>,
+) =>
+  refusedProposals(library).filter(
+    ({ from }) =>
+      from.taskId === file.taskId &&
+      from.path === file.path &&
+      (from.attemptId === file.attemptId || file.versions.some(version => version.attemptId === from.attemptId)),
+  );
+
+// A proposal the library could not take, as a plain note: its name and that the library could not take it, then its
+// problem in the controller's words.
+export function RefusedNote({ proposal }: { proposal: LibraryProposal }) {
+  return (
+    <span className="sd-meta" style={{ display: 'block', fontWeight: 400, overflowWrap: 'anywhere' }}>
+      <span>{`The library could not take ${proposal.name}.`}</span>{' '}
+      <span>{proposal.problem ?? 'The library gave no reason.'}</span>
+    </span>
+  );
+}
+
 // What the page knows to name an agent and a story by: the accepted files' stories and the project's records.
 export interface ProposalNames {
   files?: ProjectArtifact[];
@@ -79,7 +109,7 @@ export function LibraryProposals({ projectId, names }: { projectId: string; name
   // The library's own section says when the index is loading or could not be read; this one shows only proposals.
   const proposals = data?.proposals ?? [],
     waiting = proposals.filter(proposal => proposal.state === 'waiting'),
-    refused = proposals.filter(proposal => proposal.state === 'refused');
+    refused = refusedProposals(data);
   if (!waiting.length && !refused.length) return null;
   return (
     <section aria-labelledby={titleId} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -112,21 +142,14 @@ export function LibraryProposals({ projectId, names }: { projectId: string; name
         </>
       )}
       {refused.length > 0 && (
-        <div className="sd-card sd-cardlist" role="list" aria-label="Proposals the library could not take">
+        <div
+          role="list"
+          aria-label="Proposals the library could not take"
+          style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}
+        >
           {refused.map(proposal => (
-            <div key={proposal.id} role="listitem" className="sd-cardlist__row sd-cardlist__row--line">
-              <span
-                className="sd-cardlist__label"
-                style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', padding: '10px 0' }}
-              >
-                <span style={{ overflowWrap: 'anywhere' }}>{proposal.name}</span>
-                <span className="sd-meta" style={{ fontWeight: 400 }}>
-                  Approved, but the library could not take it:
-                </span>
-                <span className="sd-meta" style={{ fontWeight: 400, color: 'var(--bad)', overflowWrap: 'anywhere' }}>
-                  {proposal.problem ?? 'The library gave no reason.'}
-                </span>
-              </span>
+            <div key={proposal.id} role="listitem">
+              <RefusedNote proposal={proposal} />
             </div>
           ))}
         </div>
