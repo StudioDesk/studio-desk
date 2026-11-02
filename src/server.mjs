@@ -766,7 +766,7 @@ export function createStudio({
         // A project's releases (1.1 step 6): its lines, milestones and their work, read from records and git alone.
         if (parts[3] === 'releases')
           try {
-            return json(res, releaseOverview(store, projectId, runner));
+            return json(res, await releaseOverview(store, projectId, runner));
           } catch (error) {
             fail(error.message);
           }

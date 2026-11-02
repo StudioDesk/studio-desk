@@ -37,7 +37,9 @@ Every git command the controller runs goes through `src/git.mjs` (`runGit`), exc
 - **What still applies:** filters, line endings and Git LFS, so a checkout writes what the director's own checkout would, plus git's system and global settings.
 - **Push** (`src/connectors/source-releases.mjs`) runs as the director's own git, hooks included. The director confirms each Push, and pre-push hooks and Git LFS uploads need the repository's setup.
 - **Who uses it:** the connectors' `git()` (`src/connectors/source-integration.mjs`), the candidate commit's plumbing (`src/adapters/source-change.mjs`), reading a file at a commit (`src/connectors/source-lines.mjs`) and the sample projects (`src/core/project-templates.mjs`).
-- **Still synchronous:** moving the calls off the controller's thread comes next, in the order the load measures show.
+- **Off the controller's thread (C-20's second step):** `runGitAsync` (the connectors' `gitAsync`) answers as `runGit` does, without holding the thread. At most `gitProcessesAtOnce` (4) of its git processes run at once, and the rest wait in order.
+  - **The Releases read** (`releaseOverview`, now async) asks git its two dozen questions this way. On November 2, three lines and four tags on this repository took 0.7–1.3 s of the controller's thread as synchronous calls, and up to 4.5 s while the computer was busy. Asked asynchronously, they took 0.3–0.45 s from first to last, and the event loop's longest stall was about 50 ms.
+  - **Still synchronous:** the other calls (integration, carries, worktrees, readiness) move in the order the load measures show. A call inside a store transaction or a synchronous definition hook stays synchronous until C-31 decides that boundary.
 - **Tests:** `test/git-trust.test.mjs`. A repository whose hooks and fsmonitor command leave marker files: the director's own git runs them, and the controller's reads, commits, worktrees and checkouts run none.
 
 ## Bounded project context and source checks

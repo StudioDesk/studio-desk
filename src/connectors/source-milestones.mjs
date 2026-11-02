@@ -9,7 +9,7 @@
 // `release/x.y`, which is made from the newest x.y tag the first time a patch needs it. Milestones are opt-in: a project
 // with none takes ideas exactly as before.
 import { randomUUID } from 'node:crypto';
-import { git } from './source-integration.mjs';
+import { git, gitAsync } from './source-integration.mjs';
 import { addProjectLine, branchCommit, checkedOut, ideaLine, projectLine, projectLines } from './source-lines.mjs';
 import { projectSource } from './source-projects.mjs';
 import { projectCatalog } from '../core/project-organization.mjs';
@@ -35,13 +35,14 @@ const sourceRoot = (store, projectId, runtime) => {
   return projectSource(store, projectId, runtime).root;
 };
 // The repository's release tags (v1.2.3 or 1.2.3), oldest first.
-export function releaseTags(root) {
-  return git(root, ['tag', '--list'])
+const tagsListed = listed =>
+  listed
     .split('\n')
     .map(name => ({ name: name.trim(), version: parseVersion(name.trim()) }))
     .filter(tag => tag.version)
     .sort((a, b) => compareVersions(a.version, b.version));
-}
+export const releaseTags = root => tagsListed(git(root, ['tag', '--list']));
+export const releaseTagsAsync = async root => tagsListed(await gitAsync(root, ['tag', '--list']));
 const seriesTags = (tags, [x, y]) => tags.filter(tag => tag.version[0] === x && tag.version[1] === y);
 
 // Where a new milestone's work would land: its line (null for the newest line) and, for a patch line that does not
@@ -100,10 +101,12 @@ function versionLineTarget(project, version, tags) {
   return { line: branch, from: older.at(-1)?.branch ?? project.shipsTo };
 }
 
-// Reads the switch's destination, milestones to move and unfinished source work without changing records or git.
-export function versionLinesReadiness(store, projectId, runtime) {
+// Reads the switch's destination, milestones to move and unfinished source work without changing records or git. A
+// caller that has read the checked-out branch already passes it as `copy` (the Releases read, which asks git without
+// holding the thread), so git is not asked again.
+export function versionLinesReadiness(store, projectId, runtime, { copy } = {}) {
   const root = sourceRoot(store, projectId, runtime),
-    shipsTo = projectLines(store.project(projectId)).at(-1)?.branch ?? checkedOut(root),
+    shipsTo = projectLines(store.project(projectId)).at(-1)?.branch ?? (copy !== undefined ? copy : checkedOut(root)),
     milestones = projectMilestones(store, projectId),
     moving = milestones
       .filter(item => open(item) && item.line === null)

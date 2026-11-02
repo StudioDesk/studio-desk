@@ -20,7 +20,7 @@ import {
   sourceBase,
   sourceHead,
 } from './source-worktrees.mjs';
-import { fastForward, git, landed, repositoryState } from './source-integration.mjs';
+import { fastForward, git, gitAsync, landed, repositoryState } from './source-integration.mjs';
 import { projectSource } from './source-projects.mjs';
 import { projectCatalog } from '../core/project-organization.mjs';
 import { recordProject } from '../core/projects.mjs';
@@ -51,6 +51,16 @@ export function branchCommit(root, branch) {
     throw new Error(`The branch ${branch} no longer exists in the repository.`);
   }
 }
+// The same two answers without holding the controller's thread (C-20).
+export const checkedOutAsync = root =>
+  gitAsync(root, ['symbolic-ref', '--quiet', '--short', 'HEAD']).then(
+    branch => branch || null,
+    () => null,
+  );
+export const branchCommitAsync = (root, branch) =>
+  gitAsync(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`]).catch(() => {
+    throw new Error(`The branch ${branch} no longer exists in the repository.`);
+  });
 // Another worktree of the repository that has the branch checked out, or null.
 export function checkedOutElsewhere(root, branch) {
   const blocks = git(root, ['worktree', 'list', '--porcelain'], { raw: true }).split(/\r?\n\r?\n/);

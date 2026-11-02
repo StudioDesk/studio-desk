@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { command, subscriptionEnvironment } from '../adapters/process.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
 import { hash } from '../core/contracts.mjs';
-import { runGit } from '../git.mjs';
+import { runGit, runGitAsync } from '../git.mjs';
 import { releaseTestTurn, testTurnResource } from '../core/test-turn.mjs';
 import { sourcePlan, testOutput, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, studioDeskProfile } from './source-profile.mjs';
@@ -43,6 +43,10 @@ const samePath = (a, b) => {
 // check for tracked files reads [ ] as a glob. Output is trimmed unless raw is set.
 export function git(root, args, { raw = false } = {}) {
   return runGit(root, args, { raw });
+}
+// The same answer without holding the controller's thread, for reads that ask git many things (C-20).
+export function gitAsync(root, args, { raw = false } = {}) {
+  return runGitAsync(root, args, { raw });
 }
 // The live source must be the root of a git repository on a branch with a commit identity.
 // A story starts only from a clean tree; integration fast-forwards, and git refuses that

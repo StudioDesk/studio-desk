@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { controllerGitArguments, runGit } from '../src/git.mjs';
+import { controllerGitArguments, runGit, runGitAsync } from '../src/git.mjs';
 import { commitIntegration, git } from '../src/connectors/source-integration.mjs';
 
 function repository(t) {
@@ -72,4 +72,30 @@ test("every call but Push adds the same options before git's own arguments", () 
     '-p',
     'HEAD',
   ]);
+});
+
+test("the controller's asynchronous git answers as its git does, runs no hooks, and leaves the thread free", async t => {
+  const r = repository(t);
+  fs.writeFileSync(path.join(r.root, 'a.txt'), 'b\n');
+  r.plain(['commit', '-q', '-am', 'control']);
+  const hooksRun = r.ran().includes('pre-commit');
+  r.forget();
+  // A timer keeps ticking while a batch of git calls is out, which a synchronous call would stop.
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 2);
+  const asked = Array.from({ length: 10 }, () => runGitAsync(r.root, ['log', '-1', '--format=%s']));
+  const answers = await Promise.all([...asked, runGitAsync(r.root, ['status', '--porcelain'])]);
+  clearInterval(timer);
+  assert.ok(ticks > 0, 'the thread answered timers while git ran');
+  assert.deepEqual(answers.slice(0, 10), Array(10).fill(runGit(r.root, ['log', '-1', '--format=%s'])));
+  assert.equal(answers[10], runGit(r.root, ['status', '--porcelain']));
+  if (hooksRun) assert.deepEqual(r.ran(), [], 'no fsmonitor command ran for status');
+  await assert.rejects(
+    runGitAsync(r.root, ['rev-parse', '--verify', 'no-such-branch']),
+    /^Error: git rev-parse failed: /,
+  );
+  // Bytes come back when asked for, as the synchronous call answers them.
+  assert.ok(
+    Buffer.isBuffer(await runGitAsync(r.root, ['cat-file', '-p', 'HEAD:a.txt'], { encoding: null, literal: false })),
+  );
 });
