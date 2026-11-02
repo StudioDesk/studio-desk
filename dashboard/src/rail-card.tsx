@@ -12,11 +12,11 @@ import {
   type PointerEventHandler,
   type Ref,
 } from 'react';
-import { getJSON, liveUrl, shellUrl, type Live, type Project, type Shell } from './api';
+import { getJSON, shellUrl, type Project, type Shell } from './api';
 import { decisionState } from './decisions';
 import { initials, projectColor } from './frame';
 import type { ProjectCalls } from './rail-calls';
-import { queryKeys } from './records';
+import { queryKeys, readLive } from './records';
 import { isCleanup, isHold, liveSummary, type HomeItem, type RunStory, type StudioState } from './studio-runs';
 import { placeIn, quoted } from './today';
 
@@ -108,7 +108,7 @@ function useRead(projectId: string) {
     }),
     live = useQuery({
       queryKey: queryKeys.live(projectId),
-      queryFn: ({ signal }) => getJSON<Live>(liveUrl(projectId), signal),
+      queryFn: ({ signal }) => readLive(projectId, signal),
       enabled: false,
     });
   return useMemo<StudioState | null>(

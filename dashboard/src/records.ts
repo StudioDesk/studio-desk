@@ -2,7 +2,8 @@
 // its shell and its live set. A change to one task fetches that task alone and patches it into whatever holds
 // it; the live set reloads only when work joins or leaves it, and finished runs reload when a run finishes or
 // changes. Nothing is fetched for a task no page holds. A command's answer carries the pages of the tasks it
-// changed, which go in at once without a read.
+// changed, which go in at once without a read. The controller answers the live set a page at a time; the records
+// read every page and hold them as one set (readLive).
 import { useInfiniteQuery, useQuery, type InfiniteData, type QueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import {
@@ -17,9 +18,11 @@ import {
   type ChangeMessage,
   type CommandRecords,
   type FinishedPage,
+  type IdeaName,
   type Live,
   type PeopleSummary,
   type ReleaseOverview,
+  type RunRecord,
   type SettledKind,
   type SettledFilter,
   type SettledPage,
@@ -300,11 +303,69 @@ export function useShell(projectId: string) {
   });
 }
 
+// Newest first by when it was made, as the controller lists runs and ideas (src/core/graph.mjs projectRuns); equal
+// times keep the order they were read in.
+const newestFirst = <T extends { createdAt?: string }>(items: T[]) =>
+  items.sort((a, b) => {
+    const one = a.createdAt ?? '',
+      other = b.createdAt ?? '';
+    return one < other ? 1 : one > other ? -1 : 0;
+  });
+
+// The live set's pages held as one, as the controller answered it whole before it came in pages: every page's tasks
+// and attempts in the order read, each open run once, and each finished idea once with its tasks from every page. It
+// reflects the change sequence of its first page, the earliest, so a reader resumes from there and misses nothing.
+export function joinLive(pages: Live[]): Live {
+  if (pages.length === 1) return pages[0]!;
+  const runs = new Map<string, RunRecord>(),
+    ideas = new Map<string, IdeaName>();
+  for (const page of pages) {
+    for (const run of page.runs) if (!runs.has(run.id)) runs.set(run.id, run);
+    for (const idea of page.ideas ?? []) {
+      const held = ideas.get(idea.id);
+      ideas.set(idea.id, held ? { ...held, taskIds: [...held.taskIds, ...idea.taskIds] } : idea);
+    }
+  }
+  const versions = pages.map(page => page.version).filter((version): version is number => version !== undefined);
+  return {
+    tasks: pages.flatMap(page => page.tasks),
+    attempts: pages.flatMap(page => page.attempts),
+    runs: newestFirst([...runs.values()]),
+    ideas: newestFirst([...ideas.values()]),
+    next: null,
+    ...(versions.length ? { version: Math.min(...versions) } : {}),
+  };
+}
+
+// Reads the live set a page at a time, the next page while one says next, and holds them as one. A page whose cursor
+// settled out of the set while the pages were read is refused (404); the set is read again from its first page, twice
+// at most.
+export async function readLive(projectId: string, signal?: AbortSignal, fetchJSON: typeof getJSON = getJSON) {
+  for (let tries = 0; ; tries++) {
+    const pages: Live[] = [],
+      seen = new Set<string>();
+    let before: string | null = null;
+    try {
+      do {
+        const page: Live = await fetchJSON<Live>(liveUrl(projectId, before), signal);
+        pages.push(page);
+        before = page.next ?? null;
+        if (before !== null && seen.has(before)) throw new Error('The open work repeated a page.');
+        if (before !== null) seen.add(before);
+      } while (before !== null);
+    } catch (error) {
+      if (pages.length && tries < 2 && !signal?.aborted) continue;
+      throw error;
+    }
+    return joinLive(pages);
+  }
+}
+
 export function useLive(projectId: string) {
   return useQuery({
     enabled: useStreamReady(),
     queryKey: queryKeys.live(projectId),
-    queryFn: ({ signal }) => getJSON<Live>(liveUrl(projectId), signal),
+    queryFn: ({ signal }) => readLive(projectId, signal),
   });
 }
 

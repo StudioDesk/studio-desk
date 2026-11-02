@@ -1,7 +1,9 @@
 // What a project's pages read without its whole history (Decision MP-026, v1.0 item 19b). The live set is
 // what Home, the board and the current runs show: every unsettled task, every task of a run that still has
-// open work, the direct prerequisites of those, their attempt summaries and those runs. Finished runs come
-// a page at a time, newest first, each with its tasks and attempt summaries, and any one run on its own.
+// open work, the direct prerequisites of those, their attempt summaries and those runs, a page at a time in record
+// order. Finished runs come a page at a time, newest first, each with its tasks and attempt summaries, and any one
+// run on its own. Every read says the store's change sequence it reflects (version), the point a reader resumes the
+// change stream from; reads are synchronous, so no write lands while one is built.
 import { directorInputsOf } from './idea-inputs.mjs';
 import { projectRuns } from './graph.mjs';
 
@@ -81,9 +83,15 @@ function ideasOf(runs, runOf, tasks) {
     .map(run => ({ id: run.id, brief: run.brief ?? '', createdAt: run.createdAt, taskIds: own.get(run.id) }));
 }
 
-export function liveRecords(store, projectId) {
+// The live set a page at a time (page-read-limits): limit tasks after the task before, in record order, with their
+// attempt summaries, the open runs they belong to and the finished ideas they name; next is the last task's ID while
+// more follow. The pages' union is the whole live set. A cursor that left the live set answers 404.
+export const liveLimit = 200,
+  liveMaxLimit = 500;
+export function liveRecords(store, projectId, { before = null, limit = liveLimit } = {}) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId),
+  const version = store.version,
+    tasks = projectTasks(store, projectId),
     done = reviewReader(store, projectId, tasks),
     runOf = runMembership(tasks),
     openRuns = new Set(tasks.filter(task => !done(task) && runOf.has(task.id)).map(task => runOf.get(task.id))),
@@ -92,30 +100,39 @@ export function liveRecords(store, projectId) {
   const byId = new Map(tasks.map(task => [task.id, task]));
   for (const id of [...live]) for (const dependency of byId.get(id)?.dependencies || []) live.add(dependency);
   const chosen = tasks.filter(task => live.has(task.id)),
+    size = Math.min(Math.max(1, Math.trunc(limit)), liveMaxLimit),
+    from = before === null ? 0 : chosen.findIndex(task => task.id === before) + 1;
+  if (from === 0 && before !== null)
+    throw Object.assign(new Error('That page of open work no longer exists.'), { status: 404 });
+  const page = chosen.slice(from, from + size),
+    needed = new Set(page.map(task => runOf.get(task.id)).filter(Boolean)),
     runs = projectRuns(store, projectId, tasks);
   return {
-    tasks: chosen.map(withInputs),
-    attempts: chosen.length
+    tasks: page.map(withInputs),
+    attempts: page.length
       ? store.dashboardAttempts(
           projectId,
-          chosen.map(task => task.id),
+          page.map(task => task.id),
         )
       : [],
     runs: runs
-      .filter(run => openRuns.has(run.id))
+      .filter(run => openRuns.has(run.id) && needed.has(run.id))
       .map(run => ({ ...run, directorInputs: directorInputsOf(store.run(run.id)) })),
     // A prerequisite from a finished idea names that idea briefly; the runs above tell their own tasks.
     ideas: ideasOf(
       runs.filter(run => !openRuns.has(run.id)),
       runOf,
-      chosen,
+      page,
     ),
+    next: from + size < chosen.length ? page.at(-1).id : null,
+    version,
   };
 }
 
 export function finishedRuns(store, projectId, { before = null, limit = 10 } = {}) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId),
+  const version = store.version,
+    tasks = projectTasks(store, projectId),
     done = reviewReader(store, projectId, tasks),
     runOf = runMembership(tasks),
     members = new Map();
@@ -158,6 +175,7 @@ export function finishedRuns(store, projectId, { before = null, limit = 10 } = {
       };
     }),
     next: from + limit < finished.length ? page.at(-1).id : null,
+    version,
   };
 }
 
@@ -165,7 +183,8 @@ export function finishedRuns(store, projectId, { before = null, limit = 10 } = {
 // pages have not reached.
 export function oneRun(store, projectId, runId) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId),
+  const version = store.version,
+    tasks = projectTasks(store, projectId),
     runOf = runMembership(tasks),
     run = projectRuns(store, projectId, tasks).find(item => item.id === runId);
   if (!run) throw Object.assign(new Error('Run not found.'), { status: 404 });
@@ -182,6 +201,7 @@ export function oneRun(store, projectId, runId) {
     run: { ...run, directorInputs: directorInputsOf(store.run(run.id)) },
     tasks: members.map(finished ? storyTask : withInputs),
     attempts: finished ? attempts.map(storyAttempt) : attempts,
+    version,
   };
 }
 
@@ -193,7 +213,8 @@ export const settledKinds = ['accepted', 'closed'];
 // idea's work in its lane.
 export function settledTasks(store, projectId, { kind, before = null, limit = 12, workerId = null, team = null }) {
   store.project(projectId);
-  const all = projectTasks(store, projectId),
+  const version = store.version,
+    all = projectTasks(store, projectId),
     tasks = all.filter(
       task => (workerId === null || task.workerId === workerId) && (team === null || task.team === team),
     ),
@@ -223,6 +244,7 @@ export function settledTasks(store, projectId, { kind, before = null, limit = 12
     // Membership reads the project's every task, so a retry or a proposed story finds its idea through work
     // another employee or team did.
     ideas: page.length ? ideasOf(projectRuns(store, projectId, all), runMembership(all), page) : [],
+    version,
   };
 }
 
@@ -231,7 +253,8 @@ export function settledTasks(store, projectId, { kind, before = null, limit = 12
 // long ago.
 export function peopleSummary(store, projectId, goalIds = []) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId),
+  const version = store.version,
+    tasks = projectTasks(store, projectId),
     wanted = new Set(goalIds),
     accepted = { total: 0, workers: {}, teams: {} },
     goals = {};
@@ -251,5 +274,5 @@ export function peopleSummary(store, projectId, goalIds = []) {
         ...(task.sourceStage ? { sourceStage: task.sourceStage } : {}),
       };
   }
-  return { tasks: tasks.length, accepted, goals };
+  return { tasks: tasks.length, accepted, goals, version };
 }

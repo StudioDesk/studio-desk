@@ -109,6 +109,8 @@ import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validF
 import { LEGACY_PROJECT, recordProject, assertProject, validateTaskProject } from './core/projects.mjs';
 import {
   finishedRuns,
+  liveLimit,
+  liveMaxLimit,
   liveRecords,
   oneRun,
   peopleSummary,
@@ -483,12 +485,13 @@ export function createStudio({
       return undefined;
     }
   };
-  // One task as its page reads it, and as a command's records carry it.
+  // One task as its page reads it, and as a command's records carry it, with the change sequence it reflects.
   const taskPage = (projectId, record) => {
     const summary = storySummary(record);
     return {
       task: { ...record, directorInputs: directorInputsOf(record), ...(summary ? { summary } : {}) },
       attempts: store.dashboardAttempts(projectId, record.id),
+      version: store.version,
     };
   };
   // A command the dashboard sends with X-Studio-Records: 1 is answered with what it changed: the changes recorded
@@ -751,7 +754,16 @@ export function createStudio({
       if (parts[0] === 'api' && parts[1] === 'projects' && parts.length === 4 && req.method === 'GET') {
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });
-        if (parts[3] === 'live') return json(res, liveRecords(store, projectId));
+        // The live set a page at a time in record order (page-read-limits): after the task before, limit at a time.
+        if (parts[3] === 'live') {
+          const limit = url.searchParams.get('limit') ?? String(liveLimit);
+          if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > liveMaxLimit)
+            fail(`limit must be a whole number from 1 to ${liveMaxLimit}.`);
+          return json(
+            res,
+            liveRecords(store, projectId, { before: url.searchParams.get('before'), limit: Number(limit) }),
+          );
+        }
         // The project's library (1.2 step 6): every entry with its revisions, removed ones marked.
         if (parts[3] === 'library') return json(res, libraryOf(store, projectId));
         // Every file the project's accepted work handed back, and its snapshots (1.2 step 6).
@@ -813,7 +825,11 @@ export function createStudio({
           const before = url.searchParams.get('before');
           if (before !== null && !/^[1-9][0-9]{0,15}$/.test(before)) fail('before must be an event sequence number.');
           store.project(projectId);
-          return json(res, store.activity(projectId, { before: before === null ? null : Number(before) }));
+          // The change sequence the page reflects, as every page read says it (page-read-limits).
+          return json(res, {
+            ...store.activity(projectId, { before: before === null ? null : Number(before) }),
+            version: store.version,
+          });
         }
         if (parts[3] === 'instructions') {
           const organization = projectOrganization(store, projectId),

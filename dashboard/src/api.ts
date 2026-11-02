@@ -458,12 +458,16 @@ export interface IdeaName {
 }
 
 // The live set: unsettled work, every task of a run with open work, their direct prerequisites, their
-// attempt summaries and those runs; a prerequisite from a finished idea names that idea.
+// attempt summaries and those runs; a prerequisite from a finished idea names that idea. The controller answers it a
+// page at a time in record order: `next` names the task the following page starts after, null on the last page, and
+// `version` is the change sequence the page reflects. The records hold every page read as one (records.ts readLive).
 export interface Live {
   tasks: Task[];
   attempts: AttemptSummary[];
   runs: RunRecord[];
   ideas?: IdeaName[];
+  next?: string | null;
+  version?: number;
 }
 
 // Finished runs, newest first, a page at a time; `next` names the run the following page starts after.
@@ -803,7 +807,8 @@ const projectPath = (projectId: string, page: string) => `/api/projects/${encode
 export const projectsUrl = '/api/projects';
 export const templatesUrl = '/api/templates';
 export const shellUrl = (projectId: string) => projectPath(projectId, 'shell');
-export const liveUrl = (projectId: string) => projectPath(projectId, 'live');
+export const liveUrl = (projectId: string, before: string | null = null) =>
+  `${projectPath(projectId, 'live')}${before ? `?before=${encodeURIComponent(before)}` : ''}`;
 export const finishedUrl = (projectId: string, before: string | null, limit = 10) =>
   `${projectPath(projectId, 'runs')}?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`;
 // An employee's or a team's page reads only its own settled work.

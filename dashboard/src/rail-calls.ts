@@ -5,8 +5,8 @@
 // moment after the event, and at most once a second for each project. Nothing is read on a timer or on focus.
 import { useQueries, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
-import { getJSON, liveUrl, shellUrl, type Live, type Shell } from './api';
-import { queryKeys, useStudio } from './records';
+import { getJSON, shellUrl, type Live, type Shell } from './api';
+import { queryKeys, readLive, useStudio } from './records';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { liveSummary, type HomeItem, type StudioState } from './studio-runs';
 
@@ -59,7 +59,7 @@ export function useRailCalls(projectId: string, projects: { id: string }[]) {
     queries: others.map(id => ({
       enabled: ready,
       queryKey: queryKeys.live(id),
-      queryFn: ({ signal }: { signal: AbortSignal }) => getJSON<Live>(liveUrl(id), signal),
+      queryFn: ({ signal }: { signal: AbortSignal }) => readLive(id, signal),
       ...quiet,
     })),
   });

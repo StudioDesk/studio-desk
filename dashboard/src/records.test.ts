@@ -1,7 +1,8 @@
 // How each change reaches the records a project's pages hold (records.ts): one task's change fetches that task
 // alone and patches it in; the live set reloads only when work joins or settles; finished runs reload when a run
 // leaves the live set; nothing is fetched for a task no page holds. A command's answer puts the tasks it supplies in
-// at once, without reading them, and starts the confirming reads right away.
+// at once, without reading them, and starts the confirming reads right away. The live set is read a page at a time and
+// held as one.
 import { InfiniteQueryObserver, QueryClient, QueryClientProvider, QueryObserver } from '@tanstack/react-query';
 import { render } from '@testing-library/react';
 import { createElement } from 'react';
@@ -23,7 +24,7 @@ import {
   type TaskPage,
 } from './api';
 import { ProjectLive } from './live-context';
-import { RecordSync, queryKeys } from './records';
+import { RecordSync, queryKeys, readLive } from './records';
 import { StreamFactoryContext } from './stream-context';
 import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
 
@@ -388,4 +389,88 @@ test('a milestone, a line, a run or a story they name changing reads the release
   controller.requests.length = 0;
   await sync.answer(answered([controller.tasks[0]!]));
   expect(controller.reads()).toEqual([]);
+});
+
+// The controller answers the live set a page at a time (page-read-limits): the records read the next page while one
+// says next, and hold every page's records as one set, as the board, Home and the rail read it.
+function livePages(pages: Record<string, Live>, refuse: (url: string) => boolean = () => false) {
+  const reads: string[] = [];
+  vi.stubGlobal('fetch', async (input: string) => {
+    const url = String(input);
+    reads.push(url);
+    const page = refuse(url) ? undefined : pages[url];
+    return page
+      ? { ok: true, status: 200, json: async () => page }
+      : { ok: false, status: 404, json: async () => ({ error: 'That page of open work no longer exists.' }) };
+  });
+  return reads;
+}
+async function holdPagedLive() {
+  const observer = new QueryObserver(client, {
+    queryKey: queryKeys.live('project-x'),
+    queryFn: ({ signal }) => readLive('project-x', signal),
+  });
+  unsubscribe.push(observer.subscribe(() => {}));
+  await vi.waitFor(() => expect(client.getQueryData(queryKeys.live('project-x'))).toBeDefined());
+}
+const first: Live = {
+    tasks: [taskFixture('T-1', { status: 'running' }), taskFixture('T-2', { status: 'done' })],
+    attempts: [{ id: 'attempt-1', taskId: 'T-1', status: 'running' }],
+    runs: [{ id: 'run-1', createdAt: '2026-10-21T12:00:00Z' }],
+    ideas: [{ id: 'idea-1', brief: 'An idea.', createdAt: '2026-10-20T12:00:00Z', taskIds: ['T-2'] }],
+    next: 'T-2',
+    version: 7,
+  },
+  second: Live = {
+    tasks: [taskFixture('T-3', { status: 'failed' })],
+    attempts: [{ id: 'attempt-3', taskId: 'T-3', status: 'failed' }],
+    runs: [
+      { id: 'run-2', createdAt: '2026-10-22T12:00:00Z' },
+      { id: 'run-1', createdAt: '2026-10-21T12:00:00Z' },
+    ],
+    ideas: [{ id: 'idea-1', brief: 'An idea.', createdAt: '2026-10-20T12:00:00Z', taskIds: ['T-3'] }],
+    next: null,
+    version: 8,
+  };
+
+test('a live answer that says next reads the following page, and the records hold every task of both pages', async () => {
+  const reads = livePages({ [liveUrl('project-x')]: first, [liveUrl('project-x', 'T-2')]: second });
+  await holdPagedLive();
+  expect(reads).toEqual(['/api/projects/project-x/live', '/api/projects/project-x/live?before=T-2']);
+  expect(live().tasks.map(task => task.id)).toEqual(['T-1', 'T-2', 'T-3']);
+  expect(live().attempts.map(attempt => attempt.id)).toEqual(['attempt-1', 'attempt-3']);
+  // Each open run once, newest first as the controller lists them; each idea once, with its tasks from both pages.
+  expect(live().runs.map(run => run.id)).toEqual(['run-2', 'run-1']);
+  expect(live().ideas).toEqual([{ ...first.ideas![0]!, taskIds: ['T-2', 'T-3'] }]);
+  // The set read whole has no next page, and resumes from the earliest change sequence its pages reflect.
+  expect(live().next).toBeNull();
+  expect(live().version).toBe(7);
+});
+
+test('a single-page live answer reads once and is held as it came', async () => {
+  const only: Live = { ...first, ideas: [], next: null, version: 3 },
+    reads = livePages({ [liveUrl('project-x')]: only });
+  await holdPagedLive();
+  expect(reads).toEqual(['/api/projects/project-x/live']);
+  expect(live()).toEqual(only);
+});
+
+test('a following page whose cursor settled out of the set reads the set again from its first page', async () => {
+  const pages = { [liveUrl('project-x')]: first, [liveUrl('project-x', 'T-2')]: second },
+    following = liveUrl('project-x', 'T-2');
+  // The cursor's page is refused once, as when its task settled between the two reads.
+  let refusals = 1;
+  const reads = livePages(pages, url => url === following && refusals-- > 0);
+  const whole = await readLive('project-x');
+  expect(reads).toEqual([
+    '/api/projects/project-x/live',
+    '/api/projects/project-x/live?before=T-2',
+    '/api/projects/project-x/live',
+    '/api/projects/project-x/live?before=T-2',
+  ]);
+  expect(whole.tasks.map(task => task.id)).toEqual(['T-1', 'T-2', 'T-3']);
+  // A set that keeps refusing its pages fails after its third try rather than reading forever.
+  const always = livePages(pages, url => url === following);
+  await expect(readLive('project-x')).rejects.toThrow('That page of open work no longer exists.');
+  expect(always).toHaveLength(6);
 });
