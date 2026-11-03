@@ -71,6 +71,7 @@ import { applyAgentPermissions, approveCommands, commandRule, taskAutoMode } fro
 import { employeeTestsAllowed, runEmployeeTests, savedTestRun } from './connectors/employee-tests.mjs';
 import { attemptTrace } from './core/attempt-trace.mjs';
 import { storyActivity } from './core/story-activity.mjs';
+import { taskActionsFor } from './core/task-actions.mjs';
 import { validateReview } from './packs/game-production/contracts.mjs';
 import { validatePlan } from './planning.mjs';
 import { createRegistries } from './registry.mjs';
@@ -919,8 +920,9 @@ export function createStudio({
           });
         }
       }
-      // One task of the selected project with its attempt summaries: what a task's page shows. Its activity is what
-      // happened to it besides its agents' output, which its Activity tab reads.
+      // One task of the selected project with its attempt summaries: what a task's page shows, and the actions the
+      // director may take on it now, as the shared rules list them from the records the page holds (listed, never run).
+      // Its activity is what happened to it besides its agents' output, which its Activity tab reads.
       const taskRoute = parts[0] === 'api' && parts[1] === 'tasks' && req.method === 'GET';
       if (
         taskRoute &&
@@ -938,7 +940,8 @@ export function createStudio({
         // A story's pages for the visual check, its planned ones until the director changes them (1.2 step 8).
         if (parts[3] === 'pages') return json(res, storyPagesView(store, record));
         if (parts[3]) return json(res, storyActivity(store, record));
-        return json(res, taskPage(queryProject, record));
+        const page = taskPage(queryProject, record);
+        return json(res, { ...page, actions: taskActionsFor(store, queryProject, page, common(queryProject)) });
       }
       // The controller's own measures (C-18): event-loop delay, scheduler passes, requests, memory and record sizes.
       if (url.pathname === '/api/health/load' && req.method === 'GET') return json(res, measures.snapshot(store));

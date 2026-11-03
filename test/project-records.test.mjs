@@ -633,7 +633,7 @@ test("every page read says the store's change sequence it reflects", async t => 
   assert.equal(body.version, store.version);
   // The task page and the activity keep their own fields and cursors beside it.
   const page = (await read(`/api/tasks/P-failed?projectId=${project}`)).body;
-  assert.deepEqual(Object.keys(page).sort(), ['attempts', 'task', 'version']);
+  assert.deepEqual(Object.keys(page).sort(), ['actions', 'attempts', 'task', 'version']);
   assert.equal(page.task.id, 'P-failed');
   const activity = (await read(`/api/projects/${project}/activity`)).body;
   assert.deepEqual(Object.keys(activity).sort(), ['events', 'next', 'version']);

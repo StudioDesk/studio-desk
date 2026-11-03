@@ -461,7 +461,12 @@ test('a command asked for its records answers with the changes it recorded and t
     [id],
   );
   assert.equal(records.tasks[0].task.approval.status, 'approved');
-  assert.deepEqual(records.tasks[0], await page(c, id), 'The page is the one the task route answers.');
+  // The task route also lists the director's actions; a command's records leave them out, so its answer costs what
+  // it did.
+  const { actions, ...shown } = await page(c, id);
+  assert.ok(Array.isArray(actions), 'The task route lists the actions.');
+  assert.equal(Object.hasOwn(records.tasks[0], 'actions'), false, 'The records of a command carry no actions.');
+  assert.deepEqual(records.tasks[0], shown, 'The page is the one the task route answers, without its actions.');
   // A stream opened before the command still hears it, in the same shape.
   const heard = () =>
     stream
