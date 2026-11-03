@@ -763,18 +763,42 @@
         recovery = `Use ${approvalAction} to request controller-owned integration.`,
         action = approvalAction;
       if (stopped || refused) {
+        // The controller's own messages name the line (src/connectors/source-integration.mjs fastForward,
+        // src/connectors/source-lines.mjs moveLine); the journal's recorded line comes first.
+        const text = error || '',
+          moved = text.match(/(\S+) moved during verification/),
+          here = text.match(/(\S+) was checked out in the project's folder during verification/),
+          elsewhere = text.match(/(\S+) is checked out in (.+?)(?:\. Studio desk moves\b|\.?$)/),
+          line = journal?.repository?.branch || (here || elsewhere || moved)?.[1],
+          conflicts = journal?.verification?.conflicts || [];
         kind = 'integration-stopped';
         why = 'The last integration did not complete.';
-        recovery = `Inspect the recorded failure and resolve it before using ${approvalAction}.`;
-        if (/conflict|could not be merged/i.test(error)) {
+        recovery = `What stopped it is in the details. Once that is resolved, use ${approvalAction}.`;
+        if (/conflict|could not be merged/i.test(text) || conflicts.length) {
           kind = 'integration-conflict';
-          why = 'The candidate conflicts with the current source.';
-          recovery =
-            'Request a fresh candidate on the current source and a new independent review before approving integration.';
-        } else if (phase === 'integration.format' || /formatter/i.test(error)) {
+          why = 'The change could not be combined with the current source.';
+          if (journal?.state === 'rejected' && conflicts.length) {
+            // The controller sends it back to its editor merged onto the current source (mergeSourceStory).
+            action = 'Merge onto the current source';
+            recovery = `Use ${action} so its editor combines the change with the current source; it is then tested and reviewed again.`;
+          } else
+            recovery = `Ask for a fresh candidate on the current source and a new independent review, then use ${approvalAction}.`;
+        } else if (here || elsewhere) {
+          kind = 'integration-line-checked-out';
+          why = here
+            ? `“${line}” was checked out in the project's folder while the change was being tested.`
+            : `“${line}” was checked out in another folder, ${elsewhere[2]}, while the change was being tested.`;
+          recovery = here
+            ? `Use ${approvalAction} to merge the change onto “${line}” there.`
+            : `Check out another branch in ${elsewhere[2]}, then use ${approvalAction}. Studio desk moves a line only in the project's folder or where nothing has it checked out.`;
+        } else if (moved) {
+          kind = 'integration-line-moved';
+          why = `“${line}” moved while the change was being tested.`;
+          recovery = `Use ${approvalAction}; it merges the change onto the line as it is now.`;
+        } else if (phase === 'integration.format' || /formatter/i.test(text)) {
           kind = 'integration-formatter';
           why = 'Integration stopped while formatting the reviewed files.';
-          recovery = `Resolve the formatter failure or request a corrected candidate, then use ${approvalAction}.`;
+          recovery = `Fix the formatter failure in the details or ask for a corrected candidate, then use ${approvalAction}.`;
         } else if (journal?.verification?.landedSince) {
           // It passed its own tests and fails only merged onto work that landed after it was tested (October 27).
           kind = 'integration-landed';
@@ -786,12 +810,22 @@
           (phase === 'integration.verification' || journal?.verification?.passed === false)
         ) {
           kind = 'integration-tests';
-          why = 'The integrated candidate did not pass verification tests.';
-          recovery = `Inspect the failing tests and request a corrected candidate when needed, then use ${approvalAction}.`;
-        } else if (/branch|local edits|local changes|working tree|moved|tip|fast.forward/i.test(error)) {
+          why = 'The formatted change failed a test when it was tested on the line.';
+          recovery = `Use ${approvalAction} to test it again, or send it back if the failure is the change's own. The failing tests are in the details.`;
+        } else if (/branch|local edits|local changes|working tree|moved|tip|fast.forward/i.test(text)) {
           kind = 'integration-source-moved';
-          why = 'The source branch or local edits changed before integration could finish.';
-          recovery = `Inspect the branch and preserve local edits. Resolve the source mismatch before using ${approvalAction}.`;
+          why = 'The line or the development copy changed before the integration could finish.';
+          recovery = `If the development copy has local edits, commit or stash them, then use ${approvalAction}. It merges the change onto the line as it is now.`;
+        }
+        // Another story holds the studio's one integration request; with the policy on the controller takes no
+        // second one until that story starts integrating (src/core/autonomy-runtime.mjs requestIntegration). The
+        // story stays the director's call. Merge onto the current source is not held by that request.
+        if (ahead && policy.enabled) {
+          const title = (state.tasks || []).find(item => item.id === ahead.taskId)?.title || ahead.taskId;
+          recovery +=
+            action === approvalAction
+              ? ` ${approvalAction} is accepted once “${title}” starts integrating.`
+              : ` ${action} does not wait for “${title}”, which holds the integration request; ${approvalAction} is accepted once it starts integrating.`;
         }
       }
       return result(kind, why, recovery, action, [error]);

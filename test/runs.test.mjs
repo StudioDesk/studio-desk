@@ -1877,7 +1877,7 @@ test('integration explanations retain exact eligibility and distinguish automati
       },
       'integration-stopped',
       'Approve integration again',
-      /recorded failure/,
+      /^What stopped it is in the details\. Once that is resolved, use Approve integration again\.$/,
     ],
     [
       s => {
@@ -1885,7 +1885,7 @@ test('integration explanations retain exact eligibility and distinguish automati
       },
       'integration-conflict',
       'Approve integration again',
-      /fresh candidate.*new independent review/,
+      /fresh candidate on the current source and a new independent review, then use Approve integration again/,
     ],
     [
       s => {
@@ -1912,7 +1912,7 @@ test('integration explanations retain exact eligibility and distinguish automati
       },
       'integration-tests',
       'Approve integration again',
-      /failing tests/,
+      /^Use Approve integration again to test it again, or send it back if the failure is the change's own\./,
     ],
     // It passed its own tests and fails only merged onto what landed since: integrating again fails the same way.
     [
@@ -1940,7 +1940,7 @@ test('integration explanations retain exact eligibility and distinguish automati
       },
       'integration-source-moved',
       'Approve integration again',
-      /preserve local edits/,
+      /commit or stash them, then use Approve integration again/,
     ],
     [
       s => {
@@ -1979,6 +1979,7 @@ test('integration explanations retain exact eligibility and distinguish automati
     assert.equal(e.requiresDirector, !!action);
     assert.match(e.next, next);
     assert.doesNotMatch(e.reason + e.next, /Approve or deny proposed work/);
+    assert.doesNotMatch(e.reason + e.next, /Inspect/);
     if (kind === 'integration-tests') assert.ok(e.details.includes('test/source.test.mjs: keeps local work'));
     if (kind === 'integration-landed') {
       assert.match(e.reason, /passed its own tests but fails together with work that landed after it was tested/);
@@ -2075,6 +2076,174 @@ test('integration explanations retain exact eligibility and distinguish automati
   assert.equal(explain(refused).action, 'Approve integration again');
 });
 
+test('a stopped integration says why in plain words and offers the step that continues it', () => {
+  const { needsYou } = context.StudioRuns;
+  const elsewhere = 'C:\\code\\release-copy';
+  // The controller's own messages (src/connectors/source-integration.mjs fastForward, source-lines.mjs moveLine).
+  const cases = [
+    {
+      name: 'line moved',
+      journal: {
+        state: 'rejected',
+        error: 'release/1.2 moved during verification. Approve integration again to merge onto the current tip.',
+        repository: { branch: 'release/1.2', head: 'abc', live: false },
+        verification: { passed: true, phaseId: 'integration.verification' },
+      },
+      kind: 'integration-line-moved',
+      merge: false,
+      reason: /^“release\/1\.2” moved while the change was being tested\.$/,
+      next: /^Use Approve integration again; it merges the change onto the line as it is now\./,
+    },
+    {
+      name: 'line checked out in the project folder',
+      journal: {
+        state: 'rejected',
+        error:
+          "release/1.2 was checked out in the project's folder during verification. Approve integration again to merge onto it there.",
+        repository: { branch: 'release/1.2', head: 'abc', live: false },
+        verification: { passed: true },
+      },
+      kind: 'integration-line-checked-out',
+      merge: false,
+      reason: /^“release\/1\.2” was checked out in the project's folder while the change was being tested\.$/,
+      next: /^Use Approve integration again to merge the change onto “release\/1\.2” there\./,
+    },
+    {
+      name: 'line checked out elsewhere',
+      journal: {
+        state: 'rejected',
+        // No recorded line: it is read from the message.
+        error: `release/1.2 is checked out in ${elsewhere}. Studio desk moves a branch only in the project's folder or where nothing has it checked out: check out another branch there, then approve integration again.`,
+        verification: { passed: true },
+      },
+      kind: 'integration-line-checked-out',
+      merge: false,
+      reason:
+        /^“release\/1\.2” was checked out in another folder, C:\\code\\release-copy, while the change was being tested\.$/,
+      next: /^Check out another branch in C:\\code\\release-copy, then use Approve integration again\./,
+    },
+    {
+      name: 'formatted change failed a test',
+      journal: {
+        state: 'rejected',
+        verification: {
+          passed: false,
+          phaseId: 'integration.verification',
+          failedTests: [{ file: 'test/source.test.mjs', name: 'keeps local work' }],
+        },
+      },
+      kind: 'integration-tests',
+      merge: false,
+      reason: /^The formatted change failed a test when it was tested on the line\.$/,
+      next: /^Use Approve integration again to test it again, or send it back if the failure is the change's own\./,
+      detail: 'test/source.test.mjs: keeps local work',
+    },
+    {
+      name: 'fails with what landed',
+      journal: {
+        state: 'rejected',
+        verification: {
+          passed: false,
+          phaseId: 'integration.verification',
+          landedSince: { commits: 2, stories: ['T-landed1'] },
+        },
+      },
+      kind: 'integration-landed',
+      merge: true,
+      reason: /passed its own tests but fails together with work that landed after it was tested/,
+      next: /^Use Merge onto the current source so its editor makes the change work with what landed\./,
+    },
+    {
+      name: 'recorded conflict',
+      journal: {
+        state: 'rejected',
+        error: 'The candidate conflicts with the current source in src/a.mjs.',
+        verification: { conflicts: ['src/a.mjs'] },
+      },
+      kind: 'integration-conflict',
+      merge: true,
+      reason: /^The change could not be combined with the current source\.$/,
+      next: /^Use Merge onto the current source so its editor combines the change with the current source/,
+    },
+  ];
+  const stopped = ({ journal }, { enabled = true, waiting = false } = {}) => {
+    const s = stagedSourceState();
+    Object.assign(s.tasks[0].sourceStage, { phase: 'integration', current: 'failed' });
+    s.attempts[1].sourceIntegration = structuredClone(journal);
+    s.tasks.push(task('O', { kind: 'studio-development:change', title: 'Other story' }));
+    s.autonomy = {
+      policy: { enabled, kinds: { 'studio-development:change': { integrate: 'auto' } } },
+      pendingIntegration: waiting
+        ? { taskId: 'O', attemptId: 'other-review', reviewHash: 'other-hash', requestedAt: at(5), paused: true }
+        : null,
+    };
+    return s;
+  };
+  for (const item of cases)
+    for (const enabled of [true, false]) {
+      const s = stopped(item, { enabled }),
+        before = JSON.stringify(s),
+        e = explain(s),
+        action = item.merge ? 'Merge onto the current source' : 'Approve integration again';
+      assert.equal(e.kind, item.kind, item.name);
+      // A staged story asks for the director's approval again with the policy on or off.
+      assert.equal(e.action, action, item.name);
+      assert.equal(e.requiresDirector, true, item.name);
+      assert.match(e.reason, item.reason, item.name);
+      assert.match(e.next, item.next, item.name);
+      assert.doesNotMatch(e.reason + e.next, /Inspect|Other story/, item.name);
+      if (item.detail) assert.ok(e.details.includes(item.detail), item.name);
+      if (item.name === 'line checked out elsewhere') assert.match(e.next, /check out another branch/i);
+      assert.equal(JSON.stringify(s), before);
+
+      // Another story's request waits: the story stays the director's call with the same kind and action, and
+      // its next step names the story whose request it waits behind.
+      const w = stopped(item, { enabled, waiting: true }),
+        held = explain(w);
+      assert.equal(held.kind, item.kind, `${item.name}, waiting`);
+      assert.equal(held.action, action, `${item.name}, waiting`);
+      assert.equal(held.reason, e.reason);
+      assert.doesNotMatch(held.reason + held.next, /Inspect/);
+      const calls = needsYou(w).filter(entry => entry.taskId === 'S');
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(calls.map(entry => [entry.kind, entry.action, entry.requiresDirector]))),
+        [[item.kind, action, true]],
+      );
+      if (!enabled) {
+        // With the policy off the director's approval integrates directly; no request holds it.
+        assert.equal(held.next, e.next, item.name);
+        continue;
+      }
+      assert.ok(held.next.startsWith(e.next), item.name);
+      assert.match(held.next, /“Other story”/, item.name);
+      if (item.merge)
+        assert.match(
+          held.next,
+          / Merge onto the current source does not wait for “Other story”, which holds the integration request; Approve integration again is accepted once it starts integrating\.$/,
+        );
+      else assert.match(held.next, / Approve integration again is accepted once “Other story” starts integrating\.$/);
+      // The story ahead is named by ID when its title is not in the state.
+      w.tasks = w.tasks.filter(entry => entry.id !== 'O');
+      assert.match(explain(w).next, /“O”/);
+    }
+
+  // A policy refusal carrying the controller's message reads the same way, from the story's reason.
+  const refused = stagedSourceState();
+  refused.autonomy = { policy: { enabled: true, kinds: {} } };
+  refused.tasks[0].reason = refused.tasks[0].sourceStage.reason =
+    'The policy could not request integration; approve it yourself. main moved during verification. Approve integration again to merge onto the current tip.';
+  Object.assign(refused.tasks[0].sourceStage, { phase: 'integration', current: 'failed' });
+  const moved = explain(refused);
+  assert.equal(moved.kind, 'integration-line-moved');
+  assert.equal(moved.reason, '“main” moved while the change was being tested.');
+  assert.equal(moved.action, 'Approve integration again');
+
+  // A conflict recorded only in words, with no conflicting files, keeps asking for a fresh candidate.
+  const words = stopped({ journal: { state: 'rejected', error: 'The candidate could not be merged.' } });
+  assert.equal(explain(words).kind, 'integration-conflict');
+  assert.equal(explain(words).action, 'Approve integration again');
+});
+
 test('legacy separate reviews require the same current candidate checks before offering integration', () => {
   const legacy = () => {
     const s = stagedSourceState(),
@@ -2114,6 +2283,27 @@ test('legacy separate reviews require the same current candidate checks before o
   assert.equal(explain(s).action, 'Approve integration again');
   s.autonomy.policy.enabled = false;
   assert.equal(explain(s).action, 'Integrate again');
+  // A line that moved while it was tested reads the same in the older layout, with its own action.
+  s.attempts[1].sourceIntegration = {
+    state: 'rejected',
+    error: 'release/1.2 moved during verification. Approve integration again to merge onto the current tip.',
+    repository: { branch: 'release/1.2', head: 'abc', live: false },
+  };
+  const moved = explain(s);
+  assert.equal(moved.kind, 'integration-line-moved');
+  assert.equal(moved.reason, '“release/1.2” moved while the change was being tested.');
+  assert.equal(moved.action, 'Integrate again');
+  assert.equal(moved.requiresDirector, true);
+  assert.match(moved.next, /^Use Integrate again; it merges the change onto the line as it is now\.$/);
+  s.autonomy.policy.enabled = true;
+  assert.equal(explain(s).action, 'Approve integration again');
+  // With the policy on, another story's request holds it: it stays a director call and names that story.
+  s.autonomy.pendingIntegration = { taskId: 'O', attemptId: 'other-review' };
+  const held = explain(s);
+  assert.equal(held.kind, 'integration-line-moved');
+  assert.equal(held.action, 'Approve integration again');
+  assert.equal(held.requiresDirector, true);
+  assert.match(held.next, /Approve integration again is accepted once “Other story” starts integrating\.$/);
   for (const mutate of [
     s => {
       s.tasks[1].acceptedAttemptId = 'superseded';
