@@ -4,9 +4,10 @@
 // flow-run-v1) like a run record, so no database schema changes. Every write to it goes through writeFlow, which
 // raises its sequence and puts the change on the change stream with the group's ID. Nothing calls this module from a
 // route yet: the workflow routes still refuse graph-v2. Tasks without flowReference, stage templates and graph-v1 runs
-// are untouched.
+// are untouched. A loop that fires runs the same tasks again as their next round (flowReference.round), and a loop at
+// its limit does what its atLimit says; by default the director decides (decideFlow).
 import { randomUUID } from 'node:crypto';
-import { validateFlow } from './graph-v2.mjs';
+import { validateFlow, loopAtLimit } from './graph-v2.mjs';
 import { staff } from './staffing.mjs';
 import { projectOrganization } from './project-organization.mjs';
 import { seenBy } from './project-agents.mjs';
@@ -242,6 +243,41 @@ function attemptOf(store, id) {
   }
 }
 
+const roundOf = task => task?.flowReference?.round ?? 1;
+
+// A node's task in the node's current round, or null while it has none or its next round has not started yet: a loop
+// moves the node to its next round first, and its task joins that round when its inputs are met again.
+function currentTask(store, entry) {
+  const task = taskOf(store, entry.taskId);
+  return task && roundOf(task) === entry.round ? task : null;
+}
+
+// The nodes a key reaches through ordinary edges (or, reversed, the nodes that reach it), itself included.
+function reach(graph, start, reverse = false) {
+  const found = new Set(),
+    pending = [start];
+  while (pending.length) {
+    const key = pending.pop();
+    if (found.has(key)) continue;
+    found.add(key);
+    for (const edge of graph.edges)
+      if (edge.loop === undefined && (reverse ? edge.to : edge.from) === key)
+        pending.push(reverse ? edge.from : edge.to);
+  }
+  return found;
+}
+
+const loopKey = edge => `${edge.from}->${edge.to}`;
+const bounded = (text, max = 24000) => (text.length > max ? text.slice(0, max - 1) + '…' : text);
+const baseDirection = record => (record.brief ? `Director brief for this flow: ${record.brief}` : '');
+
+// What a director may choose when a loop reaches its limit with atLimit ask-director.
+export const LIMIT_CHOICES = Object.freeze([
+  Object.freeze({ id: 'another-round', label: 'Run another round' }),
+  Object.freeze({ id: 'accept-over', label: 'Accept it over the findings, with a reason' }),
+  Object.freeze({ id: 'stop', label: 'Stop the flow' }),
+]);
+
 // Whether a node can still change: it waits, runs or is in Review, its task stopped with attempts left, or its gate
 // waits for the director. Accepted, denied and cancelled work, failed work with no attempts left, skipped nodes and
 // decided gates are settled.
@@ -272,8 +308,9 @@ function reviewOf(store, registries, task) {
   };
 }
 
-// What a node settled as, or null while it can still change: the outcomes its edges can wait for and, in plain words,
-// how it settled. A node whose task was denied, cancelled or failed with no attempts left settled without an outcome.
+// What a node settled as in its current round, or null while it can still change: the outcomes its edges can wait for
+// and, in plain words, how it settled. A node whose task was denied, cancelled or failed with no attempts left settled
+// without an outcome. A review a loop at its limit passed over (entry.over) counts as passed.
 function settlement(store, registries, record, node) {
   const entry = record.nodes[node.key];
   if (entry.state === 'skipped') return { outcomes: [], how: 'was skipped' };
@@ -282,11 +319,12 @@ function settlement(store, registries, record, node) {
       ? { outcomes: [entry.decision.outcome], how: `decided ${entry.decision.outcome}` }
       : null;
   if (controllerKinds.includes(node.kind)) return null;
-  const task = taskOf(store, entry.taskId);
+  const task = currentTask(store, entry);
   if (!task) return null;
   if (task.status === 'done') {
-    const review = reviewOf(store, registries, task),
-      outcomes = ['accepted', ...(review ? [review.passed ? 'passed' : 'needs-work'] : [])];
+    const review = reviewOf(store, registries, task);
+    let outcomes = ['accepted', ...(review ? [review.passed ? 'passed' : 'needs-work'] : [])];
+    if (entry.over) outcomes = ['accepted', 'passed'];
     for (const name of registries.workflows.milestonesOf(task.kind))
       if (!reviewOutcomes.includes(name) && registries.workflows.reached(store, task, name)) outcomes.push(name);
     return {
@@ -314,16 +352,128 @@ function edgeState(settled, edge) {
 
 const plural = (count, one, many) => `${count} ${count === 1 ? one : many}`;
 
-// Follows a flow record's edges as far as they go now, changing the record in place: records each node that settled,
-// skips the nodes that can no longer run (and those after them), decides each gate whose inputs all settled, starts
-// each node whose ordinary inputs all fired and stops the flow where a loop edge fires. Returns the sentences that
-// describe what changed and the tasks to create; nothing changed when there are none.
+// The nodes a loop runs again: those after its target and before its source through ordinary edges, both included.
+function loopNodes(graph, edge) {
+  const after = reach(graph, edge.to),
+    before = reach(graph, edge.from, true);
+  return graph.nodes.filter(node => after.has(node.key) && before.has(node.key)).map(node => node.key);
+}
+
+// The reviews a loop's source decided on (a gate's inputs, or the review itself), each with its verdict, summary and
+// findings as its current round recorded them.
+function loopFindings(record, edge) {
+  const { graph } = record,
+    source = graph.nodes.find(node => node.key === edge.from),
+    inputs =
+      source.kind === 'gate'
+        ? graph.edges.filter(other => other.to === source.key && other.loop === undefined).map(other => other.from)
+        : [source.key];
+  return inputs.map(key => ({
+    node: key,
+    taskId: record.nodes[key].taskId ?? null,
+    verdict: record.nodes[key].review?.verdict ?? null,
+    summary: record.nodes[key].review?.summary ?? '',
+    findings: record.nodes[key].review?.findings ?? [],
+  }));
+}
+
+const passedVerdict = verdict => verdict === 'pass' || verdict === 'passed';
+
+// A loop sends its work back: every node it runs again moves to the next round and waits for its inputs again (a
+// gate's decision stays on record with its round), the target keeps the findings of the reviews that asked for
+// changes for its next attempt's direction, and nodes after the loop that its round skipped may run once the next round
+// settles. The tasks themselves join the round when their inputs are met (followEdges). Returns the sentence that says
+// what happened.
+function sendBack(record, edge) {
+  const { graph } = record,
+    byKey = new Map(graph.nodes.map(node => [node.key, node])),
+    source = byKey.get(edge.from),
+    target = byKey.get(edge.to),
+    findings = loopFindings(record, edge),
+    from = Math.max(record.nodes[edge.to].round, 1),
+    round = from + 1,
+    keys = loopNodes(graph, edge),
+    loops = (record.loops ||= {}),
+    loop = (loops[loopKey(edge)] ||= { from: edge.from, to: edge.to, limit: edge.loop.limit, sendBacks: 0 });
+  loop.sendBacks += 1;
+  for (const key of keys) {
+    const entry = record.nodes[key];
+    if (entry.decision) (entry.earlierDecisions ||= []).push(structuredClone(entry.decision));
+    for (const field of ['decision', 'outcomes', 'review', 'reason', 'over', 'sentBack']) delete entry[field];
+    Object.assign(entry, { round, state: 'waiting' });
+  }
+  for (const key of reach(graph, edge.to)) {
+    const entry = record.nodes[key];
+    if (keys.includes(key) || entry.state !== 'skipped' || entry.taskId) continue;
+    if (graph.edges.some(other => other.to === key && other.loop === undefined && keys.includes(other.from))) {
+      entry.state = 'waiting';
+      delete entry.reason;
+    }
+  }
+  const asked = findings.filter(item => !passedVerdict(item.verdict));
+  record.nodes[edge.to].sentBack = {
+    by: source.title,
+    round: from,
+    findings: (asked.length ? asked : findings).map(item => ({ ...item, title: byKey.get(item.node).title })),
+  };
+  record.sentBack = {
+    from: edge.from,
+    to: edge.to,
+    outcome: edge.outcome,
+    round: from,
+    nextRound: round,
+    at: new Date().toISOString(),
+    findings,
+  };
+  return `${source.title} sent the work back to ${target.title} with the findings of ${plural(findings.length, 'input', 'inputs')}; round ${round} starts.`;
+}
+
+// The direction of a node's next round: the flow's brief and, for a loop's target, the findings that sent it back.
+function roundDirection(record, entry) {
+  const base = baseDirection(record),
+    back = entry.sentBack;
+  if (!back) return base;
+  const text = item => (typeof item === 'string' ? item : JSON.stringify(item)),
+    lines = back.findings.flatMap(item => [
+      `- ${item.title} (${item.taskId ?? 'no task'}), verdict ${item.verdict ?? 'none'}: ${item.summary || 'no summary'}`,
+      ...item.findings.map(finding => `  - ${text(finding)}`),
+    ]);
+  return bounded(
+    [
+      base,
+      `Round ${entry.round}: ${back.by} sent this back after round ${back.round}. Your earlier attempts stay on record. Address the findings of each review that sent it back:\n${lines.join('\n')}`,
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
+  );
+}
+
+// A loop's source passes over its findings: a gate's decision becomes passed, recording who passed it over and why;
+// a review counts as passed (entry.over). The source's passed edges fire on the next pass.
+function passOver(record, edge, over) {
+  const source = record.graph.nodes.find(node => node.key === edge.from),
+    entry = record.nodes[edge.from],
+    at = new Date().toISOString();
+  if (source.kind === 'gate') {
+    entry.decision = { ...entry.decision, outcome: 'passed', over: { ...over, outcome: entry.decision.outcome, at } };
+    entry.state = 'passed';
+  } else entry.over = { ...over, at };
+}
+
+// Follows a flow record's edges as far as they go now, changing the record in place: records each node that settled
+// in its round, skips the nodes that can no longer run (and those after them), decides each gate whose inputs all
+// settled, starts each node whose ordinary inputs all fired (a node a loop sent back runs its own task again as its
+// next round), and does what a firing loop says: sends its work back while it has rounds left, and at its limit stops
+// the flow, passes over its findings or asks the director (record.pending), which starts nothing until the director
+// decides. Returns the sentences that describe what changed, the tasks to create and the tasks that run a new round;
+// nothing changed when there are no sentences.
 function followEdges(store, registries, record) {
   const { graph } = record,
     byKey = new Map(graph.nodes.map(node => [node.key, node])),
     changes = [],
-    tasks = [];
-  if (record.sentBack) return { changes, tasks };
+    tasks = [],
+    reruns = [];
+  if (record.stopped || record.pending?.length) return { changes, tasks, reruns };
   const settledOf = key => settlement(store, registries, record, byKey.get(key)),
     incomingOf = key => graph.edges.filter(edge => edge.to === key && edge.loop === undefined);
   // The tasks a node's inputs hold: a controller node passes on its own inputs' tasks.
@@ -337,7 +487,9 @@ function followEdges(store, registries, record) {
   };
   const workerOf = key => {
     const id = record.nodes[key]?.taskId;
-    return (tasks.find(task => task.id === id) || taskOf(store, id))?.workerId ?? null;
+    return (
+      (tasks.find(task => task.id === id) || reruns.find(task => task.id === id) || taskOf(store, id))?.workerId ?? null
+    );
   };
   let progressed = true;
   while (progressed) {
@@ -357,30 +509,62 @@ function followEdges(store, registries, record) {
           summary: settled.review.summary,
         };
       changes.push(first ? `${node.title} ${settled.how}.` : `${node.title} reached ${settled.outcomes.at(-1)}.`);
+      // The work a loop sent back is no longer pending once its next round settled.
+      if (record.sentBack?.to === node.key && entry.round === record.sentBack.nextRound) {
+        (record.sendBacks ||= []).push(record.sentBack);
+        delete record.sentBack;
+      }
     }
-    // A loop edge that fires sends the group back; the next round is the rounds step's, so nothing more starts.
+    // A loop edge that fires sends its work back while it has rounds left; at its limit it does what atLimit says.
     for (const edge of graph.edges) {
       if (edge.loop === undefined || edgeState(settledOf(edge.from), edge) !== 'fired') continue;
       const source = byKey.get(edge.from),
-        inputs = source.kind === 'gate' ? incomingOf(source.key).map(input => input.from) : [source.key],
-        findings = inputs.map(key => ({
-          node: key,
-          taskId: record.nodes[key].taskId ?? null,
-          verdict: record.nodes[key].review?.verdict ?? null,
-          summary: record.nodes[key].review?.summary ?? '',
-          findings: record.nodes[key].review?.findings ?? [],
-        }));
-      record.sentBack = { from: edge.from, to: edge.to, outcome: edge.outcome, at: new Date().toISOString(), findings };
+        target = byKey.get(edge.to),
+        used = record.loops?.[loopKey(edge)]?.sendBacks ?? 0;
+      progressed = true;
+      if (used < edge.loop.limit) {
+        changes.push(sendBack(record, edge));
+        continue;
+      }
+      const round = Math.max(record.nodes[edge.to].round, 1),
+        at = new Date().toISOString(),
+        reached = `${source.title} asked for changes again in round ${round}, and the loop back to ${target.title} reached its limit of ${plural(edge.loop.limit, 'round', 'rounds')}`,
+        atLimit = loopAtLimit(edge.loop);
+      if (atLimit === 'stop') {
+        record.stopped = { by: 'loop', node: edge.from, round, at, reason: `${reached}.` };
+        changes.push(`${reached}; the flow stopped, as the loop says.`);
+        return { changes, tasks, reruns };
+      }
+      if (atLimit === 'continue') {
+        const note = `${reached}; the flow continues past it, as the loop says.`;
+        passOver(record, edge, { by: 'loop', note });
+        changes.push(`${note} ${source.title} follows its passed edges.`);
+        continue;
+      }
+      (record.pending ||= []).push({
+        node: edge.from,
+        from: edge.from,
+        to: edge.to,
+        outcome: edge.outcome,
+        round,
+        limit: edge.loop.limit,
+        sendBacks: used,
+        choices: LIMIT_CHOICES.map(choice => ({ ...choice })),
+        findings: loopFindings(record, edge),
+        at,
+      });
       changes.push(
-        `${source.title} sent the work back to ${byKey.get(edge.to).title} with the findings of ${plural(findings.length, 'input', 'inputs')}; nothing more starts until its next round.`,
+        `${reached}. The director decides: run another round, accept it over the findings with a reason, or stop the flow.`,
       );
-      return { changes, tasks };
     }
+    // Nothing starts while the director decides.
+    if (record.pending?.length) return { changes, tasks, reruns };
     for (const node of graph.nodes) {
-      const entry = record.nodes[node.key];
-      if (entry.taskId || entry.state === 'skipped' || entry.decision) continue;
+      const entry = record.nodes[node.key],
+        rerun = !!entry.taskId && entry.state === 'waiting';
+      if ((entry.taskId && !rerun) || entry.state === 'skipped' || entry.decision) continue;
       const incoming = incomingOf(node.key);
-      if (!incoming.length) continue;
+      if (!incoming.length && !rerun) continue;
       const states = incoming.map(edge => [edge, settledOf(edge.from)]),
         dead = states.find(([edge, settled]) => edgeState(settled, edge) === 'dead');
       if (dead) {
@@ -402,34 +586,55 @@ function followEdges(store, registries, record) {
           { rule, reason } = node.gate,
           at = new Date().toISOString(),
           tally = `${passed} of ${plural(inputs.length, 'review', 'reviews')} passed`;
+        if (!entry.round) entry.round = 1;
         if (rule === 'director') {
-          entry.decision = { rule, state: 'pending', reason, inputs, at };
+          entry.decision = { rule, state: 'pending', reason, inputs, round: entry.round, at };
           entry.state = 'director';
           changes.push(`${node.title} waits for the director's decision (${tally}): ${reason}`);
         } else {
           const outcome = (rule === 'all-pass' ? passed === inputs.length : passed > 0) ? 'passed' : 'needs-work';
-          entry.decision = { rule, state: 'decided', outcome, reason, inputs, at };
+          entry.decision = { rule, state: 'decided', outcome, reason, inputs, round: entry.round, at };
           entry.state = outcome;
           changes.push(
             `${node.title} ${outcome === 'passed' ? 'passed' : 'needs work'} by the ${rule} rule: ${tally}.`,
           );
         }
+        // A loop from this gate acts before anything after the gate is skipped.
         progressed = true;
-        continue;
+        break;
       }
       // For-each and join nodes are run by a later step of the flow engine.
       if (controllerKinds.includes(node.kind)) continue;
       const dependencies = [...new Set(incoming.flatMap(edge => inputTasks(edge.from)))].filter(
-          id => taskOf(store, id)?.status === 'done',
-        ),
-        definition = registries.workflows.find(node.kind),
+        id => (reruns.find(task => task.id === id) || taskOf(store, id))?.status === 'done',
+      );
+      if (rerun) {
+        // The node's own task runs again as its next round: its attempts stay on record, and its attempt limit counts
+        // this round's attempts only (WorkflowRegistry.stageAttempts). A task with stages starts the round at its
+        // first stage, as a retry copy does (its stage state is cleared and recorded afresh when it is written).
+        const task = taskOf(store, entry.taskId);
+        task.flowReference = { ...task.flowReference, round: entry.round };
+        Object.assign(task, { status: 'ready', reason: '', queued: true, controllerWait: false, dependencies });
+        for (const field of ['acceptedAttemptId', 'autonomyNote']) delete task[field];
+        registries.workflows.stagesOf(task)?.clear?.(task);
+        registries.workflows.direct(task, roundDirection(record, entry));
+        reruns.push(task);
+        delete entry.reason;
+        delete entry.sentBack;
+        entry.state = 'ready';
+        changes.push(`${node.title} runs round ${entry.round}.`);
+        progressed = true;
+        continue;
+      }
+      const definition = registries.workflows.find(node.kind),
         independent = definition?.distinctFromInputs
           ? dependencies.map(id => attemptOf(store, taskOf(store, id).acceptedAttemptId)?.workerId).filter(Boolean)
           : [],
-        exclude = [...new Set([...separation(graph, node, workerOf), ...independent])];
+        exclude = [...new Set([...separation(graph, node, workerOf), ...independent])],
+        round = Math.max(entry.round, 1);
       let task;
       try {
-        task = nodeTask(store, registries, record, node, 1, exclude, dependencies);
+        task = nodeTask(store, registries, record, node, round, exclude, dependencies);
       } catch (error) {
         // A node nobody can run waits, with the reason, for the director to change the team.
         if (entry.reason !== error.message) {
@@ -440,12 +645,22 @@ function followEdges(store, registries, record) {
       }
       tasks.push(task);
       delete entry.reason;
-      Object.assign(entry, { taskId: task.id, round: 1, state: 'ready' });
+      Object.assign(entry, { taskId: task.id, round, state: 'ready' });
       changes.push(`${node.title} can start now.`);
       progressed = true;
     }
   }
-  return { changes, tasks };
+  return { changes, tasks, reruns };
+}
+
+// Writes what followEdges changed: new tasks as created, and a task starting a new round the way the orchestrator's
+// putTask writes a stored task (its stage progress, then the task).
+function putFlowTasks(store, registries, tasks, reruns) {
+  tasks.forEach(created => store.putTask(created));
+  for (const task of reruns) {
+    registries.workflows.stageProgress(store, task);
+    store.putTask(task);
+  }
 }
 
 function advanceGroup(store, registries, groupId, taskId = null, reference = null) {
@@ -453,17 +668,17 @@ function advanceGroup(store, registries, groupId, taskId = null, reference = nul
   if (!stored || stored.schemaVersion !== FLOW_RUN_SCHEMA) return [];
   if (reference && (reference.flowId !== stored.flowId || reference.revision !== stored.revision)) return [];
   const record = structuredClone(stored),
-    { changes, tasks } = followEdges(store, registries, record);
+    { changes, tasks, reruns } = followEdges(store, registries, record);
   if (!changes.length) return [];
-  tasks.forEach(created => store.putTask(created));
+  putFlowTasks(store, registries, tasks, reruns);
   writeFlow(store, record, changes.join(' '), taskId);
   return tasks.map(created => created.id);
 }
 
 // Advances a settled task's flow inside the caller's transaction (the one that settles the task), so a settlement and
-// the flow's next step are recorded together: its new tasks and one write of the flow record, which raises the
-// group's sequence by one. A task without flowReference, or a flow with nothing to do, writes nothing. Returns the
-// IDs of the tasks it created.
+// the flow's next step are recorded together: its new tasks, the tasks that start a new round and one write of the
+// flow record, which raises the group's sequence by one. A task without flowReference, or a flow with nothing to do,
+// writes nothing. Returns the IDs of the tasks it created.
 export function advanceFlow(store, registries, task) {
   const reference = task?.flowReference;
   if (!reference) return [];
@@ -472,7 +687,7 @@ export function advanceFlow(store, registries, task) {
 
 // Re-checks every open flow when readiness is refreshed: an accepted task may since have reached a milestone an edge
 // waits for, or a flow task was denied or cancelled outside an attempt. Each flow that changed is written in its own
-// transaction. Only flow records are read; with no flow there is nothing to do.
+// transaction. Only flow records are read; with no flow there is nothing to do. A stopped flow never changes again.
 export function advanceOpenFlows(store, registries) {
   const ids = store.db
     .prepare("SELECT id FROM settings WHERE id LIKE 'flow:%'")
@@ -481,28 +696,110 @@ export function advanceOpenFlows(store, registries) {
   const created = [];
   for (const groupId of ids) {
     const record = flowRecord(store, groupId);
-    if (!record || record.schemaVersion !== FLOW_RUN_SCHEMA || record.sentBack) continue;
+    if (!record || record.schemaVersion !== FLOW_RUN_SCHEMA || record.stopped) continue;
     created.push(...store.tx(() => advanceGroup(store, registries, groupId)));
   }
   return created;
 }
 
-// The group's state: sent-back once a loop edge fired; done once no node can change; in-review while every node with
-// open work is a review, or a gate waits for the director; passed once a gate passed and the work after it runs;
-// building otherwise.
+const choiceWords = {
+  'another-round': 'another round',
+  'accept-over': 'to accept it over the findings',
+  stop: 'to stop',
+};
+
+// Applies the director's answer to a loop at its limit, once, in one transaction: another-round sends the work back
+// for one more round past the limit, accept-over (which needs a reason) passes over the findings and follows the
+// source's passed edges, and stop records the group stopped. A decision already made, or one nothing waits for, is
+// refused and writes nothing. Returns the group, the choice, the tasks that start and the flow's new sequence.
+export function decideFlow(store, registries, groupId, { node, choice, reason = '' } = {}) {
+  if (!LIMIT_CHOICES.some(item => item.id === choice))
+    throw new Error(`Choose ${LIMIT_CHOICES.map(item => item.id).join(', ')}.`);
+  if (typeof reason !== 'string' || reason.length > 4000)
+    throw new Error("A decision's reason is text of at most 4000 characters.");
+  if (choice === 'accept-over' && !reason.trim()) throw new Error('Accepting over the findings needs a reason.');
+  return store.tx(() => {
+    const stored = flowRecord(store, groupId);
+    if (!stored || stored.schemaVersion !== FLOW_RUN_SCHEMA) throw new Error(`Group ${groupId} runs no flow.`);
+    const record = structuredClone(stored),
+      source = record.graph.nodes.find(item => item.key === node);
+    if (!source) throw new Error(`Flow ${record.flowId} has no node ${node}.`);
+    const index = (record.pending || []).findIndex(item => item.node === node);
+    if (index < 0) {
+      const made = (record.directorDecisions || []).filter(item => item.node === node).at(-1);
+      throw new Error(
+        made
+          ? `The director already decided ${choiceWords[made.choice]} for ${source.title} in round ${made.round}.`
+          : `Nothing at ${source.title} waits for the director's decision.`,
+      );
+    }
+    const [pending] = record.pending.splice(index, 1),
+      edge = record.graph.edges.find(
+        item => item.loop !== undefined && item.from === pending.from && item.to === pending.to,
+      ),
+      at = new Date().toISOString(),
+      why = reason.trim();
+    if (!record.pending.length) delete record.pending;
+    (record.directorDecisions ||= []).push({
+      node,
+      round: pending.round,
+      choice,
+      ...(why ? { reason: why } : {}),
+      at,
+    });
+    let change;
+    if (choice === 'stop') {
+      record.stopped = { by: 'director', node, round: pending.round, at, ...(why ? { reason: why } : {}) };
+      change = `The director stopped the flow at ${source.title} in round ${pending.round}${why ? `: ${why}` : '.'}`;
+    } else if (choice === 'another-round') {
+      change = `The director chose another round past the loop's limit${why ? `: ${why}` : '.'} ${sendBack(record, edge)}`;
+    } else {
+      passOver(record, edge, { by: 'director', reason: why });
+      change = `The director accepted ${source.title} over its findings in round ${pending.round}: ${why}`;
+    }
+    const { changes, tasks, reruns } = followEdges(store, registries, record);
+    putFlowTasks(store, registries, tasks, reruns);
+    if (tasks.length || reruns.length) {
+      // As when the flow started: the scheduler runs queued work only while the pipeline is on.
+      const org = store.organization();
+      if (!org.pipelineEnabled) {
+        org.pipelineEnabled = true;
+        store.setOrganization(org);
+      }
+    }
+    const saved = writeFlow(store, record, [change, ...changes].join(' '));
+    return {
+      groupId,
+      choice,
+      taskIds: [...reruns, ...tasks].map(task => task.id),
+      sequence: saved.sequence,
+    };
+  });
+}
+
+// The group's state: stopped once a loop or the director stopped it; in-review while the director decides a loop at
+// its limit, every node with open work is a review, or a gate waits for the director; sent-back from a loop firing
+// until the work it sent back settles its next round; done once no node can change; passed once a gate passed and
+// the work after it runs; building otherwise.
 function groupState(record, nodes, isOpen, reviewKeys) {
+  if (record.stopped) return 'stopped';
+  if (record.pending?.length) return 'in-review';
   if (record.sentBack) return 'sent-back';
   if (!isOpen.some(Boolean)) return 'done';
-  const active = nodes.filter((node, index) => isOpen[index] && (node.taskId || node.state === 'director'));
+  const active = nodes.filter(
+    (node, index) => isOpen[index] && ((node.taskId && node.state !== 'waiting') || node.state === 'director'),
+  );
   if (active.length && active.every(node => node.state === 'director' || reviewKeys.has(node.key))) return 'in-review';
   if (Object.values(record.nodes).some(entry => entry.decision?.outcome === 'passed')) return 'passed';
   return 'building';
 }
 
 // A group's flow as the controller reads it now, or null when the group has none: the flow's identity and its nodes
-// in the graph's order, each with its task (or none), round and state, a skipped node with its reason and a gate with
-// its decision, and the group's state: building, in-review, passed, sent-back (with the findings it was sent back
-// with) or done.
+// in the graph's order, each with its task (or none), round and state (waiting while its next round has not started),
+// a skipped node with its reason and a gate with its decision in its round (and its earlier rounds' decisions), and
+// the group's state: building, in-review, passed, sent-back (with the findings it was sent back with), stopped (with
+// who stopped it and why) or done. A loop at its limit adds the director's pending decision with its choices, and the
+// loops' send-backs and the director's decisions so far are listed.
 export function readFlowGroup(store, registries, groupId) {
   const record = flowRecord(store, groupId);
   if (!record) return null;
@@ -510,7 +807,7 @@ export function readFlowGroup(store, registries, groupId) {
     reviewKeys = new Set();
   const nodes = record.graph.nodes.map(node => {
     const entry = record.nodes[node.key],
-      task = taskOf(store, entry.taskId),
+      task = currentTask(store, entry),
       state = task ? taskStates[task.status] || 'waiting' : entry.state;
     isOpen.push(open(store, registries, state, task));
     const definition = controllerKinds.includes(node.kind) ? null : registries.workflows.find(node.kind);
@@ -523,6 +820,7 @@ export function readFlowGroup(store, registries, groupId) {
       state,
       ...(entry.reason ? { reason: entry.reason } : {}),
       ...(node.kind === 'gate' ? { decision: entry.decision ? structuredClone(entry.decision) : null } : {}),
+      ...(entry.earlierDecisions ? { earlierDecisions: structuredClone(entry.earlierDecisions) } : {}),
     };
   });
   return {
@@ -535,6 +833,10 @@ export function readFlowGroup(store, registries, groupId) {
     sequence: record.sequence,
     state: groupState(record, nodes, isOpen, reviewKeys),
     ...(record.sentBack ? { sentBack: structuredClone(record.sentBack) } : {}),
+    ...(record.pending?.length ? { pending: structuredClone(record.pending) } : {}),
+    ...(record.stopped ? { stopped: structuredClone(record.stopped) } : {}),
+    ...(record.loops ? { loops: structuredClone(record.loops) } : {}),
+    ...(record.directorDecisions ? { directorDecisions: structuredClone(record.directorDecisions) } : {}),
     nodes,
   };
 }

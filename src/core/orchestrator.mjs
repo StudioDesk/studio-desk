@@ -845,6 +845,8 @@ export class Runner {
       requestedModel: adapter.requestedModel(worker, this),
       requestedEffort: worker.effort || '',
       ...(this.tierOf(task) ? { requestedTier: this.tierOf(task) } : {}),
+      // A flow's attempt records its round, whose attempts alone count toward the task's limit (1.2).
+      ...(task.flowReference ? { flowRound: task.flowReference.round ?? 1 } : {}),
       ...(previousAttempts >= task.maxAttempts
         ? { directorOverride: { attemptLimit: task.maxAttempts, attemptNumber: previousAttempts + 1 } }
         : {}),

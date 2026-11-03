@@ -494,7 +494,7 @@ test('a failed task with no attempts left skips the nodes that wait on its accep
   sequencedByOne(c, 'story-failed');
 });
 
-test('a firing loop edge records the group as sent back with every input finding and starts nothing until its rounds', async t => {
+test('a firing loop edge sends the work back with every input finding, and the same task runs its next round', async t => {
   const c = await setup(t);
   c.start(
     'story-back',
@@ -515,31 +515,53 @@ test('a firing loop edge records the group as sent back with every input finding
       ],
     ),
   );
-  const group = await c.groupState('story-back', 'sent-back'),
-    reviewTask = c.taskOf('story-back', 'review');
-  assert.deepEqual([group.sentBack.from, group.sentBack.to, group.sentBack.outcome], ['gate', 'work', 'needs-work']);
-  assert.deepEqual(group.sentBack.findings, [
+  const group = await c.groupState('story-back', 'done'),
+    reviewTask = c.taskOf('story-back', 'review'),
+    workTask = c.taskOf('story-back', 'work');
+  // The send-back as the flow change that recorded it wrote it: the gate's needs-work with every input finding.
+  const back = c.snapshots.find(record => record.sentBack),
+    firstReview = c.store.attempts(reviewTask.id).find(attempt => attempt.flowRound === 1);
+  assert.ok(back, 'the group was sent back');
+  assert.deepEqual(
+    [back.sentBack.from, back.sentBack.to, back.sentBack.outcome, back.sentBack.round, back.sentBack.nextRound],
+    ['gate', 'work', 'needs-work', 1, 2],
+  );
+  assert.deepEqual(back.sentBack.findings, [
     {
       node: 'review',
       taskId: reviewTask.id,
       verdict: 'needs-work',
-      summary: c.store.attempt(reviewTask.acceptedAttemptId).result.summary,
+      summary: firstReview.result.summary,
       findings: ['Simulated finding: revise once.'],
     },
   ]);
-  assert.equal(group.nodes.find(node => node.key === 'gate').decision.outcome, 'needs-work');
-  // Nothing starts: no finish task, no new round of the work and no retry the autonomy policy would have made.
-  const workTask = c.taskOf('story-back', 'work'),
-    workAttempts = c.store.attempts(workTask.id).length,
-    sequence = group.sequence;
-  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(back.nodes.gate.earlierDecisions.at(-1).outcome, 'needs-work');
+  // No retry copy: the same work task ran round 2, its round-1 attempt still on record, and the flow went on to finish.
   const tasks = c.store.projectTasks(c.projectId);
-  assert.equal(tasks.length, 3);
+  assert.equal(tasks.length, 4);
   assert.ok(tasks.every(task => !task.retryOf));
-  assert.equal(c.store.task(workTask.id).status, 'done');
-  assert.equal(c.store.attempts(workTask.id).length, workAttempts);
-  assert.equal(c.store.task(reviewTask.id).status, 'done');
-  assert.equal(c.group('story-back').sequence, sequence);
+  assert.equal(workTask.flowReference.round, 2);
+  // Each round ran the work stage once (a general work task also runs its own stage review after it).
+  assert.deepEqual(
+    c.store
+      .attempts(workTask.id)
+      .filter(attempt => attempt.assignment.kind === workTask.kind)
+      .map(attempt => attempt.flowRound),
+    [1, 2],
+  );
+  assert.deepEqual(nodeStates(group), {
+    outline: 'accepted',
+    work: 'accepted',
+    review: 'accepted',
+    gate: 'passed',
+    finish: 'accepted',
+  });
+  const gateNode = group.nodes.find(node => node.key === 'gate');
+  assert.deepEqual([gateNode.decision.round, gateNode.decision.outcome], [2, 'passed']);
+  assert.deepEqual(
+    gateNode.earlierDecisions.map(decision => [decision.round, decision.outcome]),
+    [[1, 'needs-work']],
+  );
   assert.ok(
     c
       .flowEvents()

@@ -342,10 +342,16 @@ export class WorkflowRegistry {
   // usage limit stopped, or one the controller's own stop interrupted and the director then
   // reconciled, says nothing about the work, so it stays on record but doesn't count, except
   // under a fixed limit, which is a safety rule (the recovery drill, v1.0 criterion 3).
+  // A flow's task (1.2) counts only the attempts of its current round: a loop runs the same task again as its next
+  // round, and its earlier rounds' attempts stay on record without using the new round's limit. An attempt records its
+  // round (flowRound), as its assignment does. Tasks without flowReference count as before.
   stageAttempts(store, task) {
     const owner = this.stageOwner(store, task) || task,
-      attempts = this.stagesOf(owner)?.attempts?.(store, task) ?? store.attempts(task.id);
-    return this.find(task.kind)?.fixedAttemptLimit ? attempts : attempts.filter(countsTowardLimit);
+      attempts = this.stagesOf(owner)?.attempts?.(store, task) ?? store.attempts(task.id),
+      counted = this.find(task.kind)?.fixedAttemptLimit ? attempts : attempts.filter(countsTowardLimit);
+    if (!owner.flowReference) return counted;
+    const round = owner.flowReference.round ?? 1;
+    return counted.filter(attempt => (attempt.flowRound ?? attempt.assignment?.flowReference?.round ?? 1) === round);
   }
   // Input references for a stage view, or null to use the task's accepted dependencies.
   stageInputs(store, task) {
