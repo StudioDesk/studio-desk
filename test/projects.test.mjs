@@ -1757,7 +1757,7 @@ test('idea intake queues only current-project planning, gates on fresh accepted 
   assert.equal(taskIds.length, 2);
   assert.equal(new Set(taskIds).size, 2);
   assert.match(runId, /^run-/);
-  assert.deepEqual(budget, { steps: 2, totalAttemptSeconds: 1620 });
+  assert.deepEqual(budget, { steps: 2, totalAttemptSeconds: 1800 });
   assert.equal(
     budget.totalAttemptSeconds,
     tasks.reduce((sum, task) => sum + task.maxSeconds * task.maxAttempts, 0),

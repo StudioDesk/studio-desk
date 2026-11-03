@@ -286,8 +286,9 @@ export async function editProjectProfile(store, projectId, runtime, { expectedRe
   });
 }
 
-// How long adding a project waits for the repository's tests: as long as intake source checks may run.
-export const repositoryTestSeconds = 420;
+// How long adding a project waits for the repository's tests: as long as intake source checks may run (600 s since
+// November 3, 2026, the most a workflow step may run).
+export const repositoryTestSeconds = 600;
 // Runs the repository's tests once on a copy of its inspected commit, as intake source checks do, before a
 // project records it. They must run and pass; a repository with no tests yet passes with none run.
 // Resolves with the totals; rejects with a reason the director can act on.
