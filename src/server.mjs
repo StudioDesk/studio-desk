@@ -72,6 +72,7 @@ import { employeeTestsAllowed, runEmployeeTests, savedTestRun } from './connecto
 import { attemptTrace } from './core/attempt-trace.mjs';
 import { storyActivity } from './core/story-activity.mjs';
 import { taskActionsFor } from './core/task-actions.mjs';
+import { match as listedRoute, routes } from './core/routes.mjs';
 import { validateReview } from './packs/game-production/contracts.mjs';
 import { validatePlan } from './planning.mjs';
 import { createRegistries } from './registry.mjs';
@@ -608,6 +609,20 @@ export function createStudio({
         res.writeHead(401, signInHeaders);
         return res.end(signInPage);
       }
+      // Only a listed route is answered (src/core/routes.mjs), so a route that is handled but not listed can never be
+      // reached. A read the table does not name is refused here, before any handler runs: it names no read route (a
+      // mistyped one, or a command asked for with GET); a method other than a read's or a command's is not allowed.
+      // A command the table does not name is refused at the start of the commands below, once its token is weighed
+      // and a keyed one has left its line, before any command handler runs.
+      const listed = parts[0] === 'api' ? listedRoute(req.method, url.pathname) : null;
+      if (parts[0] === 'api' && !listed && !['POST', 'PATCH'].includes(req.method)) {
+        if (req.method === 'GET' || req.method === 'HEAD')
+          fail('Unknown read route. Commands are sent with POST or PATCH.', 404);
+        res.setHeader('Allow', 'POST, PATCH');
+        fail('Commands are sent with POST or PATCH.', 405);
+      }
+      // Every route the controller answers, as the guard above reads them.
+      if (url.pathname === '/api/routes' && req.method === 'GET') return json(res, { routes });
       const queryProject = url.searchParams.get('projectId') || LEGACY_PROJECT;
       // The project a tab follows; none on a fresh install's No projects yet, where it follows only the changes that
       // belong to no project (a project appearing, the agents).
@@ -1113,14 +1128,10 @@ export function createStudio({
         return json(res, await runEmployeeTests(runner, entry, data));
       }
       if (parts[0] === 'api') {
-        // Every read route answered above, so a read that gets here names no read route: a mistyped one, or a command
-        // asked for with GET. A command is a POST or a PATCH.
-        if (req.method === 'GET' || req.method === 'HEAD')
+        // Every listed read answered above, and the guard after the sign-in check refused every other method, so only a
+        // command gets here; a read that does is answered as the guard answers an unknown one.
+        if (!['POST', 'PATCH'].includes(req.method))
           fail('Unknown read route. Commands are sent with POST or PATCH.', 404);
-        if (!['POST', 'PATCH'].includes(req.method)) {
-          res.setHeader('Allow', 'POST, PATCH');
-          fail('Commands are sent with POST or PATCH.', 405);
-        }
         // The page's request token keeps another page in the director's browser from riding on the session cookie,
         // which the browser sends by itself. The key in its header needs no token: no page can send it without
         // knowing the key, and whoever knows the key can read the token from the page anyway (the November 2
@@ -1150,6 +1161,8 @@ export function createStudio({
         // director can tell a script's decisions from their own (the decisions themselves still say the director),
         // and a command's answer still carries only the records the command made.
         if (keyed) keyedCommandRecorded(req.method, url.pathname, parts, data);
+        // The listed-routes guard for commands: one the table does not name reaches no handler.
+        if (!listed) fail('Unknown controller route.', 404);
         // The newest change's seq before the command runs: its answer's records are what was recorded after it.
         if (req.headers['x-studio-records'] === '1' && typeof data?.projectId === 'string')
           commands.set(res, { projectId: data.projectId, after: store.version });

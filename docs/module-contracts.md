@@ -13,7 +13,7 @@ Every request needs the director's session or key (`src/director-access.mjs`).
 - **Commands (POST and PATCH):**
   - **Signed in by the cookie:** a command also needs the page's request token (`x-studio-token`), on every route. The browser sends the cookie by itself, so the token keeps another page in that browser, another port of the same address included, from riding on it. Without the header: 403, naming `X-Studio-Token`, the page's `studio-token` meta tag it comes from, and the key; with a token that is not this start's: 403, "This command's X-Studio-Token is from an earlier start of the controller. Reload the page, or read the token from it again.", which the dashboard reads as a restart.
   - **Sent with `x-studio-key`:** a command needs no token. No page can send that header without knowing the key, and anyone who knows it can read the token from the page anyway. Only the header counts (`director.keyed`); a cookie, query string or body never stands for the key. Each successful keyed command leaves a `director_key` event in its project's activity, naming the route and task, so a script's decisions can be told from the director's own.
-  - **Other cases:** a read on an unknown `/api` route answers 404, and any method other than GET, POST or PATCH answers 405 with `Allow: POST, PATCH`. The token is compared in constant time, like the key.
+  - **Other cases:** only a listed route is answered (see "Every route, listed" below): a read on an unknown `/api` route answers 404, a command on one answers 404 `Unknown controller route.`, and any method other than GET, POST or PATCH answers 405 with `Allow: POST, PATCH`. The token is compared in constant time, like the key.
 - **What it doesn't cover:**
   - the built dashboard's `/assets/*` files, which hold no records
   - `POST /api/attempts/:id/tests`, an agent's own test run, which its attempt's token authorizes
@@ -35,6 +35,22 @@ Every request needs the director's session or key (`src/director-access.mjs`).
   - **Waiting:** a run waits in turn and says once that it's waiting. A slot whose holder ended without giving it back is free again.
   - **Elsewhere:** macOS and Linux have no such range and no cap.
 - **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
+
+## Every route, listed (November 2026)
+
+`src/core/routes.mjs` exports `routes`, one frozen table of every route `src/server.mjs` answers, and `match(method, pathname)`, which returns the route a request names or null.
+
+- **An entry:** `method` (GET, POST or PATCH); `path`, with `:name` for each part a request fills in (`/api/tasks/:id/approve-work`) and a final `*` for any rest (the dashboard's pages); `fields`, the body fields a command takes or the query fields a read takes, each `{ name, required }`; `access`; `token`; and `summary`, one plain line.
+- **Access:** `director` is the director's session cookie or the `x-studio-key` header; `attempt` is only `POST /api/attempts/:id/tests`, opened by its running attempt's token; `anyone` is the launch link `/launch/:code` and the built dashboard's `/assets/:file`.
+- **Token:** `none` for reads; `unless-keyed` for every director command, which needs this start's `X-Studio-Token` when signed in by the session cookie and none when it carries `x-studio-key`; `attempt` for the agent's test run (`X-Studio-Attempt-Token`).
+- **Matching:** each part is matched whole; a fixed part wins over a parameter, so `POST /api/tasks/close` is never read as a task. A path with an empty part (a doubled or trailing slash) names no route. A path under `/api` is matched only by `/api` routes.
+- **`GET /api/routes`** (director, read) answers `{ routes }`, the table itself, which lists this route too.
+- **The guard:** an `/api` request `match` does not name reaches no handler, so a route that is handled but not listed can never be reached.
+  - Right after the sign-in check, before any read: a GET or HEAD answers 404 "Unknown read route. Commands are sent with POST or PATCH." (a mistyped read, or a command asked for with GET), and a method other than GET, POST or PATCH answers 405 with `Allow: POST, PATCH`. A request to the agent test route's address other than its POST, signed in or not, is refused here as an unknown read; before, a GET there was answered with the attempt's record without the sign-in.
+  - At the start of the commands, once the request token is weighed and a keyed command has left its activity line, before any command handler: a POST or PATCH the table does not name, such as an unknown task action or a listed path with a method it does not have (`PATCH /api/control`), answers 404 `Unknown controller route.`. A cookie-signed command without its token is still refused for the token first.
+  - The sign-in, request-token, attempt-token and project checks answer as before.
+- **Methods:** a handler that does not check its method answers only the listed ones: task actions, `/api/pipeline`, `/api/preview`, `/api/control` and the instruction commands take POST; a project's `autonomy` and `organization` take POST or PATCH; `lines` and `milestones` add with POST and change with PATCH.
+- **Adding a route:** add its entry to the table with the handler, or the guard refuses it. `test/routes.test.mjs` reads the table from `GET /api/routes`, sends a request to every listed `/api` route and checks that none meets the guard, checks the guard's refusals, and checks that every request the dashboard makes (a list in the test, which must name each `/api` path written in `dashboard/src`) is a listed route.
 
 ## The controller's own git (November 2026)
 
