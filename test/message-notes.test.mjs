@@ -1,0 +1,216 @@
+// A director's note on a busy or finished story (team chat, November 2026): a message naming the story's builder
+// while the story cannot act on it is kept as a note waiting for an attempt. The story's next attempt receives every
+// waiting note after its own direction, in Send back's words, within the direction limit, and each note records that
+// attempt in the transaction that records it. The story's own direction never changes, so the attempt after does not
+// receive them again, and a start the studio refuses leaves them waiting. Model-free: attempts are claimed by the
+// controller (Runner.claimAttempt) and no process or model runs.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { setup as studio } from './studio-setup.mjs';
+import { projectOrganization } from '../src/core/project-organization.mjs';
+import { directionWithNotes, messageLimits } from '../src/core/messages.mjs';
+
+const projectId = 'project-legacy',
+  post = (c, taskId, text) =>
+    c.request(`/api/projects/${projectId}/messages`, { projectId, channel: { type: 'task', id: taskId }, text }),
+  assignmentLayer = attempt => JSON.parse(attempt.instructions.layers.find(layer => layer.title === 'Assignment').text);
+
+// A studio with general stories of one builder, no prerequisites and room for every attempt the tests record.
+async function stories(t) {
+  const c = await studio(t),
+    store = c.app.store,
+    runner = c.app.runner,
+    builder = projectOrganization(store, projectId).workers.find(worker => worker.enabled);
+  const org = store.organization();
+  org.maxParallel = 20;
+  store.setOrganization(org);
+  // A story whose attempt is running now (or stopped, with no attempt running), not queued, so nothing starts it.
+  const seed = (name, { direction = '', resources = [], running = true } = {}) => {
+    const taskId = `T-${name}`,
+      attemptId = `attempt-${name}-first`;
+    store.putTask({
+      id: taskId,
+      projectId,
+      kind: 'general',
+      title: `The ${name}`,
+      brief: 'Bounded model-free work.',
+      workerId: builder.id,
+      team: builder.team,
+      teamId: builder.teamId,
+      status: running ? 'running' : 'failed',
+      direction,
+      reason: '',
+      hold: false,
+      queued: false,
+      dependencies: [],
+      resources,
+      maxAttempts: 10,
+      createdAt: new Date().toISOString(),
+      lastAttemptId: attemptId,
+    });
+    store.insertAttempt(
+      {
+        id: attemptId,
+        taskId,
+        projectId,
+        workerId: builder.id,
+        status: running ? 'running' : 'failed',
+        artifacts: [],
+      },
+      { text: 'Fixture', hash: 'fixture' },
+    );
+    return taskId;
+  };
+  // The story's live attempts stop, their resources are released, and the story waits for a new start.
+  const stop = taskId => {
+    for (const attempt of store.attempts(taskId).filter(a => ['running', 'stopping'].includes(a.status))) {
+      store.updateAttempt({ ...attempt, status: 'failed', finishedAt: new Date().toISOString() });
+      store.release(attempt.id);
+    }
+    const task = store.task(taskId);
+    task.status = 'failed';
+    store.putTask(task);
+  };
+  const note = async (taskId, words) => {
+    const posted = await post(c, taskId, `@${builder.displayName} ${words}`);
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+    assert.deepEqual(posted.data.outcome, { type: 'note', taskId, receivedBy: null });
+    return posted.data;
+  };
+  const claim = taskId => runner.claimAttempt(taskId, { director: true }).a.id;
+  return { c, store, runner, builder, seed, stop, note, claim };
+}
+
+test("a note kept while a story runs reaches its next attempt after the story's direction, and records it", async t => {
+  const { store, seed, stop, note, claim } = await stories(t),
+    direction = 'Keep the fixture small.',
+    taskId = seed('busy', { direction }),
+    kept = await note(taskId, 'please also check the empty case');
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: null });
+  stop(taskId);
+  const attemptId = claim(taskId),
+    attempt = store.attempt(attemptId),
+    expected = `${direction}\n\nDirector's note: ${kept.text}`;
+  assert.equal(attempt.assignment.direction, expected);
+  assert.equal(assignmentLayer(attempt).direction, expected);
+  assert.ok(attempt.instructions.text.includes(JSON.stringify(expected)), 'The compiled text carries the note.');
+  assert.equal(store.task(taskId).direction, direction, "The story's own direction is unchanged.");
+  assert.equal(store.task(taskId).status, 'running');
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: attemptId });
+  assert.deepEqual(store.waitingNotes(projectId, taskId), []);
+
+  // The attempt after it does not receive the note again.
+  stop(taskId);
+  const nextId = claim(taskId),
+    next = store.attempt(nextId);
+  assert.notEqual(nextId, attemptId);
+  assert.equal(next.assignment.direction, direction);
+  assert.equal(assignmentLayer(next).direction, direction);
+  assert.ok(!next.instructions.text.includes('please also check the empty case'));
+  assert.ok(!next.instructions.text.includes("Director's note:"));
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: attemptId });
+});
+
+test('two notes reach one attempt in the order they were written, and both record it', async t => {
+  const { store, seed, stop, note, claim } = await stories(t),
+    taskId = seed('ordered'),
+    first = await note(taskId, 'first: rename the step'),
+    second = await note(taskId, 'second: then add the check');
+  stop(taskId);
+  const attemptId = claim(taskId),
+    { direction } = store.attempt(attemptId).assignment;
+  // The story had no direction of its own, so the notes are all of it.
+  assert.equal(direction, `Director's note: ${first.text}\n\nDirector's note: ${second.text}`);
+  assert.ok(direction.indexOf(first.text) < direction.indexOf(second.text));
+  for (const kept of [first, second])
+    assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: attemptId });
+  assert.equal(store.task(taskId).direction, '');
+});
+
+test("a start refused for the studio's limit or a held resource delivers nothing, and the next start does", async t => {
+  const { store, seed, stop, note, claim } = await stories(t),
+    direction = 'Own direction.',
+    resource = 'note-fixture-resource',
+    taskId = seed('refused', { direction, resources: [resource] }),
+    kept = await note(taskId, 'wait for your turn'),
+    waiting = () => assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: null }),
+    attempts = () => store.attempts(taskId).length;
+  stop(taskId);
+  // As many live attempts as the studio's limit: another story's attempt holds the last slot.
+  const other = seed('slot-holder');
+  const org = store.organization();
+  org.maxParallel = store.liveAttempts().length;
+  store.setOrganization(org);
+  const before = attempts();
+  assert.throws(() => claim(taskId), /Studio concurrency limit reached\./);
+  assert.equal(attempts(), before);
+  waiting();
+  assert.equal(store.task(taskId).direction, direction);
+  assert.equal(store.task(taskId).status, 'blocked');
+  // A resource of the story held by another owner refuses the start the same way.
+  stop(other);
+  store.claim([resource], 'held-by-another-story');
+  assert.throws(
+    () => claim(taskId),
+    error => error.wait === true && error.conflict?.resource === resource,
+  );
+  assert.equal(attempts(), before);
+  waiting();
+  assert.equal(store.task(taskId).direction, direction);
+  assert.equal(store.task(taskId).status, 'blocked');
+  // Once the resource is free, the next start delivers the note.
+  store.release('held-by-another-story');
+  const attemptId = claim(taskId);
+  assert.equal(store.attempt(attemptId).assignment.direction, `${direction}\n\nDirector's note: ${kept.text}`);
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: attemptId });
+  assert.equal(store.task(taskId).direction, direction);
+});
+
+test("a note on one story's thread never reaches another story's attempt", async t => {
+  const { store, seed, note, claim } = await stories(t),
+    noted = seed('noted'),
+    kept = await note(noted, 'only for this story'),
+    otherDirection = 'The other story.',
+    other = seed('other', { direction: otherDirection, running: false });
+  const attemptId = claim(other),
+    attempt = store.attempt(attemptId);
+  assert.equal(attempt.assignment.direction, otherDirection);
+  assert.ok(!attempt.instructions.text.includes('only for this story'));
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId: noted, receivedBy: null });
+  assert.deepEqual(
+    store.waitingNotes(projectId, noted).map(message => message.id),
+    [kept.id],
+  );
+});
+
+test('a longest note on a direction near its limit keeps the direction first and stays within 24000 characters', async t => {
+  const { store, builder, seed, stop, note, claim } = await stories(t),
+    direction = 'D'.repeat(23990),
+    taskId = seed('long', { direction }),
+    words = 'N'.repeat(messageLimits.textMax - builder.displayName.length - 2),
+    kept = await note(taskId, words);
+  assert.equal(kept.text.length, messageLimits.textMax);
+  stop(taskId);
+  const attemptId = claim(taskId),
+    delivered = store.attempt(attemptId).assignment.direction;
+  assert.equal(delivered.length, 24000);
+  assert.ok(delivered.startsWith(direction));
+  assert.ok(delivered.endsWith('…'));
+  assert.equal(delivered, `${direction}\n\nDirector's note: ${kept.text}`.slice(0, 23999) + '…');
+  assert.equal(store.task(taskId).direction, direction);
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: attemptId });
+});
+
+test("the direction helper keeps a direction without notes and gives one note alone in Send back's words", () => {
+  assert.equal(directionWithNotes('As it was.', []), 'As it was.');
+  assert.equal(directionWithNotes('As it was.'), 'As it was.');
+  assert.equal(directionWithNotes('', []), '');
+  assert.equal(directionWithNotes('', [{ text: 'Look again.' }]), "Director's note: Look again.");
+  assert.equal(
+    directionWithNotes('First.', [{ text: 'One.' }, { text: 'Two.' }]),
+    "First.\n\nDirector's note: One.\n\nDirector's note: Two.",
+  );
+  const long = directionWithNotes('x'.repeat(24000), [{ text: 'y' }]);
+  assert.equal(long.length, 24000);
+  assert.ok(long.startsWith('x'.repeat(23999)) && long.endsWith('…'));
+});

@@ -880,6 +880,18 @@ export class Store {
       .all(projectId, type, channelId, after, limit + 1);
     return { messages: rows.slice(0, limit).map(messageOf), newer: rows.length > limit };
   }
+  // Every note on one task's thread that waits for the task's next attempt, oldest first: a director's message kept
+  // as { type: 'note', taskId, receivedBy: null } (postMessage). The attempt that receives them records itself as
+  // each one's receivedBy (setMessageOutcome), so a note is read here until it is delivered and never after.
+  waitingNotes(projectId, taskId) {
+    return this.db
+      .prepare(
+        "SELECT * FROM messages WHERE project_id=? AND channel_type='task' AND channel_id=? AND json_extract(data, '$.outcome.type')='note' ORDER BY seq",
+      )
+      .all(projectId, taskId)
+      .map(messageOf)
+      .filter(message => message.outcome?.taskId === taskId && message.outcome.receivedBy === null);
+  }
   // Records what a message led to; its words, sender and place stay as they were.
   setMessageOutcome(id, outcome) {
     const row = this.db.prepare('SELECT * FROM messages WHERE id=?').get(id);

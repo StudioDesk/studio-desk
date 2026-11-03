@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { hash, resultSchema, validateResult } from './contracts.mjs';
 import { compileInstructions } from './instructions.mjs';
+import { directionWithNotes } from './messages.mjs';
 import { artifactPath, validateAcceptedReferences, validateProtectedFiles } from './artifacts.mjs';
 import { directorInputsFor, directorInputReferences, stageDirectorInputs } from './idea-inputs.mjs';
 import { libraryFor, stageLibrary } from './library.mjs';
@@ -826,10 +827,15 @@ export class Runner {
     const library = libraryFor(store, { ...task, projectId }, references, {
       delivery: stepContract(this.workflows.find(task.kind)).receives.library,
     });
+    // The director's notes left on the story's thread while it could not take them reach this attempt after its
+    // direction, in its instructions and recorded assignment only: the task keeps its own direction, so the attempt
+    // after this one does not receive them again, and a refused start leaves them waiting.
+    const notes = store.waitingNotes(projectId, task.id),
+      delivered = notes.length ? { ...task, direction: directionWithNotes(task.direction, notes) } : task;
     const snapshot = this.compileInstructions(
       org,
       worker,
-      task,
+      delivered,
       id,
       output,
       inputs,
@@ -864,7 +870,7 @@ export class Runner {
       artifacts: [],
       configuration,
       assignment: {
-        ...structuredClone(task),
+        ...structuredClone(delivered),
         projectId,
         resources,
         directorInputs,
@@ -914,6 +920,8 @@ export class Runner {
           throw Object.assign(error, { wait: true });
         }
         store.insertAttempt(a, snapshot);
+        // Each delivered note records this attempt with it, or neither is recorded.
+        for (const note of notes) store.setMessageOutcome(note.id, { ...note.outcome, receivedBy: id });
         task.status = 'running';
         task.reason = '';
         delete task.autonomyNote;

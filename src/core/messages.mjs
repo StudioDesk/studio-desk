@@ -209,6 +209,20 @@ function preparedMessage(store, projectId, fields, from, outcome) {
 
 const waiting = Object.freeze({ type: 'waiting', reason: 'Waiting for a reply.' });
 
+// The longest direction an attempt takes, as proposals.mjs, autonomy-runtime.mjs and flow-run.mjs bound it.
+const directionMax = 24000;
+
+// An attempt's direction with the notes that wait for it (store.waitingNotes): the task's own direction first and
+// unchanged, then one paragraph per note in their order, in Send back's words ("Director's note: <text>"), each
+// separated by a blank line. A longer result keeps its first 23999 characters and ends with '…'. No notes give the
+// direction back as it is.
+export function directionWithNotes(direction, notes = []) {
+  const own = typeof direction === 'string' ? direction : '';
+  if (!notes.length) return direction;
+  const composed = [own, ...notes.map(note => `Director's note: ${note.text}`)].filter(Boolean).join('\n\n');
+  return composed.length > directionMax ? composed.slice(0, directionMax - 1) + '…' : composed;
+}
+
 // Which of the director's own actions a mention of a task's builder takes, by the task's state: send back work whose
 // later stage returned it or passed (where its stages allow it), revise work awaiting review, or start stopped or ready
 // work with the message as its direction. Anything else (running or stopping work, accepted work with nothing to send
@@ -305,7 +319,8 @@ function plannerMention(store, registries, message, keep, queueStart) {
 // action's transaction with what it led to: { type: 'sent-back' | 'revised' | 'started', taskId }. The work is then
 // queued as those buttons queue it (`queueStart`, the controller's queued Start), and the queue's answer is added as
 // the outcome's `start`. Work the mention cannot act on keeps the message as a note ({ type: 'note', taskId,
-// receivedBy: null }); an action that refuses (`refuseIntegration`, the controller's refusal of an approved
+// receivedBy: null }), delivered to the story's next attempt after its direction (directionWithNotes, when the
+// controller claims that attempt), which the note then records as its receivedBy; an action that refuses (`refuseIntegration`, the controller's refusal of an approved
 // integration, or the action's own checks) keeps it with { type: 'refused', reason } and changes nothing else. Any
 // other message waits for a reply. Returns the message as the store reads it back.
 export function postMessage(store, registries, projectId, fields, { queueStart, refuseIntegration } = {}) {
