@@ -5,7 +5,9 @@
 // retiring a line act here; the controller decides what a version means and where its work lands, and Push asks every
 // time, since it is the one thing that leaves this computer. On version lines (overview.shipsTo), the branch releases
 // ship to has a card and a map row of its own, apart from the lines, and each line says which version it builds or
-// patches; a project that is not on version lines reads as before.
+// patches; a project that is not on version lines reads as before. There a released version also says where it
+// shipped, or why it did not: skipped, or stopped with an error, which offers Ship again; and Push says it sends the
+// branch releases ship to as well when it will.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useState, type CSSProperties, type FormEvent } from 'react';
@@ -16,6 +18,7 @@ import {
   releasesUrl,
   send,
   type Milestone,
+  type MilestoneRelease,
   type ReleaseLine,
   type ReleaseOverview,
   type ReleaseStory,
@@ -790,7 +793,12 @@ function MilestoneCard({
     done = counts.stories ? Math.round((counts.integrated / counts.stories) * 100) : 0,
     working = counts.stories ? Math.round((counts.started / counts.stories) * 100) : 0,
     others = all.filter(item => item.state === 'open' && item.id !== milestone.id),
-    isOpen = opened === milestone.id || opened === milestone.version;
+    isOpen = opened === milestone.id || opened === milestone.version,
+    toast = useToast(),
+    shipped = release?.state === 'released' ? release.shipped : undefined,
+    // Push sends the branch releases ship to as well when the release moved it and it is not the release's own line.
+    alsoSends =
+      shipped?.commit && shipped.branch !== (release?.repository?.branch ?? milestone.line) ? shipped.branch : null;
   return (
     <article
       className={`sd-milestone${milestone.state === 'released' ? ' sd-milestone--released' : ''}`}
@@ -945,6 +953,29 @@ function MilestoneCard({
             Release again
           </button>
         )}
+        {shipped?.error && !shipped.commit && !shipped.skipped && (
+          <button
+            type="button"
+            className="sd-btn sd-btn--sm"
+            disabled={action.isPending}
+            onClick={() =>
+              action.mutate(
+                { url: `${base}/ship`, body: {} },
+                {
+                  // Shipping again can stop again; the controller records why, and the card shows it once read again.
+                  onSuccess: answer => {
+                    const again = (answer as { shipped?: MilestoneRelease['shipped'] | null } | undefined)?.shipped;
+                    toast(
+                      again?.error ? `Shipping to ${again.branch} stopped again: ${again.error}` : 'Shipped again.',
+                    );
+                  },
+                },
+              )
+            }
+          >
+            Ship again
+          </button>
+        )}
         {release?.state === 'released' && !release.pushed && (
           <button type="button" className="sd-btn sd-btn--primary sd-btn--sm" onClick={() => setPushing(true)}>
             Push…
@@ -983,9 +1014,9 @@ function MilestoneCard({
       >
         <h2 className="sd-dialog__title">Push to the remote?</h2>
         <p>
-          This sends the line and the tag {release?.tag} with your own git sign-in. It is the one thing in Studio desk
-          that leaves this computer, so it asks every time. If git needs a password it stops rather than wait, and shows
-          the command to run yourself.
+          {alsoSends ? `This sends the line, ${alsoSends} and the tag ` : 'This sends the line and the tag '}
+          {release?.tag} with your own git sign-in. It is the one thing in Studio desk that leaves this computer, so it
+          asks every time. If git needs a password it stops rather than wait, and shows the command to run yourself.
         </p>
         <div className="sd-dialog__actions">
           <button
@@ -1042,16 +1073,40 @@ function ReleaseState({ release, projectId }: { release?: Milestone['release']; 
     );
   if (release.state === 'released')
     return (
-      <span className="sd-meta">
-        Tagged {release.tag}
-        {release.pushed ? ` · pushed to ${release.pushed.remote}` : ''}
-      </span>
+      <>
+        <span className="sd-meta">
+          Tagged {release.tag}
+          {release.pushed ? ` · pushed to ${release.pushed.remote}` : ''}
+        </span>
+        <ShippedState shipped={release.shipped} />
+      </>
     );
   return (
     <span className="sd-meta" role="alert">
       The release stopped{release.error ? `: ${release.error}` : '.'}
     </span>
   );
+}
+
+// On version lines, what became of shipping a release to the branch releases ship to: the commit it moved to, why it
+// was not shipped, or the error that stopped it. A release without it reads as before.
+function ShippedState({ shipped }: { shipped?: MilestoneRelease['shipped'] }) {
+  if (!shipped) return null;
+  if (shipped.commit)
+    return (
+      <span className="sd-meta">
+        Shipped to {shipped.branch}
+        {shipped.merged ? ' as a merge whose content is the release' : ''} · {shipped.commit.slice(0, 7)}
+      </span>
+    );
+  if (shipped.skipped) return <span className="sd-meta">Not shipped: {shipped.skipped}</span>;
+  if (shipped.error)
+    return (
+      <span className="sd-meta" role="alert">
+        Shipping to {shipped.branch} stopped: {shipped.error}
+      </span>
+    );
+  return null;
 }
 
 function ReleaseDialog({

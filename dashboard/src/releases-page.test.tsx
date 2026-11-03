@@ -693,3 +693,112 @@ test('the page asks for no releases until the stream says where the controller i
   expect(await screen.findByRole('region', { name: 'release/1.0' })).toBeTruthy();
   expect(controller.reads()).toContain(releasesRead);
 });
+
+// On version lines, 1.2.0 released on release/1.2 and what became of shipping it to main.
+const shippedRelease = (shipped: NonNullable<Milestone['release']>['shipped']) => {
+  const releases = switched();
+  releases.lines![1]!.released = true;
+  releases.milestones![2] = milestone('1.2.0', 'release/1.2', {
+    state: 'released',
+    release: { state: 'released', tag: 'v1.2.0', repository: { branch: 'release/1.2' }, shipped },
+  });
+  return releases;
+};
+const releasedCard = async () => within(await screen.findByRole('region', { name: 'Released' }));
+
+test('a released version shipped to main says so, names the merge and its commit, and offers no Ship again', async () => {
+  controller.releases = shippedRelease({ branch: 'main', commit: 'd1e2f3a4b5c6', merged: true, at: '' });
+  open('/p/project-x/releases');
+  const released = await releasedCard();
+  expect(released.getByText('Shipped to main as a merge whose content is the release · d1e2f3a')).toBeTruthy();
+  expect(released.getByText('Tagged v1.2.0')).toBeTruthy();
+  expect(released.queryByRole('button', { name: 'Ship again' })).toBeNull();
+  expect(released.queryByRole('alert')).toBeNull();
+  cleanup();
+  // A fast-forward is not a merge.
+  controller.releases = shippedRelease({ branch: 'main', commit: 'd1e2f3a4b5c6', at: '' });
+  open('/p/project-x/releases');
+  expect((await releasedCard()).getByText('Shipped to main · d1e2f3a')).toBeTruthy();
+  expect(screen.queryByText(/as a merge/)).toBeNull();
+});
+
+test('a released version that was not shipped gives the recorded reason, and offers no Ship again', async () => {
+  controller.releases = shippedRelease({
+    branch: 'main',
+    skipped: 'v1.3.0 is newer, and main holds the newest release.',
+    at: '',
+  });
+  open('/p/project-x/releases');
+  const released = await releasedCard();
+  expect(released.getByText('Not shipped: v1.3.0 is newer, and main holds the newest release.')).toBeTruthy();
+  expect(released.queryByText(/Shipped to/)).toBeNull();
+  expect(released.queryByRole('button', { name: 'Ship again' })).toBeNull();
+});
+
+test('shipping that stopped shows its error as an alert, and Ship again asks the controller, then reads the releases', async () => {
+  const user = userEvent.setup();
+  controller.releases = shippedRelease({ branch: 'main', error: 'main moved while the release shipped.', at: '' });
+  let finish: (answer: unknown) => void = () => {};
+  controller.command = () => new Promise(resolve => (finish = resolve));
+  open('/p/project-x/releases');
+  const released = await releasedCard();
+  expect(released.getByRole('alert').textContent).toBe(
+    'Shipping to main stopped: main moved while the release shipped.',
+  );
+  const reads = controller.reads().filter(url => url === releasesRead).length;
+  const again = released.getByRole('button', { name: 'Ship again' });
+  await user.click(again);
+  expect(commands()).toEqual([
+    {
+      url: '/api/projects/project-x/milestones/milestone-1.2.0/ship',
+      method: 'POST',
+      body: { projectId: 'project-x' },
+    },
+  ]);
+  // It waits for the controller's answer before it can be asked again.
+  await waitFor(() => expect((again as HTMLButtonElement).disabled).toBe(true));
+  controller.releases = shippedRelease({ branch: 'main', commit: 'e1f2a3b4c5d6', merged: true, at: '' });
+  finish({ shipped: { branch: 'main', commit: 'e1f2a3b4c5d6', merged: true, at: '' } });
+  expect(await screen.findByText('Shipped again.')).toBeTruthy();
+  expect(await released.findByText('Shipped to main as a merge whose content is the release · e1f2a3b')).toBeTruthy();
+  expect(controller.reads().filter(url => url === releasesRead).length).toBeGreaterThan(reads);
+  expect(released.queryByRole('button', { name: 'Ship again' })).toBeNull();
+});
+
+test("Ship again shows the controller's refusal in its words", async () => {
+  const user = userEvent.setup();
+  controller.releases = shippedRelease({ branch: 'main', error: 'main moved while the release shipped.', at: '' });
+  controller.command = () => {
+    throw new Error('1.2.0 has nothing to ship again.');
+  };
+  open('/p/project-x/releases');
+  await user.click((await releasedCard()).getByRole('button', { name: 'Ship again' }));
+  expect(await screen.findByText('1.2.0 has nothing to ship again.')).toBeTruthy();
+  expect(screen.queryByText('Shipped again.')).toBeNull();
+});
+
+test('Push says it sends main as well for a release shipped there; otherwise its words are unchanged', async () => {
+  const user = userEvent.setup();
+  controller.releases = shippedRelease({ branch: 'main', commit: 'd1e2f3a4b5c6', merged: true, at: '' });
+  open('/p/project-x/releases');
+  await releasedCard();
+  // 1.1.0 was released on main before the switch, and 1.2.0 shipped to it from release/1.2.
+  await user.click(within(document.getElementById('milestone-1.2.0')!).getByRole('button', { name: 'Push…' }));
+  expect(
+    screen.getByText(/^This sends the line, main and the tag v1\.2\.0 with your own git sign-in\. It is the one thing/),
+  ).toBeTruthy();
+  cleanup();
+  controller.releases = overview();
+  controller.releases.milestones![1] = milestone('1.1.0', 'main', {
+    state: 'released',
+    release: { state: 'released', tag: 'v1.1.0' },
+  });
+  open('/p/project-x/releases');
+  await user.click(await screen.findByRole('button', { name: 'Push…' }));
+  expect(
+    screen.getByText(
+      'This sends the line and the tag v1.1.0 with your own git sign-in. It is the one thing in Studio desk that leaves this computer, so it asks every time. If git needs a password it stops rather than wait, and shows the command to run yourself.',
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText(/This sends the line, /)).toBeNull();
+});
