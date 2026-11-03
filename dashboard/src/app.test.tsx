@@ -4,11 +4,29 @@ import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './app';
 import { setChatBox } from './chat-box';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
+
+// The pages these tests open that load on demand (router.tsx), and Create a project, which the frame loads when it
+// opens. Their code is loaded before the tests, so the router's load resolves at once and a test's one-second wait
+// measures only the page's rendering. Each test that opens one also waits for something the page itself shows, so no
+// page's code is still loading when the test ends: Vitest fails the run when a load outlives the file's simulated page.
+beforeAll(async () => {
+  await Promise.all([
+    import('./settings-page'),
+    import('./previews-page'),
+    import('./platform-page'),
+    import('./activity-log-page'),
+    import('./agents-page'),
+    import('./teams-page'),
+    import('./instructions-page'),
+    import('./runs-page'),
+    import('./new-project'),
+  ]);
+});
 
 let controller: Controller;
 beforeEach(() => {
@@ -119,6 +137,7 @@ test('a story belongs to its idea, and the teams pages to the agents', async () 
   const nav = within(await screen.findByRole('navigation', { name: 'Main' }));
   expect(nav.getByRole('link', { name: 'Agents' }).getAttribute('aria-current')).toBe('page');
   expect(nav.getByRole('link', { name: 'Project settings' }).getAttribute('aria-current')).toBeNull();
+  await screen.findByRole('heading', { level: 1, name: 'Teams' });
 });
 
 test('Previews opens directly under Settings and keeps the project settings frame selected', async () => {
@@ -179,14 +198,20 @@ test('Add a project opens Create a project over the page, from the rail or Find 
 });
 
 test("the agents' addresses from under Settings lead to the same pages under Agents", async () => {
-  for (const [from, to] of [
-    ['/p/project-x/settings/employees', '/p/project-x/agents'],
-    ['/p/project-x/settings/employees/W-1', '/p/project-x/agents/W-1'],
-    ['/p/project-x/settings/teams/engineering', '/p/project-x/agents/teams/engineering'],
-    ['/p/project-x/settings/instructions?open=employee:W-1', '/p/project-x/agents/instructions?open=agent%3AW-1'],
+  // Each with the heading of the page it leads to, which shows once that page's code has loaded.
+  for (const [from, to, page] of [
+    ['/p/project-x/settings/employees', '/p/project-x/agents', 'Agents'],
+    ['/p/project-x/settings/employees/W-1', '/p/project-x/agents/W-1', 'Agents'],
+    ['/p/project-x/settings/teams/engineering', '/p/project-x/agents/teams/engineering', 'Team'],
+    [
+      '/p/project-x/settings/instructions?open=employee:W-1',
+      '/p/project-x/agents/instructions?open=agent%3AW-1',
+      'Instructions',
+    ],
   ] as const) {
     const router = open(from);
     await waitFor(() => expect(router.history.location.href).toBe(to));
+    await screen.findByRole('heading', { level: 1, name: page });
     cleanup();
   }
   // Settings' own pages stay where they are.
@@ -199,6 +224,8 @@ test('the Needs you count follows the live set, and a tile on the rail opens its
   controller.tasks = [taskFixture('T-1', { title: 'Waiting to start' })];
   const router = open('/p/project-x/runs');
   expect(await screen.findAllByLabelText('1 call for you')).toHaveLength(2);
+  // The count is the frame's; the ideas' page itself shows too.
+  await screen.findByRole('heading', { level: 1, name: 'Ideas' });
   // The open project's tile counts the same call; Project Y, whose records the stand-in does not know, shows none.
   const rail = within(screen.getByRole('navigation', { name: 'Projects' })),
     tile = await rail.findByRole('link', { name: 'Project X: 1 call for you' });
@@ -290,6 +317,8 @@ test('with the chat box switched off, the sidebar lists no talks, even with an i
   const ideas = within(await screen.findByRole('navigation', { name: 'Ideas in this project' }));
   expect(ideas.getByRole('link', { name: 'Talk it through first.' })).toBeTruthy();
   expect(screen.queryByRole('navigation', { name: 'Talking it through' })).toBeNull();
+  // That list is the frame's; the idea's own page shows too.
+  await screen.findByRole('heading', { level: 1, name: /Talk it through first/ });
   // Switched on, the same records list it (chat-panel.test.tsx follows it into the chat box).
   act(() => setChatBox(true));
   const talks = within(await screen.findByRole('navigation', { name: 'Talking it through' }));

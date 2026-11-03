@@ -4,11 +4,25 @@ import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import type { BuiltInSandbox, TrySettings, TryView } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
+
+// Settings, Previews and the agents' pages these tests open load on demand (router.tsx). Their code is loaded
+// before the tests, so the router's load resolves at once and a test's one-second wait for a page measures only its
+// rendering, not fetching and preparing its code, which took more than a second on a busy computer.
+beforeAll(async () => {
+  await Promise.all([
+    import('./settings-page'),
+    import('./previews-page'),
+    import('./agents-page'),
+    import('./teams-page'),
+    import('./instructions-page'),
+    import('./activity-log-page'),
+  ]);
+});
 
 let controller: Controller;
 beforeEach(() => {
@@ -1056,6 +1070,9 @@ test('Repository shows how a story is tried yourself, and that the next Run runs
   expect(unset.queryByText(/^The next Run runs on this computer/)).toBeNull();
 });
 
+// A longer time limit for genuinely slow work: this test types about fifty characters one key at a time, and each key
+// renders the dialog again. With every CPU thread kept busy it took just over Vitest's five seconds (5013-5062 ms, in
+// three of four runs), with its pages' code already loaded; unslowed it passes within them.
 test('the try settings save the start command as a program and its arguments, the address, the folder and Run in', async () => {
   const user = userEvent.setup();
   codeProject();
@@ -1106,7 +1123,7 @@ test('the try settings save the start command as a program and its arguments, th
   expect(await trying.findByText('This computer')).toBeTruthy();
   expect(trying.getByText('D:/tries/site')).toBeTruthy();
   expect(controller.reads().filter(url => url === '/api/projects/project-x/try')).toHaveLength(2);
-});
+}, 15_000);
 
 test('an empty address and folder are sent as null, which reads the address from the output and keeps the default folder', async () => {
   const user = userEvent.setup();

@@ -5,7 +5,7 @@ import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary } from './api';
 import { App } from './app';
 import { LiveStream } from './live';
@@ -19,6 +19,13 @@ import {
   whenShown,
   type Controller,
 } from './test-controller';
+
+// The story page loads on demand (router.tsx). Its code is loaded before the tests, so the router's load resolves at
+// once and a test's one-second wait for the page measures only its rendering, not fetching and preparing its code,
+// which took more than a second on a busy computer.
+beforeAll(async () => {
+  await import('./task-page');
+});
 
 let controller: Controller;
 const taskUrl = '/api/tasks/T-1?projectId=project-x';
