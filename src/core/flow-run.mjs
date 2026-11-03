@@ -663,7 +663,7 @@ function putFlowTasks(store, registries, tasks, reruns) {
   }
 }
 
-function advanceGroup(store, registries, groupId, taskId = null, reference = null) {
+function advanceGroup(store, registries, groupId, taskId = null, reference = null, prefix = '') {
   const stored = flowRecord(store, groupId);
   if (!stored || stored.schemaVersion !== FLOW_RUN_SCHEMA) return [];
   if (reference && (reference.flowId !== stored.flowId || reference.revision !== stored.revision)) return [];
@@ -671,7 +671,7 @@ function advanceGroup(store, registries, groupId, taskId = null, reference = nul
     { changes, tasks, reruns } = followEdges(store, registries, record);
   if (!changes.length) return [];
   putFlowTasks(store, registries, tasks, reruns);
-  writeFlow(store, record, changes.join(' '), taskId);
+  writeFlow(store, record, prefix + changes.join(' '), taskId);
   return tasks.map(created => created.id);
 }
 
@@ -689,12 +689,8 @@ export function advanceFlow(store, registries, task) {
 // waits for, or a flow task was denied or cancelled outside an attempt. Each flow that changed is written in its own
 // transaction. Only flow records are read; with no flow there is nothing to do. A stopped flow never changes again.
 export function advanceOpenFlows(store, registries) {
-  const ids = store.db
-    .prepare("SELECT id FROM settings WHERE id LIKE 'flow:%'")
-    .all()
-    .map(row => row.id.slice('flow:'.length));
   const created = [];
-  for (const groupId of ids) {
+  for (const groupId of flowGroupIds(store)) {
     const record = flowRecord(store, groupId);
     if (!record || record.schemaVersion !== FLOW_RUN_SCHEMA || record.stopped) continue;
     created.push(...store.tx(() => advanceGroup(store, registries, groupId)));
@@ -702,10 +698,55 @@ export function advanceOpenFlows(store, registries) {
   return created;
 }
 
+const flowGroupIds = store =>
+  store.db
+    .prepare("SELECT id FROM settings WHERE id LIKE 'flow:%'")
+    .all()
+    .map(row => row.id.slice('flow:'.length));
+
+// Reconciles every open flow once when the controller starts (the Orchestrator's constructor, after it marked the
+// attempts a stop cut off as interrupted): each node's recorded state and round are compared with its task through the
+// same path advanceFlow takes. A task that settled while its flow was not advanced (a milestone reached while the
+// controller was stopped) is followed once; a node whose task was interrupted stays as its task is, blocked until the
+// director reconciles it, and is followed only when it settles; a gate decided for its round is never decided again; a
+// pending director decision stays pending; a node that has a task in its round gets no second one. Recovery writes
+// tasks only (the pipeline is paused at a restart) and starts no attempt. Each flow that changed is one flow event on
+// the change stream with its group's ID and sequence; a flow that cannot be read is left as it is, with an event.
+// Returns the IDs of the tasks it created.
+export function recoverFlows(store, registries) {
+  const created = [];
+  for (const groupId of flowGroupIds(store)) {
+    const record = flowRecord(store, groupId);
+    if (!record || record.schemaVersion !== FLOW_RUN_SCHEMA || record.stopped) continue;
+    try {
+      created.push(
+        ...store.tx(() => advanceGroup(store, registries, groupId, null, null, 'After the controller started again: ')),
+      );
+    } catch (error) {
+      store.event(
+        'flow',
+        null,
+        null,
+        `The flow of group ${groupId} could not be checked after the controller started again and stays as it was: ${error.message}`,
+        record.projectId,
+      );
+    }
+  }
+  return created;
+}
+
+// What a director may choose at a gate whose rule is director.
+export const GATE_CHOICES = Object.freeze([
+  Object.freeze({ id: 'pass', label: 'Pass' }),
+  Object.freeze({ id: 'send-back', label: 'Send it back' }),
+]);
+
 const choiceWords = {
   'another-round': 'another round',
   'accept-over': 'to accept it over the findings',
   stop: 'to stop',
+  pass: 'to pass it',
+  'send-back': 'to send it back',
 };
 
 // Applies the director's answer to a loop at its limit, once, in one transaction: another-round sends the work back
@@ -713,8 +754,9 @@ const choiceWords = {
 // source's passed edges, and stop records the group stopped. A decision already made, or one nothing waits for, is
 // refused and writes nothing. Returns the group, the choice, the tasks that start and the flow's new sequence.
 export function decideFlow(store, registries, groupId, { node, choice, reason = '' } = {}) {
-  if (!LIMIT_CHOICES.some(item => item.id === choice))
-    throw new Error(`Choose ${LIMIT_CHOICES.map(item => item.id).join(', ')}.`);
+  const gateChoice = GATE_CHOICES.some(item => item.id === choice);
+  if (!gateChoice && !LIMIT_CHOICES.some(item => item.id === choice))
+    throw new Error(`Choose ${[...LIMIT_CHOICES, ...GATE_CHOICES].map(item => item.id).join(', ')}.`);
   if (typeof reason !== 'string' || reason.length > 4000)
     throw new Error("A decision's reason is text of at most 4000 characters.");
   if (choice === 'accept-over' && !reason.trim()) throw new Error('Accepting over the findings needs a reason.');
@@ -724,6 +766,10 @@ export function decideFlow(store, registries, groupId, { node, choice, reason = 
     const record = structuredClone(stored),
       source = record.graph.nodes.find(item => item.key === node);
     if (!source) throw new Error(`Flow ${record.flowId} has no node ${node}.`);
+    if (gateChoice) {
+      if (record.stopped) throw new Error(`The flow of group ${groupId} stopped.`);
+      return decideGate(store, registries, record, source, choice, reason.trim());
+    }
     const index = (record.pending || []).findIndex(item => item.node === node);
     if (index < 0) {
       const made = (record.directorDecisions || []).filter(item => item.node === node).at(-1);
@@ -757,24 +803,139 @@ export function decideFlow(store, registries, groupId, { node, choice, reason = 
       passOver(record, edge, { by: 'director', reason: why });
       change = `The director accepted ${source.title} over its findings in round ${pending.round}: ${why}`;
     }
-    const { changes, tasks, reruns } = followEdges(store, registries, record);
-    putFlowTasks(store, registries, tasks, reruns);
-    if (tasks.length || reruns.length) {
-      // As when the flow started: the scheduler runs queued work only while the pipeline is on.
-      const org = store.organization();
-      if (!org.pipelineEnabled) {
-        org.pipelineEnabled = true;
-        store.setOrganization(org);
-      }
-    }
-    const saved = writeFlow(store, record, [change, ...changes].join(' '));
-    return {
-      groupId,
-      choice,
-      taskIds: [...reruns, ...tasks].map(task => task.id),
-      sequence: saved.sequence,
-    };
+    return followDecision(store, registries, record, choice, change);
   });
+}
+
+// Follows the edges after a director's decision and writes the flow once, inside the decision's transaction.
+function followDecision(store, registries, record, choice, change) {
+  const { changes, tasks, reruns } = followEdges(store, registries, record);
+  putFlowTasks(store, registries, tasks, reruns);
+  if (tasks.length || reruns.length) {
+    // As when the flow started: the scheduler runs queued work only while the pipeline is on.
+    const org = store.organization();
+    if (!org.pipelineEnabled) {
+      org.pipelineEnabled = true;
+      store.setOrganization(org);
+    }
+  }
+  const saved = writeFlow(store, record, [change, ...changes].join(' '));
+  return {
+    groupId: record.groupId,
+    choice,
+    taskIds: [...reruns, ...tasks].map(task => task.id),
+    sequence: saved.sequence,
+  };
+}
+
+// A director gate's decision for its round, once: pass follows its passed edges, send-back its needs-work edges (a loop
+// among them sends the work back). A gate that waits for no decision, or one already decided, is refused.
+function decideGate(store, registries, record, source, choice, reason) {
+  const entry = record.nodes[source.key];
+  if (source.kind !== 'gate' || entry.decision?.state !== 'pending')
+    throw new Error(
+      entry.decision?.state === 'decided'
+        ? `${source.title} was already decided ${entry.decision.outcome} in round ${entry.decision.round}.`
+        : `Nothing at ${source.title} waits for the director's decision.`,
+    );
+  const outcome = choice === 'pass' ? 'passed' : 'needs-work',
+    at = new Date().toISOString();
+  entry.decision = {
+    ...entry.decision,
+    state: 'decided',
+    outcome,
+    director: { choice, ...(reason ? { reason } : {}), at },
+  };
+  entry.state = outcome;
+  (record.directorDecisions ||= []).push({
+    node: source.key,
+    round: entry.decision.round,
+    choice,
+    ...(reason ? { reason } : {}),
+    at,
+  });
+  const change = `The director ${choice === 'pass' ? 'passed' : 'sent back'} ${source.title} in round ${entry.decision.round}${reason ? `: ${reason}` : '.'}`;
+  return followDecision(store, registries, record, choice, change);
+}
+
+// Stops an open flow at the director's word, once, in one transaction: a pending decision is dropped, nothing new
+// starts and work already running is not cancelled. A stopped or settled flow is refused and nothing is written.
+export function stopFlow(store, registries, groupId, { reason = '' } = {}) {
+  if (typeof reason !== 'string' || reason.length > 4000)
+    throw new Error("A decision's reason is text of at most 4000 characters.");
+  const why = reason.trim();
+  return store.tx(() => {
+    const stored = flowRecord(store, groupId);
+    if (!stored || stored.schemaVersion !== FLOW_RUN_SCHEMA) throw new Error(`Group ${groupId} runs no flow.`);
+    if (stored.stopped) throw new Error(`The flow of group ${groupId} already stopped.`);
+    if (readFlowGroup(store, registries, groupId).state === 'done')
+      throw new Error(`The flow of group ${groupId} already finished.`);
+    const record = structuredClone(stored),
+      at = new Date().toISOString();
+    delete record.pending;
+    record.stopped = { by: 'director', at, ...(why ? { reason: why } : {}) };
+    (record.directorDecisions ||= []).push({ node: null, choice: 'stop', ...(why ? { reason: why } : {}), at });
+    const saved = writeFlow(store, record, `The director stopped the flow${why ? `: ${why}` : '.'}`);
+    return { groupId, choice: 'stop', taskIds: [], sequence: saved.sequence };
+  });
+}
+
+// An action's body field, as the shared task actions write one (public/task-actions.js): its name, whether it is
+// needed, what kind of value it is and the value the controller fills in.
+const field = (name, required, kind, value) => ({ name, required, kind, ...(value === undefined ? {} : { value }) });
+
+// A director's action on the flow itself. No route runs a flow yet, so it names the flow module's operation that
+// performs it (decideFlow or stopFlow) and the fields that operation takes.
+const flowAction = (record, key, label, operation, fields = []) => ({
+  key,
+  label,
+  operation,
+  fields: [field('groupId', true, 'id', record.groupId), ...fields],
+});
+
+// A node's task's own actions, the ones the story page offers on any task (public/task-actions.js, same keys, words
+// and routes), for the states a flow's task passes through: reconcile an interrupted attempt, start work that waits,
+// accept or ask to revise a result in Review, and cancel running work. A flow adds no task action of its own.
+function taskNodeActions(store, task) {
+  const id = encodeURIComponent(task.id),
+    step = route => ({
+      method: 'POST',
+      path: `/api/tasks/${id}/${route}`,
+      fields: [field('projectId', true, 'id', task.projectId)],
+    }),
+    live = ['running', 'stopping'].includes(task.status),
+    unsettled = store
+      .attempts(task.id)
+      .some(attempt => ['interrupted', 'quarantined', 'uncertain'].includes(attempt.status) && !attempt.reconciledAt),
+    actions = [];
+  const offer = (key, label, request, fields = []) =>
+    actions.push({ key, label, ...request, fields: [...request.fields, ...fields] });
+  if (unsettled) offer('reconcile', 'Reconcile interrupted attempt', step('reconcile'));
+  if (!live && !task.closed && !unsettled && ['ready', 'blocked', 'failed', 'cancelled'].includes(task.status))
+    offer('start', 'Start assignment', step('start'), [field('direction', false, 'note')]);
+  if (task.status === 'review') {
+    offer('accept', 'Accept result', step('accept'), [field('overReason', false, 'reason')]);
+    offer('revise', 'Request revision', step('revise'), [field('direction', true, 'note')]);
+  }
+  if (live) offer('cancel', 'Request cancellation', step('cancel'));
+  return actions;
+}
+
+// What the director may do about one node now: a loop at its limit offers its choices, a director gate waiting for
+// its decision offers pass and send back, and a node's task in its current round offers that task's own actions.
+function nodeActions(store, record, node, task) {
+  const choice = (item, reason = false) =>
+    flowAction(record, item.id, item.label, 'decideFlow', [
+      field('node', true, 'id', node.key),
+      field('choice', true, 'text', item.id),
+      field('reason', reason, 'reason'),
+    ]);
+  const actions = [];
+  for (const pending of (record.pending || []).filter(item => item.node === node.key))
+    actions.push(...pending.choices.map(item => choice(item, item.id === 'accept-over')));
+  if (node.decision?.state === 'pending') actions.push(...GATE_CHOICES.map(item => choice(item)));
+  if (task) actions.push(...taskNodeActions(store, task));
+  return actions;
 }
 
 // The group's state: stopped once a loop or the director stopped it; in-review while the director decides a loop at
@@ -804,12 +965,14 @@ export function readFlowGroup(store, registries, groupId) {
   const record = flowRecord(store, groupId);
   if (!record) return null;
   const isOpen = [],
-    reviewKeys = new Set();
+    reviewKeys = new Set(),
+    tasks = [];
   const nodes = record.graph.nodes.map(node => {
     const entry = record.nodes[node.key],
       task = currentTask(store, entry),
       state = task ? taskStates[task.status] || 'waiting' : entry.state;
     isOpen.push(open(store, registries, state, task));
+    tasks.push(task);
     const definition = controllerKinds.includes(node.kind) ? null : registries.workflows.find(node.kind);
     if (definition && stepContract(definition).kind === 'review') reviewKeys.add(node.key);
     return {
@@ -823,6 +986,11 @@ export function readFlowGroup(store, registries, groupId) {
       ...(entry.earlierDecisions ? { earlierDecisions: structuredClone(entry.earlierDecisions) } : {}),
     };
   });
+  const state = groupState(record, nodes, isOpen, reviewKeys),
+    settled = state === 'done' || state === 'stopped';
+  nodes.forEach((node, index) => {
+    node.actions = settled ? [] : nodeActions(store, record, node, tasks[index]);
+  });
   return {
     schemaVersion: record.schemaVersion,
     projectId: record.projectId,
@@ -831,7 +999,10 @@ export function readFlowGroup(store, registries, groupId) {
     revision: record.revision,
     createdAt: record.createdAt,
     sequence: record.sequence,
-    state: groupState(record, nodes, isOpen, reviewKeys),
+    state,
+    actions: settled
+      ? []
+      : [flowAction(record, 'stop', 'Stop the flow', 'stopFlow', [field('reason', false, 'reason')])],
     ...(record.sentBack ? { sentBack: structuredClone(record.sentBack) } : {}),
     ...(record.pending?.length ? { pending: structuredClone(record.pending) } : {}),
     ...(record.stopped ? { stopped: structuredClone(record.stopped) } : {}),

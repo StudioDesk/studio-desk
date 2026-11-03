@@ -28,7 +28,7 @@ import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
 import { endTryRuns, recoverTryRuns } from '../connectors/try-copy.mjs';
 import { attemptResource } from './store.mjs';
 import { testTurnResource } from './test-turn.mjs';
-import { advanceFlow, advanceOpenFlows } from './flow-run.mjs';
+import { advanceFlow, advanceOpenFlows, recoverFlows } from './flow-run.mjs';
 
 // Reasons that clear by themselves as other work finishes.
 const waiting = reason => /^Waiting for /.test(reason || '');
@@ -168,6 +168,10 @@ export class Runner {
     this.integration.recover(this);
     // An app the director ran in a story's try copy ended with the controller that ran it (1.2 step 7).
     recoverTryRuns(store);
+    // Open flows are reconciled with their tasks once, now that the attempts a stop cut off are interrupted (1.2): a
+    // settled task its flow missed is followed, interrupted work waits for Reconcile, and nothing is started or decided
+    // again. A studio without a flow reads one empty list; tasks without a flow reference are never read.
+    recoverFlows(store, this.registries);
     this.autonomy = new Autonomy(this, { integrate: options.integrate, restart: options.restart });
     // A reset time that passed while the controller was stopped clears its hold now.
     this.clearPassedHolds();
