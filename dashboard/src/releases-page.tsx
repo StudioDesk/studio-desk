@@ -3,7 +3,9 @@
 // on it since and the milestones planned on it, each opening to its ideas, their stories and the ideas waiting to be
 // sent, in order. Retired lines wait at the bottom, ready to be maintained again. New milestone, Release, Push and
 // retiring a line act here; the controller decides what a version means and where its work lands, and Push asks every
-// time, since it is the one thing that leaves this computer.
+// time, since it is the one thing that leaves this computer. On version lines (overview.shipsTo), the branch releases
+// ship to has a card and a map row of its own, apart from the lines, and each line says which version it builds or
+// patches; a project that is not on version lines reads as before.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useState, type CSSProperties, type FormEvent } from 'react';
@@ -17,6 +19,7 @@ import {
   type ReleaseLine,
   type ReleaseOverview,
   type ReleaseStory,
+  type ShippingBranch,
 } from './api';
 import { carryWords } from './carries';
 import { Dialog } from './design/dialog';
@@ -106,9 +109,12 @@ const lineColors = [
 ];
 const colorOf = (line: ReleaseLine, maintained: ReleaseLine[]) =>
   line.state === 'retired' ? 'var(--wait-dot)' : lineColors[Math.max(0, maintained.indexOf(line)) % lineColors.length]!;
+// The branch releases ship to, on version lines: its card and its row on the map read as one.
+const shippingColor = 'var(--ok-dot)';
 const tagVersion = (name?: string) => (name && /^v?\d+\.\d+\.\d+$/.test(name) ? name.replace(/^v/, '') : undefined);
-// What a line holds, in a few words for the map and in a sentence for its row.
-function lineWords(line: ReleaseLine, open: Milestone[]) {
+// What a line holds, in a few words for the map and in a sentence for its row. On version lines (`switched`), a line of
+// its own version says whether it builds that version or, once it is released, patches it.
+function lineWords(line: ReleaseLine, open: Milestone[], switched = false) {
   const [first, ...later] = open.map(item => item.version),
     coming = first ? `: ${first} next${later.length ? `, then ${later.join(', then ')}` : ''}` : '',
     major = /^release\/(\d+)\.x$/.exec(line.branch)?.[1],
@@ -118,6 +124,16 @@ function lineWords(line: ReleaseLine, open: Milestone[]) {
       short: 'Retired',
       purpose: 'Retired. No new ideas land here, and fixes skip it; work already on it finishes, and its tags stay.',
     };
+  if (switched && line.version)
+    return line.released
+      ? {
+          short: 'Patches',
+          purpose: `Patches of ${line.version}, a released version. Each fix ships as ${line.version}.n and is carried up to newer lines.`,
+        }
+      : {
+          short: 'Being built',
+          purpose: `Where ${line.version}.0 is being built. New work for ${line.version} lands here.`,
+        };
   if (line.newest)
     return {
       short: 'New features',
@@ -145,7 +161,8 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
     newest = lines.find(line => line.newest)?.branch ?? null,
     openOn = (line: ReleaseLine) =>
       milestones.filter(item => item.state === 'open' && (item.line ?? newest) === line.branch).sort(byVersion),
-    released = milestones.filter(item => item.state === 'released').reverse();
+    released = milestones.filter(item => item.state === 'released').reverse(),
+    shipping = overview.shipsTo ?? null;
   return (
     <div className="sd-releases">
       <Heading
@@ -158,7 +175,9 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
           </button>
         }
       />
-      {lines.length > 0 && <LineMap lines={newestFirst} maintained={maintained} milestones={milestones} />}
+      {(lines.length > 0 || shipping) && (
+        <LineMap lines={newestFirst} maintained={maintained} milestones={milestones} shipping={shipping} />
+      )}
       <section className="sd-card sd-releases__copy" aria-label="Your copy and the remote">
         <div>
           <span className="sd-eyebrow">Your copy</span>
@@ -180,7 +199,7 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
           {overview.remote ? (
             <>
               <span className="sd-releases__mono">{overview.remote.url}</span>
-              <span className="sd-meta">{remoteLine(lines)}</span>
+              <span className="sd-meta">{remoteLine(lines, shipping)}</span>
             </>
           ) : (
             <span className="sd-meta">This repository has no remote to push to, or several and none is origin.</span>
@@ -193,6 +212,7 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
           </span>
         </div>
       </section>
+      {shipping && <ShippingCard shipping={shipping} remote={overview.remote?.name ?? null} />}
       <div className="sd-rellines">
         {maintained.map(line => (
           <LineRow
@@ -205,6 +225,7 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
             all={milestones}
             opened={opened}
             studio={state}
+            switched={!!shipping}
           />
         ))}
         {retired.length > 0 && <RetiredLines projectId={projectId} lines={retired} />}
@@ -225,14 +246,15 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
           ))}
         </section>
       )}
-      <NewMilestone projectId={projectId} open={making} onClose={() => setMaking(false)} />
+      <NewMilestone projectId={projectId} open={making} onClose={() => setMaking(false)} switched={!!shipping} />
     </div>
   );
 }
 
-// What the remote is known to have of each line, as of the last fetch or push.
-function remoteLine(lines: ReleaseLine[]) {
-  const parts = lines.map(line =>
+// What the remote is known to have of each line, and first of the branch releases ship to on version lines, as of the
+// last fetch or push.
+function remoteLine(lines: ReleaseLine[], shipping?: ShippingBranch | null) {
+  const parts = [...(shipping ? [shipping] : []), ...lines].map(line =>
     !line.onRemote?.known
       ? `${line.branch} is not on it yet`
       : line.onRemote.ahead
@@ -242,28 +264,94 @@ function remoteLine(lines: ReleaseLine[]) {
   return `${parts.join('; ')}, as of the last fetch or push.`;
 }
 
+// On version lines, the branch releases ship to, apart from the lines: what it is for, the newest release it holds and
+// what the remote is known to have of it. Work never lands on it, so it has no milestones, nothing landed and no retire.
+function ShippingCard({ shipping, remote }: { shipping: ShippingBranch; remote: string | null }) {
+  const ahead = shipping.onRemote?.ahead ?? 0,
+    onRemote = !shipping.onRemote?.known
+      ? 'not there yet'
+      : ahead
+        ? `${ahead} commit${ahead === 1 ? '' : 's'} not there yet`
+        : 'up to date';
+  return (
+    <section
+      className="sd-card sd-releases__released"
+      aria-label={`${shipping.branch}, where releases ship`}
+      style={{ '--line-color': shippingColor } as CSSProperties}
+    >
+      <div className="sd-relline__head">
+        <span className="sd-branch sd-branch--big">
+          <i className="sd-linemap__swatch" aria-hidden="true"></i>
+          {shipping.branch}
+        </span>
+        <span className="sd-chip sd-chip--ok">Where releases ship</span>
+      </div>
+      <p className="sd-relline__purpose">It moves only when a release ships, so it always holds the newest release.</p>
+      <span className="sd-releases__row">
+        <span className="sd-meta">Last release</span>
+        {shipping.lastRelease ? (
+          <span className="sd-rel">
+            <Icon name="tag" size={13} weight={2.2} />
+            {shipping.lastRelease.name}
+          </span>
+        ) : (
+          <span className="sd-meta">none yet</span>
+        )}
+      </span>
+      {remote && (
+        <span className="sd-releases__row">
+          <span className="sd-meta">On {remote}</span>
+          <span className="sd-meta">{onRemote}, as of the last fetch or push</span>
+        </span>
+      )}
+    </section>
+  );
+}
+
 interface Station {
   version: string;
   name: string;
   kind: 'released' | 'open' | 'planned';
 }
+interface MapRow {
+  branch: string;
+  retired: boolean;
+  short: string;
+  color: string;
+  stations: Station[];
+  fork?: { version: string; rows: number; from: string };
+  carry?: string;
+}
+const releasedStation = (version: string): Station => ({ version, name: `v${version}`, kind: 'released' });
 // The map's rows, newest line first: each line's releases and open milestones in time order, where it was made from,
 // and the newer line its fixes are carried up to. The versions lines were made from are releases on the newest line.
-function mapRows(lines: ReleaseLine[], maintained: ReleaseLine[], milestones: Milestone[]) {
+// On version lines (`shipping`), the branch releases ship to is the first row instead, with the releases made on it or
+// shipped to it, and every line is made from it or from an older line; a line's row then holds only the releases made
+// on it, not the one its history holds from where it was made.
+function mapRows(
+  lines: ReleaseLine[],
+  maintained: ReleaseLine[],
+  milestones: Milestone[],
+  shipping: ShippingBranch | null = null,
+) {
   const newest = lines.find(line => line.newest)?.branch ?? null,
-    forks = lines.filter(line => !line.newest).map(line => tagVersion(line.from)),
-    rows = lines.map((line, index) => {
+    above = shipping ? 1 : 0,
+    madeFromTrunk = (line: ReleaseLine) => !!shipping || !line.newest,
+    forks = lines.filter(madeFromTrunk).map(line => tagVersion(line.from)),
+    rows: MapRow[] = lines.map((line, index) => {
       const own = (item: Milestone) => (item.line ?? newest) === line.branch,
-        from = line.newest ? undefined : tagVersion(line.from),
+        from = madeFromTrunk(line) ? tagVersion(line.from) : undefined,
         releasedVersions = new Set(
           milestones.filter(item => own(item) && item.state === 'released').map(item => item.version),
         );
-      if (line.lastRelease) releasedVersions.add(line.lastRelease.version);
-      if (line.newest) for (const fork of forks) if (fork) releasedVersions.add(fork);
+      if (!shipping) {
+        if (line.lastRelease) releasedVersions.add(line.lastRelease.version);
+        if (line.newest) for (const fork of forks) if (fork) releasedVersions.add(fork);
+      }
       if (from) releasedVersions.delete(from);
       const open = milestones.filter(item => own(item) && item.state === 'open').sort(byVersion),
         stations: Station[] = [
-          ...[...releasedVersions].map(version => ({ version, name: `v${version}`, kind: 'released' as const })),
+          ...[...releasedVersions].map(releasedStation),
           ...(line.state === 'retired'
             ? []
             : open.map((item, place) => ({
@@ -275,14 +363,39 @@ function mapRows(lines: ReleaseLine[], maintained: ReleaseLine[], milestones: Mi
         at = from ?? stations[0]?.version,
         carry = line.state === 'retired' || line.newest ? undefined : maintained[maintained.indexOf(line) - 1]?.branch;
       return {
-        line,
-        words: lineWords(line, open),
+        branch: line.branch,
+        retired: line.state === 'retired',
+        short: lineWords(line, open, !!shipping).short,
         color: colorOf(line, maintained),
         stations,
-        fork: !line.newest && at && index > 0 ? { version: at, rows: index } : undefined,
+        fork:
+          madeFromTrunk(line) && at && index + above > 0
+            ? { version: at, rows: index + above, from: shipping && line.from ? line.from : `v${at}` }
+            : undefined,
         carry,
       };
     });
+  if (shipping) {
+    const shipped = new Set(
+      milestones
+        .filter(
+          item =>
+            item.state === 'released' &&
+            (item.line === shipping.branch ||
+              (!!item.release?.shipped?.commit && item.release.shipped.branch === shipping.branch)),
+        )
+        .map(item => item.version),
+    );
+    if (shipping.lastRelease) shipped.add(shipping.lastRelease.version);
+    for (const fork of forks) if (fork) shipped.add(fork);
+    rows.unshift({
+      branch: shipping.branch,
+      retired: false,
+      short: 'Releases ship here',
+      color: shippingColor,
+      stations: [...shipped].map(releasedStation).sort(byVersion),
+    });
+  }
   const slots = [...new Set(rows.flatMap(row => [...row.stations.map(item => item.version), row.fork?.version]))]
     .filter((version): version is string => !!version)
     .map(version => ({ version }))
@@ -306,13 +419,15 @@ function LineMap({
   lines,
   maintained,
   milestones,
+  shipping,
 }: {
   lines: ReleaseLine[];
   maintained: ReleaseLine[];
   milestones: Milestone[];
+  shipping: ShippingBranch | null;
 }) {
   const narrow = useNarrow(),
-    { rows, slots } = mapRows(lines, maintained, milestones),
+    { rows, slots } = mapRows(lines, maintained, milestones, shipping),
     count = Math.max(1, slots.length),
     columns = `minmax(${nameMin}px, 200px) repeat(${count}, minmax(${slotMin}px, 1fr)) minmax(${carryMin}px, 150px)`,
     minWidth = narrow ? nameMin + slotMin * count + carryMin : wideMin,
@@ -321,34 +436,43 @@ function LineMap({
     <section className="sd-card sd-linemap" aria-label="How your lines fit together">
       <div className="sd-linemap__text">
         <h2 className="sd-linemap__title">How your lines fit together</h2>
-        <p>
-          Time runs left to right. The newest line gets new features, and its next release is a minor or a major. When
-          people on a released version need a fix, a release line is made from that version’s tag. The fix lands there
-          and ships as a patch, then it is carried up to every newer line, so nobody loses it when they upgrade.
-        </p>
+        {shipping ? (
+          <p>
+            Time runs left to right. Each version has its own line, where it is built and, once it is released, patched.
+            Releases ship to {shipping.branch}, which moves only when a release ships, so it always holds the newest
+            release. A fix ships as a patch from its version’s line, then it is carried up to every newer line, so
+            nobody loses it when they upgrade.
+          </p>
+        ) : (
+          <p>
+            Time runs left to right. The newest line gets new features, and its next release is a minor or a major. When
+            people on a released version need a fix, a release line is made from that version’s tag. The fix lands there
+            and ships as a patch, then it is carried up to every newer line, so nobody loses it when they upgrade.
+          </p>
+        )}
       </div>
       <div className="sd-linemap__scroll">
         <div className="sd-linemap__rows" style={{ minWidth }}>
           {rows.map(row => {
             const start = row.fork ? column(row.fork.version) : row.stations[0] ? column(row.stations[0].version) : 2,
-              retiredLine = row.line.state === 'retired',
+              retiredLine = row.retired,
               end = retiredLine && row.stations.length ? column(row.stations.at(-1)!.version) : slots.length + 1,
               span = end - start + 1;
             return (
               <div
-                key={row.line.branch}
+                key={row.branch}
                 className={`sd-linemap__row${retiredLine ? ' sd-linemap__row--retired' : ''}`}
                 style={{ gridTemplateColumns: columns, '--line-color': row.color } as CSSProperties}
                 role="group"
-                aria-label={`${row.line.branch}, ${row.words.short}: ${
+                aria-label={`${row.branch}, ${row.short}: ${
                   row.stations.map(item => `${item.name} ${item.kind}`).join(', ') || 'no releases yet'
-                }${row.fork ? `; made from v${row.fork.version}` : ''}${row.carry ? `; fixes are carried up to ${row.carry}` : ''}`}
+                }${row.fork ? `; made from ${row.fork.from}` : ''}${row.carry ? `; fixes are carried up to ${row.carry}` : ''}`}
               >
                 <span className="sd-linemap__label" style={{ gridColumn: 1 }}>
                   <i className="sd-linemap__swatch" aria-hidden="true"></i>
                   <span>
-                    <b>{row.line.branch}</b>
-                    <span>{row.words.short}</span>
+                    <b>{row.branch}</b>
+                    <span>{row.short}</span>
                   </span>
                 </span>
                 <span
@@ -422,6 +546,7 @@ function LineRow({
   all,
   opened,
   studio,
+  switched,
 }: {
   projectId: string;
   line: ReleaseLine;
@@ -431,10 +556,13 @@ function LineRow({
   all: Milestone[];
   opened?: string;
   studio: StudioState | null;
+  switched: boolean;
 }) {
   const action = useReleaseAction(projectId),
     [retiring, setRetiring] = useState(false),
-    words = lineWords(line, milestones);
+    words = lineWords(line, milestones, switched),
+    // On version lines, a line of its own version is building it until it is released, then patching it.
+    building = switched && line.version ? !line.released : line.newest;
   return (
     <section className="sd-relline" aria-label={line.branch} style={{ '--line-color': color } as CSSProperties}>
       <div className="sd-relline__head">
@@ -442,11 +570,11 @@ function LineRow({
           <i className="sd-linemap__swatch" aria-hidden="true"></i>
           {line.branch}
         </span>
-        <span className={`sd-chip ${line.newest ? 'sd-chip--brand' : 'sd-chip--outline'}`}>
-          {line.newest ? 'Newest line' : 'Maintained'}
+        <span className={`sd-chip ${building ? 'sd-chip--brand' : 'sd-chip--outline'}`}>
+          {switched && line.version ? words.short : line.newest ? 'Newest line' : 'Maintained'}
         </span>
         <span className="sd-meta">
-          {line.from ? `Made from ${line.from}` : line.newest ? 'Where new releases are made' : ''}
+          {line.from ? `Made from ${line.from}` : line.newest && !switched ? 'Where new releases are made' : ''}
         </span>
         {!line.newest && (
           <button
@@ -1026,7 +1154,17 @@ function WriteIdea({
   );
 }
 
-function NewMilestone({ projectId, open, onClose }: { projectId: string; open: boolean; onClose: () => void }) {
+function NewMilestone({
+  projectId,
+  open,
+  onClose,
+  switched,
+}: {
+  projectId: string;
+  open: boolean;
+  onClose: () => void;
+  switched: boolean;
+}) {
   const action = useReleaseAction(projectId),
     [version, setVersion] = useState(''),
     [goal, setGoal] = useState('');
@@ -1057,11 +1195,18 @@ function NewMilestone({ projectId, open, onClose }: { projectId: string; open: b
             value={version}
             onChange={event => setVersion(event.target.value)}
           />
-          <span className="sd-meta">
-            A patch (1.0.2) lands on its release line, made from the newest tag of its series when it is first needed. A
-            minor or major release lands on the newest line; the first of a new major moves the older one to a line of
-            its own.
-          </span>
+          {switched ? (
+            <span className="sd-meta">
+              On this project each minor or major version gets a line of its own, release/x.y, made when its milestone
+              is. A patch (1.2.1) lands on its version’s line.
+            </span>
+          ) : (
+            <span className="sd-meta">
+              A patch (1.0.2) lands on its release line, made from the newest tag of its series when it is first needed.
+              A minor or major release lands on the newest line; the first of a new major moves the older one to a line
+              of its own.
+            </span>
+          )}
         </div>
         <div className="sd-field">
           <label className="sd-field__label" htmlFor="milestone-goal">

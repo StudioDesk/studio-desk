@@ -499,6 +499,177 @@ test('a reload the stream asks for brings the changed releases, and so does a ch
   expect(await within(story).findByText('In review')).toBeTruthy();
 });
 
+// A project on version lines: releases ship to main, which is no longer a line; 1.2.0 is being built on release/1.2,
+// made from main, and release/1.0 holds the patches of 1.0. 1.1.0 was released on main before the switch, and
+// release/1.2's history holds it, so its last release reads v1.1.0.
+const switched = (): ReleaseOverview => {
+  const releases = overview();
+  releases.shipsTo = {
+    branch: 'main',
+    head: 'b1',
+    lastRelease: { name: 'v1.1.0', version: '1.1.0' },
+    onRemote: { known: true, ahead: 0, behind: 0 },
+  };
+  releases.lines = [
+    { ...releases.lines![0]!, from: 'v1.0.0', version: '1.0', released: true },
+    {
+      branch: 'release/1.2',
+      state: 'maintained',
+      newest: true,
+      from: 'main',
+      version: '1.2',
+      released: false,
+      head: 'c1',
+      lastRelease: { name: 'v1.1.0', version: '1.1.0' },
+      landed: { studio: 0, hand: 0, more: false, commits: [] },
+      onRemote: { known: false },
+    },
+  ];
+  releases.milestones = [
+    releases.milestones![0]!,
+    milestone('1.1.0', 'main', {
+      state: 'released',
+      release: { state: 'released', tag: 'v1.1.0', repository: { branch: 'main' } },
+    }),
+    milestone('1.2.0', 'release/1.2', { goal: 'Each version on its own line.' }),
+  ];
+  releases.tags = ['v1.1.0', 'v1.0.0'];
+  return releases;
+};
+const lineRegions = () =>
+  screen
+    .getAllByRole('region')
+    .map(region => region.getAttribute('aria-label'))
+    .filter(name => /^(main|release)/.test(name ?? ''));
+
+test('on version lines, where releases ship has a card of its own above the lines, with no milestones and no retiring', async () => {
+  controller.releases = switched();
+  open('/p/project-x/releases');
+  const shipping = within(await screen.findByRole('region', { name: 'main, where releases ship' }));
+  expect(shipping.getByText('Where releases ship')).toBeTruthy();
+  expect(shipping.getByText('It moves only when a release ships, so it always holds the newest release.')).toBeTruthy();
+  expect(shipping.getByText('v1.1.0')).toBeTruthy();
+  expect(shipping.getByText('up to date, as of the last fetch or push')).toBeTruthy();
+  expect(shipping.queryByRole('button')).toBeNull();
+  expect(shipping.queryByText(/Landed since/)).toBeNull();
+  expect(shipping.queryByText(/No open milestone/)).toBeNull();
+  // It is not one of the lines: they follow it, newest first, and none of them is main.
+  expect(screen.queryByRole('region', { name: 'main' })).toBeNull();
+  expect(lineRegions()).toEqual(['main, where releases ship', 'release/1.2', 'release/1.0']);
+  // What the remote has names main first, then the lines.
+  expect(
+    screen.getByText(
+      'main is up to date; release/1.0 is not on it yet; release/1.2 is not on it yet, as of the last fetch or push.',
+    ),
+  ).toBeTruthy();
+});
+
+test('on version lines, each line says whether it builds its version or patches a released one', async () => {
+  controller.releases = switched();
+  open('/p/project-x/releases');
+  const building = within(await screen.findByRole('region', { name: 'release/1.2' }));
+  expect(building.getByText('Being built')).toBeTruthy();
+  expect(building.getByText('Where 1.2.0 is being built. New work for 1.2 lands here.')).toBeTruthy();
+  expect(building.getByText('Made from main')).toBeTruthy();
+  expect(building.getByText('1.2.0')).toBeTruthy();
+  expect(building.queryByText('Newest line')).toBeNull();
+  expect(building.queryByText(/New features/)).toBeNull();
+  const patches = within(screen.getByRole('region', { name: 'release/1.0' }));
+  expect(patches.getByText('Patches')).toBeTruthy();
+  expect(
+    patches.getByText('Patches of 1.0, a released version. Each fix ships as 1.0.n and is carried up to newer lines.'),
+  ).toBeTruthy();
+  expect(patches.getByText('Made from v1.0.0')).toBeTruthy();
+  cleanup();
+  // Once 1.2.0 is released, its line holds the patches of 1.2.
+  const released = switched();
+  released.lines![1]!.released = true;
+  controller.releases = released;
+  open('/p/project-x/releases');
+  const patched = within(await screen.findByRole('region', { name: 'release/1.2' }));
+  expect(patched.getByText('Patches')).toBeTruthy();
+  expect(
+    patched.getByText('Patches of 1.2, a released version. Each fix ships as 1.2.n and is carried up to newer lines.'),
+  ).toBeTruthy();
+  expect(patched.queryByText('Being built')).toBeNull();
+});
+
+test('on version lines, the map draws where releases ship as its first row, and a line only the releases made on it', async () => {
+  controller.releases = switched();
+  open('/p/project-x/releases');
+  const map = within(await screen.findByRole('region', { name: 'How your lines fit together' }));
+  const rows = map.getAllByRole('group').map(row => row.getAttribute('aria-label'));
+  expect(rows).toEqual([
+    'main, Releases ship here: v1.0.0 released, v1.1.0 released',
+    'release/1.2, Being built: 1.2.0 open; made from main',
+    'release/1.0, Patches: 1.0.1 open; made from v1.0.0; fixes are carried up to release/1.2',
+  ]);
+  // release/1.2's history holds v1.1.0 from main, but it was not released there.
+  expect(rows[1]).not.toContain('v1.1.0');
+  expect(map.getByText('Releases ship here')).toBeTruthy();
+  expect(map.getByText(/Each version has its own line/)).toBeTruthy();
+  expect(map.getByText(/Releases ship to main, which moves only when a release ships/)).toBeTruthy();
+  expect(map.queryByText(/The newest line gets new features/)).toBeNull();
+  cleanup();
+  // A release shipped to main after the switch is drawn on main as well as on the line it was made on; a patch that
+  // was not shipped, since a newer release had been, only on its own line.
+  const shipped = switched();
+  shipped.milestones![0] = milestone('1.0.1', 'release/1.0', {
+    state: 'released',
+    release: {
+      state: 'released',
+      tag: 'v1.0.1',
+      repository: { branch: 'release/1.0' },
+      shipped: { branch: 'main', skipped: 'v1.2.0 is newer, and main holds the newest release.', at: '' },
+    },
+  });
+  shipped.milestones![2] = milestone('1.2.0', 'release/1.2', {
+    state: 'released',
+    release: {
+      state: 'released',
+      tag: 'v1.2.0',
+      repository: { branch: 'release/1.2' },
+      shipped: { branch: 'main', commit: 'd1', at: '' },
+    },
+  });
+  shipped.shipsTo!.lastRelease = { name: 'v1.2.0', version: '1.2.0' };
+  shipped.lines![1]!.released = true;
+  controller.releases = shipped;
+  open('/p/project-x/releases');
+  const after = within(await screen.findByRole('region', { name: 'How your lines fit together' }));
+  expect(after.getAllByRole('group').map(row => row.getAttribute('aria-label'))).toEqual([
+    'main, Releases ship here: v1.0.0 released, v1.1.0 released, v1.2.0 released',
+    'release/1.2, Patches: v1.2.0 released; made from main',
+    'release/1.0, Patches: v1.0.1 released; made from v1.0.0; fixes are carried up to release/1.2',
+  ]);
+});
+
+test('on version lines, New milestone says each version gets a line of its own; otherwise its help reads as before', async () => {
+  const user = userEvent.setup();
+  controller.releases = switched();
+  open('/p/project-x/releases');
+  await user.click(await screen.findByRole('button', { name: 'New milestone' }));
+  expect(
+    screen.getByText(
+      'On this project each minor or major version gets a line of its own, release/x.y, made when its milestone is. A patch (1.2.1) lands on its version’s line.',
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText(/A patch \(1\.0\.2\) lands on its release line/)).toBeNull();
+  cleanup();
+  controller.releases = overview();
+  open('/p/project-x/releases');
+  await user.click(await screen.findByRole('button', { name: 'New milestone' }));
+  expect(
+    screen.getByText(
+      'A patch (1.0.2) lands on its release line, made from the newest tag of its series when it is first needed. A minor or major release lands on the newest line; the first of a new major moves the older one to a line of its own.',
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText(/gets a line of its own/)).toBeNull();
+  // And a project that is not on version lines has no card for where releases ship.
+  expect(screen.queryByText('Where releases ship')).toBeNull();
+  expect(screen.queryByText('Releases ship here')).toBeNull();
+});
+
 test('the page asks for no releases until the stream says where the controller is, and reads them when it is offline', async () => {
   // The project's shell is already held, as after another of its pages, so only the stream holds the read back.
   FakeSource.hello = null;

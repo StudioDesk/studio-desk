@@ -1035,6 +1035,11 @@ export interface MilestoneRelease {
   error?: string;
   interrupted?: string;
   pushed?: { remote: string; at: string };
+  // The branch the release was made on, and, on version lines, what became of shipping it to the branch releases ship
+  // to: the commit it moved to (a merge whose content is the release when `merged`), why it was skipped, or the error
+  // that stopped it.
+  repository?: { branch: string };
+  shipped?: { branch: string; commit?: string; merged?: boolean; skipped?: string; error?: string; at: string };
 }
 export interface Milestone {
   id: string;
@@ -1053,6 +1058,9 @@ export interface ReleaseLine {
   state: string;
   newest: boolean;
   from?: string;
+  // On version lines, a line named release/x.y carries its version ('x.y') and whether x.y.0 is released.
+  version?: string;
+  released?: boolean;
   head: string | null;
   lastRelease: { name: string; version: string } | null;
   landed: {
@@ -1063,11 +1071,31 @@ export interface ReleaseLine {
   } | null;
   onRemote: { known: boolean; ahead?: number; behind?: number } | null;
 }
+// On version lines, the branch releases ship to, kept apart from the lines: its tip, the newest release it holds and
+// what the remote is known to have of it.
+export interface ShippingBranch {
+  branch: string;
+  head: string | null;
+  lastRelease: { name: string; version: string } | null;
+  onRemote: { known: boolean; ahead?: number; behind?: number } | null;
+}
+// What a project that is not on version lines yet still needs before it can switch, in order.
+export type VersionLinesNeed =
+  | { kind: 'next-version' }
+  | { kind: 'open-work'; count: number; tasks: { id: string; title: string }[] };
+export interface VersionLinesReadiness {
+  shipsTo: string | null;
+  ready: boolean;
+  needs: VersionLinesNeed[];
+}
 export interface ReleaseOverview {
   available: boolean;
   reason?: string;
   copy?: { branch: string | null; clean: boolean };
   remote?: { name: string; url: string } | null;
+  // Present once the project is on version lines; versionLines is present until then.
+  shipsTo?: ShippingBranch | null;
+  versionLines?: VersionLinesReadiness;
   lines?: ReleaseLine[];
   milestones?: Milestone[];
   tags?: string[];
@@ -1075,3 +1103,5 @@ export interface ReleaseOverview {
 export const releasesUrl = (projectId: string) => projectPath(projectId, 'releases');
 export const milestonesUrl = (projectId: string) => projectPath(projectId, 'milestones');
 export const linesUrl = (projectId: string) => projectPath(projectId, 'lines');
+// POST { shipsTo }: give each version its own line, with releases shipping to shipsTo.
+export const versionLinesUrl = (projectId: string) => projectPath(projectId, 'version-lines');
