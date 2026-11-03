@@ -357,18 +357,82 @@ export function denyBuiltInSandboxSecrets(secrets, run = spawnSync) {
 // Node looks at each folder on the way to the copy. What a run uses is let back in by the runtime's own grants, which
 // it gives the copy and its packages explicitly and which therefore come before the inherited deny. Probed on a data
 // folder outside the profile: the database and the listing refused; the copy written, its packages read and loaded.
-export function denyBuiltInSandboxData(folder, run = spawnSync) {
-  if (!folder) return null;
-  const result = run('icacls', [folder, '/deny', `${builtInSandboxGroup}:(OI)(CI)(RD)`], {
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 30000,
-  });
-  if (result.status !== 0)
-    throw new Error(
-      `The sandbox could not be kept from the data folder (${folder}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
-    );
-  return folder;
+//
+// Setting the entry makes Windows write it to everything already in the folder, which on a live data folder (job copies,
+// worktrees, packages) takes minutes: run before every test, it failed every run on November 3 at its 30-second limit.
+// So a data folder inside the director's profile gets none: the profile's own permissions keep the sandbox account out,
+// as nothing on the way grants it, or its Users group, a read. One outside the profile gets the entry once, under a
+// lock, with as long as the writing takes; a run that finds the lock waits for it. A file beside the lock records that
+// the writing finished, as one cut short leaves the folder's own entry without everything below it. With that file
+// there, a run reads only the folder's own list, which is quick.
+const dataDenyEntry = new RegExp(`${builtInSandboxGroup}:\\(OI\\)\\(CI\\)\\(DENY\\)\\(RD\\)`, 'i');
+export const dataDenyTimeoutMs = 30 * 60 * 1000;
+export const dataDenyLock = '.sandbox-data-deny.lock',
+  dataDenyDone = '.sandbox-data-denied';
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const lockHolderAlive = file => {
+  try {
+    process.kill(JSON.parse(fs.readFileSync(file, 'utf8')).pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+};
+export const insideFolder = (parent, child) => {
+  const relative = path.relative(parent.toLowerCase(), child.toLowerCase());
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+};
+// Whether the folder's own access list holds the data deny, read without touching anything below it.
+export function builtInSandboxDataDenied(folder, run = spawnSync) {
+  const result = run('icacls', [folder], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  return result.status === 0 && dataDenyEntry.test(String(result.stdout || ''));
+}
+export function denyBuiltInSandboxData(
+  folder,
+  {
+    run = spawnSync,
+    profile = process.env.USERPROFILE || os.homedir(),
+    timeoutMs = dataDenyTimeoutMs,
+    waitMs = 1000,
+  } = {},
+) {
+  if (!folder || insideFolder(profile, folder)) return null;
+  const lock = path.join(folder, dataDenyLock),
+    done = path.join(folder, dataDenyDone),
+    denied = () => fs.existsSync(done) && builtInSandboxDataDenied(folder, run);
+  if (denied()) return folder;
+  for (const until = Date.now() + timeoutMs; ; ) {
+    try {
+      fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, since: new Date().toISOString() }), { flag: 'wx' });
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+    // Another run is writing the entry: it is there once that run is done, or the lock was left by a run that ended.
+    if (!lockHolderAlive(lock)) fs.rmSync(lock, { force: true });
+    else if (denied()) return folder;
+    else if (Date.now() > until)
+      throw new Error(
+        `The sandbox could not be kept from the data folder (${folder}): another run held its lock too long.`,
+      );
+    else sleepSync(waitMs);
+  }
+  try {
+    if (denied()) return folder;
+    const result = run('icacls', [folder, '/deny', `${builtInSandboxGroup}:(OI)(CI)(RD)`], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: timeoutMs,
+    });
+    if (result.status !== 0)
+      throw new Error(
+        `The sandbox could not be kept from the data folder (${folder}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
+      );
+    fs.writeFileSync(done, `${new Date().toISOString()}\n`);
+    return folder;
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
 }
 
 // How many built-in sandbox sessions run at once on this computer (C-43, November 2). On Windows the runtime's network

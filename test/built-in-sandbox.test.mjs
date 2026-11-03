@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
 import { setup } from './source-story-setup.mjs';
 import {
   builtInSandbox,
@@ -21,6 +22,9 @@ import {
   builtInSandboxSettings,
   builtInSandboxState,
   builtInSandboxVersion,
+  dataDenyDone,
+  dataDenyLock,
+  dataDenyTimeoutMs,
   denyBuiltInSandboxData,
   denyBuiltInSandboxSecrets,
   readBuiltInSandboxStatus,
@@ -101,19 +105,95 @@ test('before a Windows run the rest of the data folder is denied to the sandbox 
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.mkdirSync(root, { recursive: true });
   assert.equal(builtInSandboxDataFolder(root), null, 'a copy outside any data folder has none to deny');
-  const calls = [],
-    run = (program, args) => (calls.push([program, args]), { status: 0 });
-  assert.equal(denyBuiltInSandboxData(null, run), null);
+  const { calls, run } = fakeAccessList(),
+    outside = { run, profile: path.join(directory, 'home') };
+  assert.equal(denyBuiltInSandboxData(null, outside), null);
   assert.deepEqual(calls, []);
   fs.writeFileSync(path.join(data, 'director-key'), 'a'.repeat(64));
   assert.equal(builtInSandboxDataFolder(root), data);
   // Reading what anything in it holds, its own listing included; looking at a folder stays allowed, as Node looks at
-  // each folder on the way to the copy.
-  assert.equal(denyBuiltInSandboxData(data, run), data);
-  assert.deepEqual(calls, [['icacls', [data, '/deny', 'sandbox-runtime-users:(OI)(CI)(RD)']]]);
+  // each folder on the way to the copy. Set once, with as long as Windows takes to write it to everything in the folder.
+  assert.equal(denyBuiltInSandboxData(data, outside), data);
+  assert.deepEqual(calls, [['icacls', [data, '/deny', 'sandbox-runtime-users:(OI)(CI)(RD)'], dataDenyTimeoutMs]]);
+  assert.ok(fs.existsSync(path.join(data, dataDenyDone)), 'the finished writing is recorded');
+  assert.ok(!fs.existsSync(path.join(data, dataDenyLock)), 'and the lock given back');
+  // After that a run reads only the folder's own list, which is quick (November 3: every run failed at 30 seconds).
+  calls.length = 0;
+  assert.equal(denyBuiltInSandboxData(data, outside), data);
+  assert.deepEqual(calls, [['icacls', [data], 30000]]);
+  // A writing cut short leaves the folder's own entry without the record, and is done again.
+  fs.rmSync(path.join(data, dataDenyDone));
+  calls.length = 0;
+  assert.equal(denyBuiltInSandboxData(data, outside), data);
+  assert.deepEqual(
+    calls.map(([, args]) => args[1] ?? 'read'),
+    ['/deny'],
+  );
+  // Inside the director's profile nothing is read or set: the profile's permissions keep the sandbox account out.
+  calls.length = 0;
+  assert.equal(denyBuiltInSandboxData(data, { run, profile: directory }), null);
+  assert.equal(
+    denyBuiltInSandboxData(data, { run, profile: data.toUpperCase() }),
+    null,
+    'the profile itself, in any case',
+  );
+  assert.deepEqual(calls, []);
+  // A failure stops the run, records nothing and gives the lock back.
+  fs.rmSync(path.join(data, dataDenyDone));
   assert.throws(
-    () => denyBuiltInSandboxData(data, () => ({ status: 5, stderr: 'Access is denied.' })),
+    () => denyBuiltInSandboxData(data, { ...outside, run: () => ({ status: 5, stderr: 'Access is denied.' }) }),
     /could not be kept from the data folder .*Access is denied/,
+  );
+  assert.ok(!fs.existsSync(path.join(data, dataDenyDone)) && !fs.existsSync(path.join(data, dataDenyLock)));
+});
+
+// A fake icacls: the folder's own list holds the data deny once it has been set, or from a given read on.
+function fakeAccessList({ deniedFromRead = Infinity } = {}) {
+  const calls = [];
+  let set = false,
+    reads = 0;
+  const run = (program, args, options) => {
+    calls.push([program, args, options.timeout]);
+    if (args[1] === '/deny') set = true;
+    else reads++;
+    const entry = set || reads >= deniedFromRead ? 'PC\\sandbox-runtime-users:(OI)(CI)(DENY)(RD)\n ' : '';
+    return { status: 0, stdout: `${args[0]} ${entry}BUILTIN\\Administrators:(I)(OI)(CI)(F)\n` };
+  };
+  return { calls, run };
+}
+
+test("a Windows run that finds another writing the data folder's deny waits for it, takes over an ended run's lock, and stops when it is held too long", t => {
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-data-lock-'));
+  t.after(() => fs.rmSync(data, { recursive: true, force: true }));
+  const lock = path.join(data, dataDenyLock),
+    profile = path.join(data, '..', 'elsewhere'),
+    holdLock = pid => fs.writeFileSync(lock, JSON.stringify({ pid }));
+  // A live run holds the lock, and its writing finishes while this one waits: nothing is set twice.
+  holdLock(process.pid);
+  fs.writeFileSync(path.join(data, dataDenyDone), 'x');
+  let fake = fakeAccessList({ deniedFromRead: 3 });
+  assert.equal(denyBuiltInSandboxData(data, { run: fake.run, profile, waitMs: 5 }), data);
+  assert.deepEqual(
+    fake.calls.map(([, args]) => args[1] ?? 'read'),
+    ['read', 'read', 'read'],
+  );
+  assert.ok(fs.existsSync(lock), "the other run's lock is left to it");
+  // A lock left by a run that ended is taken over.
+  fs.rmSync(path.join(data, dataDenyDone));
+  holdLock(spawnSync(process.execPath, ['-e', '']).pid);
+  fake = fakeAccessList();
+  assert.equal(denyBuiltInSandboxData(data, { run: fake.run, profile, waitMs: 5 }), data);
+  assert.deepEqual(
+    fake.calls.map(([, args]) => args[1] ?? 'read'),
+    ['/deny'],
+  );
+  assert.ok(!fs.existsSync(lock));
+  // A live lock held past the time limit stops the run rather than leaving the folder readable.
+  fs.rmSync(path.join(data, dataDenyDone));
+  holdLock(process.pid);
+  assert.throws(
+    () => denyBuiltInSandboxData(data, { run: fakeAccessList().run, profile, timeoutMs: 30, waitMs: 5 }),
+    /could not be kept from the data folder .*held its lock too long/,
   );
 });
 
