@@ -339,7 +339,14 @@ test('run stories list approvals, stuck steps, integration and outcomes', () => 
   });
   const passed = attempt('a-V', 'V', 3, { candidateReviewVerdict: 'pass' });
   const ready = buildRunStories({ ...base, tasks: [review], attempts: [passed] })[0];
-  assert.equal(ready.needsYou[0].action, 'Inspect stage');
+  // A review from before stories had stages that names no change offers the story page, not Inspect stage, and
+  // says what is missing.
+  assert.equal(ready.needsYou[0].kind, 'integration-ineligible');
+  assert.equal(ready.needsYou[0].action, 'Open the story');
+  assert.equal(ready.needsYou[0].requiresDirector, true);
+  assert.equal(ready.needsYou[0].reason, 'The review does not record which change it checked.');
+  assert.match(ready.needsYou[0].next, /^Open the story to see the review\./);
+  assert.doesNotMatch(ready.needsYou[0].reason + ready.needsYou[0].next, /Inspect|studio-development|a-V|\.json/);
   assert.equal(ready.outcome.label, 'Needs you');
   assert.equal(ready.outcome.state, 'needs-you');
 
@@ -362,7 +369,9 @@ test('run stories list approvals, stuck steps, integration and outcomes', () => 
       },
     ],
   })[0];
-  assert.equal(rejected.needsYou[0].action, 'Inspect stage');
+  assert.equal(rejected.needsYou[0].action, 'Open the story');
+  assert.equal(rejected.needsYou[0].reason, 'The review does not record which change it checked.');
+  assert.equal(rejected.outcome.label, 'Needs you');
   assert.ok(rejected.steps.some(step => step.text === 'Integration rejected.' && step.detail === '0/1 tests passed.'));
 
   const done = buildRunStories({
@@ -1987,26 +1996,79 @@ test('integration explanations retain exact eligibility and distinguish automati
     }
     assert.equal(JSON.stringify(s), before);
   }
-  for (const mutate of [
-    s => {
-      s.attempts[1].candidateReview.candidateHash = 'stale';
-    },
-    s => {
-      s.attempts[0].result.checks = [{ name: 'Candidate tests', status: 'fail' }];
-    },
-    s => {
-      s.attempts[1].inputReferences = [];
-    },
-    s => {
-      s.tasks[0].lastAttemptId = 'different';
-    },
+  // Evidence that is really missing or doesn't match says which, in plain words, and offers the story page's own
+  // Close without integrating instead of Inspect stage.
+  const ineligible = new Set();
+  for (const [mutate, why] of [
+    [
+      s => {
+        s.attempts[1].candidateReview.candidateHash = 'stale';
+      },
+      "The review checked a different change than the story's current one.",
+    ],
+    [
+      s => {
+        s.attempts[0].result.checks = [{ name: 'Candidate tests', status: 'fail' }];
+      },
+      "The change's own checks failed.",
+    ],
+    [
+      s => {
+        s.attempts[1].inputReferences = [];
+      },
+      "The review's inputs do not include the change.",
+    ],
+    [
+      s => {
+        s.tasks[0].lastAttemptId = 'different';
+      },
+      "The story's latest attempt is not the one whose review passed.",
+    ],
   ]) {
     const s = stagedSourceState();
     s.autonomy = { policy };
     mutate(s);
     assert.equal(context.StudioRuns.integrationReview(s.tasks[0], s.attempts), null);
-    assert.equal(explain(s).kind, 'integration-ineligible');
-    assert.doesNotMatch(explain(s).action, /Approve integration/);
+    const e = explain(s);
+    assert.equal(e.kind, 'integration-ineligible');
+    assert.equal(e.requiresDirector, true);
+    assert.equal(e.reason, why);
+    assert.equal(e.action, 'Close without integrating');
+    assert.match(e.next, /use Close without integrating\.$/);
+    assert.doesNotMatch(e.reason + e.next, /Inspect/);
+    assert.doesNotMatch(e.reason, /review-1|implementation-1|\.json|studio-development|candidate/);
+    ineligible.add(e.reason);
+  }
+  assert.equal(ineligible.size, 4);
+  // The same check passes, giving the review, with nothing changed; and other failures each name their own cause.
+  for (const [mutate, why] of [
+    [
+      s => {
+        delete s.attempts[1];
+        s.attempts = s.attempts.filter(Boolean);
+      },
+      'The passing review is not in the records.',
+    ],
+    [
+      s => {
+        s.attempts[1].workerId = 'W-02';
+        s.tasks[0].sourceStage.review.workerId = 'W-02';
+      },
+      'The reviewer is the same agent as the editor.',
+    ],
+    [
+      s => {
+        s.attempts[1].controllerChecks = [{ name: 'Review output', status: 'fail' }];
+      },
+      "The review's own checks failed.",
+    ],
+  ]) {
+    const s = stagedSourceState();
+    s.autonomy = { policy };
+    assert.equal(context.StudioRuns.integrationReview(s.tasks[0], s.attempts)?.id, 'review-1');
+    mutate(s);
+    assert.equal(context.StudioRuns.integrationReview(s.tasks[0], s.attempts), null);
+    assert.equal(explain(s).reason, why);
   }
 
   // Another story holds the studio's one integration request, which the controller refuses to share

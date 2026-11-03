@@ -780,7 +780,9 @@ function GenericCall({ projectId, stories, task, item }: CallProps & { task: Tas
           ? start
           : [
               {
-                label: item.action ? `Open to use ${item.action}` : 'Open the story',
+                // Open the story is itself the way there.
+                label:
+                  item.action && item.action !== 'Open the story' ? `Open to use ${item.action}` : 'Open the story',
                 emphasis: 'primary',
                 task: task.id,
               },

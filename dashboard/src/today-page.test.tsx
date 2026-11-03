@@ -338,6 +338,80 @@ test('a story whose line moved while it was tested says so on its Integration st
   expect(card.queryByText(/Ready to integrate/)).toBeNull();
 });
 
+// Evidence that is really missing or doesn't match: the call says what, in plain words, and its button is one the
+// story page has, never the catch-all's Inspect stage.
+test('a review from before stories had stages that records no change offers Open the story and says what is missing', async () => {
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      finishedAt: '2026-10-27T19:02:00.000Z',
+      result: { outcome: 'completed' },
+      // No candidate verdict, so the dashboard's own older-layout integration call does not take it; its run is
+      // still open, so the live set holds it.
+      reviewVerdict: 'pass',
+    },
+  ];
+  controller.tasks = [
+    taskFixture('T-1', {
+      title: 'An older review',
+      kind: 'studio-development:change-review',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      workflowReference: { runId: 'run-1', key: 'review' },
+    }),
+  ];
+  controller.runs = [
+    {
+      id: 'run-1',
+      createdAt: '2026-10-27T18:00:00.000Z',
+      brief: 'Review the change.',
+      workflow: { id: 'workflow-1', name: 'Source checks and review', version: 3 },
+      revisions: [{ revision: 1, at: '2026-10-27T18:00:00.000Z', reason: 'created' }],
+      nodes: [
+        {
+          taskId: 'T-1',
+          key: 'review',
+          kind: 'studio-development:change-review',
+          title: 'An older review',
+          workerId: 'W-1',
+          dependencies: [],
+          revision: 1,
+        },
+      ],
+      archive: { archived: false },
+    },
+  ];
+  open();
+  const region = within(await calls()),
+    card = within((await region.findByRole('heading', { name: 'An older review' })).closest('article')!);
+  expect(card.getByText(/^The review does not record which change it checked\./)).toBeTruthy();
+  const opens = card.getAllByRole('link', { name: 'Open the story' });
+  expect(opens).toHaveLength(1);
+  expect(opens[0]!.className).toContain('sd-btn');
+  expect(opens[0]!.getAttribute('href')).toBe('/p/project-x/tasks/T-1');
+  expect(card.queryAllByText(/Open to use/)).toHaveLength(0);
+  expect(region.queryAllByRole('button', { name: /Inspect stage/ })).toHaveLength(0);
+  expect(region.queryAllByText(/Inspect|attempt-review|studio-development/)).toHaveLength(0);
+});
+
+test('a staged story whose review checked a different change says so and offers Close without integrating', async () => {
+  stoppedStory({});
+  const review = controller.attempts[1] as AttemptSummary & { candidateReview: { candidateHash: string } };
+  review.candidateReview = { ...review.candidateReview, candidateHash: 'stale' };
+  open();
+  const card = await storyCall(),
+    region = within(await calls());
+  expect(card.getByText(/^The review checked a different change than the story's current one\./)).toBeTruthy();
+  expect(card.getByRole('link', { name: 'Open to use Close without integrating' })).toBeTruthy();
+  expect(card.queryByText('Integration stopped')).toBeNull();
+  expect(region.queryAllByRole('button', { name: /Inspect stage/ })).toHaveLength(0);
+  expect(region.queryAllByText(/Inspect|attempt-review|source-change|candidate-hash|T-1\b/)).toHaveLength(0);
+});
+
 test('a story whose formatted change failed a test names that failure and offers Integrate again', async () => {
   stoppedStory({ passed: false, phaseId: 'integration.verification' } as Integration['verification'], {
     error: 'npm test exited with code 1.',
