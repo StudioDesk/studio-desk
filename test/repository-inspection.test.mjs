@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import './model-free-studio.mjs';
 import { inspectRepository, proposeSourceProfile, recordProjectSource } from '../src/connectors/source-projects.mjs';
 import { sourcePlan, testTotals } from '../src/connectors/source-checks.mjs';
-import { studioDeskProfile } from '../src/connectors/source-profile.mjs';
+import { studioDeskProfile, studioDeskProfileRevision1 } from '../src/connectors/source-profile.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 
 function repository(t, files) {
@@ -69,9 +69,10 @@ test('a proposed profile covers what the repository tracks, minus dot, dependenc
     tests: { directory: 'tests', suffix: '.test.ts' },
     formatter: null,
     limits: {
-      files: studioDeskProfile.limits.files,
-      fileBytes: studioDeskProfile.limits.fileBytes,
-      totalBytes: studioDeskProfile.limits.totalBytes,
+      // A new repository starts from the first revision's limits, not Studio desk's own (raised November 3, 2026).
+      files: studioDeskProfileRevision1.limits.files,
+      fileBytes: studioDeskProfileRevision1.limits.fileBytes,
+      totalBytes: studioDeskProfileRevision1.limits.totalBytes,
     },
   });
   // A repository that already keeps Node tests in a test folder gets that folder and suffix. A tracked bin holds

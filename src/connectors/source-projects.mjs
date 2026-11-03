@@ -12,7 +12,7 @@ import { subscriptionEnvironment } from '../adapters/process.mjs';
 import { snapshotCommit } from '../adapters/source-snapshot.mjs';
 import { failedTests, sourcePlan, testOutput, testTotals } from './source-checks.mjs';
 import { git, gitRefusal, repositoryState } from './source-integration.mjs';
-import { maxProfileEntries, studioDeskProfile, validateSourceProfile } from './source-profile.mjs';
+import { maxProfileEntries, studioDeskProfile, validateSourceProfile, defaultSourceLimits } from './source-profile.mjs';
 import { sourceWorktreeRoot } from './source-worktrees.mjs';
 
 // The resources a Studio desk story and its integration hold (MP-016's names, unchanged).
@@ -123,7 +123,7 @@ const testFolders = ['test', 'tests', '__tests__'],
 // tests/*.test.ts, or .test.mjs without TypeScript), no formatter, and totals sized from the repository.
 export function proposeSourceProfile(root) {
   const tracked = git(root, ['ls-files', '-z'], { raw: true }).split('\0').filter(Boolean),
-    { limits } = studioDeskProfile,
+    limits = defaultSourceLimits,
     folders = new Set(),
     files = [];
   for (const file of tracked) {

@@ -17,10 +17,12 @@ const contextFiles = Object.freeze([
   'src/core/workflows.mjs',
 ]);
 const limits = Object.freeze({ files: 500, fileBytes: 1024 * 1024, totalBytes: 16 * 1024 * 1024 });
-// Studio desk's own limits since November 3, 2026. What a snapshot costs is bounded by its total size and each
-// file's size; the count of files was a guess, and Studio desk's own source reached it that day, so every story
-// that added a file stopped. The count stays only as a backstop against a runaway folder.
-const studioDeskLimits = Object.freeze({ ...limits, files: 5000 });
+// Studio desk's own limits since November 3, 2026. Its source reached the 500 files the count allowed that day, so
+// every story that added a file stopped, and its 8 MB was half the 16 MB total. What a snapshot costs is copying it
+// for every attempt, which 64 MB still keeps cheap; the count stays only as a backstop against a runaway folder.
+// Another repository's proposed profile still starts from `limits`, the first revision's.
+const studioDeskLimits = Object.freeze({ ...limits, files: 5000, totalBytes: 64 * 1024 * 1024 });
+export const defaultSourceLimits = limits;
 
 // What every check, plan and candidate recorded without a profile was measured with. It never changes:
 // stories planned under it keep their exact snapshot after Studio desk's profile moves on.

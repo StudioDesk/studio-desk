@@ -538,6 +538,9 @@ test("a Studio desk record is measured with the larger of its own limits and tod
     limits: { ...studioDeskProfile.limits, files: measured - 2 },
   };
   assert.equal(measuringLimits(recorded).files, studioDeskProfile.limits.files);
+  // A recorded limit above today's is kept: the larger of the two, never a cut.
+  const roomier = { ...recorded, limits: { ...recorded.limits, files: studioDeskProfile.limits.files + 1 } };
+  assert.equal(measuringLimits(roomier).files, studioDeskProfile.limits.files + 1);
   assert.equal(measuringLimits(recorded).totalBytes, studioDeskProfile.limits.totalBytes);
   const plan = sourcePlan(root, recorded);
   assert.equal(plan.files.length, measured);
@@ -559,11 +562,14 @@ test("another repository's profile keeps its own limits", t => {
   assert.throws(() => sourcePlan(root, tight), /Source snapshot exceeds its file limits/);
 });
 
-test("Studio desk's own source keeps room under its file limit", () => {
-  // A tripwire, not a target: if this fails, raise the limit before stories that add files start stopping.
-  const { files } = sourcePlan();
-  assert.ok(
-    files.length * 2 <= studioDeskProfile.limits.files,
-    `Studio desk's source has ${files.length} files, more than half its limit of ${studioDeskProfile.limits.files}.`,
-  );
+test("Studio desk's own source keeps room under its limits", () => {
+  // A tripwire, not a target. If it fails, the director raises the limit in src/connectors/source-profile.mjs by
+  // hand; an agent's story never changes it to make its tests pass.
+  const { files } = sourcePlan(),
+    bytes = files.reduce((total, file) => total + file.bytes, 0),
+    { limits } = studioDeskProfile;
+  const reason = what =>
+    `Studio desk's source is past half its ${what}. The director raises it by hand; a story must not change it.`;
+  assert.ok(files.length * 2 <= limits.files, reason(`file limit (${files.length} of ${limits.files} files)`));
+  assert.ok(bytes * 2 <= limits.totalBytes, reason(`size limit (${bytes} of ${limits.totalBytes} bytes)`));
 });
