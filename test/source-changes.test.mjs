@@ -6,6 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStudio } from './model-free-studio.mjs';
 import { setup } from './source-story-setup.mjs';
+import { waitFor } from './wait-for.mjs';
+import { testTurnResource } from '../src/core/test-turn.mjs';
 import { checkReport, sourcePlan } from '../src/connectors/source-checks.mjs';
 import { sourceDiff, sourceDiffStat } from '../src/connectors/source-diff.mjs';
 import { hash } from '../src/core/contracts.mjs';
@@ -1991,6 +1993,240 @@ test('an attempt leaves at most an hour of its own test runs out of its limit; p
   // With the hour used, a run no longer holds the limit.
   runner.setTimeLimit(entry, 10000);
   assert.equal(runner.holdTimeLimit(entry), null);
+});
+
+test("a run's wait for the test turn counts neither against the limit nor toward the hour, even past the hour", t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const stopped = [],
+    a = { id: 'attempt-wait', limitHeldMs: 0 },
+    entry = { attempt: a },
+    runner = {
+      active: new Map([[a.id, entry]]),
+      store: { updateAttempt() {} },
+      stop: id => stopped.push(id),
+    };
+  for (const name of ['setTimeLimit', 'holdTimeLimit', 'resumeTimeLimit']) runner[name] = Runner.prototype[name];
+  runner.setTimeLimit(entry, 10000);
+  t.mock.timers.tick(1000);
+  // A run of 50 seconds, 45 of them waiting for the turn: 5 count toward the hour, none against the limit.
+  const hold = runner.holdTimeLimit(entry);
+  t.mock.timers.tick(50000);
+  hold.waitedMs = 45000;
+  runner.resumeTimeLimit(entry, hold);
+  assert.equal(a.limitHeldMs, 5000);
+  t.mock.timers.tick(8999);
+  assert.deepEqual(stopped, []);
+  // With the hour used, the run no longer holds the limit, but its wait still does, whole, and adds nothing.
+  a.limitHeldMs = limitHoldMs;
+  runner.setTimeLimit(entry, 10000);
+  assert.equal(runner.holdTimeLimit(entry), null);
+  const wait = runner.holdTimeLimit(entry, { waiting: true });
+  assert.equal(wait.left, 10000);
+  t.mock.timers.tick(600000);
+  assert.deepEqual(stopped, []);
+  runner.resumeTimeLimit(entry, wait);
+  assert.equal(a.limitHeldMs, limitHoldMs);
+  t.mock.timers.tick(9999);
+  assert.deepEqual(stopped, []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(stopped, [a.id]);
+});
+
+// An agent's own run of the whole suite takes the computer's one test turn (November 2): an editor that keeps running
+// (the Claude fixture's "Hang"), the turn held by the idea's checks as another suite would hold it, and the agent's
+// test requests sent as its client sends them. Each run's command is the check fixture in `c.mode`. A run reads its
+// command twice, just before its test process starts and once it has ended; `c.started` records each first read.
+async function suiteTurnStudio(t) {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], { claudeBinary: claudeFixture }),
+    { store, runner } = c.app;
+  const org = store.organization();
+  Object.assign(
+    org.workers.find(worker => worker.id === store.task(c.taskId).workerId),
+    { provider: 'claude' },
+  );
+  store.setOrganization(org);
+  const task = store.task(c.taskId);
+  task.title = `Hang while editing: ${task.title}`;
+  store.putTask(task);
+  c.mode = 'pass';
+  c.started = [];
+  let reads = 0;
+  Object.defineProperty(runner, 'sourceCheckCommand', {
+    configurable: true,
+    get: () => {
+      if ([...runner.active.values()].some(item => item.employeeTests) && reads++ % 2 === 0) c.started.push(Date.now());
+      return { executable: process.execPath, args: [tests, c.mode] };
+    },
+  });
+  await c.start();
+  c.entry = await waitFor(
+    () => [...runner.active.values()].find(entry => entry.employeeTests && entry.child && entry.attempt.pid),
+    'the editor to run with its test endpoint open',
+  );
+  c.attemptId = c.entry.attempt.id;
+  const { STUDIO_TESTS_URL: url, STUDIO_TESTS_TOKEN: token } = c.entry.toolEnvironment;
+  c.run = (files = [], signal) =>
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Studio-Attempt-Token': token },
+      body: JSON.stringify({ files }),
+      signal,
+    }).then(response => response.json());
+  c.holder = 'checked-attempt';
+  c.reason = store.resourceConflict(testTurnResource, c.holder).reason;
+  c.turn = () => store.leases().find(lease => lease.resource === testTurnResource)?.attemptId ?? null;
+  c.waiting = () => store.attempt(c.attemptId).testTurn;
+  // Lease changes are served on the next turn of the event loop.
+  c.settle = () => new Promise(resolve => setTimeout(resolve, 50));
+  c.stop = async () => {
+    assert.equal((await c.request(`/api/tasks/${c.taskId}/cancel`)).status, 202);
+    await c.wait(c.taskId, 'cancelled');
+  };
+  return c;
+}
+
+test("an agent's whole-suite run waits for the test turn while its editor runs; named files start at once", async t => {
+  const c = await suiteTurnStudio(t),
+    { store, runner } = c.app,
+    entry = c.entry;
+  assert.match(c.reason, /^Waiting for the tests of checked-task .* one full test suite at a time\.$/);
+  store.claim([testTurnResource], c.holder);
+  // Named test files start at once while another suite holds the turn, and record no wait.
+  const named = await c.run(['test/bounded.test.mjs']);
+  assert.equal(named.exitCode, 0, named.summary);
+  assert.equal(named.summary, '1/1 tests passed on your edits, as a protocol fixture.');
+  assert.equal(c.started.length, 1);
+  assert.equal(c.turn(), c.holder);
+  assert.equal(c.waiting(), undefined);
+  assert.equal(
+    store.events().filter(event => event.kind === 'test_turn' && event.attempt_id === c.attemptId).length,
+    0,
+  );
+  // The editor's limit is short; a wait that counted against it would stop the editor.
+  runner.setTimeLimit(entry, 1500);
+  const heldBefore = store.attempt(c.attemptId).limitHeldMs || 0,
+    sent = Date.now(),
+    whole = c.run();
+  const waiting = await waitFor(c.waiting, 'the whole suite to wait for the turn'),
+    seen = Date.now();
+  assert.deepEqual({ ...waiting, since: undefined }, { reason: c.reason, since: undefined, holder: c.holder });
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  // The editor still runs, its limit untouched, and the suite has not started.
+  assert.equal(runner.active.get(c.attemptId), entry);
+  assert.ok(entry.child && store.attempt(c.attemptId).pid, 'The editor keeps its process.');
+  assert.equal(store.attempt(c.attemptId).status, 'running');
+  assert.ok(!entry.timedOut, 'The time limit did not end.');
+  assert.equal(c.started.length, 1, 'The whole suite waits for the turn.');
+  assert.equal(c.turn(), c.holder);
+  const released = Date.now();
+  store.releaseResource(testTurnResource, c.holder);
+  const answer = await whole,
+    ended = Date.now();
+  assert.equal(answer.exitCode, 0, answer.summary);
+  assert.match(
+    answer.summary,
+    /^1\/1 tests passed on your edits, as a protocol fixture\. The run waited \d+ seconds? for this computer's one test turn\.$/,
+  );
+  assert.equal(c.started.length, 2);
+  assert.ok(c.started[1] >= released, 'The run started only after the holder gave the turn back.');
+  // The run took the turn and gave it back; the record no longer waits, and one event said it waited.
+  assert.equal(c.turn(), null);
+  const a = store.attempt(c.attemptId);
+  assert.equal(a.testTurn, undefined);
+  assert.deepEqual(
+    store
+      .events()
+      .filter(event => event.kind === 'test_turn' && event.attempt_id === c.attemptId)
+      .map(event => event.message),
+    [c.reason],
+  );
+  assert.deepEqual(
+    a.employeeTestRuns.map(run => [run.files, run.exitCode]),
+    [
+      [['test/bounded.test.mjs'], 0],
+      [[], 0],
+    ],
+  );
+  // Only the run itself counts toward the hour, not its wait.
+  const held = a.limitHeldMs - heldBefore;
+  assert.ok(
+    held >= 0 && held <= ended - sent - (released - seen) + 20,
+    `${held} ms held, of a request of ${ended - sent} ms that waited at least ${released - seen} ms.`,
+  );
+  assert.equal(runner.active.get(c.attemptId), entry, 'The editor still runs after its wait.');
+  await c.stop();
+  assert.equal(store.leases().length, 0);
+});
+
+test("an agent's whole-suite run frees the turn when it fails or its client leaves, and stops waiting at its bound", async t => {
+  const c = await suiteTurnStudio(t),
+    { store, runner } = c.app;
+  // A failed run gives the turn back.
+  c.mode = 'fail';
+  const failed = await c.run();
+  assert.equal(failed.exitCode, 1);
+  assert.equal(failed.summary, '0/1 tests passed, 1 failed on your edits, as a protocol fixture.');
+  assert.equal(c.turn(), null);
+  // So does a run whose client leaves while it runs.
+  c.mode = 'hang';
+  const leaving = new AbortController(),
+    left = c.run([], leaving.signal).catch(error => error.name);
+  await waitFor(() => c.started.length === 2 && c.entry.employeeTests?.child, 'the hanging run to start');
+  assert.equal(c.turn(), c.attemptId, 'The running suite holds the turn.');
+  leaving.abort();
+  assert.equal(await left, 'AbortError');
+  await waitFor(() => store.attempt(c.attemptId).employeeTestRuns?.length === 2, 'the stopped run to be recorded');
+  await waitFor(() => !c.entry.employeeTests.busy, 'the stopped run to end');
+  assert.equal(c.turn(), null);
+  // A client that leaves while the run waits takes it out of the queue.
+  c.mode = 'pass';
+  store.claim([testTurnResource], c.holder);
+  const gone = new AbortController(),
+    abandoned = c.run([], gone.signal).catch(error => error.name);
+  await waitFor(c.waiting, 'the run to wait for the turn');
+  gone.abort();
+  assert.equal(await abandoned, 'AbortError');
+  await waitFor(() => !c.waiting() && !c.entry.employeeTests.busy, 'the abandoned wait to end');
+  store.releaseResource(testTurnResource, c.holder);
+  await c.settle();
+  assert.equal(c.turn(), null, 'The abandoned wait took no turn.');
+  assert.equal(c.started.length, 2);
+  // A wait past its bound answers without running, naming whose suite holds the turn, and leaves the queue.
+  runner.employeeTestTurnWaitMs = 300;
+  store.claim([testTurnResource], c.holder);
+  const bounded = await c.run(),
+    holder = /^Waiting for (.+) to finish: /.exec(c.reason)[1];
+  assert.equal(bounded.exitCode, 1);
+  assert.ok(
+    bounded.summary.startsWith(
+      `No tests ran: after 1 second, ${holder} still had this computer's one test turn (it runs one full test suite at a time). Run the test files your edits touch by name instead, which start at once, for example: `,
+    ),
+    bounded.summary,
+  );
+  assert.equal(c.waiting(), undefined);
+  assert.equal(c.started.length, 2);
+  store.releaseResource(testTurnResource, c.holder);
+  await c.settle();
+  assert.equal(c.turn(), null, 'The bounded wait left the queue and holds no turn.');
+  assert.equal(store.attempt(c.attemptId).employeeTestRuns.length, 2, 'A run that did not start is not recorded.');
+  assert.ok(
+    store
+      .events()
+      .some(
+        event => event.kind === 'employee_tests' && event.message.includes('whole suite did not start: No tests ran'),
+      ),
+  );
+  // The editor stopping takes a waiting run out of the queue too, and the attempt finishes.
+  runner.employeeTestTurnWaitMs = undefined;
+  store.claim([testTurnResource], c.holder);
+  c.run().catch(() => {});
+  await waitFor(c.waiting, 'the run to wait for the turn again');
+  assert.equal(runner.active.get(c.attemptId), c.entry, 'The editor still runs while the run waits.');
+  await c.stop();
+  assert.equal(store.attempt(c.attemptId).testTurn, undefined);
+  store.releaseResource(testTurnResource, c.holder);
+  await c.settle();
+  assert.equal(store.leases().length, 0);
 });
 
 test("a Claude editor's test run leads with a failed test that its kept output no longer holds", async t => {

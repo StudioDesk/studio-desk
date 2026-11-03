@@ -86,7 +86,7 @@ export function permissionsPrompt(permissions) {
   // A code-editing employee's test command (connectors/employee-tests.mjs).
   const tests = (permissions.tools || []).map(
     tool =>
-      ` To run the project's tests on your edits, run \`${tool}\` for the whole suite, or add test file paths as they are in the source (for example test/a.test.mjs) to run only those, which is faster. The controller copies the source with your edits under changes/ applied and runs the tests where candidate tests run; run it in the foreground with a timeout of 600000 ms, and hand off your result only after it finishes. Your candidate is tested again after you finish.`,
+      ` To run the project's tests on your edits, run \`${tool}\` for the whole suite, or add test file paths as they are in the source (for example test/a.test.mjs) to run only those. The whole suite waits for this computer's one test turn, which other full test suites share, and answers without running if it waits more than five minutes; named test files start at once and are faster. The controller copies the source with your edits under changes/ applied and runs the tests where candidate tests run; run it in the foreground with a timeout of 600000 ms, and hand off your result only after it finishes. Your candidate is tested again after you finish.`,
   );
   return `${mode}${tests.join('')} If your work needs a command that is refused, do not try to get around it: return outcome blocked and say in your summary which command you need and why. The director sees the commands Claude Code refused and can approve them, and the work then starts again from what you leave here.`;
 }

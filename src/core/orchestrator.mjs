@@ -979,17 +979,22 @@ export class Runner {
   // An agent's own test runs (connectors/employee-tests.mjs) do not count against its time limit. The director,
   // October 29: "The agent is what costs so docking it for long running tests seems like the wrong method." The
   // limit stops while a run goes on and starts again with the time that was left, for up to limitHoldMs of runs in
-  // all per attempt (attempt.limitHeldMs); past that, runs count again, so a loop of runs still ends.
-  holdTimeLimit(entry) {
-    if (!entry.timer || !entry.limitEndsAt || (entry.attempt.limitHeldMs || 0) >= limitHoldMs) return null;
+  // all per attempt (attempt.limitHeldMs); past that, runs count again, so a loop of runs still ends. A run of the
+  // whole suite may first wait for the computer's test turn (core/test-turn.mjs waitForTurn): that wait counts
+  // neither against the limit nor toward limitHeldMs. A run's hold leaves it out (hold.waitedMs), and a run that no
+  // longer holds the limit holds it for its wait alone ({ waiting: true }), whatever the hour has left.
+  holdTimeLimit(entry, { waiting = false } = {}) {
+    if (!entry.timer || !entry.limitEndsAt) return null;
+    if (!waiting && (entry.attempt.limitHeldMs || 0) >= limitHoldMs) return null;
     clearTimeout(entry.timer);
     entry.timer = null;
-    return { left: Math.max(0, entry.limitEndsAt - Date.now()), at: Date.now() };
+    return { left: Math.max(0, entry.limitEndsAt - Date.now()), at: Date.now(), ...(waiting ? { waiting } : {}) };
   }
   resumeTimeLimit(entry, hold) {
     if (!hold || entry.timer || entry.cancelled || this.active.get(entry.attempt.id) !== entry) return;
+    if (hold.waiting) return this.setTimeLimit(entry, hold.left);
     const a = entry.attempt;
-    a.limitHeldMs = (a.limitHeldMs || 0) + (Date.now() - hold.at);
+    a.limitHeldMs = (a.limitHeldMs || 0) + Math.max(0, Date.now() - hold.at - (hold.waitedMs || 0));
     this.store.updateAttempt(a);
     this.setTimeLimit(entry, Math.max(0, hold.left - Math.max(0, a.limitHeldMs - limitHoldMs)));
   }
