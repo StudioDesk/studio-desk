@@ -29,6 +29,7 @@ import { ModelTiers } from './model-tiers';
 import { NewProject } from './new-project';
 import { ClaudeCommands } from './permissions';
 import { ProfileDialog } from './profile-dialog';
+import { ReleaseSettings } from './release-settings';
 import { queryKeys, useStudio } from './records';
 import { usageHolds, type StudioState } from './studio-runs';
 import { useToast } from './toast';
@@ -50,6 +51,8 @@ export function settingsTrail(projectId: string) {
 const sections = [
   { id: 'general', label: 'General', group: 'This project' },
   { id: 'repository', label: 'Repository' },
+  // Only a code project has releases.
+  { id: 'releases', label: 'Releases', code: true },
   { id: 'visual-check', label: 'Visual check' },
   { id: 'rules', label: 'House rules' },
   { id: 'workflows', label: 'Workflows' },
@@ -114,30 +117,35 @@ function Row({
   );
 }
 
+const listedSections = (code: boolean) => sections.filter(section => !section.code || code);
+
 // The section nav, which marks the section in view, and Previews last: switches for unfinished features on a page of
-// their own (November 1, 2026: it was an inline link at the foot of the page, which the design never draws).
-function SubNav({ projectId }: { projectId: string }) {
-  const [current, setCurrent] = useState('general');
+// their own (November 1, 2026: it was an inline link at the foot of the page, which the design never draws). A section
+// only a code project has is listed only on one.
+function SubNav({ projectId, code }: { projectId: string; code: boolean }) {
+  const [current, setCurrent] = useState('general'),
+    listed = listedSections(code);
   useEffect(() => {
+    const observed = listedSections(code);
     if (typeof IntersectionObserver === 'undefined') return;
     const shown = new Map<string, boolean>();
     const observer = new IntersectionObserver(
       entries => {
         for (const entry of entries) shown.set(entry.target.id, entry.isIntersecting);
-        const first = sections.find(section => shown.get(section.id));
+        const first = observed.find(section => shown.get(section.id));
         if (first) setCurrent(first.id);
       },
       { rootMargin: '-10% 0px -60% 0px' },
     );
-    for (const section of sections) {
+    for (const section of observed) {
       const element = document.getElementById(section.id);
       if (element) observer.observe(element);
     }
     return () => observer.disconnect();
-  }, []);
+  }, [code]);
   return (
     <nav className="sd-subnav" aria-label="Settings sections">
-      {sections.map(section => (
+      {listed.map(section => (
         <SubNavItem key={section.id} section={section} current={current === section.id} />
       ))}
       <Link to="/p/$projectId/settings/previews" params={{ projectId }}>
@@ -1449,7 +1457,8 @@ export function SettingsPage({ projectId }: { projectId: string }) {
         Loading the settings…
       </p>
     );
-  const index = state.projects.findIndex(project => project.id === projectId);
+  const index = state.projects.findIndex(project => project.id === projectId),
+    code = isCodeProject(state);
   return (
     <div className="sd-settingspage">
       <header className="sd-settingshead">
@@ -1458,10 +1467,15 @@ export function SettingsPage({ projectId }: { projectId: string }) {
         <p>Changes apply to work that starts after you save. Anything that already ran keeps the settings it used.</p>
       </header>
       <div className="sd-settings">
-        <SubNav projectId={projectId} />
+        <SubNav projectId={projectId} code={code} />
         <div className="sd-settings__sections">
           <General key={`general-${state.project.revision}`} projectId={projectId} state={state} index={index} />
           <Repository projectId={projectId} state={state} />
+          {code && (
+            <Section id="releases" title="Releases">
+              <ReleaseSettings projectId={projectId} />
+            </Section>
+          )}
           <Section id="visual-check" title="Visual check">
             <VisualCheckSettings projectId={projectId} state={state} />
           </Section>

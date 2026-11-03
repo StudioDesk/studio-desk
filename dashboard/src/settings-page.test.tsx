@@ -506,6 +506,37 @@ test('Settings lists Previews last in its sections nav, a page of its own that t
   expect(commands()).toEqual([]);
 });
 
+test("a code project's sections nav lists Releases after Repository, and a general-work project's does not", async () => {
+  const nav = () =>
+    within(screen.getByRole('navigation', { name: 'Settings sections' }))
+      .getAllByRole('link')
+      .map(link => link.textContent);
+  controller.shell.organizationConfiguration = {
+    ...controller.shell.organizationConfiguration!,
+    taskKinds: ['studio-development:change'],
+  };
+  open('/p/project-x/settings');
+  expect(await screen.findByRole('region', { name: 'Releases' })).toBeTruthy();
+  expect(nav().slice(0, 4)).toEqual(['General', 'Repository', 'Releases', 'Visual check']);
+  expect(
+    within(screen.getByRole('navigation', { name: 'Settings sections' }))
+      .getByRole('link', { name: 'Releases' })
+      .getAttribute('href'),
+  ).toBe('#releases');
+  cleanup();
+  controller.requests = [];
+  controller.shell.organizationConfiguration = {
+    ...controller.shell.organizationConfiguration!,
+    taskKinds: ['general:plan'],
+  };
+  open('/p/project-x/settings');
+  await screen.findByRole('region', { name: 'Repository' });
+  expect(nav()).not.toContain('Releases');
+  expect(nav().slice(0, 3)).toEqual(['General', 'Repository', 'Visual check']);
+  expect(screen.queryByRole('region', { name: 'Releases' })).toBeNull();
+  expect(controller.reads()).not.toContain('/api/projects/project-x/releases');
+});
+
 test('the house rules switch a gate between you and the studio, and save against the revision they read', async () => {
   const user = userEvent.setup();
   open('/p/project-x/settings');
