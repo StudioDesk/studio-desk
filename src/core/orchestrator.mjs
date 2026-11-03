@@ -409,7 +409,8 @@ export class Runner {
     );
   }
   // `quick` when the work cannot start yet anyway: its inputs' validators may then skip measuring its source.
-  blockReason(task, verifyAuth = false, { quick = false } = {}) {
+  // `refused` receives the error its inputs' validators refused it with, for a start to note on the work (noteRefusal).
+  blockReason(task, verifyAuth = false, { quick = false, refused } = {}) {
     task = this.workflows.stageView(task);
     const org = projectOrganization(this.store, recordProject(task)),
       w = this.effectiveWorker(org, task);
@@ -483,6 +484,7 @@ export class Runner {
       });
       if (validation?.then) throw new Error('Workflow input validators must complete synchronously.');
     } catch (error) {
+      refused?.(error);
       return error.message;
     }
     if (verifyAuth && task.acceptedInputs && !stageView)
@@ -726,6 +728,13 @@ export class Runner {
   start(taskId, options = {}) {
     return this.setUpAttempt(measuringPass(() => this.claimAttempt(taskId, options)));
   }
+  // A start or dispatch that was refused lets the work's task type note on it why, when only a new plan can fix that
+  // (a task type's refused hook: a source story whose plan the source moved past). The scheduler's own readiness checks
+  // never note anything. Returns whether the task changed.
+  noteRefusal(task, error) {
+    const refused = this.workflows.find(task.kind)?.refused;
+    return !!error && typeof refused === 'function' && refused({ store: this.store, task, error }) === true;
+  }
   // Checks the work and prepares its attempt, then claims its slot, employee and resources and records it.
   claimAttempt(taskId, { director = false } = {}) {
     const store = this.store,
@@ -740,14 +749,16 @@ export class Runner {
       throw new Error('Reconcile the interrupted attempt before starting another.');
     // Measuring the work's scope (these checks and the attempt's prepared fields below) runs before the attempt
     // exists; its time is recorded as the attempt's setup.scope phase once it does.
-    let scopeStarted = performance.now();
-    const reason = this.blockReason(task, true);
+    let scopeStarted = performance.now(),
+      refusal = null;
+    const reason = this.blockReason(task, true, { refused: error => (refusal = error) });
     let scopeMs = performance.now() - scopeStarted;
     if (reason) {
       task.status = 'blocked';
       task.reason = reason;
       if (task.autonomyNote) task.autonomyNote = reason;
       task.controllerWait = !reason.includes('subscription login');
+      this.noteRefusal(task, refusal);
       this.putTask(task);
       store.event('blocked', task.id, null, reason);
       throw new Error(reason);
@@ -896,15 +907,21 @@ export class Runner {
       };
     if (operation) a.operation = operation;
     scopeStarted = performance.now();
-    const prepared = definition.prepareAttempt?.({
-      org,
-      task,
-      registries: this.registries,
-      project,
-      store,
-      runtime: this,
-      attemptId: id,
-    });
+    let prepared;
+    try {
+      prepared = definition.prepareAttempt?.({
+        org,
+        task,
+        registries: this.registries,
+        project,
+        store,
+        runtime: this,
+        attemptId: id,
+      });
+    } catch (error) {
+      if (this.noteRefusal(task, error)) this.putTask(task);
+      throw error;
+    }
     scopeMs += performance.now() - scopeStarted;
     this.applyMetadata(a, definition, prepared);
     try {

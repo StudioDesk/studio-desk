@@ -245,6 +245,31 @@ export const maxScopePaths = 100;
 // Studio desk: instruction files, the package manifest and formatter configuration) and dot-paths
 // can never be created, changed or deleted by a story.
 const scopePaths = ({ files, newFiles = [], deleteFiles = [] }) => ({ files, newFiles, deleteFiles });
+// A scope refusal only a new breakdown can fix, since the source moved past the story's plan (error.outdated, with the
+// files involved): an approved file that no longer exists, a file to create that now exists or collides and no
+// prerequisite in the chain created, or a listed file the source holds that its measured list lacks. Uncommitted
+// edits, git-ignored paths and edit counts are refusals the director can fix in place, and carry no marker.
+const outdatedError = (message, files) => Object.assign(new Error(message), { outdated: { files: [...files] } });
+// What a story whose plan the source moved past says to the director, in plain words (sourceStage.outdated).
+export const outdatedReason =
+  'The code moved on since this story was planned: another story has since created or changed files it was planned to create or change. Close it and send its remaining work as a new idea.';
+// Notes on a story that its plan is out of date when error is such a refusal: { reason, files, at }, the files of every
+// such refusal so far and when the latest was seen. It is never cleared, since editing the story cannot fix it. Returns
+// whether it noted anything; a story from before stages (with a separate review task) gains no stage.
+export function noteOutdated(task, error) {
+  if (task?.kind !== 'studio-development:change' || !error?.outdated?.files?.length) return false;
+  if (!task.sourceStage && task.proposedTaskIds?.length) return false;
+  task.sourceStage ||= newSourceStage();
+  const files = [...new Set([...(task.sourceStage.outdated?.files || []), ...error.outdated.files])];
+  task.sourceStage.outdated = { reason: outdatedReason, files, at: new Date().toISOString() };
+  return true;
+}
+// Notes it on the recorded story, for a refusal outside a start (an edit, or the check of a file request).
+function recordOutdated(store, taskId, error) {
+  if (!error?.outdated) return;
+  const task = store.task(taskId);
+  if (noteOutdated(task, error)) store.putTask(task);
+}
 // New files must not exist, ignoring case (Windows), nor sit where a file or folder already is.
 function newPathProblem(file, taken) {
   const lower = file.toLowerCase(),
@@ -273,11 +298,18 @@ export function validateStoryPaths(paths, manifest = [], name = 'The story', pro
     );
   if (new Set(all).size !== all.length)
     throw new Error(`${name} must list each source path once, in only one of files, newFiles and deleteFiles.`);
+  const recorded = file => manifest.some(item => item.path === file);
   for (const file of [...files, ...deleteFiles])
-    if (!storyPathAllowed(file, profile) || !manifest.some(item => item.path === file))
-      throw new Error(
-        `${name} lists unsupported or unrecorded source file ${String(file)}; choose an allowed existing path from the measured manifest.`,
-      );
+    if (!storyPathAllowed(file, profile) || !recorded(file)) {
+      const message = `${name} lists unsupported or unrecorded source file ${String(file)}; choose an allowed existing path from the measured manifest.`;
+      // An allowed path the measured list lacks may be one the source gained since it was measured (verifyStoryScope).
+      throw storyPathAllowed(file, profile)
+        ? outdatedError(
+            message,
+            [...files, ...deleteFiles].filter(other => storyPathAllowed(other, profile) && !recorded(other)),
+          )
+        : new Error(message);
+    }
   const taken = takenPaths(manifest);
   for (const file of newFiles) {
     const problem = storyPathAllowed(file, profile) ? newPathProblem(file, taken) : storyPathRule(profile);
@@ -456,7 +488,15 @@ function verifyStoryScope(
   } = {},
   stale = staleBreakdown,
 ) {
-  validateStoryPaths(paths, original, undefined, profileOf(current));
+  try {
+    validateStoryPaths(paths, original, undefined, profileOf(current));
+  } catch (error) {
+    // Only a listed file the source holds now is one it gained since the plan; another is a path that never was.
+    const gained = (error.outdated?.files || []).filter(file => current.files.some(item => item.path === file));
+    if (gained.length) error.outdated.files = gained;
+    else delete error.outdated;
+    throw error;
+  }
   const { files, newFiles, deleteFiles } = scopePaths(paths),
     now = file => current.files.find(item => item.path === file),
     created = newFiles.filter(file => createdByChain(file, current, prerequisites)),
@@ -473,15 +513,23 @@ function verifyStoryScope(
     }),
     committed = line.committed(drifted),
     uncommitted = drifted.filter(file => !committed.includes(file));
-  if (missing.length) throw new Error(`Approved source files no longer exist: ${named(missing)}. ${stale.action}`);
+  if (missing.length) {
+    const message = `Approved source files no longer exist: ${named(missing)}. ${stale.action}`,
+      // A deletion committed on the line moved the source past the plan; an uncommitted one can still be restored.
+      deleted = line.gone(missing);
+    throw deleted.length ? outdatedError(message, deleted) : new Error(message);
+  }
   if (uncommitted.length)
     throw new Error(
       `Approved source files changed since ${stale.since}, and the changes are not committed: ${named(uncommitted)}. Commit or discard them in the development copy, then try again.`,
     );
-  const taken = takenPaths(current.files);
-  for (const file of absent)
-    if (newPathProblem(file, taken))
-      throw new Error(`${file} now exists or collides with an existing path, so it cannot be created. ${stale.action}`);
+  const taken = takenPaths(current.files),
+    collided = absent.filter(file => newPathProblem(file, taken));
+  if (collided.length)
+    throw outdatedError(
+      `${collided[0]} now exists or collides with an existing path, so it cannot be created. ${stale.action}`,
+      collided,
+    );
   const ignored = line.ignored(absent);
   if (ignored.length)
     throw new Error(`git ignores ${ignored.join(', ')}, so a story cannot create it. Choose another path.`);
@@ -706,7 +754,7 @@ export function mergeSourceStory(store, registries, task, by = { type: 'director
     return { ok: true, direction: story.direction };
   });
 }
-function breakdownChangeScope(store, task, root, dryRun) {
+function breakdownChangeScope(store, task, root, dryRun, extras) {
   const reference = task.proposalReference,
     ref = acceptedReference(store, reference.taskId, reference.attemptId, recordProject(task)),
     attempt = store.attempt(ref.attemptId),
@@ -789,7 +837,7 @@ function breakdownChangeScope(store, task, root, dryRun) {
     ...(dryRun ? {} : { base: passBase(root, line, profile) }),
     ...paths,
     acceptedInputs: [ref, checkedReference, ...siblingInputs],
-    ...storyScopeExtras(store, task, paths, current),
+    ...(extras ? storyScopeExtras(store, task, paths, current) : {}),
   };
 }
 // A story reaches the integrated milestone once its reviewed candidate is committed.
@@ -887,6 +935,42 @@ const proposedPaths = (store, task) => scopePaths(proposedStory(store, task));
 const pathLists = ['files', 'newFiles', 'deleteFiles'],
   pathLabels = { files: 'Files', newFiles: 'New files', deleteFiles: 'Delete' },
   maxScopeEdits = 20;
+// The rules an edit of a story's paths meets, whoever sends it: the director's edit and the policy's approval of a file
+// request (editSourceStory), and the check of a blocked editor's file request as Allow and continue would send it
+// (checkScopeRequest). The edit gives a reason, names its paths as lists that change the story's, and stays within the
+// story's edit count. Returns its paths and those it replaces.
+function editPaths(store, task, edit) {
+  boundedText(edit.reason, 2000, 'The reason for the edit');
+  if (edit.note !== undefined && (typeof edit.note !== 'string' || edit.note.length > 4000))
+    throw new Error('The note for the next attempt must be bounded text.');
+  if (edit.keepWork !== undefined && typeof edit.keepWork !== 'boolean')
+    throw new Error('keepWork must be true or false.');
+  const paths = scopePaths({
+      files: edit.files,
+      newFiles: edit.newFiles ?? [],
+      deleteFiles: edit.deleteFiles ?? [],
+    }),
+    previous = storyPaths(task, proposedPaths(store, task)),
+    sorted = list => [...list].sort();
+  if (!pathLists.every(list => Array.isArray(paths[list]) && paths[list].every(file => typeof file === 'string')))
+    throw new Error('A story edit lists files, newFiles and deleteFiles as arrays of source paths.');
+  if (pathLists.every(list => equal(sorted(paths[list]), sorted(previous[list]))))
+    throw new Error("The edit does not change the story's files.");
+  if ((task.scopeEdits?.length || 0) >= maxScopeEdits)
+    throw new Error(`A story keeps at most ${maxScopeEdits} edits; close it and plan the work again.`);
+  return { paths, previous };
+}
+// Every rule a dispatch applies to the story as an edit would leave it (edited), except the clean development copy a
+// start needs, and with extras false the earlier work its next attempt continues from, which an attempt still running
+// cannot be judged by. Nothing is written but, when the source moved past the story's plan, its out-of-date note.
+function checkEditedScope(store, edited, root, { extras = true } = {}) {
+  try {
+    return changeScope(store, edited, root, { dryRun: true, extras });
+  } catch (error) {
+    recordOutdated(store, edited.id, error);
+    throw error;
+  }
+}
 // The director edits a stopped story's approved paths and sends it back to implementation,
 // keeping the work its last attempt staged (the director's direction, October 20, 2026). The
 // paths follow the same rules and drift checks as at dispatch, and each edit is recorded with its
@@ -916,25 +1000,8 @@ export function editSourceStory(store, task, edit, root, { by = { type: 'directo
     throw new Error(
       'Edit a story while its implementation is stopped, or after its independent review requested changes.',
     );
-  boundedText(edit.reason, 2000, 'The reason for the edit');
-  if (edit.note !== undefined && (typeof edit.note !== 'string' || edit.note.length > 4000))
-    throw new Error('The note for the next attempt must be bounded text.');
-  if (edit.keepWork !== undefined && typeof edit.keepWork !== 'boolean')
-    throw new Error('keepWork must be true or false.');
-  const paths = scopePaths({
-      files: edit.files,
-      newFiles: edit.newFiles ?? [],
-      deleteFiles: edit.deleteFiles ?? [],
-    }),
-    previous = storyPaths(task, proposedPaths(store, task)),
-    sorted = list => [...list].sort();
-  if (!pathLists.every(list => Array.isArray(paths[list]) && paths[list].every(file => typeof file === 'string')))
-    throw new Error('A story edit lists files, newFiles and deleteFiles as arrays of source paths.');
-  if (pathLists.every(list => equal(sorted(paths[list]), sorted(previous[list]))))
-    throw new Error("The edit does not change the story's files.");
-  if ((task.scopeEdits?.length || 0) >= maxScopeEdits)
-    throw new Error(`A story keeps at most ${maxScopeEdits} edits; close it and plan the work again.`);
-  const at = new Date().toISOString(),
+  const { paths, previous } = editPaths(store, task, edit),
+    at = new Date().toISOString(),
     implementations = implementationAttempts(store, task),
     // The latest attempt that recorded staged work; a cancelled attempt records none.
     worked = [...implementations]
@@ -974,7 +1041,7 @@ export function editSourceStory(store, task, edit, root, { by = { type: 'directo
     };
   else delete edited.sourceStage.continueFrom;
   // Every rule a dispatch applies, except the clean development copy a start needs.
-  const scope = changeScope(store, edited, root, { dryRun: true }),
+  const scope = checkEditedScope(store, edited, root),
     reported = worked || implementations.at(-1),
     changed = pathLists
       .map(list => {
@@ -1102,13 +1169,53 @@ function createdInChain(store, task, root, files) {
     created = integratedChanges(store, task.dependencies);
   return unmeasured.filter(file => createdByChain(file, current, created));
 }
+// A blocked editor's file request (scopeRequest), checked before it is recorded as the edit Allow and continue would
+// send: the story's paths plus the requested ones, with a requested file to edit that an earlier story in the chain
+// created listed as one to create (createdInChain), and the request records its paths that way, so the edit offered is
+// the edit checked. Every rule of editSourceStory's edit applies but the story's own state, since its attempt is still
+// running; nothing is written but the story's out-of-date note when the source moved past its plan. When the edit
+// would be refused, the request keeps its paths and reason and records the refusal as its problem.
+export function checkScopeRequest(store, task, request, root) {
+  if (!request || request.problem) return request;
+  return measuringPass(() => {
+    let checked = request;
+    try {
+      const created = createdInChain(store, task, root, request.files);
+      if (created.length)
+        checked = {
+          ...request,
+          files: request.files.filter(file => !created.includes(file)),
+          newFiles: [...request.newFiles, ...created],
+        };
+      const current = storyPaths(task, proposedPaths(store, task)),
+        join = list => [...new Set([...current[list], ...checked[list]])],
+        { paths, previous } = editPaths(store, task, {
+          files: join('files'),
+          newFiles: join('newFiles'),
+          deleteFiles: join('deleteFiles'),
+          reason: checked.reason,
+        }),
+        edited = structuredClone(task);
+      edited.scopeEdits = [
+        ...(task.scopeEdits || []),
+        { ...paths, reason: checked.reason, at: new Date().toISOString(), by: { type: 'director' }, previous },
+      ];
+      checkEditedScope(store, edited, root, { extras: false });
+      return checked;
+    } catch (error) {
+      return { ...checked, problem: error.message };
+    }
+  });
+}
 // The scope a story's next implementation attempt receives. A dry run checks it without fixing
-// the base commit, which needs a clean development copy only when the attempt starts.
-export function changeScope(store, task, root, { dryRun = false } = {}) {
+// the base commit, which needs a clean development copy only when the attempt starts; with extras false it leaves out
+// the director's edits and the earlier work the attempt would continue from (checkEditedScope).
+export function changeScope(store, task, root, { dryRun = false, extras = true } = {}) {
   if (task.approval?.status !== 'approved' || !task.proposalReference)
     throw new Error('Source editing requires approved work from one exact accepted source review.');
   validateAcceptedReferences(store, task.acceptedInputs, recordProject(task));
-  if (task.proposalReference.path === 'source-breakdown.json') return breakdownChangeScope(store, task, root, dryRun);
+  if (task.proposalReference.path === 'source-breakdown.json')
+    return breakdownChangeScope(store, task, root, dryRun, extras);
   if (task.dependencies.length !== 1)
     throw new Error('Source editing requires approved work from one exact accepted source review.');
   const ref = acceptedReference(store, task.dependencies[0], undefined, recordProject(task)),
@@ -1163,7 +1270,7 @@ export function changeScope(store, task, root, { dryRun = false } = {}) {
     source,
     ...(dryRun ? {} : { base: passBase(root, line, profile) }),
     ...paths,
-    ...storyScopeExtras(store, task, paths, source),
+    ...(extras ? storyScopeExtras(store, task, paths, source) : {}),
   };
 }
 // The approved scope the employee and the reviewer read (source-scope.json). Scopes from before
@@ -1204,8 +1311,9 @@ export const scopeDocument = scope => ({
 // An editor that needs paths outside the approved ones stops as blocked and names them in
 // scope-request.json (MP-021). The controller records the request on the attempt when it names
 // only paths the story does not have, which together with the approved ones pass the path rules
-// against the snapshot the editor read, or records the problem instead. A request never changes
-// the story: the director approves it by editing the story's files (editSourceStory).
+// against the snapshot the editor read, or records the problem instead. A request that passes is then checked as the
+// edit approving it would be (checkScopeRequest). A request never changes the story: the director approves it by
+// editing the story's files (editSourceStory).
 export const scopeRequestFile = 'scope-request.json';
 const maxScopeRequestBytes = 64 * 1024;
 export function scopeRequest(scope, result, read) {

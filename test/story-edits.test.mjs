@@ -558,7 +558,8 @@ test('with file requests automatic, a requested file an earlier story in the cha
   store.putTask({ ...store.task(id), maxAttempts: 5 });
   // Each request is the editor's own, recorded by the controller against the source it read.
   // The policy may answer before a poll sees the story blocked, so this waits for the attempt to stop as blocked.
-  const ask = async (file, reason) => {
+  // A file the earlier story in the chain created is recorded as one to create, as the edit approving it lists it.
+  const ask = async (file, reason, recorded = [[file], []]) => {
     store.putTask({ ...store.task(id), direction: `block-request ${JSON.stringify({ files: [file], reason })}` });
     runner.start(id);
     const attemptId = store.task(id).lastAttemptId,
@@ -566,7 +567,7 @@ test('with file requests automatic, a requested file an earlier story in the cha
         const attempt = store.attempt(attemptId);
         return attempt.status === 'blocked' && attempt;
       }, `${attemptId} to stop as blocked`);
-    assert.deepEqual([asked.scopeRequest.files, asked.scopeRequest.newFiles], [[file], []]);
+    assert.deepEqual([asked.scopeRequest.files, asked.scopeRequest.newFiles], recorded);
     return asked;
   };
   for (const file of [elsewhere, byHand]) {
@@ -583,7 +584,7 @@ test('with file requests automatic, a requested file an earlier story in the cha
     assert.equal(store.task(id).status, 'blocked');
   }
   const reason = 'The test the earlier story created pins the old wording.',
-    asked = await ask(created, reason);
+    asked = await ask(created, reason, [[], [created]]);
   const story = await waitFor(() => {
     const task = store.task(id);
     return (task.scopeEdits || task.autonomyNote?.includes(created)) && task;

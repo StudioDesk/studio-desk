@@ -36,6 +36,7 @@ import {
   maxScopePaths,
   storySituation,
   candidateSituation,
+  noteOutdated,
 } from '../../connectors/source-changes.mjs';
 import { sourceDiffLimit } from '../../connectors/source-diff.mjs';
 import { lineHead, projectLine, storyLine } from '../../connectors/source-lines.mjs';
@@ -587,6 +588,10 @@ export const studioDevelopmentPack = {
       prepareAttempt: ({ store, task, runtime }) => ({
         sourceChange: changeScope(store, task, sourceRoot(store, task, runtime)),
       }),
+      // A Start or dispatch refused because the source moved past the story's plan (its scope above, in validateInputs
+      // or prepareAttempt) notes on the story that its plan is out of date (sourceStage.outdated); the refusal reads as
+      // before. The scheduler's readiness checks note nothing.
+      refused: ({ task, error }) => noteOutdated(task, error),
       // The editing adapter's delivery scope already says what an editor may change and what the controller owns.
       instructions: ({ store, task } = {}) => ({
         layers: [

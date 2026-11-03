@@ -16,7 +16,14 @@ import {
   testOutputLimit,
   testPhaseEvidence,
 } from '../connectors/source-checks.mjs';
-import { scopeDocument, scopeRequest, stagedChanges, sourceChangesConnector } from '../connectors/source-changes.mjs';
+import {
+  checkScopeRequest,
+  scopeDocument,
+  scopeRequest,
+  stagedChanges,
+  sourceChangesConnector,
+} from '../connectors/source-changes.mjs';
+import { sourceRoot } from '../connectors/source-projects.mjs';
 import { sourceDiff, sourceDiffFormat, sourceDiffLimit, sourceDiffStat } from '../connectors/source-diff.mjs';
 import { TEXT_DELIVERY_FILES } from './text-delivery.mjs';
 import {
@@ -425,7 +432,14 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         result?.outcome === 'blocked' &&
         Array.isArray(result.artifacts) &&
         scopeRequest(scope, result, name => fs.readFileSync(artifactPath(runtime.store, a, name)));
-      if (request) a.scopeRequest = request;
+      // The edit approving it is checked as Allow and continue would send it, and its refusal recorded as the problem.
+      if (request)
+        try {
+          const task = runtime.store.task(a.taskId);
+          a.scopeRequest = checkScopeRequest(runtime.store, task, request, sourceRoot(runtime.store, task, runtime));
+        } catch (error) {
+          a.scopeRequest = request.problem ? request : { ...request, problem: error.message };
+        }
       runtime.finish(entry, result);
       return;
     }
