@@ -154,6 +154,7 @@ import { developmentOrganization } from './organizations/studio-development/proj
 import { toldView } from './core/instructions.mjs';
 import { formatRules } from './core/rules.mjs';
 import { createLoadMeasures } from './core/load-measures.mjs';
+import { addTool, changeTool, readTool, readTools, retireTool } from './core/tools.mjs';
 
 // The most attempts the studio-wide limit allows at once (MP-033).
 const mostAttemptsAtOnce = 16;
@@ -197,6 +198,20 @@ function fail(message, status = 400, fields) {
   e.status = status;
   if (fields) e.fields = fields;
   throw e;
+}
+// A studio tool's ID as the controller makes it (core/tools.mjs): 'tool-' and a UUID. Any other names no tool.
+const toolIdPattern = /^tool-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function toolId(id) {
+  if (!toolIdPattern.test(id)) fail('Tool not found.', 404);
+  return id;
+}
+// The revision a tool's change or retiring names; the tool list refuses it with 409 when it is not the current one.
+function toolRevision(data) {
+  if (!Object.hasOwn(data, 'expectedRevision'))
+    fail('Name the revision this changes as expectedRevision, from the tool as last read.');
+  if (!Number.isInteger(data.expectedRevision) || data.expectedRevision < 1)
+    fail('expectedRevision must be a whole number from 1.');
+  return data.expectedRevision;
 }
 function text(v, field, max = 24000, required = false) {
   if (typeof v !== 'string' || v.length > max || (required && !v.trim())) fail(`${field} is missing or too long.`);
@@ -641,6 +656,13 @@ export function createStudio({
       if (url.pathname === '/api/projects' && req.method === 'GET') return json(res, { projects: store.projects() });
       // No projects yet: the samples, the signed-in CLIs, git and whether this is the first run (v1.0 item 24).
       if (url.pathname === '/api/templates' && req.method === 'GET') return json(res, listTemplates(store, runner));
+      // The studio's tools (1.4, tools, step 3; core/tools.mjs), which belong to no project: the list, retired ones
+      // included, and one tool, each with what the director may do with it and its key read as not set. Like every
+      // read they need the director's session or key; an attempt's token opens only its own test run.
+      if (parts[0] === 'api' && parts[1] === 'tools' && req.method === 'GET') {
+        if (parts.length === 2) return json(res, { tools: readTools(store, { reader: 'director' }) });
+        if (parts.length === 3) return json(res, { tool: readTool(store, toolId(parts[2]), { reader: 'director' }) });
+      }
       if (
         parts[0] === 'api' &&
         parts[1] === 'projects' &&
@@ -1177,6 +1199,32 @@ export function createStudio({
             fail(error.message, error.status);
           }
           return json(res, created, 201);
+        }
+        // The director's changes to the studio's tools (1.4, tools, step 3), which belong to no project: add one, change
+        // one by naming the revision it changes, or retire one, which keeps it. A stale revision or a retired tool
+        // answers 409, and each answer is the tool as the director reads it. There is no delete. Each write goes on the
+        // change stream as { type: 'tool', id, revision }, for every tab (core/store.mjs).
+        if (parts[1] === 'tools') {
+          if (!data || typeof data !== 'object' || Array.isArray(data)) fail('Send a tool command as a JSON object.');
+          const asDirector = { reader: 'director' };
+          if (parts.length === 2 && req.method === 'POST') {
+            const added = addTool(store, data);
+            return json(res, { tool: readTool(store, added.id, asDirector) }, 201);
+          }
+          if (parts.length === 3 && req.method === 'PATCH') {
+            const id = toolId(parts[2]),
+              { expectedRevision, ...fields } = data,
+              changed = changeTool(store, id, toolRevision(data), fields);
+            return json(res, { tool: readTool(store, changed.id, asDirector) });
+          }
+          if (parts.length === 4 && parts[3] === 'retire' && req.method === 'POST') {
+            const id = toolId(parts[2]);
+            if (Object.keys(data).some(field => field !== 'expectedRevision'))
+              fail('Retiring a tool takes only expectedRevision.');
+            const retired = retireTool(store, id, toolRevision(data));
+            return json(res, { tool: readTool(store, retired.id, asDirector) });
+          }
+          fail('Unknown controller route.', 404);
         }
         const projectId = data.projectId ?? LEGACY_PROJECT;
         store.project(projectId);

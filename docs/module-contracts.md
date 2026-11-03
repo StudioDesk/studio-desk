@@ -103,6 +103,34 @@ A graceful stop, an ended controller and an ended supervisor used to look alike 
   - **On macOS and Linux:** the process group is still ended after its first process exits, since its ID is not reused while any of it runs.
 - **Tests:** `test/stop-record.test.mjs`. The record and its texts, the supervisor's lines, and the forced ends with the process calls replaced. It also starts the real controller script on a throwaway data folder, ends it from outside and checks that the next start reports that. On macOS and Linux it also checks a SIGTERM stop that the next start reports.
 
+## Studio tools (1.4, tools, steps 1 to 3)
+
+The tools the studio's agents may later use (`src/core/tools.mjs`, its routes in `src/server.mjs`). A tool belongs to the studio, not a project. No dashboard page yet.
+
+- **The record:** a studio setting `tool:<id>` with no project. Common fields: `id` (the controller's `tool-<uuid>`; an ID in the input is ignored), `name` (1 to 80 characters), `purpose` (1 to 500), `kind`, `rules` (up to 8000) and `limits`. Each kind has its own fields:
+  - **A command** (`kind: 'command'`): `program`, one program's name (1 to 64 letters, digits, `.`, `_` or `-`, with no space, folder, quote or shell character), never a shell line, and `getFrom`, where to get it when this computer lacks it (1 to 500 characters).
+  - **A studio call** (`kind: 'studio-call'`): `address`, https only, with a host and no user name, password, query string or fragment (kept without a trailing slash), and `operations`, 1 to 50 of `{ name, method, path, arguments, required }`. The method is GET, POST, PUT, PATCH or DELETE. A path starts with `/`; each part is literal or a whole `{argument}` the operation lists, with no `.` or `..` part, query or fragment. `operationRequest` builds a call only from an operation the record declares, with only its declared arguments.
+  - The controller adds `key`, `revision`, `createdAt`, `updatedAt`, `by` and, once retired, `retiredAt`.
+- **The checks** (`checkToolInput`): the input is closed to these fields, and a command has none of a studio call's or the other way round. A field whose name would carry a key, secret, token, password, credential, header or cookie is refused, saying a record never holds one. Each refusal is a 400 with a plain message, which never repeats an address.
+- **Limits:** `callsPerHour` (1 to 10000), `callsPerAttempt` (1 to 1000), `timeoutSeconds` (1 to 600) and `maxResponseBytes` (1 to 10 MiB), each a required whole number. The studio keeps at most 200 tools, retired ones included.
+- **Revisions:** adding gives revision 1, and every write raises it. A change (which replaces the director's fields) and retiring each name `expectedRevision`. One that is not the current revision is refused with 409, "Tool changed. Refresh before saving.", and nothing is saved.
+- **Retiring, never deleting:** retiring keeps the record with `retiredAt`. A retired tool takes no change and no second retiring (409). Nothing deletes a tool: there is no DELETE route, and `DELETE /api/tools/:id` answers 405 like any method other than GET, POST or PATCH.
+- **The change stream:** each write is the change `{ type: 'tool', id, revision }`, with the revision the record has after it and no project. Every tab hears it on `/api/events` and `/api/changes`, whatever project it follows or none.
+- **Reads:** a read carries the stored fields and adds:
+  - `key: { set: false }`. No read ever returns a key or any field of one.
+  - `retiredAt`, null while the tool is active.
+  - `availability`: for a command, `{ state: 'found' }` or `{ state: 'missing', getFrom }`, never where the program is; null for a studio call.
+  - `actions`, what its reader may do: the director `['change', 'retire']` on an active tool and nothing on a retired one. Any other reader gets none.
+- **Routes:** studio-wide (no `projectId`), and the director's alone.
+  - `GET /api/tools` answers `{ tools }` in the order they were added, retired ones included. `GET /api/tools/:id` answers `{ tool }`, or 404 for an unknown or malformed ID.
+  - `POST /api/tools` (the record's fields) answers 201 `{ tool }`.
+  - `PATCH /api/tools/:id` (`{ expectedRevision, ...fields }`) answers `{ tool }`.
+  - `POST /api/tools/:id/retire` (`{ expectedRevision }` and nothing else) answers `{ tool }`.
+  - A missing or non-whole `expectedRevision` is refused with 400. An error from `core/tools.mjs` keeps its status (400, 404, 409).
+  - Reads need the director's session or key. Changes, like every command, also need the request token unless sent with the key (see Who may use the controller). An agent's attempt token authorizes only its own test run and opens no tool route (401).
+- **Later steps:** keys, grants to agents and calls (running a command or a studio call for an attempt, within its limits) are not built; only the `tool-keys` folder that will hold the keys is already kept from agents (above). This step only records and reads tools.
+- **Tests:** `test/tools.test.mjs` (the record, checks and list) and `test/tool-routes.test.mjs` (the routes, refusals and change stream).
+
 ## Bounded project context and source checks
 
 The director approved using Studio desk on its own source in a separate selectable project. The existing partial project/workflow modules are now connected to the dashboard and covered by behavioral tests. Projects/workflows use additive settings records in the same SQLite database. `recordProject()` maps only missing project IDs to `project-legacy` at read time. Old task/attempt JSON, job paths and instruction snapshots are not rewritten. New project attempts use `projects/<project-id>/jobs/<attempt-id>` inside the controller data directory.
