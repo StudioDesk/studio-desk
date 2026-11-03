@@ -2,13 +2,15 @@
 // goes to one channel of a project: the project's own, one of its runs or one of its tasks. It is from the director
 // unless its caller says otherwise, its text names agents with @, and it may answer an earlier message of the same
 // channel and point at files of accepted work, each checked by its hash. What it keeps are IDs, names and hashes: no
-// location on this computer, process, session or job folder. This module records messages only; what a mention does
-// comes later. No HTTP here: the routes call it.
+// location on this computer, process, session or job folder. A director's message that names the agent building a task,
+// on that task's thread, takes the one action the task's state already allows (postMessage). No HTTP here: the routes
+// call it.
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { acceptedReference, artifactPath } from './artifacts.mjs';
 import { projectIdentity, recordProject } from './projects.mjs';
 import { projectOrganization } from './project-organization.mjs';
+import { directStart, reviseWork, sendBackWork } from './proposals.mjs';
 
 export const messageLimits = Object.freeze({
   textMin: 1,
@@ -172,6 +174,11 @@ export function parseMentions(text, workers = []) {
 // with the agents its text names. Returns the message as the store reads it back, with its sequence. The caller may
 // record what the message led to with it (`outcome`, such as waiting for a reply), so it is kept in the same write.
 export function recordMessage(store, projectId, fields, from = { type: 'director' }, { outcome = null } = {}) {
+  return store.insertMessage(preparedMessage(store, projectId, fields, from, outcome));
+}
+
+// A message as the store keeps it, checked, or a plain refusal. Nothing is written.
+function preparedMessage(store, projectId, fields, from, outcome) {
   if (outcome !== null && !plainObject(outcome)) throw new Error("A message's outcome is a record or none.");
   if (
     !plainObject(from) ||
@@ -184,7 +191,7 @@ export function recordMessage(store, projectId, fields, from = { type: 'director
     throw failure('A message names who it is from.');
   const message = validateMessage(store, projectId, fields),
     workers = projectOrganization(store, projectId).workers || [];
-  return store.insertMessage({
+  return {
     id: `msg-${randomUUID()}`,
     projectId,
     channel: message.channel,
@@ -195,5 +202,72 @@ export function recordMessage(store, projectId, fields, from = { type: 'director
     replyTo: message.replyTo,
     time: new Date().toISOString(),
     outcome,
-  });
+  };
+}
+
+const waiting = Object.freeze({ type: 'waiting', reason: 'Waiting for a reply.' });
+
+// Which of the director's own actions a mention of a task's builder takes, by the task's state: send back work whose
+// later stage returned it or passed (where its stages allow it), revise work awaiting review, or start stopped or ready
+// work with the message as its direction. Anything else (running or stopping work, accepted work with nothing to send
+// back, work waiting for the director's approval or closed) keeps the message as a note. Planned work is never
+// approved by a mention, nor started before its approval. Work whose integration is approved and waiting to run is
+// what Send back refuses (`refuseIntegration`), and the mention is refused in its words.
+function mentionAction(store, registries, task, refuseIntegration) {
+  if (task.approval && task.approval.status !== 'approved') return 'note';
+  const stages = registries.workflows.stagesOf(task);
+  if (stages?.returnable && stages.retry) {
+    if (refuseIntegration?.(task)) return 'send-back';
+    let returned;
+    try {
+      returned = stages.returnable(store, task);
+    } catch {
+      // Send back refuses it in the same words, and the message says so.
+      returned = true;
+    }
+    if (returned) return 'send-back';
+  }
+  if (task.status === 'review') return 'revise';
+  if (['ready', 'failed', 'cancelled', 'blocked'].includes(task.status)) return 'start';
+  return 'note';
+}
+
+// The director's message to one of the project's chats (team chat). Checked first: nothing runs for a message that
+// fails its checks. On a task's thread, a message naming the task's builder (task.workerId) takes one action through
+// the functions the director's buttons call, with the message's text as its note or direction, and is kept in that
+// action's transaction with what it led to: { type: 'sent-back' | 'revised' | 'started', taskId }. The work is then
+// queued as those buttons queue it (`queueStart`, the controller's queued Start), and the queue's answer is added as
+// the outcome's `start`. Work the mention cannot act on keeps the message as a note ({ type: 'note', taskId,
+// receivedBy: null }); an action that refuses (`refuseIntegration`, the controller's refusal of an approved
+// integration, or the action's own checks) keeps it with { type: 'refused', reason } and changes nothing else. Any
+// other message waits for a reply. Returns the message as the store reads it back.
+export function postMessage(store, registries, projectId, fields, { queueStart, refuseIntegration } = {}) {
+  const message = preparedMessage(store, projectId, fields, { type: 'director' }, waiting),
+    keep = outcome => store.insertMessage({ ...message, outcome }),
+    task = message.channel.type === 'task' ? store.task(message.channel.id) : null;
+  if (!task?.workerId || !message.mentions.includes(task.workerId)) return keep(waiting);
+  const action = mentionAction(store, registries, task, refuseIntegration);
+  if (action === 'note') return keep({ type: 'note', taskId: task.id, receivedBy: null });
+  let kept;
+  const record = type => () => (kept = keep({ type, taskId: task.id }));
+  try {
+    if (action === 'send-back')
+      sendBackWork(store, registries, task, message.text, {
+        refuse: current => refuseIntegration?.(current),
+        record: record('sent-back'),
+      });
+    else if (action === 'revise') reviseWork(store, registries, task, message.text, { record: record('revised') });
+    else directStart(store, registries, task, message.text, { record: record('started') });
+  } catch (error) {
+    if (kept) throw error;
+    return keep({ type: 'refused', reason: error.message });
+  }
+  let start;
+  try {
+    start = queueStart(task.id);
+  } catch (error) {
+    // The action is recorded either way; Start can be pressed once the problem is resolved.
+    start = { ok: false, reason: error.message };
+  }
+  return store.setMessageOutcome(kept.id, { ...kept.outcome, start });
 }

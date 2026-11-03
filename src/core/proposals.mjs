@@ -473,8 +473,8 @@ export function closeStartedWork(store, registries, task, reason = '') {
 // Autonomy does the same within its retry budget; the director may always do it. The check and the
 // rewind are one transaction with the record read inside it, and `refuse` (the controller's own
 // refusal, such as an integration approved meanwhile) is asked there too, so nothing approved in
-// between is overtaken.
-export function sendBackWork(store, registries, task, note = '', { refuse } = {}) {
+// between is overtaken. `record` (such as the director's message that asked for it) is written in that transaction too.
+export function sendBackWork(store, registries, task, note = '', { refuse, record } = {}) {
   if (typeof note !== 'string' || note.length > 4000) throw new Error('A send-back note must be bounded text.');
   const stages = registries.workflows.stagesOf(task);
   return store.tx(() => {
@@ -503,6 +503,52 @@ export function sendBackWork(store, registries, task, note = '', { refuse } = {}
       current.acceptedAttemptId,
       `Director sent this work back for another attempt${returned.passed ? ' over a passing review' : ''}.${note.trim() ? ` Note: ${note.trim()}` : ''}`,
     );
-    return { ok: true, direction: current.direction };
+    const sent = { ok: true, direction: current.direction };
+    record?.(current);
+    return sent;
+  });
+}
+
+// Work awaiting review goes back to ready with the director's revision direction (the Revise button, and a message
+// that names the work's builder on its thread). Past the attempt limit the revised work waits for the director to
+// press Start, except where the task type's limit is a safety rule, which refuses the revision. The attempt, the task
+// and the event are one transaction, and `record` (such as the message that asked for it) is written in it too.
+export function reviseWork(store, registries, task, direction, { record } = {}) {
+  if (task.status !== 'review') throw new Error('Only work awaiting review can be revised.');
+  if (registries.workflows.get(task.kind).fixedAttemptLimit && store.attempts(task.id).length >= task.maxAttempts)
+    throw new Error('Attempt limit reached. Create a newly scoped assignment.');
+  if (typeof direction !== 'string' || direction.length > 24000 || !direction.trim())
+    throw new Error('Revision direction is missing or too long.');
+  const words = direction.trim();
+  return store.tx(() => {
+    registries.workflows.direct(task, words);
+    const a = store.attempt(task.lastAttemptId);
+    a.status = 'revision_requested';
+    a.revisionRequestedBy = { type: 'director', at: new Date().toISOString(), reason: words };
+    store.updateAttempt(a);
+    task.status = 'ready';
+    task.reason = '';
+    delete task.autonomyNote;
+    registries.workflows.stageProgress(store, task);
+    store.putTask(task);
+    store.event('revision', task.id, a.id, words);
+    record?.(task);
+    return { ok: true };
+  });
+}
+
+// Start's direction for the next attempt (a director's Start with a note, and a message that names the work's builder
+// on its thread): recorded as a PATCH direction is, before the work starts. Work Start refuses for its state keeps its
+// direction. Starting it is the caller's: the controller's queued Start.
+export function directStart(store, registries, task, direction, { record } = {}) {
+  if (typeof direction !== 'string' || direction.length > 24000) throw new Error('Direction is missing or too long.');
+  if (!['ready', 'failed', 'cancelled', 'blocked'].includes(task.status))
+    throw new Error('Only ready or stopped assignments can start.');
+  return store.tx(() => {
+    registries.workflows.direct(task, direction.trim());
+    store.putTask(task);
+    store.event('task_updated', task.id, null, 'Direction for the next attempt updated with Start.');
+    record?.(task);
+    return { ok: true };
   });
 }

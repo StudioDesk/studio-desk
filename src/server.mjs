@@ -107,7 +107,7 @@ import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/proje
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
 import { LEGACY_PROJECT, recordProject, assertProject, validateTaskProject } from './core/projects.mjs';
-import { checkChannel, recordMessage } from './core/messages.mjs';
+import { checkChannel, postMessage } from './core/messages.mjs';
 import {
   finishedRuns,
   liveLimit,
@@ -138,6 +138,8 @@ import {
   closeStartedWork,
   sendBackWork,
   replanWork,
+  reviseWork,
+  directStart,
 } from './core/proposals.mjs';
 import { acceptAttempt } from './core/acceptance.mjs';
 import { applyWorkerExecution, taskExecution } from './core/execution.mjs';
@@ -213,6 +215,15 @@ function toolRevision(data) {
   if (!Number.isInteger(data.expectedRevision) || data.expectedRevision < 1)
     fail('expectedRevision must be a whole number from 1.');
   return data.expectedRevision;
+}
+// An integration approved for this work (by the director or the policy) and waiting to run refuses sending it back.
+function integrationRefusal(runner, task) {
+  return (
+    runner.autonomy.pendingIntegration()?.taskId === task.id &&
+    Object.assign(new Error('Integration is approved for this work and waiting to run; it cannot be sent back now.'), {
+      status: 409,
+    })
+  );
 }
 function text(v, field, max = 24000, required = false) {
   if (typeof v !== 'string' || v.length > max || (required && !v.trim())) fail(`${field} is missing or too long.`);
@@ -1271,8 +1282,9 @@ export function createStudio({
           }
           fail('Unknown controller route.', 404);
         }
-        // A message to one of the selected project's chats (team chat). Until a mention does something (later
-        // stories), each message waits for a reply, and says so in the same write that keeps it.
+        // A message to one of the selected project's chats (team chat), kept with what it led to in the same write. On
+        // a task's thread, naming the agent that builds the task takes the action the task's state allows, queued as
+        // the director's own buttons queue it; other messages wait for a reply.
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'messages' && !parts[4] && req.method === 'POST') {
           if (!data || typeof data !== 'object' || Array.isArray(data) || data.projectId !== parts[2])
             fail('Select this project before posting to its chat.');
@@ -1282,8 +1294,9 @@ export function createStudio({
           const { projectId: selected, ...fields } = data;
           let message;
           try {
-            message = recordMessage(store, selected, fields, undefined, {
-              outcome: { type: 'waiting', reason: 'Waiting for a reply.' },
+            message = postMessage(store, registries, selected, fields, {
+              queueStart: taskId => runner.queueStart(taskId),
+              refuseIntegration: task => integrationRefusal(runner, task),
             });
           } catch (error) {
             fail(error.message, error.status);
@@ -2173,12 +2186,7 @@ export function createStudio({
             // An integration approved for this work (by the director or the policy) is refused in the same
             // transaction that would send it back, so the two can never both happen.
             const sent = sendBackWork(store, registries, t, data.note ?? '', {
-              refuse: () =>
-                runner.autonomy.pendingIntegration()?.taskId === t.id &&
-                Object.assign(
-                  new Error('Integration is approved for this work and waiting to run; it cannot be sent back now.'),
-                  { status: 409 },
-                ),
+              refuse: () => integrationRefusal(runner, t),
             });
             let start;
             try {
@@ -2316,14 +2324,7 @@ export function createStudio({
           // limit), recorded as a PATCH direction is before the work starts; without one the direction is unchanged.
           // Work that Start refuses for its state keeps its direction.
           if (action === 'start') {
-            if (data.direction !== undefined) {
-              const direction = text(data.direction, 'Direction');
-              if (!['ready', 'failed', 'cancelled', 'blocked'].includes(t.status))
-                fail('Only ready or stopped assignments can start.');
-              registries.workflows.direct(t, direction);
-              store.putTask(t);
-              store.event('task_updated', t.id, null, 'Direction for the next attempt updated with Start.');
-            }
+            if (data.direction !== undefined) directStart(store, registries, t, data.direction);
             return json(res, runner.queueStart(t.id), 202);
           }
           // The director answers the question the task's latest attempt stopped to ask (1.2 step 2): one of its options,
@@ -2514,26 +2515,9 @@ export function createStudio({
             runner.autonomy.accepted(t.id);
             return json(res, { ok: true, proposedTaskIds: accepted.proposedTaskIds });
           }
-          if (action === 'revise') {
-            if (t.status !== 'review') fail('Only work awaiting review can be revised.');
-            // Past the attempt limit, the revised task waits for the director to press Start,
-            // except where the task type's limit is a safety rule.
-            if (registries.workflows.get(t.kind).fixedAttemptLimit && store.attempts(t.id).length >= t.maxAttempts)
-              fail('Attempt limit reached. Create a newly scoped assignment.');
-            const direction = text(data.direction, 'Revision direction', 24000, true);
-            registries.workflows.direct(t, direction);
-            const a = store.attempt(t.lastAttemptId);
-            a.status = 'revision_requested';
-            a.revisionRequestedBy = { type: 'director', at: new Date().toISOString(), reason: direction };
-            store.updateAttempt(a);
-            t.status = 'ready';
-            t.reason = '';
-            delete t.autonomyNote;
-            registries.workflows.stageProgress(store, t);
-            store.putTask(t);
-            store.event('revision', t.id, a.id, direction);
-            return json(res, { ok: true });
-          }
+          // Past the attempt limit, the revised task waits for the director to press Start, except where the task
+          // type's limit is a safety rule.
+          if (action === 'revise') return json(res, reviseWork(store, registries, t, data.direction));
           if (req.method === 'PATCH' && !action) {
             if (['running', 'stopping', 'done'].includes(t.status))
               fail('Edit future work only after its active attempt stops; accepted work stays recorded.');
