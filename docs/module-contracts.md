@@ -131,6 +131,24 @@ The tools the studio's agents may later use (`src/core/tools.mjs`, its routes in
 - **Later steps:** the store that will keep a tool's key is built (Where a tool's key is kept, below), but no tool command or route sets, replaces or removes a key yet, so every read still says `key: { set: false }`. Grants to agents and calls (running a command or a studio call for an attempt, within its limits) are not built. The `tool-keys` folder that holds the keys is kept from agents (above). This step only records and reads tools.
 - **Tests:** `test/tools.test.mjs` (the record, checks and list) and `test/tool-routes.test.mjs` (the routes, refusals and change stream).
 
+## Chat messages (November 2026)
+
+A project's chats keep their messages in a table of their own: `src/core/messages.mjs` checks what a message holds and `src/core/store.mjs` keeps it. Two routes post and read them. No page uses them yet.
+
+- **A channel:** the project's own (`{ type: 'project' }`), an idea's run (`{ type: 'run', id }`) or a story's task (`{ type: 'task', id }`), always of the message's own project.
+- **The record:** `seq`, `id` (`msg-<uuid>`), `projectId`, `channel`, `from` (the director for every message the route records), `text` (1 to 8000 characters after trimming), `mentions` (the IDs of the project's agents its text names with `@Name`, in any case), `attachments` (at most 10, each `{ taskId, attemptId, path, hash }`: a file the task's accepted attempt handed back, its bytes checked against the recorded hash), `replyTo` (an earlier message of the same channel, or null), `time` and `outcome`. It holds IDs, names and hashes only: no location on this computer, process, session or job folder.
+- **The cursor:** `seq` only grows, across every channel, so a reader pages back before one or resumes after one.
+- **Posting:** `POST /api/projects/<projectId>/messages` with `{ projectId, channel, text, replyTo?, attachments? }`, under the request protection every command has (the director's session and the page's request token, or the key). It answers 201 with the message, its `seq` and its outcome. Until a mention does something (later stories), every outcome is `{ type: 'waiting', reason: 'Waiting for a reply.' }`, kept in the same write as the message.
+- **Its refusals**, each in its own sentence and none recording anything:
+  - a body project other than the path's, or none: 400, "Select this project before posting to its chat."
+  - any other field: 400, naming the allowed fields
+  - a run or task of another project, a reply to a message of another channel, an empty or too long text, or more than ten attachments: 400; a run, task or reply that does not exist: 404
+  - an attachment that is not accepted work, or whose file changed after acceptance: 409
+- **Reading:** `GET /api/projects/<projectId>/messages?channel=project|run:<runId>|task:<taskId>` answers `{ messages, older, cursor, version }`: the newest 50 (`limit`, 1 to 200), newest last, whether older ones exist, the highest `seq` read (null when none) and the store's change sequence, as every page read says it. `before=<seq>` reads the page before it. `after=<seq>` reads what is newer, oldest first, and adds `newer`, whether more wait beyond the limit; with nothing new its cursor stays `after`.
+- **Its refusals:** `before`, `after` or `limit` given twice or not as one nonnegative integer, as an attempt's log refuses its paging; `before` with `after`; a `channel` missing, repeated or of another form; and a channel of another project, in the words a post to it gets.
+- **The change stream:** each message, and each later change of its outcome, is a change `{ type: 'message', id, projectId, channel }`, journaled and sent to its project's tabs like any other. Like an event row, it starts no scheduler pass (C-19), since no task's readiness depends on it.
+- **Tests:** `test/messages.test.mjs` (the record and its checks), `test/message-routes.test.mjs` (the routes over HTTP and the change stream) and `test/scheduler-passes.test.mjs` (no pass for a message).
+
 ## Where a tool's key is kept (1.4, tools)
 
 A tool's key lives in this computer's own credential store, never in a record, a command line or a log (`src/connectors/tool-key-store.mjs`). Studio tools (above) describes the tools; the key command of the next story calls this store and completes that section.

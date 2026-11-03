@@ -28,7 +28,9 @@ const fieldNames = ['channel', 'text', 'replyTo', 'attachments'],
   // A letter, digit or underscore: what continues a word, so an @ after one is part of an address, not a mention.
   wordCharacter = /[\p{L}\p{N}_]/u;
 
-function checkChannel(store, projectId, channel) {
+// One of the project's channels as a message keeps it, or a plain refusal. Reading a channel checks it here too, so
+// a channel of another project is refused in the same words whether a message is posted to it or it is read.
+export function checkChannel(store, projectId, channel) {
   if (!plainObject(channel)) throw failure('A message names its channel: the project, a run or a task.');
   if (Object.keys(channel).some(key => !['type', 'id'].includes(key)))
     throw failure("A message's channel takes only its type and, for a run or a task, its ID.");
@@ -167,8 +169,10 @@ export function parseMentions(text, workers = []) {
 }
 
 // Checks and keeps a message from the director (or another sender the caller names, such as an agent by its ID),
-// with the agents its text names. Returns the message as the store reads it back, with its sequence.
-export function recordMessage(store, projectId, fields, from = { type: 'director' }) {
+// with the agents its text names. Returns the message as the store reads it back, with its sequence. The caller may
+// record what the message led to with it (`outcome`, such as waiting for a reply), so it is kept in the same write.
+export function recordMessage(store, projectId, fields, from = { type: 'director' }, { outcome = null } = {}) {
+  if (outcome !== null && !plainObject(outcome)) throw new Error("A message's outcome is a record or none.");
   if (
     !plainObject(from) ||
     Object.keys(from).some(key => !['type', 'id', 'name', 'displayName'].includes(key)) ||
@@ -190,6 +194,6 @@ export function recordMessage(store, projectId, fields, from = { type: 'director
     attachments: message.attachments,
     replyTo: message.replyTo,
     time: new Date().toISOString(),
-    outcome: null,
+    outcome,
   });
 }

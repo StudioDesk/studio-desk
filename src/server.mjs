@@ -107,6 +107,7 @@ import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/proje
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
 import { LEGACY_PROJECT, recordProject, assertProject, validateTaskProject } from './core/projects.mjs';
+import { checkChannel, recordMessage } from './core/messages.mjs';
 import {
   finishedRuns,
   liveLimit,
@@ -407,8 +408,9 @@ export function createStudio({
     }
   };
   const notify = change => {
-    // An event row or an attempt's speech bubble changes no task's readiness, so it starts no scheduler pass (C-19).
-    if (change.type !== 'event' && !change.trace) runner.schedule();
+    // An event row, an attempt's speech bubble or a chat message changes no task's readiness, so it starts no
+    // scheduler pass (C-19). Each is still journaled and sent to its project's tabs below.
+    if (!['event', 'message'].includes(change.type) && !change.trace) runner.schedule();
     journal.push(change);
     if (journal.length > journalLimit) journal.shift();
     pending.push(change);
@@ -776,6 +778,49 @@ export function createStudio({
       if (parts[0] === 'api' && parts[1] === 'projects' && parts.length === 4 && req.method === 'GET') {
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });
+        // One chat of the project a page at a time (team chat): the newest page, the page before a message's seq, or
+        // what came after one, always newest last, with the highest seq read as the point a reader resumes from.
+        if (parts[3] === 'messages') {
+          store.project(projectId);
+          const channels = url.searchParams.getAll('channel'),
+            named = channels.length === 1 ? /^(?:(project)|(run|task):(.+))$/.exec(channels[0]) : null;
+          if (!named) fail('channel must be project, run:<runId> or task:<taskId>, given once.');
+          let channel;
+          try {
+            channel = checkChannel(store, projectId, named[1] ? { type: 'project' } : { type: named[2], id: named[3] });
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+          const paging = {};
+          for (const name of ['before', 'after', 'limit']) {
+            if (!url.searchParams.has(name)) continue;
+            const values = url.searchParams.getAll(name);
+            if (values.length !== 1 || !/^(0|[1-9][0-9]*)$/.test(values[0]))
+              fail(`${name} must be a single nonnegative integer.`);
+            paging[name] = Number(values[0]);
+          }
+          if ('before' in paging && 'after' in paging) fail('Read a page before a message or after one, not both.');
+          const { before = null, after, limit } = paging;
+          try {
+            if (after === undefined) {
+              const page = store.messagePage(projectId, channel, { before, ...(limit === undefined ? {} : { limit }) });
+              return json(res, { ...page, cursor: page.messages.at(-1)?.seq ?? null, version: store.version });
+            }
+            const page = store.messagesAfter(projectId, channel, after, limit === undefined ? {} : { limit }),
+              // Whether the chat holds messages before the first one read: before `after` itself when none was new.
+              first = Math.min(page.messages[0]?.seq ?? after + 1, Number.MAX_SAFE_INTEGER),
+              older = store.messagePage(projectId, channel, { before: first, limit: 1 }).messages.length > 0;
+            return json(res, {
+              messages: page.messages,
+              older,
+              newer: page.newer,
+              cursor: page.messages.at(-1)?.seq ?? after,
+              version: store.version,
+            });
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+        }
         // The live set a page at a time in record order (page-read-limits): after the task before, limit at a time.
         if (parts[3] === 'live') {
           const limit = url.searchParams.get('limit') ?? String(liveLimit);
@@ -1225,6 +1270,25 @@ export function createStudio({
             return json(res, { tool: readTool(store, retired.id, asDirector) });
           }
           fail('Unknown controller route.', 404);
+        }
+        // A message to one of the selected project's chats (team chat). Until a mention does something (later
+        // stories), each message waits for a reply, and says so in the same write that keeps it.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'messages' && !parts[4] && req.method === 'POST') {
+          if (!data || typeof data !== 'object' || Array.isArray(data) || data.projectId !== parts[2])
+            fail('Select this project before posting to its chat.');
+          if (Object.keys(data).some(key => !['projectId', 'channel', 'text', 'replyTo', 'attachments'].includes(key)))
+            fail('A message takes only projectId, channel, text, replyTo and attachments.');
+          store.project(parts[2]);
+          const { projectId: selected, ...fields } = data;
+          let message;
+          try {
+            message = recordMessage(store, selected, fields, undefined, {
+              outcome: { type: 'waiting', reason: 'Waiting for a reply.' },
+            });
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+          return json(res, message, 201);
         }
         const projectId = data.projectId ?? LEGACY_PROJECT;
         store.project(projectId);

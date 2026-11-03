@@ -5,6 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setup } from './studio-setup.mjs';
+import { recordProject } from '../src/core/projects.mjs';
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
 
@@ -77,4 +78,34 @@ test("an event row or an attempt's speech bubble starts no scheduler pass; a tas
   store.putTask({ ...store.task(task.id), reason: 'Changed.' });
   await turn();
   assert.equal(passes, 2, "a task's change starts one");
+});
+
+test("posting a chat message starts no scheduler pass; a task's change still does", async t => {
+  const c = await setup(t),
+    { store, runner } = c.app;
+  let passes = 0;
+  const pass = runner.dispatchQueued.bind(runner);
+  runner.dispatchQueued = () => {
+    passes++;
+    return pass();
+  };
+  t.after(() => (runner.dispatchQueued = pass));
+  const task = store.tasks()[0],
+    projectId = recordProject(task);
+  // Work that waits keeps the pipeline on, so each pass below is one the writes asked for.
+  store.putTask({ ...store.task(task.id), queued: true, status: 'blocked' });
+  const org = store.organization();
+  org.pipelineEnabled = true;
+  store.setOrganization(org);
+  await turn();
+  passes = 0;
+  for (const channel of [{ type: 'project' }, { type: 'task', id: task.id }]) {
+    const posted = await c.request(`/api/projects/${projectId}/messages`, { projectId, channel, text: 'A note.' });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+    await turn();
+  }
+  assert.equal(passes, 0, 'a posted message starts no pass');
+  store.putTask({ ...store.task(task.id), reason: 'Changed.' });
+  await turn();
+  assert.equal(passes, 1, "a task's change starts one");
 });
