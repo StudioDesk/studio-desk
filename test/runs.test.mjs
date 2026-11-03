@@ -2007,6 +2007,72 @@ test('integration explanations retain exact eligibility and distinguish automati
     assert.equal(explain(s).kind, 'integration-ineligible');
     assert.doesNotMatch(explain(s).action, /Approve integration/);
   }
+
+  // Another story holds the studio's one integration request, which the controller refuses to share
+  // (autonomy-runtime requestIntegration): this story waits its turn, naming the story ahead of it.
+  const { integrationReview, needsYou } = context.StudioRuns;
+  const other = { taskId: 'O', attemptId: 'other-review', reviewHash: 'other-hash', requestedAt: at(5), paused: true };
+  const queued = (mode = 'auto', note = 'Approve or deny proposed work S.') => {
+    const s = stagedSourceState();
+    s.tasks.push(task('O', { kind: 'studio-development:change', title: 'Other story' }));
+    s.autonomy = {
+      policy: { enabled: true, kinds: { 'studio-development:change': { integrate: mode } } },
+      pendingIntegration: { ...other },
+    };
+    s.tasks[0].autonomyNote = note;
+    return s;
+  };
+  const turn = 'The policy could not request integration; approve it yourself. An integration is already waiting.';
+  for (const [mode, note, next] of [
+    ['auto', undefined, /^Nothing is needed from you\. The studio integrates it when its turn comes\.$/],
+    ['auto', turn, /^Nothing is needed from you\. The studio integrates it when its turn comes\.$/],
+    [
+      'director',
+      undefined,
+      /^Nothing is needed from you\. Once that story starts integrating, this one is ready for your approval\.$/,
+    ],
+  ]) {
+    const s = queued(mode, note),
+      before = JSON.stringify(s);
+    assert.equal(integrationReview(s.tasks[0], s.attempts, s.autonomy.pendingIntegration, s.tasks)?.id, 'review-1');
+    const e = explain(s);
+    assert.equal(e.kind, 'integration-queued', `${mode}: ${note}`);
+    assert.equal(e.action, null);
+    assert.equal(e.requiresDirector, false);
+    assert.equal(e.reason, 'Waiting to integrate behind “Other story”.');
+    assert.match(e.next, next);
+    // It lists under Moving on their own, never under Your calls.
+    const items = needsYou(s).filter(item => item.taskId === 'S');
+    assert.deepEqual(JSON.parse(JSON.stringify(items.map(item => [item.kind, item.action, item.requiresDirector]))), [
+      ['integration-queued', null, false],
+    ]);
+    assert.ok(!needsYou(s).some(item => item.requiresDirector));
+    assert.equal(JSON.stringify(s), before);
+    // Once the request is free, the story is the studio's or the director's to integrate.
+    s.autonomy.pendingIntegration = null;
+    const free = explain(s);
+    assert.equal(free.kind, mode === 'auto' ? 'integration-auto' : 'integration-approval');
+    assert.equal(free.action, mode === 'auto' ? null : 'Approve integration');
+    assert.equal(free.requiresDirector, mode !== 'auto');
+  }
+  // Only the story's own request refuses its review; the request it waits behind is named by ID when its title is
+  // not in the state.
+  const own = queued();
+  own.autonomy.pendingIntegration = { ...other, taskId: 'S' };
+  assert.equal(integrationReview(own.tasks[0], own.attempts, own.autonomy.pendingIntegration, own.tasks), null);
+  const unknown = queued();
+  unknown.autonomy.pendingIntegration = { ...other, taskId: 'T-elsewhere' };
+  assert.equal(explain(unknown).reason, 'Waiting to integrate behind “T-elsewhere”.');
+  // With the policy off the director's approval integrates directly, so it stays the director's call.
+  const direct = queued();
+  direct.autonomy.policy.enabled = false;
+  assert.equal(explain(direct).kind, 'integration-approval');
+  assert.equal(explain(direct).action, 'Approve integration');
+  // A refusal for any other reason is no turn to wait for: it stays with the director.
+  const refused = queued('auto', 'The policy could not request integration; approve it yourself. Select the review.');
+  refused.autonomy.pendingIntegration = null;
+  assert.equal(explain(refused).kind, 'integration-stopped');
+  assert.equal(explain(refused).action, 'Approve integration again');
 });
 
 test('legacy separate reviews require the same current candidate checks before offering integration', () => {
@@ -2036,6 +2102,14 @@ test('legacy separate reviews require the same current candidate checks before o
   assert.equal(explain(s).action, 'Integrate reviewed source');
   s.autonomy = { policy: { enabled: true, kinds: {} } };
   assert.equal(explain(s).action, 'Approve integration');
+  // Behind another story's request it waits its turn; only a request for this review task refuses it.
+  s.tasks.push(task('O', { kind: 'studio-development:change', title: 'Other story' }));
+  s.autonomy.pendingIntegration = { taskId: 'O', attemptId: 'other-review' };
+  assert.equal(integrationReview(s.tasks[0], s.attempts, s.autonomy.pendingIntegration, s.tasks)?.id, 'review-1');
+  assert.equal(explain(s).kind, 'integration-queued');
+  assert.equal(explain(s).reason, 'Waiting to integrate behind “Other story”.');
+  assert.equal(integrationReview(s.tasks[0], s.attempts, { taskId: 'V', attemptId: 'review-1' }, s.tasks), null);
+  s.autonomy.pendingIntegration = null;
   s.attempts[1].sourceIntegration = { state: 'rejected', error: 'Verification stopped.' };
   assert.equal(explain(s).action, 'Approve integration again');
   s.autonomy.policy.enabled = false;
@@ -2333,6 +2407,22 @@ test('only current accepted passing source evidence offers integration, includin
   };
   assert.equal(buildRunStories(pending)[0].needsYou[0].kind, 'integration-pending');
   assert.equal(buildRunStories(pending)[0].outcome.label, 'In progress');
+  // Another story's request: the run waits for its turn and needs nothing from the director.
+  const behind = stagedSourceState();
+  behind.autonomy = {
+    policy: { enabled: true, kinds: { 'studio-development:change': { integrate: 'director' } } },
+    pendingIntegration: { taskId: 'O', attemptId: 'other-review', reviewHash: 'other-hash', requestedAt: at(5) },
+  };
+  const [waitingTurn] = buildRunStories(behind);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(waitingTurn.needsYou.map(item => [item.kind, item.action, item.requiresDirector]))),
+    [['integration-queued', null, false]],
+  );
+  assert.equal(waitingTurn.needsYou[0].reason, 'Waiting to integrate behind “O”.');
+  assert.equal(waitingTurn.outcome.label, 'In progress');
+  behind.autonomy.pendingIntegration = null;
+  assert.equal(buildRunStories(behind)[0].needsYou[0].action, 'Approve integration');
+  assert.equal(buildRunStories(behind)[0].outcome.label, 'Needs you');
   for (const state of ['rejected', 'abandoned']) {
     const s = stagedSourceState();
     s.attempts[1].sourceIntegration = {

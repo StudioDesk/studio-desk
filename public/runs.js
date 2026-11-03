@@ -91,13 +91,15 @@
   }
   // Presentation eligibility mirrors the serialized controller references. The
   // protected endpoint still validates bytes, baseline, reservations and dispatch.
+  // Only a waiting request for this same story refuses it; a story behind another
+  // story's request keeps its review and waits its turn.
   function integrationReview(task, attempts, pending, tasks = []) {
-    const stage = sourceStage(task);
+    const stage = sourceStage(task),
+      own = pending?.taskId === task.id;
     // Legacy reviews are separate tasks. Resolve their current accepted candidate,
     // then use the same identity/check predicates as a staged source story.
     if (!stage) {
-      if (task.kind !== 'studio-development:change-review' || task.closed || pending || task.status !== 'done')
-        return null;
+      if (task.kind !== 'studio-development:change-review' || task.closed || own || task.status !== 'done') return null;
       const review = attempts.find(a => a.taskId === task.id && a.id === task.acceptedAttemptId),
         source = review?.candidateReview,
         owner = tasks.find(t => t.id === source?.taskId),
@@ -166,7 +168,7 @@
       !['waiting-for-integration', 'failed', 'blocked'].includes(stage.current) ||
       !['candidate-review', 'integration'].includes(stage.phase) ||
       progress.busy ||
-      pending ||
+      own ||
       (progress.journal && !['rejected', 'abandoned'].includes(progress.journal.state)) ||
       (stage.integration && !['rejected', 'abandoned'].includes(stage.integration.state))
     )
@@ -712,10 +714,13 @@
     const integrable = integrationReview(task, all, pending, state.tasks || []);
     if (integrable) {
       const stopped = !!journal || !!stageJournal,
+        // The policy's earlier note that an integration was already waiting is no refusal: the controller still
+        // takes the story in its turn (src/core/autonomy-runtime.mjs integrateWaiting).
+        turnNote = /An integration is already waiting\.$/.test(note),
         refused =
           (stage?.phase === 'integration' && stage.current === 'failed') ||
           !!reason ||
-          /could not request integration|approve it yourself/i.test(note),
+          (!turnNote && /could not request integration|approve it yourself/i.test(note)),
         automatic =
           !!stage &&
           policy.enabled &&
@@ -733,6 +738,20 @@
             : stopped || refused
               ? 'Approve integration again'
               : 'Approve integration';
+      // Another story holds the studio's one integration request. While it waits, the controller refuses a second
+      // request (src/core/autonomy-runtime.mjs requestIntegration), so a story the policy would integrate, or one
+      // never tried that needs the director's approval, waits its turn without a call for the director.
+      const ahead = pending?.taskId && pending.taskId !== task.id ? pending : null;
+      if (ahead && (automatic || (policy.enabled && !stopped && !refused))) {
+        const title = (state.tasks || []).find(item => item.id === ahead.taskId)?.title;
+        return passive(
+          'integration-queued',
+          `Waiting to integrate behind “${title || ahead.taskId}”.`,
+          automatic
+            ? 'The studio integrates it when its turn comes.'
+            : 'Once that story starts integrating, this one is ready for your approval.',
+        );
+      }
       if (automatic)
         return passive(
           'integration-auto',
