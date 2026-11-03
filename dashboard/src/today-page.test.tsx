@@ -149,7 +149,8 @@ test('a story whose review asked for changes is sent back, or integrated over th
 });
 
 // A staged story whose passing review's integration stopped, with what its verification recorded.
-const stoppedStory = (verification: NonNullable<AttemptSummary['sourceIntegration']>['verification']) => {
+type Integration = NonNullable<AttemptSummary['sourceIntegration']>;
+const stoppedStory = (verification: Integration['verification'], journal: Partial<Integration> = {}) => {
   const pin = {
     taskId: 'T-1',
     attemptId: 'attempt-edit',
@@ -187,7 +188,7 @@ const stoppedStory = (verification: NonNullable<AttemptSummary['sourceIntegratio
         { taskId: 'T-1', attemptId: 'attempt-edit', artifacts: [{ kind: 'source-change', hash: 'change-hash' }] },
       ],
       artifacts: [{ path: 'source-change-review.json', hash: 'review-hash', kind: 'source-change-review' }],
-      sourceIntegration: { state: 'rejected', verification },
+      sourceIntegration: { state: 'rejected', verification, ...journal },
     },
   ];
   controller.tasks = [
@@ -297,7 +298,11 @@ test('an integration that failed with nothing landed and no conflict offers Inte
   stoppedStory({ conflicts: [] });
   open();
   const card = await storyCall();
-  expect(card.getByText('Ready to integrate again')).toBeTruthy();
+  expect(card.getByText('Integration stopped')).toBeTruthy();
+  expect(card.queryByText(/Ready to integrate/)).toBeNull();
+  expect(card.getByText(/^The last integration did not complete\./).textContent).toBe(
+    'The last integration did not complete. What stopped it is in the details. Once that is resolved, use Integrate again.',
+  );
   expect(buttons(card)).toEqual(['Integrate again (primary)', 'Close without integrating']);
   expect(card.queryByRole('button', { name: 'Merge onto the current source' })).toBeNull();
   expect(card.queryByText(/It passed on its own/)).toBeNull();
@@ -309,6 +314,94 @@ test('an integration that failed with nothing landed and no conflict offers Inte
       body: { projectId: 'project-x', attemptId: 'attempt-review', reviewHash: 'review-hash' },
     }),
   );
+});
+
+// A stopped integration's card says why it stopped in the shared rules' words, above the same buttons, and never the
+// catch-all's Inspect stage.
+test('a story whose line moved while it was tested says so on its Integration stopped card', async () => {
+  stoppedStory(
+    {},
+    { error: 'release/1.2 moved during verification. Approve integration again to merge onto the current tip.' },
+  );
+  open();
+  const card = await storyCall(),
+    region = within(await calls());
+  expect(card.getByText('Integration stopped')).toBeTruthy();
+  expect(card.getByText(/release\/1\.2/).textContent).toBe(
+    '“release/1.2” moved while the change was being tested. Use Integrate again; it merges the change onto the line as it is now.',
+  );
+  expect(card.getByText(/release\/1\.2/).tagName).toBe('P');
+  expect(buttons(card)).toEqual(['Integrate again (primary)', 'Close without integrating']);
+  expect(card.getByRole('link', { name: 'See the change' }).getAttribute('href')).toBe('/p/project-x/tasks/T-1');
+  expect(region.queryAllByRole('button', { name: /Inspect stage/ })).toHaveLength(0);
+  expect(region.queryAllByText(/Inspect stage|Approve integration|source-change|attempt-review|T-1\b/)).toHaveLength(0);
+  expect(card.queryByText(/Ready to integrate/)).toBeNull();
+});
+
+test('a story whose formatted change failed a test names that failure and offers Integrate again', async () => {
+  stoppedStory({ passed: false, phaseId: 'integration.verification' } as Integration['verification'], {
+    error: 'npm test exited with code 1.',
+  });
+  open();
+  const card = await storyCall();
+  expect(card.getByText('Integration stopped')).toBeTruthy();
+  expect(card.getByText(/failed a test/).textContent).toBe(
+    "The formatted change failed a test when it was tested on the line. Use Integrate again to test it again, or send it back if the failure is the change's own. The failing tests are in the details.",
+  );
+  expect(buttons(card)).toEqual(['Integrate again (primary)', 'Close without integrating']);
+});
+
+// A staged story with a passing review that was never tried.
+const readyStory = () => {
+  stoppedStory({});
+  const review = controller.attempts.find(attempt => attempt.id === 'attempt-review')!;
+  delete review.sourceIntegration;
+  const task = controller.tasks[0]!;
+  task.sourceStage = { ...task.sourceStage!, phase: 'candidate-review', current: 'waiting-for-integration' };
+};
+
+test('a story ready to integrate for the first time keeps Ready to integrate and has no stop paragraph', async () => {
+  readyStory();
+  open();
+  const card = await storyCall();
+  expect(card.getByText('Ready to integrate')).toBeTruthy();
+  expect(card.queryByText('Integration stopped')).toBeNull();
+  expect(card.queryByText(/did not complete|while the change was being tested|failed a test/)).toBeNull();
+  expect(card.queryByText(/It passed on its own/)).toBeNull();
+  expect(buttons(card)).toEqual(['Integrate (primary)', 'Close without integrating']);
+});
+
+test("a story waiting behind another story's integration is not a call and names that story as it moves on", async () => {
+  readyStory();
+  // The story ahead holds the studio's one integration request and is still in the live set, waiting its turn.
+  controller.tasks.push(
+    taskFixture('T-2', {
+      title: 'Name the line on Releases',
+      kind: 'studio-development:change',
+      status: 'done',
+      sourceStage: { version: 'source-story-stages-v1', phase: 'candidate-review', current: 'waiting-for-integration' },
+    }),
+  );
+  controller.shell.autonomy = {
+    policy: {
+      enabled: true,
+      revision: 2,
+      kinds: { 'studio-development:change': { approve: 'auto', accept: 'auto', integrate: 'auto' } },
+    },
+    pendingIntegration: { taskId: 'T-2' },
+  };
+  open();
+  const region = within(await calls()),
+    moving = () => screen.queryByText('Moving on their own, nothing to do')?.closest('details') ?? null;
+  await waitFor(() => expect(moving()).toBeTruthy());
+  expect(region.queryByRole('heading', { name: 'Explain a change that fails with what landed' })).toBeNull();
+  const row = within(moving()!)
+    .getByRole('link', { name: 'Explain a change that fails with what landed' })
+    .closest('li')!;
+  expect(row.textContent).toBe(
+    'Explain a change that fails with what landedWaiting to integrate behind “Name the line on Releases”. The studio integrates it when its turn comes.',
+  );
+  expect(region.queryByRole('heading', { name: 'Name the line on Releases' })).toBeNull();
 });
 
 test("a blocked editor's file request is approved as asked, with the attempt that asked", async () => {

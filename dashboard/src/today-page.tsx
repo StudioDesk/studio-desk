@@ -261,7 +261,8 @@ function closeAction(task: Task, act: ReturnType<typeof useAct>['act'], label: s
 
 // A story with a passing review, ready to integrate: the change, its tests and the review. One whose integration
 // stopped on a conflict, or failed only with what landed after it was tested, offers Merge onto the current source
-// first, as the story page does; integrating again as it is fails the same way, so it comes second.
+// first, as the story page does; integrating again as it is fails the same way, so it comes second. Any other
+// integration that was tried and stopped reads Integration stopped and says why above the same buttons.
 function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & { task: Task }) {
   const { act, busy } = useAct(projectId),
     decision = decisionState(task, state),
@@ -277,7 +278,20 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
     reviewer = workerName(state, review.workerId),
     editor = workerName(state, candidate?.workerId ?? task.workerId),
     notes = (review.candidateReviewNotes as string[] | undefined)?.length ?? 0,
-    again = /again/.test(integrationAction(state, task, review)),
+    approval = integrationAction(state, task, review),
+    again = /again/.test(approval),
+    integrateLabel = again ? 'Integrate again' : 'Integrate',
+    // An integration that was tried and stopped, other than the conflict and landed-since cases above, says why in the
+    // shared rules' own words. Their next step names the story page's approval button; here it is Integrate again.
+    stopped =
+      !mergeable &&
+      (['rejected', 'abandoned'].includes(decision.journal?.state ?? '') ||
+        (decision.stage?.phase === 'integration' && decision.stage.current === 'failed')),
+    stopText = stopped
+      ? [decision.explanation.reason, decision.explanation.next.split(approval).join(integrateLabel)]
+          .filter(Boolean)
+          .join(' ')
+      : '',
     built = took(candidate),
     reviewed = took(review);
   const changeShare = stat && stat.added + stat.removed ? (stat.added / (stat.added + stat.removed)) * 100 : 100;
@@ -303,11 +317,13 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
               landed ? 'Fails with what landed since' : 'Conflicts with the current source',
               <Icon name="merge" size={14} weight={2.4} />,
             )
-          : chip(
-              'brand',
-              again ? 'Ready to integrate again' : 'Ready to integrate',
-              <Icon name="merge" size={14} weight={2.4} />,
-            )
+          : stopped
+            ? chip('you', 'Integration stopped', <Icon name="merge" size={14} weight={2.4} />)
+            : chip(
+                'brand',
+                again ? 'Ready to integrate again' : 'Ready to integrate',
+                <Icon name="merge" size={14} weight={2.4} />,
+              )
       }
       time={when(review.finishedAt)}
       title={task.title}
@@ -328,7 +344,7 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
             ]
           : []),
         {
-          label: again ? 'Integrate again' : 'Integrate',
+          label: integrateLabel,
           emphasis: mergeable ? 'default' : 'primary',
           onClick: () =>
             act(taskPath(task, 'integrate-source'), { attemptId: review.id, reviewHash: reviewItem.hash }, result =>
@@ -359,6 +375,7 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
             : 'It passed on its own but conflicts with the current source.'}
         </p>
       )}
+      {stopText && <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>{stopText}</p>}
       <div className="sd-decision__tiles">
         <Link className="sd-tile" to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: task.id }}>
           <span className="sd-eyebrow">Change</span>
@@ -1314,7 +1331,10 @@ function Moving({
             <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: item.taskId }}>
               {state.tasks.find(task => task.id === item.taskId)?.title ?? item.taskId}
             </Link>
-            <span className="sd-meta">{item.next.replace(/^Nothing is needed from you\.\s*/, '')}</span>
+            <span className="sd-meta">
+              {/* A story waiting its integration turn names the story ahead of it, which only its reason says. */}
+              {`${item.kind === 'integration-queued' ? `${item.reason} ` : ''}${item.next.replace(/^Nothing is needed from you\.\s*/, '')}`}
+            </span>
           </li>
         ))}
         {added.map(proposal => (
