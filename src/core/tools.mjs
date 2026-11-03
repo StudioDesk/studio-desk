@@ -5,8 +5,8 @@
 // agent follows when using it, and limits on calls per hour and per attempt, a time limit and the largest answer.
 //
 // Domain-free: no routes or pages, and no imports from packs, connectors or the server. The record's checks are pure.
-// A record never holds a key: checked input refuses any key, secret, token, password or header field, and toolKey()
-// says no key is set. A command names a program, never a shell line. A studio call can only ever be built from an
+// A record never holds a key: checked input refuses any key, secret, token, password or header field, and a record's
+// key state says only whether a key is set, when, and its last four characters (toolKey). A command names a program, never a shell line. A studio call can only ever be built from an
 // operation its record declares, with the arguments that operation declares (operationRequest), so undeclared input
 // never reaches the address.
 //
@@ -14,7 +14,13 @@
 // tool:<id> with no project. Adding one gives it an ID the controller makes and revision 1; a change or retiring names
 // the revision it changes and is refused when that revision is out of date; every write raises the revision and goes
 // on the change stream as { type: 'tool', id, revision } (core/store.mjs). Retiring keeps the record: nothing here
-// deletes a tool. Each read says what its reader may do, and reads the key as not set.
+// deletes a tool. Each read says what its reader may do, and whether a key is set, when, and its last four characters.
+//
+// A tool's key itself lives only in the credential store it is given (connectors/tool-key-store.mjs: put(id, key),
+// remove(id), read(id) and has(id)). setToolKey, removeToolKey and retireTool refuse a stale revision, a retired tool
+// and a bad key before the credential store is called, then change the store and the record in one store step; if the
+// record cannot be saved after the store changed, the store is put back as it was. No message, record, return value
+// or change on the stream ever holds the key.
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -224,8 +230,31 @@ export function checkToolInput(input) {
   return body;
 }
 
-// The record's key state. No key can be set in this step, and checked input never supplies one.
-export const toolKey = () => ({ set: false });
+// A record's key state as read: { set: false }, or { set: true, setAt, lastFour } when a key is set, and nothing else.
+// Any other field a record might hold under key is never read, and anything that is not a well-formed set state reads
+// as no key set. Checked input never supplies one; toolKey() is the state of a tool with no key.
+export function toolKey(stored) {
+  if (!plainObject(stored) || stored.set !== true) return { set: false };
+  const { setAt, lastFour } = stored;
+  const isoTime =
+    typeof setAt === 'string' && Number.isFinite(Date.parse(setAt)) && new Date(setAt).toISOString() === setAt;
+  if (!isoTime || typeof lastFour !== 'string' || [...lastFour].length !== 4) return { set: false };
+  return { set: true, setAt, lastFour };
+}
+
+// The bounds on a tool's key: at least 12 characters, and at most 2000, which stays well inside every credential
+// store's own limit (the Keychain's 4000-byte line included).
+export const toolKeyBounds = Object.freeze({ min: 12, max: 2000 });
+// A key is one line: no line break of any kind and no NUL character.
+const lineBreak = /[\r\n\u2028\u2029\0]/;
+// Checks a key the director gives without ever repeating it; returns its last four characters.
+function checkKey(key) {
+  if (typeof key !== 'string') throw failure("A tool's key is text.");
+  if (key.length < toolKeyBounds.min) throw failure(`A tool's key is at least ${toolKeyBounds.min} characters.`);
+  if (key.length > toolKeyBounds.max) throw failure(`A tool's key is at most ${toolKeyBounds.max} characters.`);
+  if (lineBreak.test(key)) throw failure("A tool's key is one line, with no line break.");
+  return [...key].slice(-4).join('');
+}
 
 // Whether this computer has a program: a plain file in one of the PATH folders, trying each PATHEXT extension too on
 // Windows. Answers only true or false, never where the program is. Relative PATH folders are skipped, so the answer
@@ -367,7 +396,7 @@ export function changeTool(store, id, expectedRevision, input, by = 'director') 
     const record = {
       id: previous.id,
       ...body,
-      key: previous.key ?? toolKey(),
+      key: toolKey(previous.key),
       revision: previous.revision + 1,
       createdAt: previous.createdAt,
       updatedAt: new Date().toISOString(),
@@ -378,12 +407,98 @@ export function changeTool(store, id, expectedRevision, input, by = 'director') 
   });
 }
 
-// Retires the tool at expectedRevision. The record is kept, marked by when it was retired.
-export function retireTool(store, id, expectedRevision, by = 'director') {
-  return store.tx(() => {
+const keyMethods = ['put', 'remove', 'read', 'has'];
+// The credential store a key change needs, refused in plain words before anything changes when there is none.
+function credentialStore(keys) {
+  if (!keys || keyMethods.some(method => typeof keys[method] !== 'function'))
+    throw failure("The studio has no credential store for tools' keys, so the key was not changed.", 500);
+  return keys;
+}
+
+// Runs one key change in one store step: step(changed) checks the record, changes the credential store, calls
+// changed(undo) with how to put the store back once it has changed, and saves the record. If saving the record or the
+// commit fails after the store changed, the store is put back as it was before the failure passes on, so the store
+// and the record stay in step. A failure before the store changed leaves both as they were.
+function keyStep(store, step) {
+  let undo = null;
+  try {
+    return store.tx(() => step(restore => (undo = restore)));
+  } catch (error) {
+    if (undo)
+      try {
+        undo();
+      } catch {
+        throw failure(
+          "The tool's record could not be saved, and the credential store could not be put back as it was. " +
+            'Set or remove the key again.',
+          500,
+        );
+      }
+    throw error;
+  }
+}
+
+// Removes the key the credential store holds for a tool whose record says one is set, telling changed how to put the
+// key it held back.
+function removeHeldKey(keys, id, changed) {
+  const held = keys.read(id);
+  keys.remove(id);
+  changed(() => {
+    if (typeof held === 'string') keys.put(id, held);
+  });
+}
+
+// Sets or replaces the key of the tool at expectedRevision in the credential store `keys`, and records that a key is
+// set, when, and its last four characters. Replacing keeps the old key in effect until the new record is saved.
+export function setToolKey(store, keys, id, expectedRevision, key, by = 'director') {
+  return keyStep(store, changed => {
+    const previous = currentRecord(store, id, expectedRevision, 'This tool is retired, so it cannot have a key.');
+    const lastFour = checkKey(key);
+    credentialStore(keys);
+    const held = toolKey(previous.key).set ? keys.read(id) : null;
+    keys.put(id, key);
+    changed(() => (typeof held === 'string' ? keys.put(id, held) : keys.remove(id)));
+    const now = new Date().toISOString();
+    const record = {
+      ...previous,
+      key: { set: true, setAt: now, lastFour },
+      revision: previous.revision + 1,
+      updatedAt: now,
+      by,
+    };
+    store.putTool(record);
+    return record;
+  });
+}
+
+// Removes the key of the tool at expectedRevision from the credential store `keys`, and records that none is set.
+export function removeToolKey(store, keys, id, expectedRevision, by = 'director') {
+  return keyStep(store, changed => {
+    const previous = currentRecord(store, id, expectedRevision, 'This tool is retired, so it cannot have a key.');
+    if (!toolKey(previous.key).set) throw failure('This tool has no key to remove.', 409);
+    removeHeldKey(credentialStore(keys), id, changed);
+    const record = {
+      ...previous,
+      key: toolKey(),
+      revision: previous.revision + 1,
+      updatedAt: new Date().toISOString(),
+      by,
+    };
+    store.putTool(record);
+    return record;
+  });
+}
+
+// Retires the tool at expectedRevision. The record is kept, marked by when it was retired. A tool with a key set has
+// its key removed from the credential store `keys` as removeToolKey does; a tool with no key never calls it.
+export function retireTool(store, id, expectedRevision, by = 'director', keys = null) {
+  return keyStep(store, changed => {
     const previous = currentRecord(store, id, expectedRevision, 'This tool is already retired.');
+    const keySet = toolKey(previous.key).set;
+    if (keySet) removeHeldKey(credentialStore(keys), id, changed);
     const now = new Date().toISOString();
     const record = { ...previous, revision: previous.revision + 1, updatedAt: now, by, retiredAt: now };
+    if (keySet) record.key = toolKey();
     store.putTool(record);
     return record;
   });
@@ -395,12 +510,13 @@ export function toolActions(record, reader) {
   return reader === 'director' && !record?.retiredAt ? ['change', 'retire'] : [];
 }
 
-// A tool as read: its stored fields, the key as not set and nothing else about a key, whether this computer has a
-// command's program (null for a studio call), when it was retired (null while active) and what the reader may do.
+// A tool as read: its stored fields, whether a key is set, when and its last four characters and nothing else about a
+// key, whether this computer has a command's program (null for a studio call), when it was retired (null while
+// active) and what the reader may do.
 function readRecord(record, { reader = 'director', find } = {}) {
   const read = {};
   for (const field of readFields) if (Object.hasOwn(record, field)) read[field] = record[field];
-  read.key = toolKey();
+  read.key = toolKey(record.key);
   for (const field of recordFields) read[field] = record[field];
   read.retiredAt = record.retiredAt ?? null;
   read.availability = programAvailability(record, find);

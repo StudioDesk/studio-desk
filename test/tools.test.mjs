@@ -1,7 +1,8 @@
 // A studio tool's record and its checks: a command names one program and where to get it, a studio call an https
 // address with nothing secret in it and the operations it allows, every tool its rules and limits, and no record ever
 // holds a key. The studio's tool list on a temporary store: adding, changing by revision, retiring, the change stream
-// and what each reader may do. Model-free: the program finder is injected, or reads a temporary folder of plain files.
+// and what each reader may do, and setting, replacing and removing a tool's key in a stand-in credential store that
+// keeps keys in memory. Model-free: the program finder is injected, or reads a temporary folder of plain files.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -19,7 +20,9 @@ import {
   programOnPath,
   readTool,
   readTools,
+  removeToolKey,
   retireTool,
+  setToolKey,
   toolActions,
   toolKey,
   toolLimitBounds,
@@ -301,8 +304,34 @@ test('limits are required, closed and whole numbers within their bounds', () => 
   }
 });
 
-test('a record never has a key set', () => {
+test('a key state reads as set, when and its last four characters, or as not set, and nothing else', () => {
+  const setAt = '2026-11-03T09:30:00.000Z';
   assert.deepEqual(toolKey(), { set: false });
+  assert.deepEqual(toolKey({ set: false }), { set: false });
+  assert.deepEqual(toolKey({ set: true, setAt, lastFour: '9481' }), { set: true, setAt, lastFour: '9481' });
+  // Any other field under the key is never read.
+  assert.deepEqual(toolKey({ set: true, setAt, lastFour: '9481', value: 'sk-live-secret', key: 'sk-live-secret' }), {
+    set: true,
+    setAt,
+    lastFour: '9481',
+  });
+  // Anything that is not a well-formed set state reads as not set.
+  for (const stored of [
+    undefined,
+    null,
+    'set',
+    [],
+    { set: 'true', setAt, lastFour: '9481' },
+    { set: true, lastFour: '9481' },
+    { set: true, setAt: 'yesterday', lastFour: '9481' },
+    { set: true, setAt: '2026-11-03', lastFour: '9481' },
+    { set: true, setAt },
+    { set: true, setAt, lastFour: 9481 },
+    { set: true, setAt, lastFour: '481' },
+    { set: true, setAt, lastFour: 'sk-live-secret' },
+    { set: true, value: 'sk-live-secret' },
+  ])
+    assert.deepEqual(toolKey(stored), { set: false }, JSON.stringify(stored));
   for (const body of [checkToolInput(command()), checkToolInput(studioCall())]) assert.ok(!('key' in body));
 });
 
@@ -565,9 +594,10 @@ test('retiring raises the revision and keeps the tool listed with retiredAt; the
 
 test('nothing deletes a tool, and deleting a project leaves the studio its tools', t => {
   const { store } = studio(t);
+  // Removing a tool's key keeps the tool.
   assert.deepEqual(
     Object.keys(tools).filter(name => /delete|remove|drop|purge|erase|destroy/i.test(name)),
-    [],
+    ['removeToolKey'],
   );
   assert.deepEqual(
     Object.getOwnPropertyNames(Store.prototype).filter(name => /tool/i.test(name)),
@@ -632,33 +662,368 @@ test('the director may change or retire an active tool; a retired one and any ot
   assert.deepEqual(readTool(store, addTool(store, studioCall()).id).actions, ['change', 'retire']);
 });
 
-test("every read's key is exactly { set: false }, and the list holds no other key field", t => {
+test("every read's key says only whether a key is set, when and its last four, and the list holds no other key field", t => {
   const { store } = studio(t);
+  const setAt = '2026-11-03T09:30:00.000Z';
   const added = addTool(store, command()),
-    call = addTool(store, studioCall());
-  // Even a record written past the checks with key material reads as having no key set, and nothing else of it.
+    call = addTool(store, studioCall()),
+    keyed = addTool(store, studioCall({ name: 'Keyed call' }));
+  // A record written past the checks with key material and no well-formed set state reads as having no key set, and
+  // nothing else of it.
   store.putTool({
     ...store.tool(call.id),
     key: { set: true, value: 'sk-live-secret' },
     apiKey: 'sk-live-secret',
     headers: { Authorization: 'Bearer sk-live-secret' },
   });
+  // One with a set state and extra key material reads only set, setAt and lastFour, never the material.
+  store.putTool({
+    ...store.tool(keyed.id),
+    key: { set: true, setAt, lastFour: 'cret', value: 'sk-live-secret', protectedKey: 'sk-live-secret' },
+  });
   retireTool(store, added.id, 1);
   const list = readTools(store, { find: () => true });
-  assert.equal(list.length, 2);
-  for (const tool of list) assert.deepEqual(tool.key, { set: false });
+  assert.equal(list.length, 3);
+  assert.deepEqual(
+    list.map(tool => tool.key),
+    [{ set: false }, { set: false }, { set: true, setAt, lastFour: 'cret' }],
+  );
   assert.deepEqual(readTool(store, call.id).key, { set: false });
-  const json = JSON.stringify(list);
+  assert.deepEqual(readTool(store, keyed.id).key, { set: true, setAt, lastFour: 'cret' });
+  const json = JSON.stringify([...list, readTool(store, call.id), readTool(store, keyed.id)]);
   assert.ok(!json.includes('sk-live-secret'));
   const keyFields = [];
-  JSON.parse(json, (name, value) => {
+  JSON.parse(JSON.stringify(list), (name, value) => {
     if (/key|secret|token|password|passwd|credential|auth|header|cookie/i.test(name)) keyFields.push([name, value]);
     return value;
   });
   assert.deepEqual(keyFields, [
     ['key', { set: false }],
     ['key', { set: false }],
+    ['key', { set: true, setAt, lastFour: 'cret' }],
   ]);
+});
+
+// A stand-in for the computer's credential store: it keeps keys in memory and records every call it gets, by
+// operation and tool ID. refuse names operations it refuses, in its own plain words.
+function credentials({ refuse = [] } = {}) {
+  const held = new Map(),
+    calls = [];
+  const call = (operation, id, act) => {
+    calls.push([operation, id]);
+    if (refuse.includes(operation)) throw new Error(`The stand-in store refused to ${operation} the key.`);
+    return act();
+  };
+  return {
+    held,
+    calls,
+    put: (id, key) => call('put', id, () => void held.set(id, key)),
+    remove: id => call('remove', id, () => void held.delete(id)),
+    read: id => call('read', id, () => (held.has(id) ? held.get(id) : null)),
+    has: id => call('has', id, () => held.has(id)),
+  };
+}
+const testKey = 'sd-test-key-QX7J-9481',
+  secondKey = 'sd-test-key-ZP3M-5502';
+const withoutSeq = changes => changes.map(({ seq, ...change }) => change);
+// Every row of the store's settings and events tables, as text.
+const storedRows = store =>
+  JSON.stringify([store.db.prepare('SELECT * FROM settings').all(), store.db.prepare('SELECT * FROM events').all()]);
+const validTime = value => typeof value === 'string' && new Date(value).toISOString() === value;
+
+test("setting, replacing and removing a tool's key keep the key in the credential store and its state on the record", t => {
+  const { store, changes } = studio(t);
+  const keys = credentials(),
+    added = addTool(store, studioCall());
+  changes.length = 0;
+  const set = setToolKey(store, keys, added.id, 1, testKey);
+  assert.equal(set.revision, 2);
+  assert.equal(set.by, 'director');
+  assert.equal(set.updatedAt, set.key.setAt);
+  assert.deepEqual(set.key, { set: true, setAt: set.key.setAt, lastFour: '9481' });
+  assert.ok(validTime(set.key.setAt));
+  assert.deepEqual(store.tool(added.id), set);
+  assert.deepEqual([...keys.held], [[added.id, testKey]]);
+  // A first key reads nothing from the store before keeping the new one.
+  assert.deepEqual(keys.calls, [['put', added.id]]);
+  assert.deepEqual(readTool(store, added.id).key, { set: true, setAt: set.key.setAt, lastFour: '9481' });
+  assert.deepEqual(readTools(store)[0].key, { set: true, setAt: set.key.setAt, lastFour: '9481' });
+  // The director's fields are unchanged.
+  assert.deepEqual({ ...set, key: added.key, revision: 1, updatedAt: added.updatedAt }, added);
+
+  // Replacing it at the new revision keeps the new key, with its own last four characters and a later revision.
+  keys.calls.length = 0;
+  const replaced = setToolKey(store, keys, added.id, 2, secondKey, 'director');
+  assert.equal(replaced.revision, 3);
+  assert.deepEqual(replaced.key, { set: true, setAt: replaced.key.setAt, lastFour: '5502' });
+  assert.ok(validTime(replaced.key.setAt));
+  assert.deepEqual([...keys.held], [[added.id, secondKey]]);
+  assert.deepEqual(keys.calls, [
+    ['read', added.id],
+    ['put', added.id],
+  ]);
+  assert.deepEqual(readTool(store, added.id).key, replaced.key);
+
+  // Removing it at the current revision leaves the store empty and the read says no key is set.
+  keys.calls.length = 0;
+  const removed = removeToolKey(store, keys, added.id, 3);
+  assert.equal(removed.revision, 4);
+  assert.deepEqual(removed.key, { set: false });
+  assert.deepEqual(store.tool(added.id), removed);
+  assert.equal(keys.held.size, 0);
+  assert.deepEqual(keys.calls, [
+    ['read', added.id],
+    ['remove', added.id],
+  ]);
+  assert.deepEqual(readTool(store, added.id).key, { set: false });
+  assert.deepEqual(readTools(store)[0].key, { set: false });
+  // The tool can have a key again afterwards, and other tools are untouched.
+  assert.equal(setToolKey(store, keys, added.id, 4, testKey).revision, 5);
+
+  // Each write goes on the change stream as the tool's ID and revision and nothing else.
+  assert.deepEqual(withoutSeq(changes), [
+    { type: 'tool', id: added.id, revision: 2 },
+    { type: 'tool', id: added.id, revision: 3 },
+    { type: 'tool', id: added.id, revision: 4 },
+    { type: 'tool', id: added.id, revision: 5 },
+  ]);
+});
+
+test('retiring a tool with a key set removes the key; one with no key never calls the credential store', t => {
+  const { store, changes } = studio(t);
+  const keys = credentials(),
+    keyed = addTool(store, command()),
+    plain = addTool(store, studioCall());
+  setToolKey(store, keys, keyed.id, 1, testKey);
+  keys.calls.length = 0;
+  changes.length = 0;
+  const retired = retireTool(store, keyed.id, 2, 'director', keys);
+  assert.equal(retired.revision, 3);
+  assert.ok(validTime(retired.retiredAt));
+  assert.deepEqual(retired.key, { set: false });
+  assert.deepEqual(store.tool(keyed.id), retired);
+  assert.equal(keys.held.size, 0);
+  assert.deepEqual(keys.calls, [
+    ['read', keyed.id],
+    ['remove', keyed.id],
+  ]);
+  assert.deepEqual(readTool(store, keyed.id).key, { set: false });
+
+  // A tool with no key retires without the credential store, given or not.
+  keys.calls.length = 0;
+  assert.equal(retireTool(store, plain.id, 1, 'director', keys).revision, 2);
+  assert.deepEqual(keys.calls, []);
+  const other = addTool(store, command());
+  assert.equal(retireTool(store, other.id, 1).revision, 2);
+  assert.deepEqual(withoutSeq(changes), [
+    { type: 'tool', id: keyed.id, revision: 3 },
+    { type: 'tool', id: plain.id, revision: 2 },
+    { type: 'tool', id: other.id, revision: 1 },
+    { type: 'tool', id: other.id, revision: 2 },
+  ]);
+
+  // Retiring a tool with a key set and no credential store is refused in plain words before anything changes.
+  const unprovided = addTool(store, command());
+  setToolKey(store, keys, unprovided.id, 1, testKey);
+  const before = store.tool(unprovided.id),
+    announced = changes.length;
+  keys.calls.length = 0;
+  refusedWith(() => retireTool(store, unprovided.id, 2), 500, /no credential store for tools' keys/);
+  assert.deepEqual(store.tool(unprovided.id), before);
+  assert.deepEqual([...keys.held], [[unprovided.id, testKey]]);
+  assert.deepEqual(keys.calls, []);
+  assert.equal(changes.length, announced);
+});
+
+test('every refusal comes before the credential store is called, and changes nothing', t => {
+  const { store, changes } = studio(t);
+  const keys = credentials(),
+    plain = addTool(store, studioCall()),
+    keyed = addTool(store, command()),
+    retired = addTool(store, command());
+  setToolKey(store, keys, keyed.id, 1, testKey);
+  retireTool(store, retired.id, 1);
+  keys.calls.length = 0;
+  changes.length = 0;
+  const records = () => store.tools(),
+    before = records(),
+    held = [...keys.held];
+  const messages = [];
+  const refusal = (call, status, message) =>
+    assert.throws(call, error => {
+      assert.equal(error.status, status);
+      assert.match(error.message, message);
+      messages.push(error.message);
+      return true;
+    });
+  const retiredKey = /^This tool is retired, so it cannot have a key\.$/;
+  // A stale revision, for setting and removing.
+  for (const revision of [1, 3, 0, undefined, null, '2']) {
+    refusal(() => setToolKey(store, keys, keyed.id, revision, secondKey), 409, stale);
+    refusal(() => removeToolKey(store, keys, keyed.id, revision), 409, stale);
+  }
+  refusal(() => setToolKey(store, keys, plain.id, 2, testKey), 409, stale);
+  // A retired tool, for setting and removing.
+  refusal(() => setToolKey(store, keys, retired.id, 2, testKey), 409, retiredKey);
+  refusal(() => removeToolKey(store, keys, retired.id, 2), 409, retiredKey);
+  // A key that is not a key.
+  refusal(
+    () => setToolKey(store, keys, plain.id, 1, testKey.slice(-11)),
+    400,
+    /^A tool's key is at least 12 characters\.$/,
+  );
+  refusal(
+    () => setToolKey(store, keys, plain.id, 1, 'Q'.repeat(2001)),
+    400,
+    /^A tool's key is at most 2000 characters\.$/,
+  );
+  const oneLine = /^A tool's key is one line, with no line break\.$/;
+  for (const broken of [`${testKey}\n`, `sd-test\r-key-QX7J-9481`, `sd-test-key\0-QX7J-9481`, `sd-test\r\nkey-QX7J`])
+    refusal(() => setToolKey(store, keys, plain.id, 1, broken), 400, oneLine);
+  for (const notText of [undefined, null, 123456789012345, ['sd-test-key-QX7J-9481'], { key: testKey }])
+    refusal(() => setToolKey(store, keys, plain.id, 1, notText), 400, /^A tool's key is text\.$/);
+  // Removing a key that is not set.
+  refusal(() => removeToolKey(store, keys, plain.id, 1), 409, /^This tool has no key to remove\.$/);
+  // A tool that does not exist.
+  refusal(() => setToolKey(store, keys, 'tool-missing', 1, testKey), 404, notFound);
+  refusal(() => removeToolKey(store, keys, 'tool-missing', 1), 404, notFound);
+
+  assert.deepEqual(keys.calls, []);
+  assert.deepEqual([...keys.held], held);
+  assert.deepEqual(records(), before);
+  assert.deepEqual(changes, []);
+  // No refusal repeats the key, or any part of it beyond what a read says.
+  for (const message of messages) assert.ok(!message.includes('QX7J') && !message.includes('sd-test'), message);
+  // A key of exactly 12 and of exactly 2000 characters is accepted.
+  assert.equal(setToolKey(store, keys, plain.id, 1, 'sd-test-1234').key.lastFour, '1234');
+  assert.equal(setToolKey(store, keys, plain.id, 2, 'Q'.repeat(1996) + '2000').key.lastFour, '2000');
+});
+
+test('a record that cannot be saved after the credential store changed puts the store back as it was', t => {
+  const { store, changes } = studio(t);
+  const keys = credentials(),
+    tool = addTool(store, studioCall());
+  // putTool throws once, after the credential store has changed.
+  const failOnce = () =>
+    t.mock.method(store, 'putTool').mock.mockImplementationOnce(() => {
+      throw new Error('The disk is full.');
+    });
+  const failing = (call, check) => {
+    const before = store.tool(tool.id),
+      announced = changes.length;
+    failOnce();
+    assert.throws(call, { message: 'The disk is full.' });
+    t.mock.restoreAll();
+    assert.deepEqual(store.tool(tool.id), before);
+    assert.equal(changes.length, announced);
+    check();
+  };
+
+  // A first key: the store is left empty.
+  failing(
+    () => setToolKey(store, keys, tool.id, 1, testKey),
+    () => {
+      assert.equal(keys.held.size, 0);
+      assert.deepEqual(keys.calls, [
+        ['put', tool.id],
+        ['remove', tool.id],
+      ]);
+    },
+  );
+  setToolKey(store, keys, tool.id, 1, testKey);
+
+  // Replacing a key: the store holds the old key again.
+  keys.calls.length = 0;
+  failing(
+    () => setToolKey(store, keys, tool.id, 2, secondKey),
+    () => {
+      assert.deepEqual([...keys.held], [[tool.id, testKey]]);
+      assert.deepEqual(keys.calls, [
+        ['read', tool.id],
+        ['put', tool.id],
+        ['put', tool.id],
+      ]);
+    },
+  );
+
+  // Removing a key: the store holds the old key again.
+  failing(
+    () => removeToolKey(store, keys, tool.id, 2),
+    () => assert.deepEqual([...keys.held], [[tool.id, testKey]]),
+  );
+
+  // Retiring a tool with a key: the store holds the old key and the tool stays active.
+  failing(
+    () => retireTool(store, tool.id, 2, 'director', keys),
+    () => {
+      assert.deepEqual([...keys.held], [[tool.id, testKey]]);
+      assert.equal(store.tool(tool.id).retiredAt, undefined);
+    },
+  );
+
+  // The record and the store are still in step: the key can be replaced, then removed.
+  assert.equal(setToolKey(store, keys, tool.id, 2, secondKey).revision, 3);
+  assert.deepEqual([...keys.held], [[tool.id, secondKey]]);
+  assert.equal(removeToolKey(store, keys, tool.id, 3).revision, 4);
+  assert.equal(keys.held.size, 0);
+});
+
+test("a put the credential store refuses leaves the record unchanged and passes on the store's message", t => {
+  const { store, changes } = studio(t);
+  const tool = addTool(store, studioCall()),
+    refusing = credentials({ refuse: ['put'] });
+  const before = store.tool(tool.id),
+    announced = changes.length;
+  assert.throws(() => setToolKey(store, refusing, tool.id, 1, testKey), {
+    message: 'The stand-in store refused to put the key.',
+  });
+  assert.deepEqual(store.tool(tool.id), before);
+  assert.equal(refusing.held.size, 0);
+  assert.equal(changes.length, announced);
+  // A refused replacement keeps the old key and the record as they were.
+  const keys = credentials();
+  setToolKey(store, keys, tool.id, 1, testKey);
+  const keyed = store.tool(tool.id);
+  refusing.held.set(tool.id, testKey);
+  assert.throws(() => setToolKey(store, refusing, tool.id, 2, secondKey), /refused to put the key/);
+  assert.deepEqual(store.tool(tool.id), keyed);
+  assert.deepEqual([...refusing.held], [[tool.id, testKey]]);
+});
+
+test('only the credential store ever holds the key: no read, change, message or stored row does', t => {
+  const { store, changes } = studio(t);
+  const keys = credentials(),
+    tool = addTool(store, studioCall()),
+    other = addTool(store, command());
+  const seen = [];
+  const keep = value => (seen.push(value), value);
+  keep(setToolKey(store, keys, tool.id, 1, testKey));
+  keep(readTool(store, tool.id));
+  keep(readTools(store));
+  for (const attempt of [
+    () => setToolKey(store, keys, tool.id, 1, testKey),
+    () => setToolKey(store, keys, tool.id, 2, `${testKey}\n`),
+    () => setToolKey(store, keys, tool.id, 2, testKey.repeat(100)),
+    () => setToolKey(store, credentials({ refuse: ['put'] }), tool.id, 2, testKey),
+    () => removeToolKey(store, keys, other.id, 1),
+  ])
+    assert.throws(attempt, error => (keep(error.message), keep({ ...error }), true));
+  keep(setToolKey(store, keys, tool.id, 2, testKey));
+  keep(retireTool(store, tool.id, 3, 'director', keys));
+  keep(readTools(store));
+  const everything = JSON.stringify([seen, changes, storedRows(store)]);
+  assert.ok(!everything.includes(testKey));
+  assert.ok(!everything.includes('QX7J'));
+  for (const change of changes) assert.deepEqual(Object.keys(change).sort(), ['id', 'revision', 'seq', 'type']);
+  // The stand-in held it until the tool was retired.
+  assert.equal(keys.held.size, 0);
+  assert.deepEqual(
+    keys.calls.filter(([operation]) => operation === 'put'),
+    [
+      ['put', tool.id],
+      ['put', tool.id],
+    ],
+  );
 });
 
 test("a command's read says found, or missing with where to get it, from an injected finder", t => {
