@@ -28,6 +28,7 @@ import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
 import { endTryRuns, recoverTryRuns } from '../connectors/try-copy.mjs';
 import { attemptResource } from './store.mjs';
 import { testTurnResource } from './test-turn.mjs';
+import { advanceFlow, advanceOpenFlows } from './flow-run.mjs';
 
 // Reasons that clear by themselves as other work finishes.
 const waiting = reason => /^Waiting for /.test(reason || '');
@@ -595,7 +596,16 @@ export class Runner {
   // (`quick`): a story's scope took six git calls, and twenty waiting stories held the controller for seconds on each
   // pass (October 29).
   refreshReadiness() {
+    this.advanceFlows();
     measuringPass(() => this.refreshEach());
+  }
+  // Open flows follow edges that wait for a milestone after acceptance, or for work denied or cancelled outside an
+  // attempt (1.2). Only flow records and their tasks are read; a studio without a flow reads one empty list. A flow
+  // that cannot advance now never stops readiness: it is tried again on the next pass.
+  advanceFlows() {
+    try {
+      advanceOpenFlows(this.store, this.registries);
+    } catch {}
   }
   refreshEach() {
     // What every waiting task is weighed against, read once for the pass (C-19): weighing a task writes only that task,
@@ -1278,6 +1288,10 @@ export class Runner {
       if (a.status === 'review' && proposedWork) recordProposedWork(this.store, task, proposedWork);
       this.store.release(a.id);
       if (resumes && !this.store.project(recordProject(task)).dispatchPaused) this.enablePipeline(recordProject(task));
+      // A flow's task that failed with no attempts left, or was cancelled, settles its node in the same transaction:
+      // the flow skips what waited for it (1.2). advanceFlow leaves a task with attempts left alone.
+      if (task.flowReference && ['failed', 'cancelled'].includes(task.status))
+        advanceFlow(this.store, this.registries, task);
     });
     this.active.delete(a.id);
     // Negative reports remain reviewable evidence; phase outcomes describe their measured

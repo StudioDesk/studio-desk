@@ -108,6 +108,9 @@ export class Autonomy {
       this.accepted(task.id);
     } else if (verdict.retryUpstream && mode.accept === 'auto') {
       acceptAttempt(this.store, this.runner.registries, task, by(`Recorded as evidence. ${verdict.reason}`));
+      // A flow's own review that asks for changes is evidence only: its flow's edges decide where the work goes (1.2),
+      // so the policy sends nothing back. A later stage of a flow's task still sends its own work back as before.
+      if (task.flowReference && view.kind === task.kind) return this.accepted(task.id);
       this.retryUpstream(this.store.task(task.id), verdict.retryUpstream, policy);
     } else if (verdict.retry) this.retry(task, verdict.reason, policy);
     else this.attention(task, verdict.reason);

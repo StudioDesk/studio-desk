@@ -7,6 +7,7 @@ import { expandMaps } from './fanout.mjs';
 import { autonomyPolicy } from './autonomy.mjs';
 import { recordLibraryProposals } from './library.mjs';
 import { stepContract } from './step-contract.mjs';
+import { advanceFlow } from './flow-run.mjs';
 
 // Accepts a reviewed attempt. Shared by the director's route and the
 // controller's autonomy policy so both apply exactly the same checks.
@@ -63,6 +64,8 @@ export function acceptAttempt(store, registries, task, by = { type: 'director' }
     // A map whose source this is expands now, within the run's approved envelope.
     expandMaps(store, registries, task, a);
     if (prepared) recordProposedWork(store, task, prepared);
+    // A flow's task follows its flow's edges in the same transaction (1.2); other tasks write nothing more.
+    if (task.flowReference) advanceFlow(store, registries, task);
   });
   store.event(
     'accepted',

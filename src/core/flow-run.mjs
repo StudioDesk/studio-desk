@@ -10,6 +10,7 @@ import { validateFlow } from './graph-v2.mjs';
 import { staff } from './staffing.mjs';
 import { projectOrganization } from './project-organization.mjs';
 import { seenBy } from './project-agents.mjs';
+import { stepContract } from './step-contract.mjs';
 
 export const FLOW_RUN_SCHEMA = 'flow-run-v1';
 const controllerKinds = ['gate', 'for-each', 'join'];
@@ -102,8 +103,8 @@ function staffingOrder(ready) {
 }
 
 // One node's task, built the way materializeWorkflow builds a step's task, staffed by the node's owner other than the
-// agents in `exclude`.
-function nodeTask(store, registries, record, node, round, exclude) {
+// agents in `exclude`. A node started after others depends on their accepted tasks, which are its inputs.
+function nodeTask(store, registries, record, node, round, exclude, dependencies = []) {
   const org = projectOrganization(store, record.projectId);
   let staffed;
   try {
@@ -129,7 +130,7 @@ function nodeTask(store, registries, record, node, round, exclude) {
     directorInputs: [],
     team: worker.team,
     goalId: null,
-    dependencies: [],
+    dependencies: [...dependencies],
     status: 'ready',
     direction: record.brief ? `Director brief for this flow: ${record.brief}` : '',
     reason: '',
@@ -233,29 +234,296 @@ function taskOf(store, id) {
   }
 }
 
-// Whether a node can still change: it waits, runs or is in Review, or its task stopped with attempts left. Accepted,
-// denied and cancelled work, and failed work with no attempts left, is settled.
+function attemptOf(store, id) {
+  try {
+    return id ? store.attempt(id) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Whether a node can still change: it waits, runs or is in Review, its task stopped with attempts left, or its gate
+// waits for the director. Accepted, denied and cancelled work, failed work with no attempts left, skipped nodes and
+// decided gates are settled.
 function open(store, registries, state, task) {
-  if (!task) return state === 'waiting';
+  if (!task) return state === 'waiting' || state === 'director';
   if (state === 'accepted' || ['denied', 'cancelled'].includes(task.status)) return false;
   if (task.status !== 'failed') return true;
   const view = registries.workflows.stageView(task);
   return registries.workflows.stageAttempts(store, view).length < view.maxAttempts;
 }
 
+const reviewOutcomes = ['accepted', 'passed', 'needs-work'];
+
+// A review task's accepted verdict as its task type records it on the attempt (general work: workReviewVerdict), with
+// its findings; null for a task whose type is not a review step.
+function reviewOf(store, registries, task) {
+  const definition = registries.workflows.find(task.kind);
+  if (!definition || stepContract(definition).kind !== 'review') return null;
+  const attempt = attemptOf(store, task.acceptedAttemptId),
+    field = (definition.attemptFields || []).find(name => /Verdict$/.test(name)),
+    verdict = attempt && field ? (attempt[field] ?? null) : null,
+    findings = attempt && field ? attempt[field.replace(/Verdict$/, 'Findings')] : null;
+  return {
+    passed: verdict === 'pass' || verdict === 'passed',
+    verdict,
+    findings: Array.isArray(findings) ? structuredClone(findings) : [],
+    summary: attempt?.result?.summary ?? '',
+  };
+}
+
+// What a node settled as, or null while it can still change: the outcomes its edges can wait for and, in plain words,
+// how it settled. A node whose task was denied, cancelled or failed with no attempts left settled without an outcome.
+function settlement(store, registries, record, node) {
+  const entry = record.nodes[node.key];
+  if (entry.state === 'skipped') return { outcomes: [], how: 'was skipped' };
+  if (node.kind === 'gate')
+    return entry.decision?.outcome
+      ? { outcomes: [entry.decision.outcome], how: `decided ${entry.decision.outcome}` }
+      : null;
+  if (controllerKinds.includes(node.kind)) return null;
+  const task = taskOf(store, entry.taskId);
+  if (!task) return null;
+  if (task.status === 'done') {
+    const review = reviewOf(store, registries, task),
+      outcomes = ['accepted', ...(review ? [review.passed ? 'passed' : 'needs-work'] : [])];
+    for (const name of registries.workflows.milestonesOf(task.kind))
+      if (!reviewOutcomes.includes(name) && registries.workflows.reached(store, task, name)) outcomes.push(name);
+    return {
+      outcomes,
+      done: true,
+      review,
+      how: !review ? 'was accepted' : review.passed ? 'passed its review' : 'asked for changes',
+    };
+  }
+  if (open(store, registries, taskStates[task.status], task)) return null;
+  return {
+    outcomes: [],
+    how: task.status === 'failed' ? 'failed with no attempts left' : `was ${task.status}`,
+  };
+}
+
+// An edge fires once its source settled with its outcome, and can no longer fire once the source settled otherwise.
+// A milestone after acceptance (such as integrated) may still be reached by an accepted task, so its edge waits.
+function edgeState(settled, edge) {
+  if (!settled) return 'pending';
+  if (settled.outcomes.includes(edge.outcome)) return 'fired';
+  if (settled.done && !reviewOutcomes.includes(edge.outcome)) return 'pending';
+  return 'dead';
+}
+
+const plural = (count, one, many) => `${count} ${count === 1 ? one : many}`;
+
+// Follows a flow record's edges as far as they go now, changing the record in place: records each node that settled,
+// skips the nodes that can no longer run (and those after them), decides each gate whose inputs all settled, starts
+// each node whose ordinary inputs all fired and stops the flow where a loop edge fires. Returns the sentences that
+// describe what changed and the tasks to create; nothing changed when there are none.
+function followEdges(store, registries, record) {
+  const { graph } = record,
+    byKey = new Map(graph.nodes.map(node => [node.key, node])),
+    changes = [],
+    tasks = [];
+  if (record.sentBack) return { changes, tasks };
+  const settledOf = key => settlement(store, registries, record, byKey.get(key)),
+    incomingOf = key => graph.edges.filter(edge => edge.to === key && edge.loop === undefined);
+  // The tasks a node's inputs hold: a controller node passes on its own inputs' tasks.
+  const inputTasks = (key, seen = new Set()) => {
+    if (seen.has(key)) return [];
+    seen.add(key);
+    const entry = record.nodes[key];
+    if (entry.taskId) return [entry.taskId];
+    if (!controllerKinds.includes(byKey.get(key).kind)) return [];
+    return incomingOf(key).flatMap(edge => inputTasks(edge.from, seen));
+  };
+  const workerOf = key => {
+    const id = record.nodes[key]?.taskId;
+    return (tasks.find(task => task.id === id) || taskOf(store, id))?.workerId ?? null;
+  };
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    // Each node's settlement, recorded once it settles (and again when an accepted task reaches a later milestone).
+    for (const node of graph.nodes) {
+      const entry = record.nodes[node.key];
+      if (!entry.taskId) continue;
+      const settled = settledOf(node.key);
+      if (!settled || JSON.stringify(entry.outcomes) === JSON.stringify(settled.outcomes)) continue;
+      const first = entry.outcomes === undefined;
+      entry.outcomes = settled.outcomes;
+      if (settled.review)
+        entry.review = {
+          verdict: settled.review.verdict,
+          findings: settled.review.findings,
+          summary: settled.review.summary,
+        };
+      changes.push(first ? `${node.title} ${settled.how}.` : `${node.title} reached ${settled.outcomes.at(-1)}.`);
+    }
+    // A loop edge that fires sends the group back; the next round is the rounds step's, so nothing more starts.
+    for (const edge of graph.edges) {
+      if (edge.loop === undefined || edgeState(settledOf(edge.from), edge) !== 'fired') continue;
+      const source = byKey.get(edge.from),
+        inputs = source.kind === 'gate' ? incomingOf(source.key).map(input => input.from) : [source.key],
+        findings = inputs.map(key => ({
+          node: key,
+          taskId: record.nodes[key].taskId ?? null,
+          verdict: record.nodes[key].review?.verdict ?? null,
+          summary: record.nodes[key].review?.summary ?? '',
+          findings: record.nodes[key].review?.findings ?? [],
+        }));
+      record.sentBack = { from: edge.from, to: edge.to, outcome: edge.outcome, at: new Date().toISOString(), findings };
+      changes.push(
+        `${source.title} sent the work back to ${byKey.get(edge.to).title} with the findings of ${plural(findings.length, 'input', 'inputs')}; nothing more starts until its next round.`,
+      );
+      return { changes, tasks };
+    }
+    for (const node of graph.nodes) {
+      const entry = record.nodes[node.key];
+      if (entry.taskId || entry.state === 'skipped' || entry.decision) continue;
+      const incoming = incomingOf(node.key);
+      if (!incoming.length) continue;
+      const states = incoming.map(edge => [edge, settledOf(edge.from)]),
+        dead = states.find(([edge, settled]) => edgeState(settled, edge) === 'dead');
+      if (dead) {
+        const [edge, settled] = dead;
+        entry.state = 'skipped';
+        entry.reason = `The edge ${edge.from} → ${edge.to} waits for ${edge.outcome}, and ${byKey.get(edge.from).title} ${settled.how}.`;
+        changes.push(`Skipped ${node.title}: ${entry.reason}`);
+        progressed = true;
+        continue;
+      }
+      if (!states.every(([edge, settled]) => edgeState(settled, edge) === 'fired')) continue;
+      if (node.kind === 'gate') {
+        const inputs = incoming.map(edge => ({
+            node: edge.from,
+            taskId: record.nodes[edge.from].taskId ?? null,
+            passed: !!settledOf(edge.from).review?.passed,
+          })),
+          passed = inputs.filter(input => input.passed).length,
+          { rule, reason } = node.gate,
+          at = new Date().toISOString(),
+          tally = `${passed} of ${plural(inputs.length, 'review', 'reviews')} passed`;
+        if (rule === 'director') {
+          entry.decision = { rule, state: 'pending', reason, inputs, at };
+          entry.state = 'director';
+          changes.push(`${node.title} waits for the director's decision (${tally}): ${reason}`);
+        } else {
+          const outcome = (rule === 'all-pass' ? passed === inputs.length : passed > 0) ? 'passed' : 'needs-work';
+          entry.decision = { rule, state: 'decided', outcome, reason, inputs, at };
+          entry.state = outcome;
+          changes.push(
+            `${node.title} ${outcome === 'passed' ? 'passed' : 'needs work'} by the ${rule} rule: ${tally}.`,
+          );
+        }
+        progressed = true;
+        continue;
+      }
+      // For-each and join nodes are run by a later step of the flow engine.
+      if (controllerKinds.includes(node.kind)) continue;
+      const dependencies = [...new Set(incoming.flatMap(edge => inputTasks(edge.from)))].filter(
+          id => taskOf(store, id)?.status === 'done',
+        ),
+        definition = registries.workflows.find(node.kind),
+        independent = definition?.distinctFromInputs
+          ? dependencies.map(id => attemptOf(store, taskOf(store, id).acceptedAttemptId)?.workerId).filter(Boolean)
+          : [],
+        exclude = [...new Set([...separation(graph, node, workerOf), ...independent])];
+      let task;
+      try {
+        task = nodeTask(store, registries, record, node, 1, exclude, dependencies);
+      } catch (error) {
+        // A node nobody can run waits, with the reason, for the director to change the team.
+        if (entry.reason !== error.message) {
+          entry.reason = error.message;
+          changes.push(`${node.title} cannot start: ${error.message}`);
+        }
+        continue;
+      }
+      tasks.push(task);
+      delete entry.reason;
+      Object.assign(entry, { taskId: task.id, round: 1, state: 'ready' });
+      changes.push(`${node.title} can start now.`);
+      progressed = true;
+    }
+  }
+  return { changes, tasks };
+}
+
+function advanceGroup(store, registries, groupId, taskId = null, reference = null) {
+  const stored = flowRecord(store, groupId);
+  if (!stored || stored.schemaVersion !== FLOW_RUN_SCHEMA) return [];
+  if (reference && (reference.flowId !== stored.flowId || reference.revision !== stored.revision)) return [];
+  const record = structuredClone(stored),
+    { changes, tasks } = followEdges(store, registries, record);
+  if (!changes.length) return [];
+  tasks.forEach(created => store.putTask(created));
+  writeFlow(store, record, changes.join(' '), taskId);
+  return tasks.map(created => created.id);
+}
+
+// Advances a settled task's flow inside the caller's transaction (the one that settles the task), so a settlement and
+// the flow's next step are recorded together: its new tasks and one write of the flow record, which raises the
+// group's sequence by one. A task without flowReference, or a flow with nothing to do, writes nothing. Returns the
+// IDs of the tasks it created.
+export function advanceFlow(store, registries, task) {
+  const reference = task?.flowReference;
+  if (!reference) return [];
+  return advanceGroup(store, registries, reference.group, task.id, reference);
+}
+
+// Re-checks every open flow when readiness is refreshed: an accepted task may since have reached a milestone an edge
+// waits for, or a flow task was denied or cancelled outside an attempt. Each flow that changed is written in its own
+// transaction. Only flow records are read; with no flow there is nothing to do.
+export function advanceOpenFlows(store, registries) {
+  const ids = store.db
+    .prepare("SELECT id FROM settings WHERE id LIKE 'flow:%'")
+    .all()
+    .map(row => row.id.slice('flow:'.length));
+  const created = [];
+  for (const groupId of ids) {
+    const record = flowRecord(store, groupId);
+    if (!record || record.schemaVersion !== FLOW_RUN_SCHEMA || record.sentBack) continue;
+    created.push(...store.tx(() => advanceGroup(store, registries, groupId)));
+  }
+  return created;
+}
+
+// The group's state: sent-back once a loop edge fired; done once no node can change; in-review while every node with
+// open work is a review, or a gate waits for the director; passed once a gate passed and the work after it runs;
+// building otherwise.
+function groupState(record, nodes, isOpen, reviewKeys) {
+  if (record.sentBack) return 'sent-back';
+  if (!isOpen.some(Boolean)) return 'done';
+  const active = nodes.filter((node, index) => isOpen[index] && (node.taskId || node.state === 'director'));
+  if (active.length && active.every(node => node.state === 'director' || reviewKeys.has(node.key))) return 'in-review';
+  if (Object.values(record.nodes).some(entry => entry.decision?.outcome === 'passed')) return 'passed';
+  return 'building';
+}
+
 // A group's flow as the controller reads it now, or null when the group has none: the flow's identity and its nodes
-// in the graph's order, each with its task (or none), round and state, and the group's state, building while any
-// node is open.
+// in the graph's order, each with its task (or none), round and state, a skipped node with its reason and a gate with
+// its decision, and the group's state: building, in-review, passed, sent-back (with the findings it was sent back
+// with) or done.
 export function readFlowGroup(store, registries, groupId) {
   const record = flowRecord(store, groupId);
   if (!record) return null;
-  let building = false;
+  const isOpen = [],
+    reviewKeys = new Set();
   const nodes = record.graph.nodes.map(node => {
     const entry = record.nodes[node.key],
       task = taskOf(store, entry.taskId),
       state = task ? taskStates[task.status] || 'waiting' : entry.state;
-    if (open(store, registries, state, task)) building = true;
-    return { key: node.key, title: node.title, taskId: entry.taskId ?? null, round: entry.round, state };
+    isOpen.push(open(store, registries, state, task));
+    const definition = controllerKinds.includes(node.kind) ? null : registries.workflows.find(node.kind);
+    if (definition && stepContract(definition).kind === 'review') reviewKeys.add(node.key);
+    return {
+      key: node.key,
+      title: node.title,
+      taskId: entry.taskId ?? null,
+      round: entry.round,
+      state,
+      ...(entry.reason ? { reason: entry.reason } : {}),
+      ...(node.kind === 'gate' ? { decision: entry.decision ? structuredClone(entry.decision) : null } : {}),
+    };
   });
   return {
     schemaVersion: record.schemaVersion,
@@ -265,7 +533,8 @@ export function readFlowGroup(store, registries, groupId) {
     revision: record.revision,
     createdAt: record.createdAt,
     sequence: record.sequence,
-    state: building ? 'building' : 'settled',
+    state: groupState(record, nodes, isOpen, reviewKeys),
+    ...(record.sentBack ? { sentBack: structuredClone(record.sentBack) } : {}),
     nodes,
   };
 }
