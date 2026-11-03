@@ -18,6 +18,7 @@ import {
   profileOf,
   recordedProfile,
   installsPackages,
+  measuringLimits,
 } from '../src/connectors/source-profile.mjs';
 import {
   sourcePlan,
@@ -509,4 +510,60 @@ test("a repository's listed top-level files are a story's to edit or delete, nev
   // Studio desk's root files change only by hand.
   assert.equal(storyPathAllowed('README.md', studioDeskProfile), false);
   assert.doesNotMatch(storyPathScope(studioDeskProfile), /top-level/);
+});
+
+// November 3, 2026: Studio desk's own source reached the 500 files its profile allowed, and every story that added a
+// file stopped at its merge with "Source snapshot exceeds its file limits", stories planned before the limit could
+// move included. Limits bound what measuring costs; they are not part of what a plan promised.
+test("a Studio desk record is measured with the larger of its own limits and today's, and keeps what it recorded", t => {
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-limits-'))),
+    root = path.join(directory, 'r'),
+    destination = path.join(directory, 'copy');
+  t.after(() => {
+    assert.ok(path.resolve(directory).startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  for (const name of studioDeskProfile.files) {
+    fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
+    fs.writeFileSync(path.join(root, name), name.endsWith('.json') ? '{}\n' : '# ' + name + '\n');
+  }
+  fs.mkdirSync(path.join(root, 'test'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'test/a.test.mjs'), "import test from 'node:test';\ntest('a', () => {});\n");
+  for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(root, `src/part-${i}.mjs`), `export const part = ${i};\n`);
+  const measured = studioDeskProfile.files.length + 7;
+  // A record from before a limit was raised: its own limit is below what its source holds now.
+  const recorded = {
+    ...structuredClone(studioDeskProfile),
+    limits: { ...studioDeskProfile.limits, files: measured - 2 },
+  };
+  assert.equal(measuringLimits(recorded).files, studioDeskProfile.limits.files);
+  assert.equal(measuringLimits(recorded).totalBytes, studioDeskProfile.limits.totalBytes);
+  const plan = sourcePlan(root, recorded);
+  assert.equal(plan.files.length, measured);
+  // The plan records the profile it was given, limit and all, so its identity is unchanged and a copy still verifies.
+  assert.deepEqual(plan.profile, recorded);
+  assert.equal(profileOf(plan).limits.files, measured - 2);
+  copySource(plan, destination);
+  assert.equal(fs.readFileSync(path.join(destination, 'src/part-5.mjs'), 'utf8'), 'export const part = 5;\n');
+  // A record of the first revision is measured the same way.
+  assert.equal(measuringLimits(studioDeskProfileRevision1).files, studioDeskProfile.limits.files);
+  assert.equal(studioDeskProfileRevision1.limits.files, 500, 'the first revision never changes');
+});
+
+test("another repository's profile keeps its own limits", t => {
+  const { root } = repository(t),
+    tight = { ...notesProfile, limits: { ...notesProfile.limits, files: 3 } };
+  assert.equal(measuringLimits(notesProfile), notesProfile.limits);
+  assert.equal(measuringLimits(tight).files, 3);
+  assert.throws(() => sourcePlan(root, tight), /Source snapshot exceeds its file limits/);
+});
+
+test("Studio desk's own source keeps room under its file limit", () => {
+  // A tripwire, not a target: if this fails, raise the limit before stories that add files start stopping.
+  const { files } = sourcePlan();
+  assert.ok(
+    files.length * 2 <= studioDeskProfile.limits.files,
+    `Studio desk's source has ${files.length} files, more than half its limit of ${studioDeskProfile.limits.files}.`,
+  );
 });

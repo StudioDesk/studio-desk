@@ -17,6 +17,10 @@ const contextFiles = Object.freeze([
   'src/core/workflows.mjs',
 ]);
 const limits = Object.freeze({ files: 500, fileBytes: 1024 * 1024, totalBytes: 16 * 1024 * 1024 });
+// Studio desk's own limits since November 3, 2026. What a snapshot costs is bounded by its total size and each
+// file's size; the count of files was a guess, and Studio desk's own source reached it that day, so every story
+// that added a file stopped. The count stays only as a backstop against a runaway folder.
+const studioDeskLimits = Object.freeze({ ...limits, files: 5000 });
 
 // What every check, plan and candidate recorded without a profile was measured with. It never changes:
 // stories planned under it keep their exact snapshot after Studio desk's profile moves on.
@@ -71,6 +75,7 @@ export const studioDeskProfile = Object.freeze({
     'tsconfig*',
   ]),
   install: 'npm-ci',
+  limits: studioDeskLimits,
 });
 
 // Whether a tested copy gets the packages installed from its lockfile: always for Studio desk, whose stories
@@ -83,6 +88,22 @@ export const profileOf = record => record?.profile || studioDeskProfileRevision1
 // What a plan or check records about its profile: nothing for Studio desk's first revision.
 export const recordedProfile = profile =>
   !profile || profile === studioDeskProfileRevision1 ? {} : { profile: structuredClone(profile) };
+
+// The limits a snapshot is measured with. They bound what measuring costs; they are not part of what a plan
+// promised. So a Studio desk record of any revision is measured with the larger of its own limits and the current
+// profile's, and a story planned before a limit was raised is never stranded when the source grows past its old
+// one (November 3, 2026). The record's profile, and with it the plan's identity, stays as it was recorded.
+// Another repository's profile keeps its own limits.
+export function measuringLimits(profile) {
+  if (profile.id !== studioDeskProfile.id) return profile.limits;
+  const current = studioDeskProfile.limits,
+    recorded = profile.limits;
+  return Object.freeze({
+    files: Math.max(recorded.files, current.files),
+    fileBytes: Math.max(recorded.fileBytes, current.fileBytes),
+    totalBytes: Math.max(recorded.totalBytes, current.totalBytes),
+  });
+}
 
 // Every path a snapshot covers, so git checks use the same allowlist.
 export const snapshotPaths = profile => [...profile.files, ...profile.directories];

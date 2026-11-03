@@ -9,7 +9,14 @@ import { projectOrganization } from '../core/project-organization.mjs';
 import { isRoleId } from '../core/staffing.mjs';
 import { readContinuation } from '../core/attempt-continuation.mjs';
 import { sourcePlan, testsSentence, validateCheckReport } from './source-checks.mjs';
-import { profileOf, recordedProfile, storyPathAllowed, storyPathRule, studioDeskProfile } from './source-profile.mjs';
+import {
+  measuringLimits,
+  profileOf,
+  recordedProfile,
+  storyPathAllowed,
+  storyPathRule,
+  studioDeskProfile,
+} from './source-profile.mjs';
 import { reviewedImages, reviewVisualProblems, validateStoryPages } from './story-pages.mjs';
 import { sourceResources, sourceRoot, studioDeskSourceResources } from './source-projects.mjs';
 import { sourceDiffFormat, sourceDiffLimit, verifySourceDiff } from './source-diff.mjs';
@@ -1293,7 +1300,7 @@ export function stagedChanges(scope, result, read) {
       );
     seen.set(file, index);
     const contents = read(artifact.path),
-      { fileBytes } = profileOf(scope.source).limits;
+      { fileBytes } = measuringLimits(profileOf(scope.source));
     if (contents.length > fileBytes || contents.includes(0) || !Buffer.from(contents.toString('utf8')).equals(contents))
       throw new Error(
         `Source changes must be UTF-8 text files of at most ${fileBytes % (1024 * 1024) ? `${Math.ceil(fileBytes / 1024)} KiB` : `${fileBytes / 1024 / 1024} MiB`}.`,

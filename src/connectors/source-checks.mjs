@@ -5,7 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hash } from '../core/contracts.mjs';
-import { studioDeskProfile, profileOf, recordedProfile, snapshotPaths, isTestFile } from './source-profile.mjs';
+import {
+  studioDeskProfile,
+  profileOf,
+  recordedProfile,
+  snapshotPaths,
+  isTestFile,
+  measuringLimits,
+} from './source-profile.mjs';
 import { buildPassed } from './source-build.mjs';
 
 export const studioSourceRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -51,7 +58,7 @@ export const sourceTestArgs = (tests, timeoutMs = sourceTestTimeoutMs) => [
 export function sourcePlan(root = studioSourceRoot, profile = studioDeskProfile) {
   root = fs.realpathSync(root);
   const manifest = [],
-    { limits } = profile;
+    limits = measuringLimits(profile);
   let total = 0;
   const visit = relative => {
     const target = path.join(root, relative),
