@@ -1,0 +1,340 @@
+// The computer's test turn after a restart (src/core/orchestrator.mjs, Runner's constructor): an attempt the stopped
+// controller left running is interrupted and keeps its reservations until it is reconciled, except the test turn when
+// every process it recorded is gone, so the other suites need not wait for the director. A run that may still be going
+// keeps the turn, and nothing is started again. Model-free: records in a temporary store, reopened as a restart
+// does, with the pid of a process that has exited or of one still running; the agent's own run uses the protocol
+// fixtures.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createStudio } from './model-free-studio.mjs';
+import { setup } from './source-story-setup.mjs';
+import { waitFor } from './wait-for.mjs';
+import { testTurnResource } from '../src/core/test-turn.mjs';
+import { attemptResource } from '../src/core/store.mjs';
+import { recordedProcessesEnded } from '../src/core/orchestrator.mjs';
+
+const tests = fileURLToPath(new URL('./fixture-source-check.mjs', import.meta.url)),
+  claudeFixture = fileURLToPath(new URL('./fixture-claude.mjs', import.meta.url)),
+  tap = [
+    'TAP version 13',
+    '1..1',
+    'ok 1 - gated fixture',
+    '# tests 1',
+    '# pass 1',
+    '# fail 0',
+    '# cancelled 0',
+    '# skipped 0',
+    '# todo 0',
+  ].join('\n'),
+  // A passing test run that ends once its gate file exists, so the test sees which attempt holds the turn meanwhile.
+  gated = gate => ({
+    executable: process.execPath,
+    args: [
+      '-e',
+      `const fs = require('node:fs'); const wait = setInterval(() => { if (fs.existsSync(process.argv[1])) { clearInterval(wait); console.log(${JSON.stringify(tap)}); } }, 20);`,
+      gate,
+    ],
+  });
+const holder = store => store.leases().find(lease => lease.resource === testTurnResource)?.attemptId ?? null;
+const leasesOf = (store, id) =>
+  store
+    .leases()
+    .filter(lease => lease.attemptId === id)
+    .map(lease => lease.resource);
+const turnEvents = (store, attemptId) =>
+  store.events().filter(event => event.kind === 'test_turn' && event.attempt_id === attemptId);
+const freed =
+  /^The test turn was freed: the run that held it had ended when the controller started again\. Only the run's own process was checked; processes it started are not tracked yet and may outlive it\.$/;
+const project = 'source:project-legacy:fixture-held';
+
+// A process that has exited: its pid is recorded, and nothing answers to it.
+const exitedPid = () => spawnSync(process.execPath, ['-e', '']).pid;
+// A process that runs until the test stops it. As the controller starts an attempt's own process (a.pid), a leader
+// leads a process group of its own on macOS and Linux, which is what the liveness check looks for there; an agent's run
+// of the whole suite (employeeTestPid) is started without one, as connectors/employee-tests.mjs starts it.
+function liveProcess(t, { leader }) {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: leader && process.platform !== 'win32',
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  const stop = async () => {
+    child.kill();
+    await exited;
+  };
+  t.after(stop);
+  return { pid: child.pid, stop };
+}
+
+// A task with an attempt the controller recorded as running when it stopped, and the leases it held.
+function running(store, { taskId, attemptId, workerId = 'W-07', fields = {}, resources = [] }) {
+  const worker = store.organization().workers.find(item => item.id === workerId);
+  store.putTask({
+    id: taskId,
+    projectId: 'project-legacy',
+    title: `Fixture ${taskId}`,
+    brief: 'Measure the current commit.',
+    acceptance: '',
+    kind: 'studio-development:checks',
+    workerId,
+    team: worker.team,
+    dependencies: [],
+    resources: [],
+    maxSeconds: 120,
+    maxAttempts: 3,
+    direction: '',
+    status: 'running',
+    reason: '',
+    hold: false,
+    lastAttemptId: attemptId,
+    createdAt: '2026-11-03T09:00:00.000Z',
+  });
+  store.insertAttempt(
+    {
+      id: attemptId,
+      taskId,
+      projectId: 'project-legacy',
+      workerId,
+      provider: 'codex',
+      status: 'running',
+      contracts: { adapter: { id: 'source-checks', version: 'source-checks-adapter-v1' } },
+      startedAt: '2026-11-03T09:00:00.000Z',
+      artifacts: [],
+      inputReferences: [],
+      pid: null,
+      ...fields,
+    },
+    { hash: 'snapshot', text: 'Instructions.' },
+  );
+  store.claim([attemptResource(attemptId), ...resources], attemptId);
+}
+
+// An idea's checks, as intake creates them.
+function addChecks(store, id) {
+  const worker = store.organization().workers.find(item => item.id === 'W-06');
+  store.putTask({
+    id,
+    projectId: 'project-legacy',
+    title: 'Check the current commit',
+    brief: 'Measure the current commit.',
+    acceptance: '',
+    kind: 'studio-development:checks',
+    workerId: 'W-06',
+    team: worker.team,
+    dependencies: [],
+    resources: [],
+    maxSeconds: 120,
+    maxAttempts: 3,
+    direction: '',
+    status: 'ready',
+    reason: '',
+    hold: false,
+    lastAttemptId: null,
+    createdAt: new Date().toISOString(),
+  });
+  return id;
+}
+
+// A studio on temporary records. An interrupted attempt takes one of the studio's slots until it is reconciled, so there
+// are slots enough for the attempts these tests leave interrupted and the checks that follow them.
+async function restartStudio(t) {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true),
+    org = c.app.store.organization();
+  org.maxParallel = 4;
+  c.app.store.setOrganization(org);
+  return c;
+}
+
+// The controller stops at once and starts again on the same records.
+async function restart(c) {
+  await c.app.close();
+  c.app = createStudio(c.options);
+  return c.app;
+}
+
+test('a turn whose run has ended is freed on restart; the attempt stays interrupted with its other leases, and another suite takes the turn', async t => {
+  const c = await restartStudio(t);
+  running(c.app.store, {
+    taskId: 'T-held',
+    attemptId: 'attempt-held',
+    fields: { pid: exitedPid(), employeeTestPid: exitedPid() },
+    resources: [project, testTurnResource],
+  });
+  // One only waiting for the turn when the controller stopped, as a candidate's tests wait: no process, no turn.
+  running(c.app.store, {
+    taskId: 'T-waiting',
+    attemptId: 'attempt-waiting',
+    workerId: 'W-02',
+    fields: {
+      contracts: { adapter: { id: 'source-change', version: 'source-change-adapter-v2' } },
+      testTurn: {
+        reason:
+          'Waiting for the tests of T-held (Fixture T-held) to finish: this computer runs one full test suite at a time.',
+        since: '2026-11-03T09:01:00.000Z',
+        holder: 'attempt-held',
+      },
+    },
+  });
+  const { store, runner } = await restart(c);
+
+  const held = store.attempt('attempt-held');
+  assert.equal(held.status, 'interrupted');
+  assert.equal(store.task('T-held').status, 'blocked');
+  assert.equal(store.task('T-held').reason, 'Controller restarted. Reconcile the previous attempt before retrying.');
+  assert.equal(holder(store), null, 'The turn is free.');
+  assert.deepEqual(leasesOf(store, 'attempt-held'), [attemptResource('attempt-held'), project].sort());
+  assert.deepEqual(
+    turnEvents(store, 'attempt-held').map(event => event.message),
+    [turnFreedMessage(store)],
+  );
+  assert.match(turnFreedMessage(store), freed);
+  // Nothing of it is started again.
+  assert.equal(runner.active.has('attempt-held'), false);
+  assert.deepEqual(
+    store.attempts('T-held').map(a => a.id),
+    ['attempt-held'],
+  );
+  assert.throws(() => runner.start('T-held'), /Reconcile the interrupted attempt before starting another\./);
+
+  // The waiter holds no turn and no longer waits.
+  const waiter = store.attempt('attempt-waiting');
+  assert.equal(waiter.status, 'interrupted');
+  assert.equal(waiter.testTurn, undefined);
+  assert.deepEqual(leasesOf(store, 'attempt-waiting'), [attemptResource('attempt-waiting')]);
+  assert.deepEqual(turnEvents(store, 'attempt-waiting'), []);
+
+  // Another attempt's checks take the turn and run, without waiting for a reconciliation.
+  const gate = path.join(c.directory, 'checks-gate');
+  runner.sourceCheckCommand = gated(gate);
+  const check = runner.start(addChecks(store, 'T-check')).attemptId;
+  await waitFor(() => holder(store) === check, 'the checks to take the turn');
+  assert.equal(store.attempt(check).testTurn, undefined);
+  fs.writeFileSync(gate, '');
+  const done = await c.wait('T-check');
+  assert.equal(done.result.checks[0].status, 'pass');
+  assert.deepEqual(turnEvents(store, check), [], 'It never waited.');
+  assert.equal(holder(store), null);
+  // The interrupted attempt still waits for the director, with its other leases.
+  assert.equal(store.attempt('attempt-held').status, 'interrupted');
+  assert.deepEqual(leasesOf(store, 'attempt-held'), [attemptResource('attempt-held'), project].sort());
+});
+
+function turnFreedMessage(store) {
+  return turnEvents(store, 'attempt-held').at(-1)?.message;
+}
+
+for (const [label, field] of [
+  ['its own process', 'pid'],
+  ["its agent's run of the whole suite", 'employeeTestPid'],
+])
+  test(`an attempt whose recorded process may still run (${label}) keeps the turn after restart until it is reconciled`, async t => {
+    const c = await restartStudio(t),
+      alive = liveProcess(t, { leader: field === 'pid' });
+    running(c.app.store, {
+      taskId: 'T-held',
+      attemptId: 'attempt-held',
+      fields: { pid: exitedPid(), employeeTestPid: exitedPid(), [field]: alive.pid },
+      resources: [project, testTurnResource],
+    });
+    const { store, runner } = await restart(c);
+    assert.equal(store.attempt('attempt-held').status, 'interrupted');
+    assert.equal(holder(store), 'attempt-held', 'The turn stays held.');
+    assert.deepEqual(
+      leasesOf(store, 'attempt-held'),
+      [attemptResource('attempt-held'), project, testTurnResource].sort(),
+    );
+    assert.deepEqual(turnEvents(store, 'attempt-held'), []);
+    assert.equal(runner.active.has('attempt-held'), false, 'Nothing is started again.');
+    // Another suite waits for it.
+    const check = runner.start(addChecks(store, 'T-check')).attemptId;
+    await waitFor(() => store.attempt(check).testTurn, 'the checks to wait for the turn');
+    assert.equal(store.attempt(check).testTurn.holder, 'attempt-held');
+    // Reconciling it releases its leases with the turn, after which the waiting checks run.
+    if (field === 'pid') assert.throws(() => runner.reconcile('T-held'), /still has a live process\/group/);
+    await alive.stop();
+    runner.reconcile('T-held');
+    assert.deepEqual(leasesOf(store, 'attempt-held'), []);
+    const done = await c.wait('T-check');
+    assert.equal(done.result.checks[0].status, 'pass');
+    assert.equal(holder(store), null);
+  });
+
+test('the restart check reads every process an attempt recorded', async t => {
+  const gone = exitedPid(),
+    attempt = liveProcess(t, { leader: true }),
+    // Not the leader of a process group, as an agent's run of the whole suite is not: it still counts as running.
+    suite = liveProcess(t, { leader: false });
+  assert.equal(recordedProcessesEnded({}), true, 'An attempt that recorded no process has none running.');
+  assert.equal(recordedProcessesEnded({ pid: gone, employeeTestPid: gone }), true);
+  assert.equal(recordedProcessesEnded({ pid: attempt.pid }), false);
+  assert.equal(recordedProcessesEnded({ pid: attempt.pid, employeeTestPid: gone }), false);
+  assert.equal(recordedProcessesEnded({ pid: gone, employeeTestPid: suite.pid }), false);
+  assert.equal(recordedProcessesEnded({ employeeTestPid: suite.pid }), false);
+  await suite.stop();
+  assert.equal(recordedProcessesEnded({ pid: gone, employeeTestPid: suite.pid }), true, 'Once it exits, it is gone.');
+  await attempt.stop();
+  assert.equal(recordedProcessesEnded({ pid: attempt.pid, employeeTestPid: suite.pid }), true);
+});
+
+test("an agent's run of the whole suite records its process while it holds the turn; a run of named files does not", async t => {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], { claudeBinary: claudeFixture }),
+    { store, runner } = c.app;
+  const org = store.organization();
+  Object.assign(
+    org.workers.find(worker => worker.id === store.task(c.taskId).workerId),
+    { provider: 'claude' },
+  );
+  store.setOrganization(org);
+  const task = store.task(c.taskId);
+  task.title = `Hang while editing: ${task.title}`;
+  store.putTask(task);
+  let mode = 'pass';
+  Object.defineProperty(runner, 'sourceCheckCommand', {
+    configurable: true,
+    get: () => ({ executable: process.execPath, args: [tests, mode] }),
+  });
+  await c.start();
+  const entry = await waitFor(
+    () => [...runner.active.values()].find(item => item.employeeTests && item.child && item.attempt.pid),
+    'the editor to run with its test endpoint open',
+  );
+  const id = entry.attempt.id,
+    { STUDIO_TESTS_URL: url, STUDIO_TESTS_TOKEN: token } = entry.toolEnvironment,
+    run = (files = [], signal) =>
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Studio-Attempt-Token': token },
+        body: JSON.stringify({ files }),
+        signal,
+      }).then(response => response.json());
+  // Named test files take no turn, so their process is not recorded.
+  mode = 'hang';
+  const named = new AbortController(),
+    namedRun = run(['test/bounded.test.mjs'], named.signal).catch(error => error.name);
+  await waitFor(() => entry.employeeTests?.child?.pid, 'the named run to start');
+  assert.equal(holder(store), null);
+  assert.equal(store.attempt(id).employeeTestPid, undefined);
+  named.abort();
+  assert.equal(await namedRun, 'AbortError');
+  await waitFor(() => !entry.employeeTests.busy, 'the named run to end');
+  // The whole suite holds the turn, and its running process is on the attempt until it closes.
+  const whole = new AbortController(),
+    wholeRun = run([], whole.signal).catch(error => error.name);
+  await waitFor(() => {
+    const child = entry.employeeTests?.child;
+    return holder(store) === id && child?.pid && store.attempt(id).employeeTestPid === child.pid;
+  }, 'the whole suite to run with the turn and its process recorded');
+  assert.notEqual(store.attempt(id).employeeTestPid, store.attempt(id).pid, "It is not the editor's own process.");
+  whole.abort();
+  assert.equal(await wholeRun, 'AbortError');
+  await waitFor(() => !entry.employeeTests.busy, 'the whole suite to end');
+  assert.equal(store.attempt(id).employeeTestPid, undefined, 'The record clears when the run ends.');
+  assert.equal(holder(store), null);
+  assert.equal((await c.request(`/api/tasks/${c.taskId}/cancel`)).status, 202);
+  await c.wait(c.taskId, 'cancelled');
+});

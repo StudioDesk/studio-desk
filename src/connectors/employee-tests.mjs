@@ -168,11 +168,25 @@ export async function savedTestRun(store, attempt, number, name) {
   return file;
 }
 
-function run(executable, args, { cwd, environment, timeoutMs, tests, reader, saved }) {
+// A process of a run that holds the computer's test turn is recorded on the attempt (employeeTestPid) until it closes,
+// so a controller that stops meanwhile gives the turn back when it starts again only once that process is gone
+// (core/orchestrator.mjs, recordedProcessesEnded). A write the closed store refuses keeps the last record.
+function recordTurnProcess(turn, pid) {
+  if (!turn) return;
+  const a = turn.attempt;
+  if (pid) a.employeeTestPid = pid;
+  else delete a.employeeTestPid;
+  try {
+    turn.store.updateAttempt(a);
+  } catch {}
+}
+
+function run(executable, args, { cwd, environment, timeoutMs, tests, reader, saved, turn = null }) {
   return new Promise(resolve => {
     const [bin, argv] = nativeCommand(executable, args);
     const child = spawn(bin, argv, { cwd, env: environment, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     tests.child = child;
+    if (child.pid) recordTurnProcess(turn, child.pid);
     let stdout = '',
       stderr = '',
       timedOut = false;
@@ -203,6 +217,7 @@ function run(executable, args, { cwd, environment, timeoutMs, tests, reader, sav
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       tests.child = null;
+      if (child.pid) recordTurnProcess(turn, null);
       const rest = decoder.end();
       if (rest) read(rest);
       resolve({ code, signal, stdout, stderr, timedOut });
@@ -277,6 +292,8 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
     for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
     // As for candidate tests: only the copied test harness reads this marker.
     environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
+    // Holding the turn, the run's processes are recorded on the attempt while they run (recordTurnProcess).
+    const held = turn ? { store: runtime.store, attempt: a } : null;
     const install = installStep(runtime, directory, installsPackages(profileOf(a.sourceChange.source)));
     if (install) {
       const installed = await run(install.executable, install.args, {
@@ -284,6 +301,7 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
         environment,
         timeoutMs: installTimeoutMs,
         tests,
+        turn: held,
       });
       if (installed.code !== 0)
         return {
@@ -309,6 +327,7 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
         tests,
         reader,
         saved,
+        turn: held,
       });
     } finally {
       // A run stopped early (its time limit, the editor stopping, the client leaving) keeps what it printed.

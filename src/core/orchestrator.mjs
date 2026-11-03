@@ -27,6 +27,7 @@ import { questionFile, questionReason, readQuestion } from './questions.mjs';
 import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
 import { endTryRuns, recoverTryRuns } from '../connectors/try-copy.mjs';
 import { attemptResource } from './store.mjs';
+import { testTurnResource } from './test-turn.mjs';
 
 // Reasons that clear by themselves as other work finishes.
 const waiting = reason => /^Waiting for /.test(reason || '');
@@ -51,6 +52,31 @@ function resetTime(time) {
 // Where a self-clearing hold's reset time came from (org.quotaResetSources); a hold recorded
 // without one names no source.
 const resetSources = { report: ", from the CLI's own report", message: ", read from the CLI's message" };
+
+// Whether one process is gone. Unlike live(), which looks for the process group an attempt's own process leads on
+// macOS and Linux, this asks for the process itself: an agent's run of the whole suite is started without a group of
+// its own, so there no group answers to its id while it runs. Only "no such process" counts as gone.
+function processEnded(pid) {
+  if (!pid) return true;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return e.code === 'ESRCH';
+  }
+}
+
+// Whether every process an interrupted attempt recorded is confirmed gone, so the computer's test turn it held is no
+// longer in use (Runner's constructor): its own process (a.pid, its CLI or its candidate tests' current step, checked
+// as reconciliation checks it, live()) and its agent's run of the whole suite (a.employeeTestPid,
+// connectors/employee-tests.mjs, checked as the one process it is on every platform). The one check, so containing
+// each run (C-07) can strengthen it: until then a gone root process is the evidence used, and the processes a run
+// started are not checked; on Windows they can outlive it.
+export function recordedProcessesEnded(a) {
+  return !live({ pid: a.pid }) && processEnded(a.employeeTestPid);
+}
+const turnFreedOnRestart =
+  "The test turn was freed: the run that held it had ended when the controller started again. Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";
 
 export class Runner {
   constructor(store, options = {}) {
@@ -126,6 +152,16 @@ export class Runner {
       // Unknown operation endings stay unmatched. This is an observation of interruption,
       // not evidence that the old process stopped or that any mutation completed.
       this.interruptPhases(a);
+      // The computer's one test turn is the exception: every other suite waits for it, so a turn whose run has
+      // ended is given back now. The attempt stays interrupted with its other leases, and nothing is started again.
+      // A run that may still be going keeps the turn until it is reconciled.
+      if (
+        store.leases().some(lease => lease.resource === testTurnResource && lease.attemptId === a.id) &&
+        recordedProcessesEnded(a)
+      ) {
+        store.releaseResource(testTurnResource, a.id);
+        store.event('test_turn', t.id, a.id, turnFreedOnRestart);
+      }
     }
     // Likewise an integration no process of this controller runs yet; its resources stay held until reconciled.
     this.integration.recover(this);
