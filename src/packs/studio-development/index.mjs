@@ -838,6 +838,12 @@ export const studioDevelopmentPack = {
 
 // Intake is a fixed planning workflow, composed from current explicit project defaults.
 // Unlike setup defaults, missing configuration must never select a fallback employee.
+// An idea's checks run the whole suite. It took 98 to 127 s on October 20 and 21, and on November 3, with the suite
+// on half the computer's threads, about 300 s when quiet and past the old 420 s under load, so checks failed at
+// random. They get the most a workflow step may run (600 s; an idea's two steps fit its 1800 s budget with the
+// breakdown's two 600 s attempts). One ceiling for every kind of step is the graph engine's step contract work.
+const checkSeconds = 600;
+
 export function intakeSteps(org, adapters) {
   for (const kind of ['checks', 'breakdown', 'change', 'change-review'].map(name => `studio-development:${name}`))
     if (!org.taskKinds?.includes(kind))
@@ -880,8 +886,7 @@ export function intakeSteps(org, adapters) {
         'Inspect the measured logs, source identities and test totals. Accept this exact report as planning evidence.',
       dependencies: [],
       resources: [],
-      // The full suite took 98 to 127 s on October 20 and 21 and grows with every story.
-      maxSeconds: 420,
+      maxSeconds: checkSeconds,
       maxAttempts: 1,
     },
     {
@@ -925,7 +930,7 @@ export function developmentSteps(org) {
       acceptance: 'Inspect logs, source hashes and test totals. Accept the report as evidence.',
       dependencies: [],
       resources: [],
-      maxSeconds: 420,
+      maxSeconds: checkSeconds,
       maxAttempts: 1,
     },
     {

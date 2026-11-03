@@ -40,7 +40,7 @@ import { studioDeskProfile } from '../src/connectors/source-profile.mjs';
 import { createRegistries } from '../src/registry.mjs';
 import { textPrompt, stageTextDelivery } from '../src/adapters/text-delivery.mjs';
 import { materializeWorkflow } from '../src/core/workflows.mjs';
-import { intakeSteps } from '../src/packs/studio-development/index.mjs';
+import { developmentSteps, intakeSteps } from '../src/packs/studio-development/index.mjs';
 import { employeeTestsCommand } from '../src/connectors/employee-tests.mjs';
 import {
   directorInputsFor,
@@ -4172,4 +4172,20 @@ test('earlier work that can no longer be trusted starts the whole work fresh, wi
       assert.doesNotMatch(candidateText(store, next, file), /Retained quota fixture work/, `${cause}: ${file}`);
     assert.ok(store.attempt(stopped.id), 'The earlier attempt and its history stay.');
   }
+});
+
+// November 3, 2026: an idea's checks ran out of their 420 s while the suite, on half the computer's threads under
+// load, took 422 s. They get the most a workflow step may run, and the idea still fits its budget.
+test("an idea's checks get the most a workflow step may run", async t => {
+  const c = await setup(t, 'pass', undefined, {}, true);
+  const org = c.app.store.organization();
+  org.kindOwners = { ...org.kindOwners, 'studio-development:checks': 'W-06', 'studio-development:breakdown': 'W-01' };
+  org.taskKinds = ['checks', 'breakdown', 'change', 'change-review'].map(name => 'studio-development:' + name);
+  const steps = intakeSteps(org, c.app.runner.adapters);
+  assert.equal(steps.find(step => step.kind === 'studio-development:checks').maxSeconds, 600);
+  assert.equal(developmentSteps(org).find(step => step.kind === 'studio-development:checks').maxSeconds, 600);
+  assert.equal(
+    steps.reduce((total, step) => total + step.maxSeconds * step.maxAttempts, 0),
+    1800,
+  );
 });
