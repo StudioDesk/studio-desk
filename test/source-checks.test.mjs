@@ -22,6 +22,7 @@ import {
   sourcePlan,
   sourceTestArgs,
   sourceTestTimeoutMs,
+  suiteConcurrency,
   testOutput,
   testTotals,
   testPhaseEvidence,
@@ -47,12 +48,14 @@ test('a hung test or a file that never exits ends the measured suite with a repo
     path.join(directory, 'test/open.test.mjs'),
     "import test from 'node:test';\nsetInterval(() => {}, 1000);\ntest('passes but leaves a timer running', () => {});\n",
   );
-  // Every measured run bounds each test and exits once every test has finished.
+  // Every measured run bounds each test, runs about half of this computer's threads' worth of files at
+  // once and exits once every test has finished.
   const plan = sourcePlan(directory);
   assert.deepEqual(plan.command.args, [
     '--test',
     '--test-reporter=tap',
     `--test-timeout=${sourceTestTimeoutMs}`,
+    `--test-concurrency=${Math.max(1, Math.floor(os.availableParallelism() / 2))}`,
     '--test-force-exit',
     'test/hang.test.mjs',
     'test/open.test.mjs',
@@ -112,6 +115,30 @@ test('a hung test or a file that never exits ends the measured suite with a repo
       ),
     /does not match/,
   );
+});
+
+test("a suite runs about half of the computer's threads' worth of test files at once, and at least one", () => {
+  // The thread count is injectable, so a one-thread computer is modelled rather than needed.
+  assert.equal(suiteConcurrency(1), 1);
+  assert.equal(suiteConcurrency(2), 1);
+  assert.equal(suiteConcurrency(3), 1);
+  assert.equal(suiteConcurrency(4), 2);
+  assert.equal(suiteConcurrency(7), 3);
+  assert.equal(suiteConcurrency(32), 16);
+  // Without an argument it measures this computer.
+  assert.equal(suiteConcurrency(), Math.max(1, Math.floor(os.availableParallelism() / 2)));
+  // Every call has the same leading options, '--test' first, so an agent's own test runs still find
+  // the suite's files after sourceTestArgs([]).length (src/connectors/employee-tests.mjs).
+  const files = ['test/a.test.mjs', 'test/b.test.mjs'],
+    leading = sourceTestArgs([]);
+  assert.equal(leading[0], '--test');
+  assert.ok(leading.includes(`--test-concurrency=${suiteConcurrency()}`));
+  assert.ok(leading.every(arg => arg.startsWith('--')));
+  for (const args of [sourceTestArgs(files), sourceTestArgs(files, 1000)]) {
+    assert.equal(args.length, leading.length + files.length);
+    assert.equal(args[0], '--test');
+    assert.deepEqual(args.slice(leading.length), files);
+  }
 });
 
 // Exercise the adapter's actual fixed Node command on a tiny committed repository.

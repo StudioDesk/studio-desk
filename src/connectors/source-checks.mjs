@@ -1,6 +1,7 @@
 // Trusted, controller-owned operation. Run the installed Node test runner on a
 // copied source tree; assignments cannot supply commands, paths or environment.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hash } from '../core/contracts.mjs';
@@ -23,17 +24,26 @@ export const sourceChecksConnector = Object.freeze({
   operationVersion: 'node-tests-v1',
   resource: 'source:studio-desk-tests',
 });
-// The fixed Node test command that intake checks, candidates and integration verification run.
+// How many test files a suite runs at once: about half of this computer's threads, and at least one.
+// The studio runs one suite at a time, and Node's own default (every thread but one) left the agents
+// and the computer slow to respond while a suite ran. The count is measured on the controller's
+// computer when a plan is made, so each attempt's command and check report record it.
+export const suiteConcurrency = (threads = os.availableParallelism()) => Math.max(1, Math.floor(threads / 2));
+// The fixed Node test command that an idea's checks, a story's candidate tests, an integration's
+// verification, an agent's own test runs and scripts/verify.mjs all run (each through sourcePlan).
 // Each test may run for at most sourceTestTimeoutMs, and the runner exits once every test has
 // finished, so a hung test, or a test file whose process never exits, ends the suite with a report
 // (the test counts as cancelled and names its timeout) instead of holding the attempt to its time
 // limit (MP-016 slice 4 step (b), known issue 15). The slowest test took about 21 s locally and
 // 11 s in the candidate sandbox on October 20, 2026. A hang outside any test is not bounded.
+// '--test' stays first (a candidate without a sandbox is checked by it), and every call has the same
+// number of leading options, so the arguments after sourceTestArgs([]).length are the test files.
 export const sourceTestTimeoutMs = 120 * 1000;
 export const sourceTestArgs = (tests, timeoutMs = sourceTestTimeoutMs) => [
   '--test',
   '--test-reporter=tap',
   `--test-timeout=${timeoutMs}`,
+  `--test-concurrency=${suiteConcurrency()}`,
   '--test-force-exit',
   ...tests,
 ];
