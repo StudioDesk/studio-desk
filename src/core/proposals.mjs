@@ -354,8 +354,13 @@ function denial(store, task) {
 export function denyWork(store, task, reason = '') {
   const allowed = denial(store, task);
   if (!allowed) throw new Error('Only Planned, approved or workflow work that has not started can be denied.');
-  const { unstarted, workflowStep } = allowed;
   if (typeof reason !== 'string' || reason.length > 2000) throw new Error('Denial reason must be bounded text.');
+  store.tx(() => store.putTask(denied(task, allowed, reason)));
+  store.event('work_denied', task.id, null, task.reason);
+  return { ok: true };
+}
+// The task set aside with its reason, as Deny records it; nothing is written here.
+function denied(task, { unstarted, workflowStep }, reason) {
   task.approval = {
     status: 'denied',
     decidedAt: new Date().toISOString(),
@@ -367,9 +372,7 @@ export function denyWork(store, task, reason = '') {
   task.queued = false;
   task.reason = reason.trim() || 'Director denied this work.';
   delete task.autonomyNote;
-  store.tx(() => store.putTask(task));
-  store.event('work_denied', task.id, null, task.reason);
-  return { ok: true };
+  return task;
 }
 
 // A plan whose steps have not started is planned again with the director's reply (the chat box, October 30). Under
@@ -377,8 +380,9 @@ export function denyWork(store, task, reason = '') {
 // director, so a reply to it in the idea's conversation comes after its acceptance. Every step is checked before any
 // changes: each is set aside (denied, with the reply as its reason), and the plan step goes back to ready with the reply
 // as its direction, to be started as the director's Start would. Its accepted attempt stays recorded, marked as
-// planned again; the new plan's steps join the same idea.
-export function replanWork(store, registries, task, direction) {
+// planned again; the new plan's steps join the same idea. The steps, the plan and their events are one transaction, and
+// `record` (such as the message that asked for it) is written in it too.
+export function replanWork(store, registries, task, direction, { record } = {}) {
   if (typeof direction !== 'string' || !direction.trim() || direction.length > 24000)
     throw new Error('Say what to change in the plan.');
   const plan = store.task(task.id),
@@ -389,8 +393,11 @@ export function replanWork(store, registries, task, direction) {
     throw new Error("Some of this plan's steps have started; change them on their own pages instead.");
   const words = direction.trim(),
     reason = `Planned again with your reply: ${words.split('\n')[0].slice(0, 200)}`;
-  for (const step of steps) denyWork(store, step, reason);
-  store.tx(() => {
+  return store.tx(() => {
+    for (const step of steps) {
+      store.putTask(denied(step, denial(store, step), reason));
+      store.event('work_denied', step.id, null, step.reason);
+    }
     const accepted = store.attempt(plan.acceptedAttemptId),
       current = store.task(plan.id);
     accepted.replannedBy = { type: 'director', at: new Date().toISOString(), reason: words };
@@ -400,14 +407,16 @@ export function replanWork(store, registries, task, direction) {
     delete current.acceptedAttemptId;
     delete current.autonomyNote;
     store.putTask(current);
+    store.event(
+      'replanned',
+      plan.id,
+      null,
+      `Director replied to the plan: its ${steps.length} waiting step${steps.length === 1 ? ' was' : 's were'} set aside, and it is planned again with the reply.`,
+    );
+    const replanned = { ok: true, setAside: steps.map(step => step.id) };
+    record?.(current);
+    return replanned;
   });
-  store.event(
-    'replanned',
-    plan.id,
-    null,
-    `Director replied to the plan: its ${steps.length} waiting step${steps.length === 1 ? ' was' : 's were'} set aside, and it is planned again with the reply.`,
-  );
-  return { ok: true, setAside: steps.map(step => step.id) };
 }
 
 // Closes several unstarted tasks at once (for example, what is left of a stopped run).

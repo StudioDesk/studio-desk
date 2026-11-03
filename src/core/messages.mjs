@@ -3,14 +3,16 @@
 // unless its caller says otherwise, its text names agents with @, and it may answer an earlier message of the same
 // channel and point at files of accepted work, each checked by its hash. What it keeps are IDs, names and hashes: no
 // location on this computer, process, session or job folder. A director's message that names the agent building a task,
-// on that task's thread, takes the one action the task's state already allows (postMessage). No HTTP here: the routes
+// on that task's thread, takes the one action the task's state already allows, and one that names an idea's planner, in
+// the idea's chat, plans again or revises the plan as a reply to the plan does (postMessage). No HTTP here: the routes
 // call it.
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { acceptedReference, artifactPath } from './artifacts.mjs';
+import { runIdOf } from './graph.mjs';
 import { projectIdentity, recordProject } from './projects.mjs';
 import { projectOrganization } from './project-organization.mjs';
-import { directStart, reviseWork, sendBackWork } from './proposals.mjs';
+import { directStart, replanWork, reviseWork, sendBackWork } from './proposals.mjs';
 
 export const messageLimits = Object.freeze({
   textMin: 1,
@@ -232,8 +234,73 @@ function mentionAction(store, registries, task, refuseIntegration) {
   return 'note';
 }
 
+// The kinds of an idea's plan step: the ones the idea conversation reads.
+export const planKinds = Object.freeze(['studio-development:breakdown', 'general:plan']);
+
+// An idea's plan step: its run's task of a planning kind, or null.
+export function planStepOf(store, projectId, runId) {
+  return store.projectTasks(projectId).find(task => runIdOf(task) === runId && planKinds.includes(task.kind)) ?? null;
+}
+
+// The idea's planner as its conversation names it: the agent of the plan step's latest attempt, else the step's own.
+export function plannerOf(store, plan) {
+  const latest = store
+    .attempts(plan.id)
+    .sort((a, b) => Date.parse(String(a.startedAt ?? '')) - Date.parse(String(b.startedAt ?? '')))
+    .at(-1);
+  return latest?.workerId ?? plan.workerId ?? null;
+}
+
+const notNow = 'The plan cannot take a reply now.';
+
+// Why a plan neither accepted nor waiting for review takes no reply: it is being written, it waits for an answer or a
+// new start, its planning stopped, or it was closed.
+function planRefusal(plan) {
+  if (plan.closed || plan.status === 'denied') return `${notNow} It was closed.`;
+  if (['backlog', 'ready', 'running', 'stopping'].includes(plan.status))
+    return `${notNow} It is still being written; reply once it arrives.`;
+  if (plan.status === 'blocked') return `${notNow} It waits for your answer, or for its planning to start again.`;
+  if (['failed', 'cancelled'].includes(plan.status))
+    return `${notNow} Its planning stopped; start it again from its page.`;
+  return notNow;
+}
+
+// In an idea's chat (its run's channel), a message naming the idea's planner is the director's reply to the plan, as
+// the idea conversation sends it: an accepted plan whose steps all wait is planned again with the message's text
+// (replanWork, as Reply's replan route), a plan waiting for review is revised with it (reviseWork, as Reply's revise),
+// and either is then queued as Start. A plan being written, waiting for an answer or with a step started takes no
+// reply: the message is refused with a plain sentence and nothing changes. A message naming anyone else waits.
+function plannerMention(store, registries, message, keep, queueStart) {
+  const plan = planStepOf(store, message.projectId, message.channel.id),
+    planner = plan && plannerOf(store, plan);
+  if (!planner || !message.mentions.includes(planner)) return keep(waiting);
+  const refused = reason => `${notNow} ${reason}`;
+  if (plan.status === 'done' && !plan.closed)
+    return actOn(
+      store,
+      keep,
+      plan,
+      queueStart,
+      'replanned',
+      record => replanWork(store, registries, plan, message.text, { record }),
+      refused,
+    );
+  if (plan.status === 'review')
+    return actOn(
+      store,
+      keep,
+      plan,
+      queueStart,
+      'revised',
+      record => reviseWork(store, registries, plan, message.text, { record }),
+      refused,
+    );
+  return keep({ type: 'refused', reason: planRefusal(plan) });
+}
+
 // The director's message to one of the project's chats (team chat). Checked first: nothing runs for a message that
-// fails its checks. On a task's thread, a message naming the task's builder (task.workerId) takes one action through
+// fails its checks. In an idea's chat, a message naming the idea's planner replies to the plan (plannerMention) and is
+// kept with { type: 'replanned' | 'revised', taskId, start }, or refused. On a task's thread, a message naming the task's builder (task.workerId) takes one action through
 // the functions the director's buttons call, with the message's text as its note or direction, and is kept in that
 // action's transaction with what it led to: { type: 'sent-back' | 'revised' | 'started', taskId }. The work is then
 // queued as those buttons queue it (`queueStart`, the controller's queued Start), and the queue's answer is added as
@@ -243,24 +310,40 @@ function mentionAction(store, registries, task, refuseIntegration) {
 // other message waits for a reply. Returns the message as the store reads it back.
 export function postMessage(store, registries, projectId, fields, { queueStart, refuseIntegration } = {}) {
   const message = preparedMessage(store, projectId, fields, { type: 'director' }, waiting),
-    keep = outcome => store.insertMessage({ ...message, outcome }),
-    task = message.channel.type === 'task' ? store.task(message.channel.id) : null;
+    keep = outcome => store.insertMessage({ ...message, outcome });
+  if (message.channel.type === 'run') return plannerMention(store, registries, message, keep, queueStart);
+  const task = message.channel.type === 'task' ? store.task(message.channel.id) : null;
   if (!task?.workerId || !message.mentions.includes(task.workerId)) return keep(waiting);
   const action = mentionAction(store, registries, task, refuseIntegration);
   if (action === 'note') return keep({ type: 'note', taskId: task.id, receivedBy: null });
+  return actOn(
+    store,
+    keep,
+    task,
+    queueStart,
+    action === 'send-back' ? 'sent-back' : action === 'revise' ? 'revised' : 'started',
+    record => {
+      if (action === 'send-back')
+        sendBackWork(store, registries, task, message.text, {
+          refuse: current => refuseIntegration?.(current),
+          record,
+        });
+      else if (action === 'revise') reviseWork(store, registries, task, message.text, { record });
+      else directStart(store, registries, task, message.text, { record });
+    },
+  );
+}
+
+// Takes an action that keeps the message in the action's own transaction (`record`) with { type, taskId }, then
+// queues the work as the director's buttons queue it (`queueStart`) and adds the queue's answer as the outcome's
+// `start`. An action that refuses keeps the message as refused, in `refused`'s words, and changes nothing else.
+function actOn(store, keep, task, queueStart, type, act, refused = reason => reason) {
   let kept;
-  const record = type => () => (kept = keep({ type, taskId: task.id }));
   try {
-    if (action === 'send-back')
-      sendBackWork(store, registries, task, message.text, {
-        refuse: current => refuseIntegration?.(current),
-        record: record('sent-back'),
-      });
-    else if (action === 'revise') reviseWork(store, registries, task, message.text, { record: record('revised') });
-    else directStart(store, registries, task, message.text, { record: record('started') });
+    act(() => (kept = keep({ type, taskId: task.id })));
   } catch (error) {
     if (kept) throw error;
-    return keep({ type: 'refused', reason: error.message });
+    return keep({ type: 'refused', reason: refused(error.message) });
   }
   let start;
   try {

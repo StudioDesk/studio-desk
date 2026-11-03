@@ -1284,7 +1284,9 @@ export function createStudio({
         }
         // A message to one of the selected project's chats (team chat), kept with what it led to in the same write. On
         // a task's thread, naming the agent that builds the task takes the action the task's state allows, queued as
-        // the director's own buttons queue it; other messages wait for a reply.
+        // the director's own buttons queue it; in an idea's chat, naming its planner replies to the plan as the idea
+        // conversation's reply does (planned again or revised, then queued as the replan route and Start queue it);
+        // other messages wait for a reply.
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'messages' && !parts[4] && req.method === 'POST') {
           if (!data || typeof data !== 'object' || Array.isArray(data) || data.projectId !== parts[2])
             fail('Select this project before posting to its chat.');
