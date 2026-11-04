@@ -69,6 +69,12 @@ export function recordedProcessesEnded(a) {
     !live({ pid: a.pid, pidStartedAt: a.pidStartedAt }) && processEnded(a.employeeTestPid, a.employeeTestStartedAt)
   );
 }
+// Puts back fields of an in-memory record that a rolled-back transaction changed, so it matches what is saved.
+function restoreFields(record, fields) {
+  for (const [key, value] of Object.entries(fields))
+    if (value === undefined) delete record[key];
+    else record[key] = value;
+}
 const turnFreedOnRestart =
   "The test turn was freed: the run that held it had ended when the controller started again. Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";
 
@@ -132,30 +138,35 @@ export class Runner {
     }
     // An unacknowledged process may still be alive. Retain its reservations until reconciled.
     for (const a of store.liveAttempts().filter(x => ['running', 'stopping'].includes(x.status))) {
+      // The adapter's hook changes only the attempt in memory, which the transaction below saves.
       this.adapters.find(a.contracts?.adapter?.id || a.provider)?.recover?.(this, a);
-      a.status = 'interrupted';
-      a.finishedAt = new Date().toISOString();
-      store.updateAttempt(a);
-      const t = store.task(a.taskId);
-      t.status = 'blocked';
-      t.queued = false;
-      t.reason = 'Controller restarted. Reconcile the previous attempt before retrying.';
-      if (t.autonomyNote) t.autonomyNote = t.reason;
-      this.putTask(t);
-      store.event('interrupted', t.id, a.id, t.reason);
+      // The attempt, its task, their event and the test turn are saved in one step, so a crash between them never
+      // leaves an interrupted attempt whose task still reads running; the next start finds both as they were.
+      store.tx(() => {
+        a.status = 'interrupted';
+        a.finishedAt = new Date().toISOString();
+        store.updateAttempt(a);
+        const t = store.task(a.taskId);
+        t.status = 'blocked';
+        t.queued = false;
+        t.reason = 'Controller restarted. Reconcile the previous attempt before retrying.';
+        if (t.autonomyNote) t.autonomyNote = t.reason;
+        this.putTask(t);
+        store.event('interrupted', t.id, a.id, t.reason);
+        // The computer's one test turn is the exception: every other suite waits for it, so a turn whose run has
+        // ended is given back now. The attempt stays interrupted with its other leases, and nothing is started again.
+        // A run that may still be going keeps the turn until it is reconciled.
+        if (
+          store.leases().some(lease => lease.resource === testTurnResource && lease.attemptId === a.id) &&
+          recordedProcessesEnded(a)
+        ) {
+          store.releaseResource(testTurnResource, a.id);
+          store.event('test_turn', t.id, a.id, turnFreedOnRestart);
+        }
+      });
       // Unknown operation endings stay unmatched. This is an observation of interruption,
       // not evidence that the old process stopped or that any mutation completed.
       this.interruptPhases(a);
-      // The computer's one test turn is the exception: every other suite waits for it, so a turn whose run has
-      // ended is given back now. The attempt stays interrupted with its other leases, and nothing is started again.
-      // A run that may still be going keeps the turn until it is reconciled.
-      if (
-        store.leases().some(lease => lease.resource === testTurnResource && lease.attemptId === a.id) &&
-        recordedProcessesEnded(a)
-      ) {
-        store.releaseResource(testTurnResource, a.id);
-        store.event('test_turn', t.id, a.id, turnFreedOnRestart);
-      }
     }
     // Likewise an integration no process of this controller runs yet; its resources stay held until reconciled.
     this.integration.recover(this);
@@ -678,20 +689,30 @@ export class Runner {
       .filter(a => ['interrupted', 'quarantined'].includes(a.status) && !a.reconciledAt);
     if (['running', 'stopping', 'review', 'done'].includes(task.status) || !unsettled.length)
       throw new Error('Only an interrupted or quarantined assignment can be reconciled.');
-    for (const a of unsettled) {
+    // Check every owner before checkpointing anything or releasing any reservation.
+    for (const a of unsettled)
       if (this.active.has(a.id) || live(a))
         throw new Error(`Attempt ${a.id} still has a live process/group. Stop it in your terminal before reconciling.`);
+    // The checkpoint of retained work is on disk and cannot be rolled back, so it comes first; it records only its
+    // own evidence.
+    for (const a of unsettled) {
       a.status = 'interrupted';
       this.checkpoint(a);
-      this.store.release(a.id);
-      a.reconciledAt = new Date().toISOString();
-      this.store.updateAttempt(a);
     }
-    task.status = 'ready';
-    task.reason = '';
-    delete task.autonomyNote;
-    this.putTask(task);
-    this.store.event('reconciled', taskId, null, 'Previous process is no longer live; reservations released.');
+    // The attempts, their reservations, the task and the event are saved in one step: a failure part-way leaves every
+    // attempt unreconciled with its leases held, and Reconcile can be asked again.
+    this.store.tx(() => {
+      for (const a of unsettled) {
+        this.store.release(a.id);
+        a.reconciledAt = new Date().toISOString();
+        this.store.updateAttempt(a);
+      }
+      task.status = 'ready';
+      task.reason = '';
+      delete task.autonomyNote;
+      this.putTask(task);
+      this.store.event('reconciled', taskId, null, 'Previous process is no longer live; reservations released.');
+    });
   }
   // A director Start is always accepted when the work is only waiting (MP-012): for its
   // prerequisites, a slot, its employee or a resource. It is queued and starts when free.
@@ -1184,13 +1205,22 @@ export class Runner {
       const a = entry.attempt,
         task = this.store.task(a.taskId);
       entry.nativeError ||= error || 'Adapter tried to finish before its process/group was confirmed stopped.';
-      a.status = 'quarantined';
-      a.finishedAt = new Date().toISOString();
-      task.status = 'blocked';
-      task.reason = 'Process/group is still live or unknown. Reservations retained until reconciliation.';
-      this.store.updateAttempt(a);
-      this.putTask(task);
-      this.store.event('quarantined', a.taskId, a.id, task.reason);
+      const { status, finishedAt } = a;
+      // The attempt, its task and the event are saved in one step; a failure leaves both as they were.
+      try {
+        this.store.tx(() => {
+          a.status = 'quarantined';
+          a.finishedAt = new Date().toISOString();
+          task.status = 'blocked';
+          task.reason = 'Process/group is still live or unknown. Reservations retained until reconciliation.';
+          this.store.updateAttempt(a);
+          this.putTask(task);
+          this.store.event('quarantined', a.taskId, a.id, task.reason);
+        });
+      } catch (failure) {
+        restoreFields(a, { status, finishedAt });
+        throw failure;
+      }
       return;
     }
     clearTimeout(entry.timer);
@@ -1368,6 +1398,7 @@ export class Runner {
   stop(id) {
     const entry = this.active.get(id);
     if (!entry) throw new Error('No live attempt to cancel.');
+    let stopContextRecorded = false;
     if (entry.timedOut && !entry.attempt.stopContext) {
       const a = entry.attempt,
         phase = [...(entry.phases || [])]
@@ -1400,27 +1431,42 @@ export class Runner {
         phaseFinished: phase?.closed || false,
         ...(phase?.payload.phaseId === 'test' && evidence ? { testEvidence: evidence } : {}),
       };
-      this.store.updateAttempt(a);
+      stopContextRecorded = true;
     }
+    // A stop context is saved alone only when this call changes nothing else; otherwise it is saved with the
+    // attempt's stopping status below.
+    if (stopContextRecorded && (entry.cancelled || entry.adapter.stop)) this.store.updateAttempt(entry.attempt);
     if (entry.cancelled) return;
     if (entry.adapter.stop) {
       entry.adapter.stop(this, entry);
       return;
     }
+    const previous = entry.attempt.status;
     entry.cancelled = true;
-    entry.attempt.status = 'stopping';
-    this.store.updateAttempt(entry.attempt);
-    const t = this.store.task(entry.attempt.taskId);
-    t.status = 'stopping';
-    this.putTask(t);
-    this.store.event(
-      'stopping',
-      t.id,
-      id,
-      entry.timedOut
-        ? 'Time limit reached; stopping the process.'
-        : 'Cancellation requested. Reservations remain until the process closes.',
-    );
+    // The attempt (with any stop context recorded above), its task and the event are saved in one step; a failure
+    // leaves both as they were, and the attempt is not taken as cancelled.
+    try {
+      this.store.tx(() => {
+        entry.attempt.status = 'stopping';
+        this.store.updateAttempt(entry.attempt);
+        const t = this.store.task(entry.attempt.taskId);
+        t.status = 'stopping';
+        this.putTask(t);
+        this.store.event(
+          'stopping',
+          t.id,
+          id,
+          entry.timedOut
+            ? 'Time limit reached; stopping the process.'
+            : 'Cancellation requested. Reservations remain until the process closes.',
+        );
+      });
+    } catch (failure) {
+      entry.cancelled = false;
+      entry.attempt.status = previous;
+      if (stopContextRecorded) delete entry.attempt.stopContext;
+      throw failure;
+    }
     if (!entry.child) {
       this.finish(entry, null);
       return;

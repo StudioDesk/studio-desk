@@ -155,21 +155,26 @@ export const sourceBreakdownAdapter = {
     for (const a of unsettled)
       if (runtime.active.has(a.id) || live(a))
         throw new Error(`Attempt ${a.id} still has a live process/group. Stop it in your terminal before reconciling.`);
-    for (const a of unsettled) {
-      removeReference(runtime, a);
-      runtime.store.release(a.id);
-      a.status = 'interrupted';
-      a.reconciledAt = new Date().toISOString();
-      runtime.store.updateAttempt(a);
-    }
-    task.status = 'ready';
-    task.reason = '';
-    runtime.putTask(task);
-    runtime.store.event(
-      'reconciled',
-      taskId,
-      null,
-      'Previous process is no longer live; source reference removed and reservations released.',
-    );
+    // Removing a source reference cannot be rolled back, so every one goes first; a failure there leaves the records
+    // unchanged and Reconcile can be asked again.
+    for (const a of unsettled) removeReference(runtime, a);
+    // The attempts, their reservations, the task and the event are saved in one step.
+    runtime.store.tx(() => {
+      for (const a of unsettled) {
+        runtime.store.release(a.id);
+        a.status = 'interrupted';
+        a.reconciledAt = new Date().toISOString();
+        runtime.store.updateAttempt(a);
+      }
+      task.status = 'ready';
+      task.reason = '';
+      runtime.putTask(task);
+      runtime.store.event(
+        'reconciled',
+        taskId,
+        null,
+        'Previous process is no longer live; source reference removed and reservations released.',
+      );
+    });
   },
 };
