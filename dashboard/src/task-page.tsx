@@ -26,6 +26,7 @@ import {
   type LogEvent,
   type StoryActivity as StoryActivityRecord,
   type Task,
+  type TaskAction,
   type TaskPage,
 } from './api';
 import { carriedOf, continuation, openPhase, useAttemptDetail } from './attempt-record';
@@ -86,7 +87,7 @@ import {
 } from './story-tabs';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { active, explain, liveSummary, statusOf, type RunStory, type StudioState } from './studio-runs';
-import { DecisionNotes, NextAttemptTools, OwnerForm, TaskDecisions } from './task-decisions';
+import { DecisionNotes, NextAttemptTools, offeredActions, OwnerForm, TaskDecisions } from './task-decisions';
 import { agentLooks, placeIn, quoted, when } from './today';
 import { useToast } from './toast';
 import type { AttemptTrace } from './trace';
@@ -145,6 +146,7 @@ export function TaskView({ projectId, taskId, tab }: { projectId: string; taskId
       studio={studio}
       live={state}
       initialTab={tab}
+      served={data.actions}
     />
   );
 }
@@ -203,6 +205,7 @@ function Story({
   studio,
   live: liveState,
   initialTab,
+  served,
 }: {
   projectId: string;
   task: Task;
@@ -210,6 +213,8 @@ function Story({
   studio: StudioState;
   live: StudioState;
   initialTab?: TabId;
+  // The actions the task read served, which the page draws; a page the records of a command placed has none yet.
+  served?: TaskAction[];
 }) {
   const narrow = useNarrow(),
     [draft, setDraft] = useState<string | null>(null),
@@ -233,6 +238,11 @@ function Story({
   const latest = attempts.find(attempt => attempt.id === task.lastAttemptId) ?? attempts.at(-1),
     // An agent's question waiting for an answer, and auto mode's answer the director may still change.
     asking = waitingQuestion(task, attempts),
+    // What the director may do now, as the controller serves it: the question card's send button and the Allow
+    // commands form show only where it lists them, and are sent to the route it names.
+    offered = offeredActions(served, task, studio),
+    answering = offered.find(action => action.key === 'answer'),
+    allowing = offered.find(action => action.key === 'allow-commands'),
     autoAnswer = changeableAnswer(task),
     // The attempt chosen in the strip, which every view shows, or else the latest.
     choice = attempts.find(attempt => attempt.id === chosen),
@@ -526,15 +536,19 @@ function Story({
       {/* The question an agent stopped to ask comes first, with the box that answers it. */}
       {asking && (
         <QuestionCard key={asking.id} projectId={projectId} state={studio} task={task} attempt={asking}>
-          <AnswerBox
-            projectId={projectId}
-            state={studio}
-            task={task}
-            attempt={asking}
-            onSent={() =>
-              toast(`Answered. ${workerName(studio, asking.workerId ?? task.workerId)} continues from its saved work.`)
-            }
-          />
+          {answering && (
+            <AnswerBox
+              projectId={projectId}
+              state={studio}
+              task={task}
+              attempt={asking}
+              onSent={() =>
+                toast(
+                  `Answered. ${workerName(studio, asking.workerId ?? task.workerId)} continues from its saved work.`,
+                )
+              }
+            />
+          )}
         </QuestionCard>
       )}
       {autoAnswer && (
@@ -556,6 +570,7 @@ function Story({
         looks={looks}
         narrow={narrow}
         direction={direction}
+        actions={offered}
         onEditFiles={editFiles}
         onRevised={() => setDraft(null)}
         onReadInFull={readInFull}
@@ -570,7 +585,7 @@ function Story({
             Open Candidate tests in Settings
           </Link>
         )}
-        {explanation.kind === 'command-request' && (
+        {explanation.kind === 'command-request' && allowing && (
           <CommandRequest key={explanation.attemptId} projectId={projectId} task={task} explanation={explanation} />
         )}
         <AskedFiles task={task} studio={studio} />
@@ -667,6 +682,7 @@ function Stands({
   looks,
   narrow,
   direction,
+  actions,
   onEditFiles,
   onRevised,
   onReadInFull,
@@ -680,6 +696,8 @@ function Stands({
   looks: Map<string, AgentLook>;
   narrow: boolean;
   direction: string;
+  // The actions the controller serves for the task (offeredActions), which the decisions draw.
+  actions: TaskAction[];
   onEditFiles: () => void;
   onRevised: () => void;
   onReadInFull: () => void;
@@ -746,6 +764,7 @@ function Stands({
         task={task}
         studio={studio}
         direction={direction}
+        actions={actions}
         onEditFiles={onEditFiles}
         onRevised={onRevised}
       />

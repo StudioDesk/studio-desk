@@ -6,7 +6,7 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary, Task } from './api';
+import type { AttemptSummary, Task, TaskAction, TaskActionField } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import {
@@ -1037,4 +1037,158 @@ test('a file request with a problem shows the problem and offers no Allow and co
   expect(region.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
   expect(region.queryByRole('button', { name: 'Edit the file list' })).toBeNull();
   expect(row(region).getByRole('button', { name: 'Start assignment' })).toBeTruthy();
+});
+
+// The stand-in's read of T-1 serves the actions given, in place of the ones the controller's rules list for its records.
+const serve = (actions: TaskAction[]) => {
+  const inner = fetch;
+  vi.stubGlobal('fetch', async (url: string, options?: RequestInit) => {
+    const answer = await inner(url, options);
+    if ((options?.method ?? 'GET') !== 'GET' || url.split('?')[0] !== '/api/tasks/T-1') return answer;
+    const page = (await answer.json()) as object;
+    return { ...answer, json: async () => ({ ...page, actions }) };
+  });
+};
+// One served action on T-1, with the project and any other fields it takes.
+const served = (
+  key: string,
+  label: string,
+  emphasis: TaskAction['emphasis'],
+  path: string,
+  { fields = [], closing = false, method = 'POST' }: Partial<Pick<TaskAction, 'fields' | 'closing' | 'method'>> = {},
+): TaskAction => ({
+  key,
+  label,
+  emphasis,
+  closing,
+  method,
+  path,
+  fields: [{ name: 'projectId', required: true, kind: 'id', value: 'project-x' }, ...fields],
+});
+const note = (name: string, required = false): TaskActionField => ({ name, required, kind: 'note' });
+
+// The page draws what the controller serves, not what it would work out from its own records.
+test('the page draws exactly the served actions, in their order, with closing ones behind More actions', async () => {
+  // Ready work, which the page alone would offer Start for: served only its Close.
+  serve([
+    served('deny-Close this step', 'Close this step', 'quiet', '/api/tasks/T-1/deny-work', {
+      fields: [note('reason')],
+      closing: true,
+    }),
+  ]);
+  open(taskFixture('T-1'));
+  let region = await decisions();
+  await waitFor(() => expect(names(region)).toEqual(['More actions']));
+  expect(closing()).toEqual(['Close this step: It will not run; a note you add is kept with the decision.']);
+  expect(region.queryByRole('button', { name: 'Start assignment' })).toBeNull();
+  cleanup();
+  // A result in review served with Request revision before Accept result, and no Close.
+  serve([
+    served('revise', 'Request revision', 'default', '/api/tasks/T-1/revise', { fields: [note('direction', true)] }),
+    served('accept', 'Accept result', 'primary', '/api/tasks/T-1/accept'),
+  ]);
+  open(decisionStates['a result in review']!(controller));
+  region = await decisions();
+  await waitFor(() => expect(names(row(region))).toEqual(['Request revision', 'Accept result']));
+  expect(isPrimary(region.getByRole('button', { name: 'Accept result' }))).toBe(true);
+  expect(isPrimary(region.getByRole('button', { name: 'Request revision' }))).toBe(false);
+  expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+  expect(closing()).toEqual([]);
+});
+
+test('a served action that needs no words is sent exactly as served', async () => {
+  const user = userEvent.setup();
+  serve([
+    served('hold', 'Release hold', 'default', '/api/tasks/T-1', {
+      method: 'PATCH',
+      fields: [{ name: 'hold', required: true, kind: 'boolean', value: false }],
+    }),
+    // An action the page has no dialog for is a plain button sending its served request.
+    served('unknown-step', 'Reconcile source integration', 'default', '/api/tasks/T-1/restore-source', {
+      fields: [
+        { name: 'attemptId', required: true, kind: 'id', value: 'attempt-9' },
+        { name: 'note', required: false, kind: 'note' },
+      ],
+    }),
+  ]);
+  open(taskFixture('T-1'));
+  const region = await decisions();
+  await user.click(await region.findByRole('button', { name: 'Release hold' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/tasks/T-1', method: 'PATCH', body: { projectId: 'project-x', hold: false } },
+    ]),
+  );
+  await user.click(region.getByRole('button', { name: 'Reconcile source integration' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/restore-source',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'attempt-9' },
+    }),
+  );
+});
+
+test("a served action with a dialog opens it as before and sends the director's words to the served route", async () => {
+  const user = userEvent.setup();
+  // Past its limit as the controller counts it, which the page's own count of a fresh task would not be.
+  serve([
+    served('start-past-limit', 'Start assignment', 'primary', '/api/tasks/T-1/start', {
+      fields: [note('direction')],
+    }),
+    served('revise', 'Request revision', 'default', '/api/tasks/T-1/revise', { fields: [note('direction', true)] }),
+  ]);
+  open(taskFixture('T-1'));
+  const region = await decisions();
+  await user.click(await region.findByRole('button', { name: 'Start assignment' }));
+  let dialog = await again();
+  expect(posted()).toEqual([]);
+  await user.type(dialog.getByLabelText('Note for the next attempt (optional)'), 'Fix the failing test first.');
+  await user.click(dialog.getByRole('button', { name: 'Start assignment' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-1/start',
+        method: 'POST',
+        body: { projectId: 'project-x', direction: 'Fix the failing test first.' },
+      },
+    ]),
+  );
+  await user.click(region.getByRole('button', { name: 'Request revision' }));
+  dialog = await revision();
+  await user.type(dialog.getByLabelText('What to change'), 'Name the route.');
+  await user.click(dialog.getByRole('button', { name: 'Request revision' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/revise',
+      method: 'POST',
+      body: { projectId: 'project-x', direction: 'Name the route.' },
+    }),
+  );
+});
+
+// The question card's box that answers it shows only where the controller serves Answer.
+test('a waiting question shows its answer box only where the served actions include it', async () => {
+  const task = decisionStates['a waiting question']!(controller);
+  serve([]);
+  open(task);
+  const card = await screen.findByRole('article', { name: /'s question$/ });
+  await decisions();
+  expect(
+    within(card)
+      .queryAllByRole('button')
+      .filter(button => (button as HTMLButtonElement).type === 'submit'),
+  ).toEqual([]);
+  cleanup();
+  controller = fakeController();
+  open(decisionStates['a waiting question']!(controller));
+  const asked = await screen.findByRole('article', { name: /'s question$/ });
+  await waitFor(() =>
+    expect(
+      within(asked)
+        .getAllByRole('button')
+        .filter(button => (button as HTMLButtonElement).type === 'submit')
+        .map(button => button.textContent?.trim()),
+    ).toEqual(['Send to Eli']),
+  );
 });
