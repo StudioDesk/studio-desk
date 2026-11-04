@@ -2023,6 +2023,13 @@ function integrationApproval(by = { type: 'director' }, override) {
     throw new Error('Only the director, or the autonomy policy after a passing review, approves integration.');
   return { type: 'policy', revision: by.revision, reason: by.reason };
 }
+// What the director's reason covered, in words: the review's verdict when it requested changes, and the names of
+// its failed checks.
+function overriddenReview(verdict, checks) {
+  const named = checks.length ? `failed check${checks.length === 1 ? '' : 's'} ${checks.join(', ')}` : '';
+  if (verdict === 'pass' && named) return `the review's ${named}`;
+  return `the review's ${verdict} verdict${named ? ` and its ${named}` : ''}`;
+}
 // Integration runs in two parts (MP-016). The synchronous part validates the exact reviewed
 // candidate and its commit, and records a journal holding the source reservations. The
 // controller then merges that commit onto the current tip of the development copy's branch in
@@ -2043,10 +2050,14 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
   )
     throw new Error('Select the exact accepted candidate review for integration.');
   const verdict = validateChangeReview(review, name => fs.readFileSync(artifactPath(store, review, name)));
-  // The director's override covers the review's verdict and its own failed checks, never the candidate's tests.
-  if (!override && (verdict.verdict !== 'pass' || review.result.checks.some(check => check.status === 'fail')))
+  // The director's override covers the review's verdict and its failed checks, its own and the controller's (as the
+  // story's stage and the autonomy policy count them), never the candidate's tests.
+  const failedChecks = [...review.result.checks, ...(review.controllerChecks || [])]
+    .filter(check => check.status === 'fail')
+    .map(check => String(check.name || 'Unnamed check'));
+  if (!override && (verdict.verdict !== 'pass' || failedChecks.length))
     throw new Error(
-      'Integration requires a passing independent review, or your reason to integrate over a review that requested changes.',
+      'Integration requires a passing independent review whose checks passed, or your reason to integrate over it.',
     );
   const candidateRef = acceptedCandidate(store, review.assignment),
     candidate = store.attempt(candidateRef.attemptId);
@@ -2108,6 +2119,7 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
           reviewOverride: {
             by: { type: 'director' },
             verdict: verdict.verdict,
+            ...(failedChecks.length ? { checks: failedChecks } : {}),
             reason: override.reason,
             at: new Date().toISOString(),
           },
@@ -2126,7 +2138,7 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
     'source_verifying',
     task.id,
     review.id,
-    `Integration approved${override ? ` over the review's ${verdict.verdict} verdict, by the director: ${override.reason}` : approval.type === 'policy' ? ` by autonomy policy revision ${approval.revision} after the independent review passed` : ' by the director'}. The controller is merging the reviewed change onto ${journal.repository.branch} at ${journal.repository.head.slice(0, 7)} in its own worktree, then formatting and testing it; ${journal.repository.live === false ? journal.repository.branch : 'the development copy'} is unchanged until it passes.`,
+    `Integration approved${override ? ` over ${overriddenReview(verdict.verdict, failedChecks)}, by the director: ${override.reason}` : approval.type === 'policy' ? ` by autonomy policy revision ${approval.revision} after the independent review passed` : ' by the director'}. The controller is merging the reviewed change onto ${journal.repository.branch} at ${journal.repository.head.slice(0, 7)} in its own worktree, then formatting and testing it; ${journal.repository.live === false ? journal.repository.branch : 'the development copy'} is unchanged until it passes.`,
   );
   sourceIntegrationProgress(runtime, task, journal);
   const promise = finishIntegration(runtime, task, review, candidate)
@@ -2286,7 +2298,7 @@ function commitMessage(store, review, candidate, journal) {
     `Proposal: ${proposal.taskId} (${proposal.attemptId})`,
     `Change: ${change.id} (${candidate.id}), candidate ${journal.candidateHash}`,
     journal.reviewOverride
-      ? `Candidate review: ${review.taskId} (${review.id}), verdict ${journal.reviewOverride.verdict}; integrated over it by the director: ${journal.reviewOverride.reason}`
+      ? `Candidate review: ${review.taskId} (${review.id}), verdict ${journal.reviewOverride.verdict}${journal.reviewOverride.checks?.length ? `, failed checks: ${journal.reviewOverride.checks.join(', ')}` : ''}; integrated over it by the director: ${journal.reviewOverride.reason}`
       : `Candidate review: ${review.taskId} (${review.id}), verdict pass`,
     formatter === 'none'
       ? `Verification: no formatter in the source profile; ${testsSentence(totals)} on the merged source${fixture ? ' (protocol fixture)' : ''}.`
