@@ -73,7 +73,7 @@ import { employeeTestsAllowed, runEmployeeTests, savedTestRun } from './connecto
 import { attemptTrace } from './core/attempt-trace.mjs';
 import { storyActivity } from './core/story-activity.mjs';
 import { taskActionsFor } from './core/task-actions.mjs';
-import { match as listedRoute, routes } from './core/routes.mjs';
+import { routes, rulesFor } from './core/routes.mjs';
 import { validateReview } from './packs/game-production/contracts.mjs';
 import { validatePlan } from './planning.mjs';
 import { createRegistries } from './registry.mjs';
@@ -554,7 +554,9 @@ export function createStudio({
   // since it began that its project's tab would hear, as a change event names them, and the page of each task of
   // that project they name, so the page shows the effect without waiting for the stream. Beyond the stream's 200
   // changes, or 50 tasks, or past the capped list, the answer says reload instead. Kept per response.
-  const commands = new WeakMap();
+  const commands = new WeakMap(),
+    // A listed command the guard admitted with the director's key, until its handler answers (json).
+    keyedCommands = new WeakMap();
   const commandRecords = ({ projectId, after }) => {
     const base = { projectId, version: store.version, start: startId },
       changes = journal.filter(change => change.seq > after && relevant(change, projectId));
@@ -590,12 +592,14 @@ export function createStudio({
       }
       answer = { ...data, records };
     }
-    return send(
-      res,
-      status,
-      { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-      JSON.stringify(answer),
-    );
+    const text = JSON.stringify(answer);
+    // A command sent with the director's key leaves its line once its handler answers with a success, after its
+    // records are read, so the line is never among them; a refused one (a 4xx or 5xx answer) leaves none.
+    const keyedCommand = keyedCommands.get(res);
+    keyedCommands.delete(res);
+    if (keyedCommand && status < 400)
+      keyedCommandRecorded(keyedCommand.method, keyedCommand.route, keyedCommand.parts, keyedCommand.data);
+    return send(res, status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, text);
   };
   const server = http.createServer(async (req, res) => {
     // How long each request takes, for the controller's own measures (C-18); the change stream stays open, so not it.
@@ -611,36 +615,52 @@ export function createStudio({
         fail('Cross-origin requests are not accepted.', 403);
       const url = new URL(req.url, origin()),
         parts = url.pathname.split('/').filter(Boolean);
+      // The guard: the route the request names (src/core/routes.mjs) decides which sign-in and which token it needs,
+      // for every request. Its access: 'director' needs the director's session cookie or key, reads and the change
+      // stream included; 'attempt' and 'anyone' need neither (the launch link, the built dashboard's files, which
+      // hold no records, and an agent's own test run, which its attempt's token authorizes). A request no route lists
+      // is weighed as it was before the table decided (rulesFor).
+      const rules = rulesFor(req.method, url.pathname),
+        listed = rules.route;
+      if (rules.access === 'director' && access === 'session' && !director.authenticated(req.headers)) {
+        if (parts[0] === 'api') fail(signInMessage, 401);
+        res.writeHead(401, signInHeaders);
+        return res.end(signInPage);
+      }
+      // Its token. 'unless-keyed': the page's request token keeps another page in the director's browser from riding
+      // on the session cookie, which the browser sends by itself. The key in its header needs no token: no page can
+      // send it without knowing the key, and whoever knows the key can read the token from the page anyway (the
+      // November 2 review). A request signed in by the cookie alone still needs the token, on every such route and on
+      // an /api command no route lists. Its refusal says whether the header is missing or carries a token from an
+      // earlier start, which the dashboard reads as a restart (dashboard/src/api.ts staleToken). 'attempt': the
+      // running attempt's own token, which exists only while its editor runs; the director's session does not stand
+      // for it.
+      const keyed = director.keyed(req.headers);
+      if (rules.token === 'unless-keyed' && !keyed) {
+        const token = req.headers['x-studio-token'];
+        if (token === undefined) fail(missingTokenMessage, 403);
+        if (!sameSecret(token, csrf)) fail(earlierTokenMessage, 403);
+      }
+      if (
+        rules.token === 'attempt' &&
+        !employeeTestsAllowed(runner.active.get(rules.params.id), req.headers['x-studio-attempt-token'])
+      )
+        fail('This attempt cannot run tests now.', 403);
       // The launch link this start printed signs a browser in (C-01): it sets the session cookie and opens the
       // dashboard. A link from an earlier start says so.
-      if (parts[0] === 'launch' && parts.length === 2 && req.method === 'GET') {
-        if (!director.launches(parts[1])) {
+      if (listed?.path === '/launch/:code') {
+        if (!director.launches(rules.params.code)) {
           res.writeHead(403, signInHeaders);
           return res.end(staleLaunchPage);
         }
         res.writeHead(303, { Location: '/', 'Set-Cookie': director.sessionCookie, 'Cache-Control': 'no-store' });
         return res.end();
       }
-      // Every other request needs the director's session or key, reads and the change stream included, apart from
-      // the built dashboard's files (they hold no records) and an agent's own test run, which its attempt's token
-      // authorizes below.
-      const attemptTests = parts[0] === 'api' && parts[1] === 'attempts' && parts[3] === 'tests' && parts.length === 4;
-      if (
-        access === 'session' &&
-        !attemptTests &&
-        !url.pathname.startsWith('/assets/') &&
-        !director.authenticated(req.headers)
-      ) {
-        if (parts[0] === 'api') fail(signInMessage, 401);
-        res.writeHead(401, signInHeaders);
-        return res.end(signInPage);
-      }
       // Only a listed route is answered (src/core/routes.mjs), so a route that is handled but not listed can never be
       // reached. A read the table does not name is refused here, before any handler runs: it names no read route (a
       // mistyped one, or a command asked for with GET); a method other than a read's or a command's is not allowed.
-      // A command the table does not name is refused at the start of the commands below, once its token is weighed
-      // and a keyed one has left its line, before any command handler runs.
-      const listed = parts[0] === 'api' ? listedRoute(req.method, url.pathname) : null;
+      // A command the table does not name is refused at the start of the commands below, once its token is weighed,
+      // before any command handler runs.
       if (parts[0] === 'api' && !listed && !['POST', 'PATCH'].includes(req.method)) {
         if (req.method === 'GET' || req.method === 'HEAD')
           fail('Unknown read route. Commands are sent with POST or PATCH.', 404);
@@ -1141,11 +1161,10 @@ export function createStudio({
         return json(res, { ...attempt, phaseEvents: store.phaseEvents(attempt.id) });
       }
       // A code-editing employee runs the project's tests on its edits (v1.0 item 22). Its attempt's token, which
-      // exists only while its editor runs, authorizes this one request and nothing else; the dashboard's does not.
-      if (parts[0] === 'api' && parts[1] === 'attempts' && parts[3] === 'tests' && parts.length === 4) {
-        const entry = runner.active.get(parts[2]);
-        if (req.method !== 'POST' || !employeeTestsAllowed(entry, req.headers['x-studio-attempt-token']))
-          fail('This attempt cannot run tests now.', 403);
+      // exists only while its editor runs, authorizes this one request and nothing else; the dashboard's does not. The
+      // guard has weighed it (the route's token is 'attempt').
+      if (listed?.path === '/api/attempts/:id/tests') {
+        const entry = runner.active.get(rules.params.id);
         if (closing) fail('Controller is stopping.', 503);
         const data = await body(req);
         if (Object.keys(data).some(key => key !== 'files')) fail('A test run takes only files.');
@@ -1158,18 +1177,7 @@ export function createStudio({
         // command gets here; a read that does is answered as the guard answers an unknown one.
         if (!['POST', 'PATCH'].includes(req.method))
           fail('Unknown read route. Commands are sent with POST or PATCH.', 404);
-        // The page's request token keeps another page in the director's browser from riding on the session cookie,
-        // which the browser sends by itself. The key in its header needs no token: no page can send it without
-        // knowing the key, and whoever knows the key can read the token from the page anyway (the November 2
-        // review). A request signed in by the cookie alone still needs the token, on every route. Its refusal says
-        // whether the header is missing or carries a token from an earlier start, which the dashboard reads as a
-        // restart (dashboard/src/api.ts staleToken).
-        const keyed = director.keyed(req.headers);
-        if (!keyed) {
-          const token = req.headers['x-studio-token'];
-          if (token === undefined) fail(missingTokenMessage, 403);
-          if (!sameSecret(token, csrf)) fail(earlierTokenMessage, 403);
-        }
+        // The guard has weighed the command's request token, or its key.
         if (closing) fail('Controller is stopping.', 503);
         // Idea intake: the Studio desk route, and the general one (1.0 item 11), which starts the
         // project's own intake: source checks and a breakdown for a source project, the planner for
@@ -1183,12 +1191,12 @@ export function createStudio({
           req,
           intake ? ideaInputLimits.wireBytes : libraryUpload ? libraryLimits.wireBytes + 64 * 1024 : undefined,
         );
-        // A command a local tool sends with the key leaves a line in its project's activity before it runs, so the
-        // director can tell a script's decisions from their own (the decisions themselves still say the director),
-        // and a command's answer still carries only the records the command made.
-        if (keyed) keyedCommandRecorded(req.method, url.pathname, parts, data);
         // The listed-routes guard for commands: one the table does not name reaches no handler.
         if (!listed) fail('Unknown controller route.', 404);
+        // A command a local tool sends with the key leaves a line in its project's activity once its handler answers
+        // with a success (json below), so the director can tell a script's decisions from their own (the decisions
+        // themselves still say the director). One its handler refuses leaves none.
+        if (keyed) keyedCommands.set(res, { method: req.method, route: url.pathname, parts, data });
         // The newest change's seq before the command runs: its answer's records are what was recorded after it.
         if (req.headers['x-studio-records'] === '1' && typeof data?.projectId === 'string')
           commands.set(res, { projectId: data.projectId, after: store.version });

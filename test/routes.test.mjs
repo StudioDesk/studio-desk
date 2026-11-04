@@ -1,6 +1,7 @@
 // Every route the controller answers is listed (src/core/routes.mjs), and only a listed /api route is answered: GET
 // /api/routes reads the table, every listed /api route reaches a handler, an unlisted one is refused before any
-// handler runs, and every request the dashboard makes is a listed one, so no page can meet the guard.
+// handler runs, and every request the dashboard makes is a listed one, so no page can meet the guard. The guard also
+// enforces each route's access and token: they decide which sign-in and which token a request needs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createStudio } from './model-free-studio.mjs';
 import { closeAndRemove } from './fixture-cleanup.mjs';
-import { match, routes } from '../src/core/routes.mjs';
+import { match, routes, rulesFor } from '../src/core/routes.mjs';
 
 const unknownCommand = 'Unknown controller route.',
   unknownRead = 'Unknown read route. Commands are sent with POST or PATCH.';
@@ -49,7 +50,7 @@ async function studio(t) {
     } catch {}
     return { status: response.status, error };
   };
-  return { app, origin, call };
+  return { app, origin, call, token };
 }
 
 const fellThrough = answer =>
@@ -170,9 +171,10 @@ test('an unlisted /api route, or a listed path with a method it does not have, i
     assert.equal(answer.error, unknownCommand, `${method} ${route}`);
     assert.equal(match(method, route), null, `${method} ${route}`);
   }
-  // No handler ran: the tasks and the studio's switches are as they were (a keyed command still leaves its line).
+  // No handler ran: the tasks and the studio's switches are as they were, and no keyed command left a line.
   assert.equal(JSON.stringify(app.store.tasks()), tasks, 'No refused route changed a task.');
   assert.equal(app.store.organization().paused, paused, 'PATCH /api/control changed nothing.');
+  assert.deepEqual(app.store.db.prepare("SELECT message FROM events WHERE kind='director_key'").all(), []);
   // Signed in by the session cookie, an unlisted command still needs the request token first.
   const tokenless = await fetch(origin + '/api/no-such-command', {
     method: 'POST',
@@ -199,6 +201,84 @@ test('an unlisted /api route, or a listed path with a method it does not have, i
     assert.equal(read.status, 404);
     assert.equal((await read.json()).error, unknownRead);
   }
+});
+
+test("the guard enforces each route's access and token from the table", async t => {
+  const { app, origin, call, token } = await studio(t);
+  assert.equal((await call('POST', '/api/control', { paused: true })).status, 200);
+  const projectId = app.store.projects()[0].id,
+    taskId = app.store.tasks().find(task => task.projectId === projectId || !task.projectId)?.id;
+  assert.ok(taskId, 'The studio has a task to name.');
+  const fill = route =>
+    route
+      .replace(/^\/api\/projects\/:id/, `/api/projects/${projectId}`)
+      .replace(/^\/api\/tasks\/:id/, `/api/tasks/${taskId}`)
+      .replace(/:number|:revision/g, '1')
+      .replace(/:[a-zA-Z]+/g, 'x');
+  const records = () =>
+    JSON.stringify({
+      tasks: app.store.tasks(),
+      organization: app.store.organization(),
+      projects: app.store.projects(),
+    });
+  const before = records();
+  // Every listed command whose token is 'unless-keyed', signed in by the session cookie (as the suite's fetch sends a
+  // command without a token) but without X-Studio-Token, is refused before any handler runs.
+  const commands = routes.filter(route => ['POST', 'PATCH'].includes(route.method) && route.token === 'unless-keyed');
+  assert.ok(commands.length > 50, 'The table lists the commands.');
+  for (const route of commands) {
+    const address = fill(route.path);
+    assert.equal(rulesFor(route.method, address).route, route, `${route.method} ${route.path}`);
+    const answer = await fetch(origin + address, {
+      method: route.method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId, taskId, paused: false, maxParallel: 7, name: 'Refused', idea: 'Refused.' }),
+    });
+    assert.equal(answer.status, 403, `${route.method} ${route.path}`);
+    assert.match((await answer.json()).error, /X-Studio-Token header/, `${route.method} ${route.path}`);
+  }
+  assert.equal(records(), before, 'No command refused for its token changed a task, a project or the organization.');
+  // The attempt's own test run needs its running attempt's token: the director's session and request token, or the
+  // director's key, do not stand for it.
+  const tests = rulesFor('POST', '/api/attempts/x/tests');
+  assert.deepEqual([tests.access, tests.token, tests.params], ['attempt', 'attempt', { id: 'x' }]);
+  for (const headers of [{ 'X-Studio-Token': token }, { 'x-studio-key': app.directorKey }]) {
+    const answer = await fetch(origin + '/api/attempts/x/tests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify({ files: [] }),
+    });
+    assert.equal(answer.status, 403);
+    assert.equal((await answer.json()).error, 'This attempt cannot run tests now.');
+  }
+  // A route whose access is 'anyone' answers without sign-in; a director's read beside it does not.
+  const anyone = routes.filter(route => route.access === 'anyone');
+  assert.deepEqual(
+    anyone.map(route => route.path),
+    ['/launch/:code', '/assets/:file'],
+  );
+  for (const route of anyone) {
+    const answer = await fetch(origin + fill(route.path), { directorKey: false, redirect: 'manual' });
+    assert.notEqual(answer.status, 401, route.path);
+    await answer.arrayBuffer();
+  }
+  const launched = await fetch(app.launchUrl, { directorKey: false, redirect: 'manual' });
+  assert.equal(launched.status, 303);
+  assert.ok(launched.headers.get('set-cookie'), 'The launch link signs the browser in.');
+  assert.equal((await fetch(origin + '/assets/missing.js', { directorKey: false })).status, 404);
+  assert.equal((await fetch(origin + '/theme.js', { directorKey: false })).status, 401);
+  // A request no route lists keeps the rules it had: the director's sign-in, and for an /api command the token.
+  assert.deepEqual(
+    [rulesFor('POST', '/api/no-such-command'), rulesFor('GET', '/api/no-such-read'), rulesFor('HEAD', '/')].map(
+      rule => [rule.route, rule.access, rule.token],
+    ),
+    [
+      [null, 'director', 'unless-keyed'],
+      [null, 'director', 'none'],
+      [null, 'director', 'none'],
+    ],
+  );
+  assert.equal(rulesFor('GET', '/api/attempts/x/tests').access, 'attempt');
 });
 
 // Every request the dashboard makes, with its method: each URL its API module builds and each command a page sends

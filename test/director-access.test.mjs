@@ -137,27 +137,47 @@ test("local tools send the data folder's key; a wrong key is refused", async t =
 const keyedEvents = app =>
   app.store.db.prepare("SELECT message FROM events WHERE kind='director_key' ORDER BY seq").all();
 
-test("a command sent with the director's key needs no request token, and leaves a line in the activity first", async t => {
+test("a command sent with the director's key needs no request token, and leaves a line in the activity once it succeeds", async t => {
   const { app, origin } = await studio(t);
-  const sent = await fetch(origin + '/api/control', {
-    ...plain,
-    method: 'POST',
-    headers: { 'x-studio-key': app.directorKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ maxParallel: 3 }),
-  });
+  const keyed = (route, body, headers = {}) =>
+    fetch(origin + route, {
+      ...plain,
+      method: 'POST',
+      headers: { 'x-studio-key': app.directorKey, 'Content-Type': 'application/json', ...headers },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+  // A command no route lists reaches no handler and leaves no line in any activity.
+  const unlisted = await keyed('/api/no-such-command', '{}');
+  assert.equal(unlisted.status, 404);
+  assert.deepEqual(keyedEvents(app), []);
+  // A listed command its handler refuses changes nothing and leaves none either.
+  const before = app.store.organization().maxParallel;
+  const refused = await keyed('/api/control', { maxParallel: 'many' });
+  assert.ok(refused.status >= 400 && refused.status < 500, String(refused.status));
+  assert.match((await refused.json()).error, /attempts at the same time/);
+  const unknownField = await keyed('/api/control', { paused: 'yes' });
+  assert.ok(unknownField.status >= 400 && unknownField.status < 500, String(unknownField.status));
+  assert.equal(app.store.organization().maxParallel, before);
+  assert.deepEqual(keyedEvents(app), []);
+  // One that succeeds leaves exactly one line, worded as before.
+  const sent = await keyed('/api/control', { maxParallel: 3 });
   assert.equal(sent.status, 200);
   assert.equal(app.store.organization().maxParallel, 3);
-  const [line] = keyedEvents(app);
-  assert.match(line.message, /^A local tool sent POST \/api\/control with the director's key\.$/);
-  // A command that is refused was still sent with the key, and says so.
-  const refused = await fetch(origin + '/api/no-such-command', {
-    ...plain,
-    method: 'POST',
-    headers: { 'x-studio-key': app.directorKey, 'Content-Type': 'application/json' },
-    body: '{}',
-  });
-  assert.equal(refused.status, 404);
-  assert.equal(keyedEvents(app)[1].message, "A local tool sent POST /api/no-such-command with the director's key.");
+  assert.deepEqual(
+    keyedEvents(app).map(line => line.message),
+    ["A local tool sent POST /api/control with the director's key."],
+  );
+  // A command's answer still carries only the records the command made: its line is written after them.
+  const projectId = app.store.projects()[0]?.id;
+  if (projectId) {
+    const recorded = await keyed('/api/control', { projectId, maxParallel: 4 }, { 'X-Studio-Records': '1' });
+    assert.equal(recorded.status, 200);
+    const { records } = await recorded.json();
+    assert.ok(Array.isArray(records.changes), 'The answer carries its records.');
+    assert.ok(!records.changes.some(change => change.kind === 'director_key'), 'The line is not among the records.');
+    assert.ok(records.version < app.store.version, 'The line was recorded after the records were read.');
+    assert.equal(keyedEvents(app).length, 2);
+  }
 });
 
 test('only the key header stands for the key, and the session cookie alone still needs the token', async t => {

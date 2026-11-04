@@ -1,6 +1,7 @@
 // Every route the controller answers (src/server.mjs), in one frozen table, and the match the server's guard uses:
 // an /api request this table does not name is refused before any handler runs, so a route that is handled but not
-// listed can never be reached, and GET /api/routes answers the table itself.
+// listed can never be reached, and GET /api/routes answers the table itself. The guard also enforces each route's
+// access and token (rulesFor below): they decide which sign-in and which token every request needs.
 //
 // Each entry: `method`; `path`, with `:name` for a part the request fills in and a final `*` for any rest; `fields`,
 // the body fields a command takes or the query fields a read takes, each { name, required }; `access`, who may call
@@ -550,4 +551,32 @@ export function match(method, pathname) {
     }
   }
   return found;
+}
+
+// The sign-in and the token a request needs, as the server's guard enforces them, and the parts its route fills in
+// (each `:name`, as the request writes it). A listed route's `access` and `token` decide. A request no route lists
+// is refused or, outside /api, answered by the dashboard's pages, and keeps the rules it had before the table decided
+// them: the director's sign-in, except at an /api address the table lists only for the attempt (its test run), whose
+// other methods are refused without asking for it; and an /api command (POST or PATCH) signed in by the session cookie
+// still needs this start's request token before its route is weighed.
+export function rulesFor(method, pathname) {
+  const route = match(method, pathname);
+  if (route) {
+    const names = partsOf(route.path),
+      parts = partsOf(pathname),
+      params = {};
+    names.forEach((name, i) => {
+      if (name.startsWith(':')) params[name.slice(1)] = parts[i];
+    });
+    return { route, access: route.access, token: route.token, params };
+  }
+  const api = typeof pathname === 'string' && pathname.startsWith('/') && partsOf(pathname)[0] === 'api';
+  if (!api) return { route: null, access: 'director', token: 'none', params: {} };
+  const address = ['GET', 'POST', 'PATCH'].map(other => other !== method && match(other, pathname)).filter(Boolean);
+  return {
+    route: null,
+    access: address.length && address.every(other => other.access === 'attempt') ? 'attempt' : 'director',
+    token: ['POST', 'PATCH'].includes(method) ? 'unless-keyed' : 'none',
+    params: {},
+  };
 }
