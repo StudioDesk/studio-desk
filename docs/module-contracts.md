@@ -33,6 +33,8 @@ Every request needs the director's session or key (`src/director-access.mjs`).
 - **The computer's sandbox sessions** (C-43): on Windows the runtime's network proxy binds in the loopback range its install permitted, 60080–60089 by default, two ports a session, so a sixth session at once failed at setup.
   - **The cap:** each run takes one of `builtInSandboxSessionsAtOnce` (4) slots before the runtime starts (`takeBuiltInSandboxSession` in `built-in-sandbox-run.mjs`), and gives it back when it finishes. The slots are files made only if absent, beside the helper's shared copy in ProgramData, so every copy on the computer shares them: the controller's checks, candidates, integrations and agents' test runs, and `npm run verify`.
   - **Waiting:** a run waits in turn and says once that it's waiting. A slot whose holder ended without giving it back is free again.
+    - **Who holds a slot:** a slot records its holder's process ID and when it was taken (`since`). The holder is judged by both, through the shared check (`processEnded` in `src/adapters/process.mjs`), so a process that has the ID now but started after the slot was taken is not the holder (Windows hands freed IDs on quickly), and its slot is freed. A slot without a readable time keeps the ID-only answer. A holder found genuine is asked again only by its ID while its slot reads the same, since reading a start time starts PowerShell on Windows.
+    - **A bounded wait:** with no slot free after `builtInSandboxSessionWaitMs` (10 minutes), the run stops with a plain reason, "All 4 of this computer's built-in sandbox sessions stayed in use by runs still going…", and changes no slot.
   - **Elsewhere:** macOS and Linux have no such range and no cap.
 - **Tests:** `test/director-access.test.mjs`. The suite's studios send their key from `test/model-free-studio.mjs`, so every test passes through the check.
 
@@ -97,6 +99,7 @@ On Windows, Node lets its children's children break away from it. So a process a
 - **`src/adapters/process-job.mjs`:** `jobbedCommand`, plus `windowsCommandLine`, which quotes as Windows programs read a command line. `processJobsWork` asks once whether the wrapper runs on this computer; `readJobReport` reads what it reported.
 - **Agent CLIs** (`runNative`) run in it. When the CLI's main process ends, what it left running is ended and counted (the director's rule): the attempt records `leftoverProcesses`, its log says how many, and nothing of it runs when its reservations are released.
   - The attempt also records `processJob: true`. A restart ends every job with the controller, so after one, a recorded process that is gone means nothing of the attempt runs.
+  - **After a restart:** the `Runner` constructor, marking such an attempt interrupted, records `processJobEndedAt` (its `finishedAt`). Its job ended with the controller whose wrapper held its only handle, so `live` in `src/adapters/process.mjs` counts it over without signalling or looking up its ID, which may be another program's by then. Its test turn is freed with a `test_turn` event saying so, and Reconcile goes ahead without checking its process. Its agent's run of the whole suite (`employeeTestPid`) ran outside the job, so it is still checked by its own process and can keep the turn. An attempt without a job keeps its process check. Tests: `test/test-turn-restart.test.mjs`.
 - **Try's Run** runs in it too, but keeps what it started until Stop (`keep`): a dev server's launcher may exit while the server runs. Stop and a restart end everything it started.
 - **Where the wrapper can't run** (not Windows, PowerShell barred from scripts, or a controller inside a job that allows no breakaway, such as the built-in sandbox), commands start as before, and the first attempt's log says so.
 - **macOS and Linux:** attempts keep their process group as before.
@@ -118,6 +121,18 @@ A graceful stop, an ended controller and an ended supervisor used to look alike 
   - **On Windows:** a forced end never reaches a process that has exited. The orchestrator's `terminate` and integration's `stopProcess` skip a child whose exit code or signal is known, since taskkill finds a tree by its root's ID, which may belong to another process by then. Try's and the visual check's `endTree` already did.
   - **On macOS and Linux:** the process group is still ended after its first process exits, since its ID is not reused while any of it runs.
 - **Tests:** `test/stop-record.test.mjs`. The record and its texts, the supervisor's lines, and the forced ends with the process calls replaced. It also starts the real controller script on a throwaway data folder, ends it from outside and checks that the next start reports that. On macOS and Linux it also checks a SIGTERM stop that the next start reports.
+
+## The data folder's lock (November 2026)
+
+One controller owns a data folder at a time (`src/data-folder-lock.mjs`, `takeDataFolderLock`, called by `createStudio` in `src/server.mjs`).
+
+- **The lock:** an exclusive lock on a file of its own in the data folder, `<data>/controller.lock` (`dataFolderLockName`), taken through `node:sqlite` with no busy wait (exclusive locking mode, no journal). The studio's database, `studio.sqlite`, is never the lock file and is never locked by it.
+- **When:** taken before the studio database opens and before the owner row is written, and held for the whole run. The operating system releases it however the controller ends: a close, a crash, Task Manager, a stopped computer.
+- **A busy lock** refuses the start (400) with "Another controller owns this data folder. Stop it before starting another instance.", before the records are opened, so a refused start neither opens nor changes them.
+- **A failed start leaves it free:** a start that fails opening the records, writing the owner row or building the `Runner` releases it, and so does `close()`. A failure after that keeps it until close or the process ends, as the owner row did.
+- **The owner row** (the setting `controller-owner`, `{ id, pid, startedAt }`) is still written at start and deleted at close, but the lock decides: its process ID and start time decide nothing, so a row naming a live, unrelated program never blocks a start.
+- **The file may remain** in the folder after a stop; only the held lock matters.
+- **Tests:** `test/controller-owner.test.mjs` (a second controller refused in this process and in another, an owner row naming a live program that blocks nothing, a failed start that leaves the lock free, a start after a clean close, and the database open to other readers) and the outside-end start in `test/stop-record.test.mjs` (a controller ended from outside, after which the next start is not refused).
 
 ## Studio tools (1.4, tools, steps 1 to 3)
 
