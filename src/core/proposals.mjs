@@ -439,23 +439,15 @@ export function closeWork(store, projectId, taskIds, reason = '') {
 // started work that is not live (in Review, failed, cancelled or blocked) keeps its recorded
 // attempts and is closed without accepting a result. Accepted work is final unless its stages
 // say it is still unfinished (for example, a candidate that will not be integrated).
-export function closeStartedWork(store, registries, task, reason = '') {
+// `sentAsIdea` (Close and send as a new idea) records on the closed task the run its remaining work was sent in as.
+export function closeStartedWork(store, registries, task, reason = '', { sentAsIdea } = {}) {
   if (typeof reason !== 'string' || reason.length > 2000) throw new Error('Closing reason must be bounded text.');
+  const refusal = closeRefusal(store, registries, task);
+  if (refusal) throw refusal;
+  if (sentAsIdea) task.sentAsIdea = { ...sentAsIdea };
   if (denial(store, task)) return denyWork(store, task, reason);
-  const attempts = store.attempts(task.id),
-    stages = registries.workflows.stagesOf(task);
-  if (task.status === 'denied') throw new Error('This work is already closed.');
-  if (['running', 'stopping'].includes(task.status))
-    throw new Error('Cancel the running attempt first; close the work once it has stopped.');
-  if (attempts.some(a => ['interrupted', 'quarantined', 'uncertain'].includes(a.status) && !a.reconciledAt))
-    throw new Error('Reconcile interrupted work before closing it.');
-  if (store.leases().some(lease => attempts.some(a => a.id === lease.attemptId)))
-    throw new Error('This work still holds a reservation. Wait for it to be released.');
-  if (task.status === 'done' && !stages?.closable?.(store, task))
-    throw new Error('Accepted work is final; it cannot be closed.');
-  if (!['review', 'failed', 'cancelled', 'blocked', 'ready', 'done'].includes(task.status))
-    throw new Error('Only stopped work can be closed.');
-  const at = new Date().toISOString(),
+  const stages = registries.workflows.stagesOf(task),
+    at = new Date().toISOString(),
     text = reason.trim() || 'Director closed this work without taking it further.',
     pending = task.status === 'review' ? store.attempt(task.lastAttemptId) : null;
   task.closed = { at, reason: text, status: task.status, by: { type: 'director' } };
@@ -472,6 +464,32 @@ export function closeStartedWork(store, registries, task, reason = '') {
   });
   store.event('work_closed', task.id, pending?.id || null, `Director closed this work: ${text}`);
   return { ok: true };
+}
+// Why closeStartedWork would refuse this task now, as the error it would throw, or null when it may be closed. Nothing
+// is written, so a step that must do something else first (sending a story as a new idea) can ask before it starts.
+export function closeRefusal(store, registries, task) {
+  if (denial(store, task)) return null;
+  const attempts = store.attempts(task.id),
+    stages = registries.workflows.stagesOf(task);
+  if (task.status === 'denied') return new Error('This work is already closed.');
+  if (['running', 'stopping'].includes(task.status))
+    return new Error('Cancel the running attempt first; close the work once it has stopped.');
+  if (attempts.some(a => ['interrupted', 'quarantined', 'uncertain'].includes(a.status) && !a.reconciledAt))
+    return new Error('Reconcile interrupted work before closing it.');
+  if (store.leases().some(lease => attempts.some(a => a.id === lease.attemptId)))
+    return new Error('This work still holds a reservation. Wait for it to be released.');
+  if (task.status === 'done') {
+    let closable;
+    try {
+      closable = stages?.closable?.(store, task);
+    } catch (error) {
+      return error;
+    }
+    if (!closable) return new Error('Accepted work is final; it cannot be closed.');
+  }
+  if (!['review', 'failed', 'cancelled', 'blocked', 'ready', 'done'].includes(task.status))
+    return new Error('Only stopped work can be closed.');
+  return null;
 }
 
 // Sends accepted work back to an earlier stage when a later stage returned findings (for example,

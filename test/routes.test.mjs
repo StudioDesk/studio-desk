@@ -101,6 +101,22 @@ test('GET /api/routes answers the table: each route with its method, path, field
   assert.equal((await fetch(origin + '/api/routes', { directorKey: false })).status, 401);
 });
 
+test("Close and send as a new idea is listed as a task's action, with its project and an optional idea", () => {
+  const route = match('POST', '/api/tasks/T/send-as-idea');
+  assert.ok(route, 'The step is listed.');
+  assert.equal(route.path, '/api/tasks/:id/send-as-idea');
+  assert.equal(route.summary, 'Closes a story whose plan is out of date and sends its remaining work as a new idea.');
+  assert.deepEqual(
+    route.fields.map(field => [field.name, field.required]),
+    [
+      ['projectId', true],
+      ['idea', false],
+    ],
+  );
+  assert.equal(route.access, 'director');
+  assert.equal(route.token, 'unless-keyed');
+});
+
 test('every listed /api route reaches its handler', async t => {
   const { app, call } = await studio(t);
   // Nothing the probes queue starts: new dispatch is paused first.

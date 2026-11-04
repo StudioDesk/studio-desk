@@ -392,6 +392,9 @@ const table = [
   taskAction('replan', 'Replies to an accepted plan whose steps have not started, and plans again.', ['direction']),
   taskAction('deny-work', 'Denies planned work.', ['reason']),
   taskAction('close', 'Closes started work.', ['reason']),
+  taskAction('send-as-idea', 'Closes a story whose plan is out of date and sends its remaining work as a new idea.', [
+    'idea',
+  ]),
   taskAction('send-back', "Sends work back to its editor with the review's findings.", ['note']),
   taskAction('merge-source', 'Merges a story whose integration stopped on a conflict onto the current source.'),
   taskAction('carry', "Approves a fix's next carry to a line.", [field('line', true)]),

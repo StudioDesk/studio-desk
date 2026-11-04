@@ -79,7 +79,7 @@ import { validatePlan } from './planning.mjs';
 import { createRegistries } from './registry.mjs';
 import { bootstrapFactory } from './core/bootstrap.mjs';
 import { createProject } from './core/project-creation.mjs';
-import { sendWaitingIdea, startIdeaIntake } from './core/idea-intake.mjs';
+import { sendStoryAsIdea, sendWaitingIdea, startIdeaIntake } from './core/idea-intake.mjs';
 import { answerQuestion, changeAnswer } from './core/questions.mjs';
 import {
   openTryFolder,
@@ -2204,6 +2204,33 @@ export function createStudio({
             const closed = closeStartedWork(store, registries, t, data.reason ?? '');
             runner.autonomy.sendWaiting(projectId);
             return json(res, closed);
+          }
+          // Close and send as a new idea: a story whose plan the code moved past is closed once its remaining work has
+          // entered as a new idea on its line and milestone; a refused idea leaves the story as it was.
+          if (action === 'send-as-idea') {
+            if (Object.keys(data).some(key => !['projectId', 'idea'].includes(key)))
+              fail('Close and send as a new idea takes only the idea.');
+            let sent;
+            try {
+              sent = sendStoryAsIdea(
+                store,
+                registries,
+                runner,
+                t,
+                {
+                  idea: data.idea,
+                  refuse: current =>
+                    runner.autonomy.pendingIntegration()?.taskId === current.id
+                      ? new Error('Integration is approved for this work and waiting to run; it cannot be closed now.')
+                      : null,
+                },
+                sampleIdeaFiles,
+              );
+            } catch (error) {
+              fail(error.message, error.status);
+            }
+            runner.autonomy.sendWaiting(projectId);
+            return json(res, sent, 201);
           }
           // Back to implementation with the review's findings, then queued like Start.
           if (action === 'send-back') {
