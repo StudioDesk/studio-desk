@@ -317,7 +317,11 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
           errors: installed.stderr.slice(-errorLimit),
         };
     }
-    const focused = { ...plan, command: { ...plan.command, args: sourceTestArgs(wanted.length ? wanted : suite) } },
+    const focused = {
+        ...plan,
+        data: runtime.store.directory,
+        command: { ...plan.command, args: sourceTestArgs(wanted.length ? wanted : suite) },
+      },
       command = runtime.sourceCheckCommand || candidateTestCommand(focused, a.configuration);
     // A run's number increases across the attempt and stays its own when the oldest runs are dropped.
     const reader = failedTestReader(),

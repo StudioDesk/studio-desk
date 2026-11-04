@@ -503,11 +503,16 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     );
     runtime.store.finishPhase(commitPhase, 'succeeded', { commit });
     a.sourceCandidate = { ...sourcePlan(candidate, profileOf(scope.source)), commit, diffStat: sourceDiffStat(diff) };
-    a.sourceCandidate.command = candidateTestCommand(a.sourceCandidate, a.configuration);
+    // The runner is kept from the controller's own data folder, named to it, wherever the candidate is.
+    const data = runtime.store.directory;
+    a.sourceCandidate.command = candidateTestCommand({ ...a.sourceCandidate, data }, a.configuration);
     // The project's build, when its settings name one, runs before the tests and is wrapped as they are (1.1).
     const build = buildCommand(profileOf(scope.source));
     if (build)
-      a.sourceCandidate.build = candidateTestCommand({ root: a.sourceCandidate.root, command: build }, a.configuration);
+      a.sourceCandidate.build = candidateTestCommand(
+        { root: a.sourceCandidate.root, data, command: build },
+        a.configuration,
+      );
     a.sourceCandidate.sandbox = sandboxRecord(a.configuration);
     runtime.store.updateAttempt(a);
     const manifest = {
@@ -662,7 +667,11 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         JSON.stringify({
           root: candidate,
           start: plan.start,
-          command: builtInSandboxCommand({ root: candidate, command: startCommand(plan.start) }),
+          command: builtInSandboxCommand({
+            root: candidate,
+            data: runtime.store.directory,
+            command: startCommand(plan.start),
+          }),
           place: 'built-in',
           environment,
           address: plan.address,

@@ -614,7 +614,10 @@ export async function verifyIntegration(runtime, journal, directory, configurati
       const build = buildCommand(profile);
       let built = null;
       if (build) {
-        const wrapped = candidateTestCommand({ root: worktree, command: build }, configuration);
+        const wrapped = candidateTestCommand(
+          { root: worktree, data: runtime.store.directory, command: build },
+          configuration,
+        );
         let result;
         try {
           result = await run(runtime, wrapped.executable, wrapped.args, {
@@ -654,7 +657,8 @@ export async function verifyIntegration(runtime, journal, directory, configurati
           );
         if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash) throw new Error(changedByBuild);
       }
-      const test = runtime.sourceCheckCommand || candidateTestCommand(plan, configuration);
+      const test =
+        runtime.sourceCheckCommand || candidateTestCommand({ ...plan, data: runtime.store.directory }, configuration);
       // Same command-local test profile and copied-harness marker as candidate tests.
       environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
       const tested = await run(runtime, test.executable, test.args, {

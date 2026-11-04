@@ -15,7 +15,10 @@ import {
   builtInSandboxCommand,
   builtInSandboxCommandLine,
   builtInSandboxDataFolder,
+  builtInSandboxDataSecrets,
   builtInSandboxEnvironment,
+  builtInSandboxRunArguments,
+  builtInSandboxRunUsage,
   builtInSandboxRunner,
   builtInSandboxRuntimeEnvironment,
   builtInSandboxSecrets,
@@ -27,6 +30,7 @@ import {
   dataDenyLock,
   dataDenyTimeoutMs,
   denyBuiltInSandboxData,
+  denyBuiltInSandboxDataFolders,
   denyBuiltInSandboxSecrets,
   readBuiltInSandboxStatus,
   takeBuiltInSandboxSession,
@@ -309,6 +313,156 @@ test('its tests run through its runner, which gets the folder they may write and
     executable: process.execPath,
     args: [builtInSandboxRunner, '--root', '/candidate', '--', process.execPath, '--test', 'test/a.test.mjs'],
   });
+  // The controller's own data folder, which the run is kept from wherever the copy is, goes after the copy.
+  assert.deepEqual(builtInSandboxCommand({ ...plan, data: '/data' }), {
+    executable: process.execPath,
+    args: [
+      builtInSandboxRunner,
+      '--root',
+      '/candidate',
+      '--data',
+      '/data',
+      '--',
+      process.execPath,
+      '--test',
+      'test/a.test.mjs',
+    ],
+  });
+});
+
+test('the runner reads its arguments with or without the data folder, and refuses any other list with its usage line', () => {
+  assert.deepEqual(builtInSandboxRunArguments(['--root', '/c', '--data', '/d', '--', 'node', '--test', 'a.mjs']), {
+    root: '/c',
+    data: '/d',
+    executable: 'node',
+    args: ['--test', 'a.mjs'],
+  });
+  // A command recorded on an attempt before the data folder was named keeps running.
+  assert.deepEqual(builtInSandboxRunArguments(['--root', '/c', '--', 'node']), {
+    root: '/c',
+    data: null,
+    executable: 'node',
+    args: [],
+  });
+  // An argument after the separator is the command's own, however it looks.
+  assert.deepEqual(builtInSandboxRunArguments(['--root', '/c', '--', 'node', '--data', '/x']).args, ['--data', '/x']);
+  for (const malformed of [
+    [],
+    ['--root'],
+    ['--root', '/c'],
+    ['--root', '/c', '--'],
+    ['--root', '--', 'node'],
+    ['--data', '/d', '--root', '/c', '--', 'node'],
+    ['--root', '/c', '--data', '--', 'node'],
+    ['--root', '/c', '--data', '/d', '--'],
+    ['--root', '/c', '--data', '/d', 'node'],
+    ['--root', '/c', '--other', '/d', '--', 'node'],
+    ['--root', '/c', '--data', '/d', '--data', '/e', '--', 'node'],
+  ])
+    assert.equal(builtInSandboxRunArguments(malformed), null, malformed.join(' '));
+  // The runner itself stops there, before it prepares or starts anything.
+  const refused = spawnSync(process.execPath, [builtInSandboxRunner, '--root', '/c', '--data', '--', 'node'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  assert.equal(refused.status, 2);
+  assert.equal(refused.stderr.trim(), builtInSandboxRunUsage);
+});
+
+test("on macOS and Linux the controller's named data folder and its secrets are denied wherever the copy is", t => {
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-named-data-'))),
+    root = path.join(directory, 'source', '.studio-verify', 'wt', 'v-1'),
+    data = path.join(directory, 'moved-data'),
+    home = path.join(directory, 'home');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.mkdirSync(root, { recursive: true });
+  const run = {
+      root,
+      nodeDirectory: path.join(directory, 'node'),
+      launcherDirectory: path.join(directory, 'adapters'),
+      runDirectory: path.join(directory, 'run'),
+      helper: path.join(directory, 'srt-win.exe'),
+      seccomp: path.join(directory, 'seccomp'),
+      temporary: path.join(directory, 'run', 'tmp'),
+      platform: 'linux',
+      home,
+    },
+    today = builtInSandboxSettings(run);
+  // A named folder that is not there (a source whose controller never ran) changes nothing.
+  assert.deepEqual(builtInSandboxSettings({ ...run, data }), today);
+  fs.mkdirSync(data);
+  const key = path.join(data, 'director-key'),
+    launch = path.join(data, 'launch-url');
+  fs.writeFileSync(key, 'a'.repeat(64));
+  fs.writeFileSync(launch, 'http://127.0.0.1:4317/launch/' + 'c'.repeat(48));
+  assert.deepEqual(builtInSandboxDataSecrets(data), [key, launch]);
+  assert.equal(builtInSandboxDataFolder(root), null, 'the copy is outside the data folder');
+  const named = builtInSandboxSettings({ ...run, data });
+  assert.deepEqual(named.filesystem.denyRead, [home, data, key, launch]);
+  assert.ok(named.filesystem.allowRead.includes(root), 'the copy is still read');
+  assert.deepEqual(named.filesystem.allowRead, today.filesystem.allowRead);
+  assert.deepEqual(named.filesystem.allowWrite, [root, run.temporary]);
+  // Without a named folder the settings are as they were.
+  assert.deepEqual(builtInSandboxSettings(run).filesystem.denyRead, [home]);
+  // A copy inside the named folder names it once, and keeps its own grants.
+  const inside = path.join(data, 'projects', 'p', 'jobs', 'a', 'copy');
+  fs.mkdirSync(inside, { recursive: true });
+  const within = builtInSandboxSettings({ ...run, root: inside, data });
+  assert.deepEqual(within.filesystem.denyRead, [home, data, key, launch]);
+  assert.equal(within.filesystem.allowRead[0], inside);
+  assert.deepEqual(within.filesystem.allowWrite, [inside, run.temporary]);
+  // Windows' account is kept out before the run instead (below); its settings list nothing to deny.
+  assert.deepEqual(builtInSandboxSettings({ ...run, data, platform: 'win32' }).filesystem.denyRead, []);
+});
+
+test("before a Windows run the controller's named data folder and its secrets are denied wherever the copy is, the folder not in the profile", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-named-data-')),
+    root = path.join(directory, 'source', '.studio-verify', 'wt', 'v-1'),
+    data = path.join(directory, 'data'),
+    profile = path.join(directory, 'home');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(data);
+  const key = path.join(data, 'director-key'),
+    launch = path.join(data, 'launch-url');
+  fs.writeFileSync(key, 'a'.repeat(64));
+  fs.writeFileSync(launch, 'http://127.0.0.1:4317/launch/' + 'c'.repeat(48));
+  const prepare = (copy, named, home = profile) => {
+    const { calls, run } = fakeAccessList();
+    const result = denyBuiltInSandboxDataFolders(copy, named, { run, profile: home });
+    return { result, calls: calls.map(([program, args]) => [program, args]) };
+  };
+  // Without a named folder, a copy outside any data folder has nothing to deny, as before.
+  assert.deepEqual(prepare(root, null).calls, []);
+  // Named, its key and launch link are denied and then the folder itself.
+  let prepared = prepare(root, data);
+  assert.deepEqual(prepared.calls, [
+    ['icacls', [key, '/deny', 'sandbox-runtime-users:(R)']],
+    ['icacls', [launch, '/deny', 'sandbox-runtime-users:(R)']],
+    ['icacls', [data, '/deny', 'sandbox-runtime-users:(OI)(CI)(RD)']],
+  ]);
+  assert.deepEqual(prepared.result, { secrets: [key, launch], folders: [data] });
+  // Inside the director's profile the folder gets no deny (the profile keeps the sandbox account out); its secrets
+  // are denied as those above a copy always were.
+  fs.rmSync(path.join(data, dataDenyDone));
+  prepared = prepare(root, data, directory);
+  assert.deepEqual(prepared.calls, [
+    ['icacls', [key, '/deny', 'sandbox-runtime-users:(R)']],
+    ['icacls', [launch, '/deny', 'sandbox-runtime-users:(R)']],
+  ]);
+  assert.deepEqual(prepared.result, { secrets: [key, launch], folders: [null] });
+  // A copy inside the named folder has it denied once, as without the name.
+  const inside = path.join(data, 'projects', 'p', 'jobs', 'a', 'copy');
+  fs.mkdirSync(inside, { recursive: true });
+  const before = prepare(inside, null).calls;
+  assert.deepEqual(
+    before.map(([, args]) => args[0]),
+    [key, launch, data],
+  );
+  fs.rmSync(path.join(data, dataDenyDone));
+  assert.deepEqual(prepare(inside, data).calls, before);
+  // A named folder that is not there changes nothing.
+  assert.deepEqual(prepare(root, path.join(directory, 'missing')).calls, []);
 });
 
 test("the runtime's status reads as not set up, out of date or ready", () => {

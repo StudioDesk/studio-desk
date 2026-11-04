@@ -3,7 +3,10 @@
 // the runtime run the launcher inside the sandbox, passes the output and exit code through, and then takes
 // back the write access the runtime keeps on the copy between sessions. The helper's shared copy, the folders'
 // see-only entries and the kept write access are Windows' own; macOS and Linux need none of them.
-// Usage: node built-in-sandbox-run.mjs --root <the folder the tests may write> -- <executable> [args...]
+// Usage: node built-in-sandbox-run.mjs --root <the folder the tests may write> [--data <the controller's data folder>]
+//   -- <executable> [args...]
+// The controller names its own data folder (--data), which the run is kept from wherever the copy is; a command recorded
+// before it did so still runs, kept only from a data folder above the copy.
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -12,17 +15,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   builtInSandboxCommandLine,
-  builtInSandboxDataFolder,
   builtInSandboxEnvironment,
   builtInSandboxFiles,
   builtInSandboxGitConfiguration,
   builtInSandboxPackages,
+  builtInSandboxRunArguments,
+  builtInSandboxRunUsage,
   builtInSandboxRuntimeEnvironment,
-  builtInSandboxSecrets,
   builtInSandboxSessionFolder,
   builtInSandboxSettings,
-  denyBuiltInSandboxData,
-  denyBuiltInSandboxSecrets,
+  denyBuiltInSandboxDataFolders,
   openBuiltInSandboxPassThrough,
   shareBuiltInSandboxHelper,
   takeBuiltInSandboxSession,
@@ -30,13 +32,14 @@ import {
 
 const windows = process.platform === 'win32';
 
-const separator = process.argv.indexOf('--');
-if (process.argv[2] !== '--root' || separator !== 4 || process.argv.length < 6) {
-  console.error('Usage: node built-in-sandbox-run.mjs --root <folder> -- <executable> [args...]');
+const parsed = builtInSandboxRunArguments(process.argv.slice(2));
+if (!parsed) {
+  console.error(builtInSandboxRunUsage);
   process.exit(2);
 }
-const root = path.resolve(process.argv[3]),
-  [executable, ...args] = process.argv.slice(5),
+const root = path.resolve(parsed.root),
+  data = parsed.data && path.resolve(parsed.data),
+  { executable, args } = parsed,
   files = builtInSandboxFiles(),
   launcher = fileURLToPath(new URL('./built-in-sandbox-launch.mjs', import.meta.url)),
   // Node as the sandbox account sees it: the installed folder, not a link to it (nvm's, for one).
@@ -56,14 +59,14 @@ if (windows) {
     [root, path.dirname(node), path.dirname(launcher), runDirectory, ...builtInSandboxPackages(root)],
     files,
   );
-  denyBuiltInSandboxSecrets(builtInSandboxSecrets(root));
-  denyBuiltInSandboxData(builtInSandboxDataFolder(root));
+  denyBuiltInSandboxDataFolders(root, data);
 } else for (const folder of [home, gitTemplates]) fs.mkdirSync(folder, { recursive: true });
 fs.writeFileSync(
   settings,
   JSON.stringify(
     builtInSandboxSettings({
       root,
+      data,
       nodeDirectory: path.dirname(node),
       launcherDirectory: path.dirname(launcher),
       runDirectory,

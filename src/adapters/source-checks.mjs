@@ -86,7 +86,9 @@ function testSnapshot(runtime, entry, a, snapshot) {
   const sandboxed = a.configuration?.testSandbox === 'built-in',
     command =
       runtime.sourceCheckCommand ||
-      (sandboxed ? builtInSandboxCommand({ root: snapshot, command: a.sourceCheck.command }) : a.sourceCheck.command);
+      (sandboxed
+        ? builtInSandboxCommand({ root: snapshot, data: runtime.store.directory, command: a.sourceCheck.command })
+        : a.sourceCheck.command);
   const environment = subscriptionEnvironment();
   // Snapshot tests must not inherit live provider/engine overrides.
   for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];

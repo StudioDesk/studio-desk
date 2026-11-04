@@ -12,6 +12,8 @@ export const testSandboxOf = configuration => configuration?.testSandbox || 'cod
 export const chosenTestSandbox = organization => (organization?.testSandbox === 'none' ? 'none' : 'built-in');
 // Where an attempt's tests run now: one recorded under the Codex sandbox has them run again in the built-in one.
 const runsIn = configuration => (testSandboxOf(configuration) === 'none' ? 'none' : 'built-in');
+// The plan names the copy (root), the command and the controller's own data folder (data), which the built-in
+// sandbox keeps the tests from wherever the copy is.
 export const candidateTestCommand = (plan, configuration) =>
   runsIn(configuration) === 'none' ? structuredClone(plan.command) : builtInSandboxCommand(plan);
 // How a check's evidence names where the tests ran, so the dashboard shows it.

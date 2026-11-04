@@ -21,6 +21,8 @@ import { installStep, packageBoundary } from '../src/connectors/package-installs
 import { createSourceWorktree, removeSourceWorktree, worktreeName } from '../src/connectors/source-worktrees.mjs';
 import { snapshotCommit } from '../src/adapters/source-snapshot.mjs';
 import { builtInSandboxCommand, readBuiltInSandboxStatus } from '../src/adapters/built-in-sandbox.mjs';
+// Only its rules for the data folder: importing the server starts no controller.
+import { localConfiguration } from '../src/server.mjs';
 
 const usage = 'Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|none] [commit]';
 const options = { as: 'candidate', sandbox: undefined, commit: 'HEAD' };
@@ -41,6 +43,15 @@ const root = studioSourceRoot,
   profile = studioDeskProfile,
   data = path.join(root, '.studio-verify'),
   id = 'attempt-' + randomUUID();
+// The data folder this source's controller uses (STUDIO_DATA_DIR, studio.local.json's dataDirectory, else <source>/data),
+// which the built-in sandbox keeps the tests from, as the pipeline's runs are kept from theirs: the worktree tested
+// here sits outside it.
+let controllerData;
+try {
+  controllerData = localConfiguration(root).dataDirectory;
+} catch (error) {
+  fail(error.message);
+}
 let commit;
 try {
   commit = git(root, ['rev-parse', '--verify', `${options.commit}^{commit}`]);
@@ -85,9 +96,9 @@ try {
     throw new Error('Installing the packages failed, so no tests ran.');
   const test =
       options.as !== 'checks'
-        ? candidateTestCommand(plan, configuration)
+        ? candidateTestCommand({ ...plan, data: controllerData }, configuration)
         : configuration.testSandbox === 'built-in'
-          ? builtInSandboxCommand({ root: copy, command: plan.command })
+          ? builtInSandboxCommand({ root: copy, data: controllerData, command: plan.command })
           : plan.command,
     where = `${sandboxLabel(configuration)}, as ${options.as === 'checks' ? "an idea's checks run" : 'candidate tests run'}`,
     started = Date.now();

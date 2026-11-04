@@ -218,6 +218,26 @@ export function builtInSandboxDataFolder(root) {
     if (fs.existsSync(path.join(folder, directorKeyName))) return folder;
   return null;
 }
+// The controller's own data folder, named to the run (--data), so it is hidden wherever the copy is: npm run verify's
+// worktrees beside the source, a copy in a temporary folder or a data folder moved with STUDIO_DATA_DIR sit outside it.
+// Null when none is named or the folder is not there (a source whose controller never ran has no data folder yet).
+export function builtInSandboxNamedData(data) {
+  if (!data) return null;
+  const folder = path.resolve(data);
+  return fs.statSync(folder, { throwIfNoEntry: false })?.isDirectory() ? folder : null;
+}
+// The files of a named data folder that let a program act as the director, as builtInSandboxSecrets finds them above
+// a copy: the key, the launch link and the tools' keys.
+export function builtInSandboxDataSecrets(data) {
+  const folder = builtInSandboxNamedData(data);
+  return folder ? directorSecretNames.map(name => path.join(folder, name)).filter(secret => fs.existsSync(secret)) : [];
+}
+// Every data folder a run is kept from: the one above the copy, as before, and the named one; and their secrets.
+const unique = paths => [...new Set(paths)];
+export const builtInSandboxDataFolders = (root, data) =>
+  unique([builtInSandboxDataFolder(root), builtInSandboxNamedData(data)].filter(Boolean));
+export const builtInSandboxAllSecrets = (root, data) =>
+  unique([...builtInSandboxSecrets(root), ...builtInSandboxDataSecrets(data)]);
 
 // What one test run may touch. It writes only the copy it runs on; it reads Node, the packages installed for
 // the copy, the launcher and the run's own instructions; it reaches no network beyond this computer. Git for
@@ -229,9 +249,11 @@ export function builtInSandboxDataFolder(root) {
 // they sit in the disposable copy or the run's temporary folder, and the project's own repository is outside
 // what a run may write. Every .git/hooks stays refused. npm and npx run from the npm package of the Node.js
 // install (<install>/lib/node_modules/npm beside its bin), which a home-folder install such as nvm's keeps out
-// of reach otherwise; only that folder is let back in, and only when it is there.
+// of reach otherwise; only that folder is let back in, and only when it is there. `data` is the controller's own data
+// folder, which is denied with its secrets wherever the copy is; a copy inside it keeps its own grants.
 export function builtInSandboxSettings({
   root,
+  data,
   nodeDirectory,
   launcherDirectory,
   runDirectory,
@@ -249,12 +271,9 @@ export function builtInSandboxSettings({
       network,
       filesystem: {
         // The data folder too, for one kept outside the home folder: its database, its other projects' copies and
-        // records. The copy and its packages are let back in below, as on Windows (C-40).
-        denyRead: [
-          home,
-          ...(builtInSandboxDataFolder(root) ? [builtInSandboxDataFolder(root)] : []),
-          ...builtInSandboxSecrets(root),
-        ],
+        // records. The copy and its packages are let back in below, as on Windows (C-40). The controller's own data
+        // folder, when the run names it, is denied as well, wherever the copy is.
+        denyRead: [home, ...builtInSandboxDataFolders(root, data), ...builtInSandboxAllSecrets(root, data)],
         allowRead: [root, ...reads, seccomp, ...(fs.existsSync(npm) ? [npm] : [])],
         allowWrite: [root, temporary],
         denyWrite: [],
@@ -435,6 +454,16 @@ export function denyBuiltInSandboxData(
     fs.rmSync(lock, { force: true });
   }
 }
+// What a Windows run does before it starts to keep the sandbox from the data folders: the secrets of the data folder
+// above the copy and of the controller's named one are denied, then each of those folders is (one inside the director's
+// profile gets no folder deny, as above). Without a named folder, only the one above the copy, as before --data.
+export function denyBuiltInSandboxDataFolders(root, data, { run = spawnSync, ...options } = {}) {
+  const secrets = denyBuiltInSandboxSecrets(builtInSandboxAllSecrets(root, data), run);
+  return {
+    secrets,
+    folders: builtInSandboxDataFolders(root, data).map(folder => denyBuiltInSandboxData(folder, { run, ...options })),
+  };
+}
 
 // How many built-in sandbox sessions run at once on this computer (C-43, November 2). On Windows the runtime's network
 // proxy binds inside the loopback range its install permitted, 60080-60089 by default, at two ports a session, so a
@@ -541,10 +570,35 @@ export const builtInSandboxGitConfiguration =
   '[user]\n\tname = Studio desk tests\n\temail = tests@studio-desk.invalid\n';
 
 // The test command run through the built-in sandbox: the runner gets the folder the tests may write
-// (the copy they run on) and the command itself.
+// (the copy they run on), the controller's own data folder it is kept from (plan.data), and the command itself.
 export function builtInSandboxCommand(plan) {
   return {
     executable: process.execPath,
-    args: [builtInSandboxRunner, '--root', plan.root, '--', plan.command.executable, ...plan.command.args],
+    args: [
+      builtInSandboxRunner,
+      '--root',
+      plan.root,
+      ...(plan.data ? ['--data', plan.data] : []),
+      '--',
+      plan.command.executable,
+      ...plan.command.args,
+    ],
   };
+}
+// The runner's arguments, after the program's own: --root <folder>, then --data <folder> unless the command was recorded
+// before the controller named its data folder (such commands keep running, hiding only a data folder above the copy),
+// then -- and the command. Null for any other list, which the runner refuses with its usage line.
+export const builtInSandboxRunUsage =
+  'Usage: node built-in-sandbox-run.mjs --root <folder> [--data <folder>] -- <executable> [args...]';
+export function builtInSandboxRunArguments(argv) {
+  if (argv[0] !== '--root' || !argv[1] || argv[1] === '--') return null;
+  let next = 2,
+    data = null;
+  if (argv[next] === '--data') {
+    if (!argv[next + 1] || argv[next + 1] === '--') return null;
+    data = argv[next + 1];
+    next += 2;
+  }
+  if (argv[next] !== '--' || argv.length < next + 2) return null;
+  return { root: argv[1], data, executable: argv[next + 1], args: argv.slice(next + 2) };
 }

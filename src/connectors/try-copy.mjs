@@ -313,7 +313,10 @@ export function runTry(runtime, projectId, { confirmOutside = false } = {}) {
   const environment = subscriptionEnvironment();
   for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
   const start = runtime.tryStartCommand?.(settings.start) || startCommand(settings.start),
-    command = place === 'built-in' ? builtInSandboxCommand({ root: copy.folder, command: start }) : start,
+    command =
+      place === 'built-in'
+        ? builtInSandboxCommand({ root: copy.folder, data: store.directory, command: start })
+        : start,
     key = copy.installs ? installKey(copy.folder) : null,
     install = key && key !== copy.packages,
     run = {
