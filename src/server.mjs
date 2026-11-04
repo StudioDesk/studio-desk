@@ -118,6 +118,7 @@ import {
   liveRecords,
   oneRun,
   peopleSummary,
+  servedAttemptCount,
   settledKinds,
   settledTasks,
 } from './core/project-records.mjs';
@@ -542,11 +543,17 @@ export function createStudio({
       return undefined;
     }
   };
-  // One task as its page reads it, and as a command's records carry it, with the change sequence it reflects.
+  // One task as its page reads it, and as a command's records carry it, with the change sequence it reflects, and its
+  // automatic attempts used and allowed as the scheduler counts them (attemptCount, core/registry.mjs).
   const taskPage = (projectId, record) => {
     const summary = storySummary(record);
     return {
-      task: { ...record, directorInputs: directorInputsOf(record), ...(summary ? { summary } : {}) },
+      task: {
+        ...record,
+        directorInputs: directorInputsOf(record),
+        ...(summary ? { summary } : {}),
+        ...servedAttemptCount(store, registries, record),
+      },
       attempts: store.dashboardAttempts(projectId, record.id),
       version: store.version,
     };
@@ -746,7 +753,7 @@ export function createStudio({
         parts.length === 5 &&
         req.method === 'GET'
       )
-        return json(res, oneRun(store, parts[2], parts[4]));
+        return json(res, oneRun(store, parts[2], parts[4], { registries }));
       // The older lines an idea whose stories landed can be brought back to, or why not.
       if (
         parts[0] === 'api' &&
@@ -902,7 +909,11 @@ export function createStudio({
             fail(`limit must be a whole number from 1 to ${liveMaxLimit}.`);
           return json(
             res,
-            liveRecords(store, projectId, { before: url.searchParams.get('before'), limit: Number(limit) }),
+            liveRecords(store, projectId, {
+              before: url.searchParams.get('before'),
+              limit: Number(limit),
+              registries,
+            }),
           );
         }
         // The project's library (1.2 step 6): every entry with its revisions, removed ones marked.
@@ -929,7 +940,11 @@ export function createStudio({
           if (!/^[1-9][0-9]?$/.test(limit) || Number(limit) > 50) fail('limit must be a whole number from 1 to 50.');
           return json(
             res,
-            finishedRuns(store, projectId, { before: url.searchParams.get('before'), limit: Number(limit) }),
+            finishedRuns(store, projectId, {
+              before: url.searchParams.get('before'),
+              limit: Number(limit),
+              registries,
+            }),
           );
         }
         // Settled work for the board, a page at a time; a limit of 0 reads only the counts.
@@ -947,6 +962,7 @@ export function createStudio({
               limit: Number(limit),
               workerId: url.searchParams.get('workerId'),
               team: url.searchParams.get('team'),
+              registries,
             }),
           );
         }

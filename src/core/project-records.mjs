@@ -57,6 +57,21 @@ export function runMembership(tasks) {
 }
 
 const withInputs = record => ({ ...record, directorInputs: directorInputsOf(record) });
+// Each task served with the registries carries attemptCount, { used, allowed }: its automatic attempts used and its
+// current stage's limit, counted from the stored task as the scheduler counts them (WorkflowRegistry.attemptCount).
+// Reading it writes nothing. A record whose current stage cannot be read (a stage missing what its view needs) is
+// served without one rather than failing the whole read; a caller without the registries serves the records as before.
+export function servedAttemptCount(store, registries, task) {
+  try {
+    return { attemptCount: registries.workflows.attemptCount(store, task) };
+  } catch {
+    return {};
+  }
+}
+const served = (store, registries, shape) => task => {
+  const record = shape(task);
+  return registries ? { ...record, ...servedAttemptCount(store, registries, task) } : record;
+};
 // A project's tasks in record order, read through the project index (core/store.mjs).
 const projectTasks = (store, projectId) => store.projectTasks(projectId);
 
@@ -88,7 +103,7 @@ function ideasOf(runs, runOf, tasks) {
 // more follow. The pages' union is the whole live set. A cursor that left the live set answers 404.
 export const liveLimit = 200,
   liveMaxLimit = 500;
-export function liveRecords(store, projectId, { before = null, limit = liveLimit } = {}) {
+export function liveRecords(store, projectId, { before = null, limit = liveLimit, registries = null } = {}) {
   store.project(projectId);
   const version = store.version,
     tasks = projectTasks(store, projectId),
@@ -108,7 +123,7 @@ export function liveRecords(store, projectId, { before = null, limit = liveLimit
     needed = new Set(page.map(task => runOf.get(task.id)).filter(Boolean)),
     runs = projectRuns(store, projectId, tasks);
   return {
-    tasks: page.map(withInputs),
+    tasks: page.map(served(store, registries, withInputs)),
     attempts: page.length
       ? store.dashboardAttempts(
           projectId,
@@ -129,7 +144,7 @@ export function liveRecords(store, projectId, { before = null, limit = liveLimit
   };
 }
 
-export function finishedRuns(store, projectId, { before = null, limit = 10 } = {}) {
+export function finishedRuns(store, projectId, { before = null, limit = 10, registries = null } = {}) {
   store.project(projectId);
   const version = store.version,
     tasks = projectTasks(store, projectId),
@@ -170,7 +185,7 @@ export function finishedRuns(store, projectId, { before = null, limit = 10 } = {
         finishedAt = ended.get(run.id)?.time;
       return {
         run: { ...run, directorInputs: directorInputsOf(store.run(run.id)), ...(finishedAt ? { finishedAt } : {}) },
-        tasks: members.get(run.id).map(storyTask),
+        tasks: members.get(run.id).map(served(store, registries, storyTask)),
         attempts: attempts.filter(attempt => own.has(attempt.taskId)).map(storyAttempt),
       };
     }),
@@ -181,7 +196,7 @@ export function finishedRuns(store, projectId, { before = null, limit = 10 } = {
 
 // One run with its tasks and attempt summaries, open or finished, for a page that shows a run the loaded
 // pages have not reached.
-export function oneRun(store, projectId, runId) {
+export function oneRun(store, projectId, runId, { registries = null } = {}) {
   store.project(projectId);
   const version = store.version,
     tasks = projectTasks(store, projectId),
@@ -199,7 +214,7 @@ export function oneRun(store, projectId, runId) {
       : [];
   return {
     run: { ...run, directorInputs: directorInputsOf(store.run(run.id)) },
-    tasks: members.map(finished ? storyTask : withInputs),
+    tasks: members.map(served(store, registries, finished ? storyTask : withInputs)),
     attempts: finished ? attempts.map(storyAttempt) : attempts,
     version,
   };
@@ -211,7 +226,11 @@ export const settledKinds = ['accepted', 'closed'];
 // Settled work of one kind, newest finished first, a page at a time; an employee's or a team's page reads only
 // its own (v1.0 item 19c). Each idea the page's work belongs to is named briefly, so the board keeps a finished
 // idea's work in its lane.
-export function settledTasks(store, projectId, { kind, before = null, limit = 12, workerId = null, team = null }) {
+export function settledTasks(
+  store,
+  projectId,
+  { kind, before = null, limit = 12, workerId = null, team = null, registries = null },
+) {
   store.project(projectId);
   const version = store.version,
     all = projectTasks(store, projectId),
@@ -232,7 +251,7 @@ export function settledTasks(store, projectId, { kind, before = null, limit = 12
     throw Object.assign(new Error('That page of tasks no longer exists.'), { status: 404 });
   const page = list.slice(from, from + limit);
   return {
-    tasks: page.map(withInputs),
+    tasks: page.map(served(store, registries, withInputs)),
     attempts: page.length
       ? store.dashboardAttempts(
           projectId,

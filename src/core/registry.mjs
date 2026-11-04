@@ -357,6 +357,15 @@ export class WorkflowRegistry {
     const round = owner.flowReference.round ?? 1;
     return counted.filter(attempt => (attempt.flowRound ?? attempt.assignment?.flowReference?.round ?? 1) === round);
   }
+  // How many of a task's automatic attempts it has used and how many its current stage allows, counted exactly as the
+  // scheduler counts them before it queues, starts or retries the task (stageAttempts against the current stage view's
+  // maxAttempts), for the records the dashboard reads. Reading it writes nothing; `allowed` is absent when the task has
+  // no limit.
+  attemptCount(store, task) {
+    const used = this.stageAttempts(store, task).length,
+      allowed = this.stageView(task).maxAttempts;
+    return Number.isInteger(allowed) ? { used, allowed } : { used };
+  }
   // Input references for a stage view, or null to use the task's accepted dependencies.
   stageInputs(store, task) {
     const owner = this.stageOwner(store, task);

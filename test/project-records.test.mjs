@@ -149,6 +149,12 @@ test('accepted work that still waits for integration keeps its run live', async 
   assert.deepEqual(live.runs.map(run => run.id).sort(), ['run-review', 'run-waiting']);
   assert.ok(['T-check', 'T-story', 'T-review'].every(id => live.tasks.some(item => item.id === id)));
   assert.deepEqual(finished.runs.map(item => item.run.id).sort(), ['run-merged', 'run-review-merged']);
+  // A review phase recorded without its review task has no stage view to count against, so that story alone is served
+  // without an attempt count; the read itself still answers.
+  const served = id => live.tasks.find(item => item.id === id);
+  assert.equal('attemptCount' in served('T-story'), false);
+  assert.deepEqual(served('T-check').attemptCount, { used: 0, allowed: 3 });
+  assert.deepEqual(served('T-review').attemptCount, { used: 1, allowed: 3 });
 });
 
 test('finished runs come newest first, a page at a time, each with its tasks and attempts', async t => {
@@ -638,4 +644,43 @@ test("every page read says the store's change sequence it reflects", async t => 
   const activity = (await read(`/api/projects/${project}/activity`)).body;
   assert.deepEqual(Object.keys(activity).sort(), ['events', 'next', 'version']);
   assert.ok(activity.events.length > 0 && activity.events.every(event => Number.isInteger(event.seq)));
+});
+
+test('every task record the pages read is served its attempts used and its limit, as the scheduler counts them', async t => {
+  const { read, store, app } = await records(t),
+    workflows = app.runner.registries.workflows;
+  // One attempt the work ended, one a usage limit stopped and one the controller's stop cancelled: only the first counts.
+  store.putTask(task('T-counted', 'failed', 'run-counted'));
+  for (const [id, status, endCause] of [
+    ['attempt-counted-work', 'failed', { cause: 'work' }],
+    ['attempt-counted-limit', 'blocked', { cause: 'usage-limit' }],
+    ['attempt-counted-stop', 'cancelled', { cause: 'environment', detail: 'controller-stop' }],
+  ])
+    store.insertAttempt({ id, taskId: 'T-counted', status, endCause }, {});
+  const expected = { used: 1, allowed: 3 },
+    at = store.version,
+    stored = JSON.stringify(store.task('T-counted'));
+  assert.equal(workflows.stageAttempts(store, store.task('T-counted')).length, expected.used);
+  const live = (await read('/api/projects/project-legacy/live')).body,
+    run = (await read('/api/projects/project-legacy/runs/run-counted')).body,
+    page = (await read('/api/tasks/T-counted?projectId=project-legacy')).body;
+  assert.deepEqual(live.tasks.find(item => item.id === 'T-counted').attemptCount, expected, 'The live records.');
+  assert.deepEqual(run.tasks.find(item => item.id === 'T-counted').attemptCount, expected, "The run's records.");
+  assert.deepEqual(page.task.attemptCount, expected, "The task's own page.");
+  // Every live task is served one, counted from its own stored record.
+  for (const item of live.tasks)
+    assert.deepEqual(item.attemptCount, workflows.attemptCount(store, store.task(item.id)), item.id);
+  // Finished runs and settled work carry it too: an accepted attempt from before endCause counts as the work's.
+  const finished = (await read('/api/projects/project-legacy/runs?limit=50')).body,
+    settled = (await read('/api/projects/project-legacy/settled?kind=accepted&limit=50')).body;
+  assert.deepEqual(
+    finished.runs.find(item => item.run.id === 'run-a').tasks.find(item => item.id === 'T-r2-a').attemptCount,
+    { used: 1, allowed: 3 },
+  );
+  assert.deepEqual(settled.tasks.find(item => item.id === 'T-accepted').attemptCount, { used: 1, allowed: 3 });
+  assert.deepEqual(settled.tasks.find(item => item.id === 'T-r3').attemptCount, { used: 0, allowed: 3 });
+  // The records are read-only views: nothing is written, and the stored task has no count of its own.
+  assert.equal(store.version, at);
+  assert.equal(JSON.stringify(store.task('T-counted')), stored);
+  assert.equal('attemptCount' in store.task('T-counted'), false);
 });
