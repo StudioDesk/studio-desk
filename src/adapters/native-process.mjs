@@ -43,6 +43,10 @@ export function runNative(
   });
   entry.child = child;
   a.pid = child.pid || null;
+  // When it started, so a later process that is handed the same ID is not taken for it (adapters/process.mjs, live()):
+  // taken right after the spawn returns, so the process started at or before it.
+  if (a.pid) a.pidStartedAt = new Date().toISOString();
+  else delete a.pidStartedAt;
   // Whether that process holds the whole tree: in a job, it ending, or the controller ending, ends everything the CLI
   // started, so after a restart a recorded process that is gone means nothing of the attempt still runs.
   if (this.processJobs) a.processJob = true;

@@ -168,14 +168,20 @@ export async function savedTestRun(store, attempt, number, name) {
   return file;
 }
 
-// A process of a run that holds the computer's test turn is recorded on the attempt (employeeTestPid) until it closes,
+// A process of a run that holds the computer's test turn is recorded on the attempt (employeeTestPid, with when it
+// started, employeeTestStartedAt, so a later process handed the same ID is not taken for it) until it closes,
 // so a controller that stops meanwhile gives the turn back when it starts again only once that process is gone
 // (core/orchestrator.mjs, recordedProcessesEnded). A write the closed store refuses keeps the last record.
 function recordTurnProcess(turn, pid) {
   if (!turn) return;
   const a = turn.attempt;
-  if (pid) a.employeeTestPid = pid;
-  else delete a.employeeTestPid;
+  if (pid) {
+    a.employeeTestPid = pid;
+    a.employeeTestStartedAt = new Date().toISOString();
+  } else {
+    delete a.employeeTestPid;
+    delete a.employeeTestStartedAt;
+  }
   try {
     turn.store.updateAttempt(a);
   } catch {}

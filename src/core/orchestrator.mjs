@@ -11,7 +11,7 @@ import { directorInputsFor, directorInputReferences, stageDirectorInputs } from 
 import { libraryFor, stageLibrary } from './library.mjs';
 import { prepareOperation, validateOperationResult } from './operations.mjs';
 import { LEGACY_PROJECT, recordProject, assertProject, validateTaskProject, jobDirectory } from './projects.mjs';
-import { live } from '../adapters/process.mjs';
+import { live, processEnded } from '../adapters/process.mjs';
 import { prepareProposedWork, recordProposedWork } from './proposals.mjs';
 import { runMock } from '../adapters/simulator.mjs';
 import { runNative, parseOutput, recordLine, nativeFailure } from '../adapters/native-process.mjs';
@@ -55,27 +55,19 @@ function resetTime(time) {
 // without one names no source.
 const resetSources = { report: ", from the CLI's own report", message: ", read from the CLI's message" };
 
-// Whether one process is gone. Unlike live(), which looks for the process group an attempt's own process leads on
-// macOS and Linux, this asks for the process itself: an agent's run of the whole suite is started without a group of
-// its own, so there no group answers to its id while it runs. Only "no such process" counts as gone.
-function processEnded(pid) {
-  if (!pid) return true;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (e) {
-    return e.code === 'ESRCH';
-  }
-}
-
 // Whether every process an interrupted attempt recorded is confirmed gone, so the computer's test turn it held is no
-// longer in use (Runner's constructor): its own process (a.pid, its CLI or its candidate tests' current step, checked
-// as reconciliation checks it, live()) and its agent's run of the whole suite (a.employeeTestPid,
-// connectors/employee-tests.mjs, checked as the one process it is on every platform). The one check, so containing
-// each run (C-07) can strengthen it: until then a gone root process is the evidence used, and the processes a run
-// started are not checked; on Windows they can outlive it.
+// longer in use (Runner's constructor): its own process (a.pid with a.pidStartedAt, its CLI or its candidate tests'
+// current step, checked as reconciliation checks it, live()) and its agent's run of the whole suite (a.employeeTestPid
+// with a.employeeTestStartedAt, connectors/employee-tests.mjs, checked by the shared processEnded() as the one process
+// it is on every platform, since it is started without a group of its own). Both use the shared identity check
+// (adapters/process.mjs): a recorded start time lets an ID that a later process now holds count as gone; an attempt
+// recorded without one keeps the ID-only answer. The one check, so containing each run (C-07) can strengthen it: until
+// then a gone root process is the evidence used, and the processes a run started are not checked; on Windows they can
+// outlive it.
 export function recordedProcessesEnded(a) {
-  return !live({ pid: a.pid }) && processEnded(a.employeeTestPid);
+  return (
+    !live({ pid: a.pid, pidStartedAt: a.pidStartedAt }) && processEnded(a.employeeTestPid, a.employeeTestStartedAt)
+  );
 }
 const turnFreedOnRestart =
   "The test turn was freed: the run that held it had ended when the controller started again. Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";

@@ -2,8 +2,9 @@
 // controller left running is interrupted and keeps its reservations until it is reconciled, except the test turn when
 // every process it recorded is gone, so the other suites need not wait for the director. A run that may still be going
 // keeps the turn, and nothing is started again. Model-free: records in a temporary store, reopened as a restart
-// does, with the pid of a process that has exited or of one still running; the agent's own run uses the protocol
-// fixtures.
+// does, with the pid and start time of a process that has exited or of one still running (or of a running one recorded
+// as started an hour before it did, as a later process that now has a recorded ID reads); the agent's own run uses the
+// protocol fixtures.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -51,25 +52,43 @@ const freed =
   /^The test turn was freed: the run that held it had ended when the controller started again\. Only the run's own process was checked; processes it started are not tracked yet and may outlive it\.$/;
 const project = 'source:project-legacy:fixture-held';
 
-// A process that has exited: its pid is recorded, and nothing answers to it.
-const exitedPid = () => spawnSync(process.execPath, ['-e', '']).pid;
+const hour = 60 * 60 * 1000;
+// A process that has exited: its pid and start time are recorded, and nothing answers to it. As a stopped controller's
+// record reads, it started well before the restart (here a minute before the fixture ran it, more than the check's
+// slack): a later process the operating system hands its ID meanwhile, as Windows does quickly while other suites run,
+// started after it and is not taken for it. The start of a process that has exited cannot be checked anyway.
+function exited() {
+  const startedAt = new Date(Date.now() - 60 * 1000).toISOString();
+  return { pid: spawnSync(process.execPath, ['-e', '']).pid, startedAt };
+}
 // A process that runs until the test stops it. As the controller starts an attempt's own process (a.pid), a leader
 // leads a process group of its own on macOS and Linux, which is what the liveness check looks for there; an agent's run
-// of the whole suite (employeeTestPid) is started without one, as connectors/employee-tests.mjs starts it.
+// of the whole suite (employeeTestPid) is started without one, as connectors/employee-tests.mjs starts it. Its start
+// time is taken right after the spawn returns, as the controller records it: its true start.
 function liveProcess(t, { leader }) {
   const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
     detached: leader && process.platform !== 'win32',
     stdio: 'ignore',
     windowsHide: true,
   });
-  const exited = new Promise(resolve => child.once('exit', resolve));
+  const startedAt = new Date().toISOString();
+  const ended = new Promise(resolve => child.once('exit', resolve));
   const stop = async () => {
     child.kill();
-    await exited;
+    await ended;
   };
   t.after(stop);
-  return { pid: child.pid, stop };
+  return { pid: child.pid, startedAt, stop };
 }
+// The same running process as a later one that now has a recorded ID reads: recorded as started an hour before it did.
+const reused = process => ({ ...process, startedAt: new Date(Date.parse(process.startedAt) - hour).toISOString() });
+// An attempt's recorded processes: its own (pid) and its agent's run of the whole suite (employeeTestPid).
+const recorded = ({ own, suite }) => ({
+  pid: own.pid,
+  pidStartedAt: own.startedAt,
+  employeeTestPid: suite.pid,
+  employeeTestStartedAt: suite.startedAt,
+});
 
 // A task with an attempt the controller recorded as running when it stopped, and the leases it held.
 function running(store, { taskId, attemptId, workerId = 'W-07', fields = {}, resources = [] }) {
@@ -162,7 +181,7 @@ test('a turn whose run has ended is freed on restart; the attempt stays interrup
   running(c.app.store, {
     taskId: 'T-held',
     attemptId: 'attempt-held',
-    fields: { pid: exitedPid(), employeeTestPid: exitedPid() },
+    fields: recorded({ own: exited(), suite: exited() }),
     resources: [project, testTurnResource],
   });
   // One only waiting for the turn when the controller stopped, as a candidate's tests wait: no process, no turn.
@@ -228,6 +247,31 @@ function turnFreedMessage(store) {
   return turnEvents(store, 'attempt-held').at(-1)?.message;
 }
 
+test('an attempt whose recorded processes now belong to later processes has its turn freed on restart and can be reconciled', async t => {
+  const c = await restartStudio(t),
+    own = liveProcess(t, { leader: true }),
+    suite = liveProcess(t, { leader: false });
+  running(c.app.store, {
+    taskId: 'T-held',
+    attemptId: 'attempt-held',
+    fields: recorded({ own: reused(own), suite: reused(suite) }),
+    resources: [project, testTurnResource],
+  });
+  const { store, runner } = await restart(c);
+  assert.equal(store.attempt('attempt-held').status, 'interrupted');
+  assert.equal(holder(store), null, 'The turn is free.');
+  assert.deepEqual(leasesOf(store, 'attempt-held'), [attemptResource('attempt-held'), project].sort());
+  assert.match(turnFreedMessage(store), freed);
+  assert.equal(turnEvents(store, 'attempt-held').length, 1);
+  assert.equal(runner.active.has('attempt-held'), false, 'Nothing is started again.');
+  // The processes holding its IDs started after the recorded ones, so they are not the attempt's: Reconcile goes ahead
+  // while they still run.
+  runner.reconcile('T-held');
+  assert.equal(store.task('T-held').status, 'ready');
+  assert.ok(store.attempt('attempt-held').reconciledAt);
+  assert.deepEqual(leasesOf(store, 'attempt-held'), []);
+});
+
 for (const [label, field] of [
   ['its own process', 'pid'],
   ["its agent's run of the whole suite", 'employeeTestPid'],
@@ -238,7 +282,7 @@ for (const [label, field] of [
     running(c.app.store, {
       taskId: 'T-held',
       attemptId: 'attempt-held',
-      fields: { pid: exitedPid(), employeeTestPid: exitedPid(), [field]: alive.pid },
+      fields: recorded({ own: exited(), suite: exited(), [field === 'pid' ? 'own' : 'suite']: alive }),
       resources: [project, testTurnResource],
     });
     const { store, runner } = await restart(c);
@@ -265,11 +309,23 @@ for (const [label, field] of [
   });
 
 test('the restart check reads every process an attempt recorded', async t => {
-  const gone = exitedPid(),
+  const ended = exited(),
+    gone = ended.pid,
     attempt = liveProcess(t, { leader: true }),
     // Not the leader of a process group, as an agent's run of the whole suite is not: it still counts as running.
     suite = liveProcess(t, { leader: false });
   assert.equal(recordedProcessesEnded({}), true, 'An attempt that recorded no process has none running.');
+  // With the start times each process is recorded with.
+  assert.equal(recordedProcessesEnded(recorded({ own: ended, suite: ended })), true);
+  assert.equal(recordedProcessesEnded(recorded({ own: attempt, suite: ended })), false, 'Its true start: running.');
+  assert.equal(recordedProcessesEnded(recorded({ own: ended, suite })), false, 'Its true start: running.');
+  // A recorded ID that a later process now has: that process started after the recorded one, so it is not the one.
+  assert.equal(recordedProcessesEnded(recorded({ own: reused(attempt), suite: ended })), true);
+  assert.equal(recordedProcessesEnded(recorded({ own: ended, suite: reused(suite) })), true);
+  assert.equal(recordedProcessesEnded(recorded({ own: reused(attempt), suite: reused(suite) })), true);
+  assert.equal(recordedProcessesEnded(recorded({ own: reused(attempt), suite })), false, 'One really runs.');
+  assert.equal(recordedProcessesEnded(recorded({ own: attempt, suite: reused(suite) })), false, 'One really runs.');
+  // Records made before start times were recorded keep the answer by ID alone.
   assert.equal(recordedProcessesEnded({ pid: gone, employeeTestPid: gone }), true);
   assert.equal(recordedProcessesEnded({ pid: attempt.pid }), false);
   assert.equal(recordedProcessesEnded({ pid: attempt.pid, employeeTestPid: gone }), false);
@@ -330,10 +386,16 @@ test("an agent's run of the whole suite records its process while it holds the t
     return holder(store) === id && child?.pid && store.attempt(id).employeeTestPid === child.pid;
   }, 'the whole suite to run with the turn and its process recorded');
   assert.notEqual(store.attempt(id).employeeTestPid, store.attempt(id).pid, "It is not the editor's own process.");
+  // With when it started: after the editor's own process, and not later than now.
+  const suiteStart = Date.parse(store.attempt(id).employeeTestStartedAt);
+  assert.ok(Number.isFinite(suiteStart), 'Its start time is recorded.');
+  assert.ok(suiteStart <= Date.now());
+  assert.ok(suiteStart >= Date.parse(store.attempt(id).pidStartedAt), "It started after the editor's own process.");
   whole.abort();
   assert.equal(await wholeRun, 'AbortError');
   await waitFor(() => !entry.employeeTests.busy, 'the whole suite to end');
   assert.equal(store.attempt(id).employeeTestPid, undefined, 'The record clears when the run ends.');
+  assert.equal(store.attempt(id).employeeTestStartedAt, undefined, 'With its start time.');
   assert.equal(holder(store), null);
   assert.equal((await c.request(`/api/tasks/${c.taskId}/cancel`)).status, 202);
   await c.wait(c.taskId, 'cancelled');

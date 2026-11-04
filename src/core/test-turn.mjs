@@ -80,6 +80,7 @@ function wait(store, resource, queue, waiter) {
   entry.timer = null;
   entry.child = null;
   entry.attempt.pid = null;
+  delete entry.attempt.pidStartedAt;
   enqueue(store, resource, queue, waiter);
 }
 
