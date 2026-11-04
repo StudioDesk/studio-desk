@@ -83,15 +83,17 @@ export function runNative(
       entry.spawnError ??= 'The CLI could not be started in its job (src/adapters/windows-job.ps1). See recorded logs.';
     if (live(a)) {
       clearTimeout(entry.timer);
-      const { status, finishedAt } = a;
+      const { status, finishedAt, requeue } = a;
       // The attempt, its task and the event are saved in one step; a failure leaves both as they were. The task is
       // written to the store directly, as before (not through the runner's stage view mapping).
       try {
         this.store.tx(() => {
+          const t = this.store.task(a.taskId);
           a.status = 'quarantined';
           a.finishedAt = new Date().toISOString();
+          // As at a restart: queued work leaves the queue until Reconcile puts it back (Runner.holdQueue).
+          this.holdQueue(a, t);
           this.store.updateAttempt(a);
-          const t = this.store.task(a.taskId);
           t.status = 'blocked';
           t.reason = 'CLI exited but its process group is still live. Reservations retained until reconciliation.';
           this.store.putTask(t);
@@ -101,6 +103,8 @@ export function runNative(
         a.status = status;
         if (finishedAt === undefined) delete a.finishedAt;
         else a.finishedAt = finishedAt;
+        if (requeue === undefined) delete a.requeue;
+        else a.requeue = requeue;
         throw failure;
       }
       this.active.delete(a.id);

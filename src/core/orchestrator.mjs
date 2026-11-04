@@ -143,12 +143,14 @@ export class Runner {
       // The attempt, its task, their event and the test turn are saved in one step, so a crash between them never
       // leaves an interrupted attempt whose task still reads running; the next start finds both as they were.
       store.tx(() => {
+        const t = store.task(a.taskId);
         a.status = 'interrupted';
         a.finishedAt = new Date().toISOString();
+        // Queued work leaves the queue until it is reconciled; the attempt records that it was queued, so Reconcile
+        // puts it back (holdQueue, restoreQueue).
+        this.holdQueue(a, t);
         store.updateAttempt(a);
-        const t = store.task(a.taskId);
         t.status = 'blocked';
-        t.queued = false;
         t.reason = 'Controller restarted. Reconcile the previous attempt before retrying.';
         if (t.autonomyNote) t.autonomyNote = t.reason;
         this.putTask(t);
@@ -679,6 +681,7 @@ export class Runner {
         const current = this.store.task(taskId);
         delete current.autonomyNote;
         this.putTask(current);
+        this.afterReconcile(taskId);
         return result;
       };
       const result = adapter.reconcile(this, taskId);
@@ -690,9 +693,7 @@ export class Runner {
     if (['running', 'stopping', 'review', 'done'].includes(task.status) || !unsettled.length)
       throw new Error('Only an interrupted or quarantined assignment can be reconciled.');
     // Check every owner before checkpointing anything or releasing any reservation.
-    for (const a of unsettled)
-      if (this.active.has(a.id) || live(a))
-        throw new Error(`Attempt ${a.id} still has a live process/group. Stop it in your terminal before reconciling.`);
+    this.assertReconcilable(unsettled);
     // The checkpoint of retained work is on disk and cannot be rolled back, so it comes first; it records only its
     // own evidence.
     for (const a of unsettled) {
@@ -710,9 +711,52 @@ export class Runner {
       task.status = 'ready';
       task.reason = '';
       delete task.autonomyNote;
+      this.restoreQueue(task, unsettled);
       this.putTask(task);
       this.store.event('reconciled', taskId, null, 'Previous process is no longer live; reservations released.');
     });
+    this.afterReconcile(taskId);
+  }
+  // Reconcile refuses while anything an unsettled attempt recorded may still run (both Reconciles, the default one and
+  // an adapter's): an attempt this controller still runs, its own process or group, or its agent's run of the whole
+  // suite (recordedProcessesEnded). The message names which one.
+  assertReconcilable(unsettled) {
+    for (const a of unsettled) {
+      if (this.active.has(a.id) || live(a))
+        throw new Error(`Attempt ${a.id} still has a live process/group. Stop it in your terminal before reconciling.`);
+      if (!recordedProcessesEnded(a))
+        throw new Error(
+          `Attempt ${a.id} still has a live process: its agent's run of the whole test suite (process ${a.employeeTestPid}). Stop it in your terminal before reconciling.`,
+        );
+    }
+  }
+  // A restart or quarantine takes queued work out of the queue until it is reconciled, so dispatch never weighs it; the
+  // cut-off attempt records that its task was queued, with the director Start it ran (a.directorStart) if any.
+  holdQueue(a, task) {
+    if (!task.queued) return;
+    a.requeue = a.directorStart ? { directorStart: a.directorStart } : {};
+    task.queued = false;
+  }
+  // Inside the transaction that makes a reconciled task ready (both Reconciles): work an attempt recorded as queued is
+  // queued again, as a queued Start leaves it, with the director's Start it ran; its project's pipeline is enabled
+  // unless the project is paused (the director's pause, or the restart's, which lifts on Resume).
+  restoreQueue(task, unsettled) {
+    const held = unsettled.filter(a => a.requeue);
+    if (!held.length) return;
+    task.queued = true;
+    task.controllerWait = true;
+    const directorStart = held.map(a => a.requeue.directorStart).findLast(Boolean);
+    if (directorStart) task.directorStart = directorStart;
+    const projectId = recordProject(task);
+    if (!this.store.project(projectId).dispatchPaused) this.enablePipeline(projectId);
+  }
+  // After a Reconcile's transaction (both Reconciles): the house rules act on the ready task as after approval, then
+  // dispatch runs. Queued work in a paused project says why it waits.
+  afterReconcile(taskId) {
+    this.autonomy.reconciled(taskId);
+    const task = this.store.task(taskId);
+    if (task.queued && this.store.project(recordProject(task)).dispatchPaused) this.refreshReadiness();
+    this.schedule();
   }
   // A director Start is always accepted when the work is only waiting (MP-012): for its
   // prerequisites, a slot, its employee or a resource. It is queued and starts when free.
@@ -884,6 +928,9 @@ export class Runner {
       ...(previousAttempts >= task.maxAttempts
         ? { directorOverride: { attemptLimit: task.maxAttempts, attemptNumber: previousAttempts + 1 } }
         : {}),
+      // A queued director Start the attempt runs (task.directorStart, cleared from the task as it starts), so a restart
+      // or quarantine that cuts the attempt off can queue the work again with the director's override (restoreQueue).
+      ...(director && task.directorStart ? { directorStart: task.directorStart } : {}),
       reportedModel: null,
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -1205,12 +1252,14 @@ export class Runner {
       const a = entry.attempt,
         task = this.store.task(a.taskId);
       entry.nativeError ||= error || 'Adapter tried to finish before its process/group was confirmed stopped.';
-      const { status, finishedAt } = a;
+      const { status, finishedAt, requeue } = a;
       // The attempt, its task and the event are saved in one step; a failure leaves both as they were.
       try {
         this.store.tx(() => {
           a.status = 'quarantined';
           a.finishedAt = new Date().toISOString();
+          // As at a restart: queued work leaves the queue until Reconcile puts it back.
+          this.holdQueue(a, task);
           task.status = 'blocked';
           task.reason = 'Process/group is still live or unknown. Reservations retained until reconciliation.';
           this.store.updateAttempt(a);
@@ -1218,7 +1267,7 @@ export class Runner {
           this.store.event('quarantined', a.taskId, a.id, task.reason);
         });
       } catch (failure) {
-        restoreFields(a, { status, finishedAt });
+        restoreFields(a, { status, finishedAt, requeue });
         throw failure;
       }
       return;
@@ -1228,6 +1277,12 @@ export class Runner {
     clearTimeout(entry.killTimer);
     const a = entry.attempt,
       task = this.store.task(a.taskId);
+    // A quarantined attempt this controller then sees end settles as any attempt does: its task is in the queue it was
+    // in before the quarantine, and nothing is left for Reconcile to put back.
+    if (a.requeue) {
+      task.queued = true;
+      delete a.requeue;
+    }
     // Observe adapter-owned evidence before persisting the terminal attempt. A cancelled
     // native process never invokes its result callback, but its TAP may still be useful.
     const phaseEvidence = new Map();

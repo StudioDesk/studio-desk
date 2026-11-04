@@ -229,6 +229,13 @@ export class Autonomy {
     const task = this.store.task(taskId);
     if (this.policy(task).enabled && task.status === 'ready' && !task.queued) this.queue([task]);
   }
+  // Called after Reconcile makes interrupted or quarantined work ready again: the policy queues it as it queues approved
+  // work. Work Reconcile already queued again, or whose approval is not granted, is left as it is.
+  reconciled(taskId) {
+    const task = this.store.task(taskId);
+    if (task.approval && task.approval.status !== 'approved') return;
+    this.approved(taskId);
+  }
 
   retry(task, reason, policy) {
     // Each stage has its own retry budget and direction: a later stage retrying its own result does

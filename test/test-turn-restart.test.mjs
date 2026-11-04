@@ -298,8 +298,19 @@ for (const [label, field] of [
     const check = runner.start(addChecks(store, 'T-check')).attemptId;
     await waitFor(() => store.attempt(check).testTurn, 'the checks to wait for the turn');
     assert.equal(store.attempt(check).testTurn.holder, 'attempt-held');
-    // Reconciling it releases its leases with the turn, after which the waiting checks run.
-    if (field === 'pid') assert.throws(() => runner.reconcile('T-held'), /still has a live process\/group/);
+    // Reconcile refuses while either recorded process may still run, naming which, and its leases stay held.
+    assert.throws(
+      () => runner.reconcile('T-held'),
+      field === 'pid'
+        ? /still has a live process\/group/
+        : /still has a live process: its agent's run of the whole test suite/,
+    );
+    assert.equal(store.attempt('attempt-held').reconciledAt, undefined);
+    assert.deepEqual(
+      leasesOf(store, 'attempt-held'),
+      [attemptResource('attempt-held'), project, testTurnResource].sort(),
+    );
+    // Once it ends, reconciling releases its leases with the turn, after which the waiting checks run.
     await alive.stop();
     runner.reconcile('T-held');
     assert.deepEqual(leasesOf(store, 'attempt-held'), []);

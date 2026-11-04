@@ -239,7 +239,7 @@ test('retry and start resolve current failure attention while retaining original
   assert.equal(store.attempt(owner).instructions.text, 'Fixture instructions');
 });
 
-test('reconciliation clears interruption attention and retains an unresolved hold', t => {
+test('reconciliation clears interruption attention and retains an unresolved hold', async t => {
   const { store, runner, owner } = conflictFixture(t);
   store.putTask({ ...store.task('T-holder'), hold: true, lastAttemptId: owner, autonomyNote: 'Earlier failure.' });
   store.claim(['employee:W-02'], owner);
@@ -247,9 +247,16 @@ test('reconciliation clears interruption attention and retains an unresolved hol
   const interrupted = store.task('T-holder');
   assert.match(interrupted.reason, /Reconcile the previous attempt/);
   assert.equal(interrupted.autonomyNote, interrupted.reason);
+  assert.equal(interrupted.queued, false);
+  assert.deepEqual(store.attempt(owner).requeue, {}, 'The attempt records that its task was queued.');
   assert.throws(() => restarted.pipeline('queue', ['T-holder']), /Reconcile interrupted work/);
   assert.equal(store.task('T-holder').autonomyNote, interrupted.reason);
   restarted.reconcile('T-holder');
+  // It was queued when the controller stopped, so Reconcile queues it again; the dispatch Reconcile asks for runs
+  // before the checks below, and the hold keeps it from starting.
+  assert.equal(store.task('T-holder').queued, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.attempts('T-holder').length, 1, 'Nothing starts while it is on hold.');
   restarted.refreshReadiness();
   assert.equal(store.task('T-holder').autonomyNote, undefined);
   assert.equal(store.task('T-holder').reason, 'Assignment is deliberately on hold.');

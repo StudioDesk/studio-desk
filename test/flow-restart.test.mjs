@@ -450,11 +450,11 @@ test('a restart while an attempt runs leaves the task interrupted and the flow w
   assert.equal(c.store.attempts(taskId).length, 1);
   assert.equal(c.taskOf('story-run', 'review'), undefined);
   assert.equal(flowRecord(c.store, 'story-run').sequence, before);
-  // The director reconciles it and queues it again; the flow advances once the task settles.
+  // The director reconciles it; the project's house rules queue the ready work again as they queue approved work, with
+  // no Start or queueing pressed, and the flow advances once the task settles.
   await c.ok(`/api/tasks/${taskId}/reconcile`);
-  assert.deepEqual(view(c.group('story-run'))[0], ['work', 1, 'ready', ['start']]);
-  await c.ok('/api/pipeline', { action: 'queue', taskIds: [taskId] });
   group = await c.groupState('story-run', 'done');
+  assert.ok(c.store.attempt(attemptId).reconciledAt);
   assert.deepEqual(view(group), [
     ['work', 1, 'accepted', []],
     ['review', 1, 'accepted', []],
