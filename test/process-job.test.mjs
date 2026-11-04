@@ -77,28 +77,33 @@ test("the wrapper's inputs travel in the environment, and its report is read onc
   assert.equal(processJobsWork({ platform: 'linux' }), false);
 });
 
-test('on Windows a process the main process left running is ended and counted; its output and exit code pass through', async t => {
-  if (process.platform !== 'win32' || !processJobsWork())
-    return t.skip(
-      'the job wrapper does not run here (not Windows, or inside a job that allows no breakaway, such as the built-in sandbox)',
-    );
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'process-job-tree-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const report = path.join(directory, 'report.json'),
-    command = jobbedCommand(process.execPath, [tree, 'main', directory, '7'], process.env, { report });
-  const child = spawn(command.file, command.args, {
-    env: command.environment,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+// The job wrapper exists only on Windows, so on macOS and Linux this test is not registered at all. A skip there
+// counted against every verification, which accepts no skipped test, so Studio desk's own verify could not pass on
+// Linux (found in the 1.2 release proof, November 4, 2026). On Windows, a job that allows no breakaway still shows
+// as a skip.
+if (process.platform === 'win32')
+  test('on Windows a process the main process left running is ended and counted; its output and exit code pass through', async t => {
+    if (!processJobsWork())
+      return t.skip(
+        'the job wrapper does not run here (inside a job that allows no breakaway, such as the built-in sandbox)',
+      );
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'process-job-tree-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const report = path.join(directory, 'report.json'),
+      command = jobbedCommand(process.execPath, [tree, 'main', directory, '7'], process.env, { report });
+    const child = spawn(command.file, command.args, {
+      env: command.environment,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    child.stdout.on('data', chunk => (output += chunk));
+    const code = await new Promise(resolve => child.on('exit', resolve));
+    assert.equal(code, 7);
+    assert.equal(output.trim(), 'main done');
+    const job = readJobReport(report);
+    assert.equal(job.exitCode, 7);
+    assert.ok(job.leftovers >= 1, JSON.stringify(job));
+    const sleeper = Number(fs.readFileSync(path.join(directory, 'sleeper.pid'), 'utf8'));
+    assert.throws(() => process.kill(sleeper, 0), { code: 'ESRCH' }, 'the detached sleeper was ended with the job');
   });
-  let output = '';
-  child.stdout.on('data', chunk => (output += chunk));
-  const code = await new Promise(resolve => child.on('exit', resolve));
-  assert.equal(code, 7);
-  assert.equal(output.trim(), 'main done');
-  const job = readJobReport(report);
-  assert.equal(job.exitCode, 7);
-  assert.ok(job.leftovers >= 1, JSON.stringify(job));
-  const sleeper = Number(fs.readFileSync(path.join(directory, 'sleeper.pid'), 'utf8'));
-  assert.throws(() => process.kill(sleeper, 0), { code: 'ESRCH' }, 'the detached sleeper was ended with the job');
-});
