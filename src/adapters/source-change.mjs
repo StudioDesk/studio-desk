@@ -49,7 +49,13 @@ import {
   changedByBuild,
 } from '../connectors/source-build.mjs';
 import { continuationFile, prepareSourceContinuation } from '../core/attempt-continuation.mjs';
-import { sandboxCause, sandboxNeverStarted } from '../core/attempt-cause.mjs';
+import {
+  causeText,
+  randomTestCause,
+  randomTestFailures,
+  sandboxCause,
+  sandboxNeverStarted,
+} from '../core/attempt-cause.mjs';
 import { closeEmployeeTests, employeeTestsCommand, openEmployeeTests } from '../connectors/employee-tests.mjs';
 import { releaseTestTurn, releaseTurn, takeTestTurn, takeTurn, visualTurnResource } from '../core/test-turn.mjs';
 import { notRunRecord, visualPlan } from '../connectors/visual-check.mjs';
@@ -610,6 +616,20 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
               : '';
           runtime.store.finishPhase(testPhase, testsPassed ? 'succeeded' : 'failed', testPhaseEvidence(stdout));
           a.failedTests = failedTests(stdout);
+          // A negative candidate whose only failures are tests outside the story known to fail at random (they failed on
+          // other stories too) ended with the studio's environment: it stays negative and goes to review as any other,
+          // but does not use up one of the story's attempts (core/attempt-cause.mjs).
+          const random =
+            !testsPassed &&
+            randomTestFailures(runtime.store, a, {
+              failed: a.failedTests,
+              totals,
+              buildFailed: !!report.build && !report.build.passed,
+              signal: checkSignal,
+            });
+          if (random) entry.endCause = randomTestCause();
+          const randomSentence = random ? causeText({ endCause: randomTestCause() }) : '',
+            randomTests = random ? random.map(item => `${item.name}, in ${item.file}`).join('; ') : '';
           fs.writeFileSync(path.join(entry.output, 'test-output.txt'), stdout);
           fs.writeFileSync(path.join(entry.output, 'test-errors.txt'), stderr);
           fs.writeFileSync(path.join(entry.output, 'check-report.json'), JSON.stringify(report, null, 2));
@@ -647,11 +667,10 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
               {
                 name: 'Candidate Node test suite',
                 status: testsPassed ? 'pass' : 'fail',
-                evidence: `${a.checkExecution.fixture ? 'Protocol fixture' : `Measured candidate tests ${sandboxLabel(a.configuration)}`}: ${JSON.stringify(totals)}${totals.tests ? '' : '; no tests ran (the repository has none yet)'}`,
+                evidence: `${a.checkExecution.fixture ? 'Protocol fixture' : `Measured candidate tests ${sandboxLabel(a.configuration)}`}: ${JSON.stringify(totals)}${totals.tests ? '' : '; no tests ran (the repository has none yet)'}${random ? `; ${randomSentence} (${randomTests})` : ''}`,
               },
             ],
-            handoff:
-              'Accept this candidate as evidence, then approve its independent review. Integration requires passing measured checks, accepted review and a separate director action.',
+            handoff: `${random ? `Ended by the environment: ${randomSentence}. ` : ''}Accept this candidate as evidence, then approve its independent review. Integration requires passing measured checks, accepted review and a separate director action.`,
           };
         },
         { cwd: candidate, environment, resultOnFailure: true, onComplete: result => visualStep(result, environment) },

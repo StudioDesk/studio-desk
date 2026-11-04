@@ -1,12 +1,14 @@
 // Why an attempt ended (its endCause, recorded when it finishes): the work itself, the studio's environment (the
-// controller stopping, or a test sandbox that could not start), a provider's usage limit, or a question the agent
-// stopped to ask. Only the work's own endings use up a story's automatic attempts (registry.mjs countsTowardLimit);
-// the rest stay on record. An attempt recorded before endCause existed is classified by the rules that counted it then.
+// controller stopping, a test sandbox that could not start, or a test outside the story known to fail at random), a
+// provider's usage limit, or a question the agent stopped to ask. Only the work's own endings use up a story's
+// automatic attempts (registry.mjs countsTowardLimit); the rest stay on record. An attempt recorded before endCause existed is classified by the rules that counted it then.
 import { jobStartFailed } from '../adapters/process-job.mjs';
+import { recordProject } from './projects.mjs';
 
 export const attemptCauses = Object.freeze(['work', 'environment', 'usage-limit', 'question']);
-// What in the environment ended it.
-export const environmentDetails = Object.freeze(['controller-stop', 'sandbox']);
+// What in the environment ended it: the controller stopping, a test sandbox that could not start, or a test outside the
+// story that is known to fail at random (randomTestFailures).
+export const environmentDetails = Object.freeze(['controller-stop', 'sandbox', 'random-test']);
 
 export function endCause(cause, detail = null) {
   if (!attemptCauses.includes(cause)) throw new Error(`Unknown attempt end cause: ${cause}.`);
@@ -17,6 +19,7 @@ export function endCause(cause, detail = null) {
 export const workCause = () => endCause('work');
 export const controllerStopCause = () => endCause('environment', 'controller-stop');
 export const sandboxCause = () => endCause('environment', 'sandbox');
+export const randomTestCause = () => endCause('environment', 'random-test');
 
 // The cause Runner.finish records. A usage-limit hold and a question name themselves; an attempt the controller's own
 // shutdown cancelled (not one the director or its time limit had already stopped) ended with the controller; an
@@ -53,7 +56,9 @@ export function causeText(attempt) {
   if (cause === 'environment')
     return detail === 'sandbox'
       ? "the candidate's test sandbox could not start, so no tests ran; not counted"
-      : 'the controller stopped; not counted';
+      : detail === 'random-test'
+        ? 'a test outside this story that has failed on other stories failed again; not counted'
+        : 'the controller stopped; not counted';
   return 'the work itself; counted toward the attempt limit';
 }
 
@@ -71,4 +76,51 @@ export function sandboxNeverStarted({ exitCode, stdout = '', stderr = '' }) {
   if (reportedTests(stdout)) return false;
   if (exitCode === jobStartFailed) return true;
   return exitCode !== 0 && sandboxStartMessages.some(message => message.test(stderr));
+}
+
+// A failed test names only its file's name (connectors/source-checks.mjs failedTests), so a story's files are compared
+// by name: its approved files, the files it creates and the files it deletes. A test file of the same name in another
+// folder counts as the story's own, which only ever keeps the cause the work's.
+const fileName = file => String(file).split(/[\/]+/).at(-1);
+const storyFileNames = attempt => {
+  const scope = attempt?.sourceChange;
+  if (!scope) return null;
+  return new Set(
+    [...(scope.allowedFiles || []), ...(scope.newFiles || []), ...(scope.deleteFiles || [])].map(fileName),
+  );
+};
+// The failed test reader keeps at most this many failures; a run that reached it may have failed more than it names.
+const namedFailureLimit = 20;
+
+// The failed tests of a story's negative candidate that make it the environment's (environment/random-test), or null
+// when it stays the work's. Every failed test must lie in a file outside the story's files and be known to fail at
+// random: the same test (file and name) is among the failed tests an earlier attempt of a different story in the same
+// project recorded, in a file outside that story's files too. A failed build, a failure in one of the story's own
+// files, a test never seen failing elsewhere, a skipped or todo test, or no named failure at all keeps it the work's.
+// The earlier records are read from the attempts that name the failed tests (store.attemptsNaming).
+export function randomTestFailures(store, attempt, { failed = [], totals = {}, buildFailed = false, signal = null }) {
+  const own = storyFileNames(attempt);
+  if (!own || buildFailed || signal || totals.skipped || totals.todo) return null;
+  if (!failed.length || failed.length >= namedFailureLimit) return null;
+  if (!failed.every(item => item.file && item.name && !own.has(fileName(item.file)))) return null;
+  const projectId = recordProject(attempt),
+    elsewhere = store
+      .attemptsNaming([...new Set(failed.map(item => item.name))])
+      .filter(
+        other =>
+          other.id !== attempt.id &&
+          other.taskId !== attempt.taskId &&
+          recordProject(other) === projectId &&
+          Array.isArray(other.failedTests) &&
+          storyFileNames(other),
+      );
+  const known = item =>
+    elsewhere.some(other => {
+      const theirs = storyFileNames(other);
+      return (
+        !theirs.has(fileName(item.file)) &&
+        other.failedTests.some(seen => seen?.name === item.name && seen?.file === item.file)
+      );
+    });
+  return failed.every(known) ? failed : null;
 }
