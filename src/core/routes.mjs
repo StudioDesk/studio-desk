@@ -191,6 +191,11 @@ const table = [
     ...toolFields,
   ]),
   post('/api/tools/:id/retire', 'Retires a tool, which keeps it.', [project, field('expectedRevision', true)]),
+  post('/api/tools/:id/key', "Sets, replaces or removes a tool's key.", [
+    project,
+    field('expectedRevision', true),
+    field('key', true),
+  ]),
   post('/api/studio-development', 'Sets up the Studio desk development project and its workflow.', [project]),
   post('/api/tasks/close', 'Closes several tasks at once.', [project, field('taskIds', true), field('reason')]),
   // A project's commands.

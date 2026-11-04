@@ -160,7 +160,8 @@ import { developmentOrganization } from './organizations/studio-development/proj
 import { toldView } from './core/instructions.mjs';
 import { formatRules } from './core/rules.mjs';
 import { createLoadMeasures } from './core/load-measures.mjs';
-import { addTool, changeTool, readTool, readTools, retireTool } from './core/tools.mjs';
+import { addTool, changeTool, readTool, readTools, removeToolKey, retireTool, setToolKey } from './core/tools.mjs';
+import { toolKeyStore } from './connectors/tool-key-store.mjs';
 
 // The most attempts the studio-wide limit allows at once (MP-033).
 const mostAttemptsAtOnce = 16;
@@ -290,6 +291,11 @@ export function createStudio({
   // photographs (scripts/sample-studio.mjs). A trusted option of the code that starts the controller, never a
   // setting, a variable or a request.
   access = 'session',
+  // The credential store that keeps the tools' keys (connectors/tool-key-store.mjs: put, remove, read and has). Like
+  // access, a trusted option of the code that starts the controller, never a setting, a variable or a request. When it
+  // is not given, the controller makes this computer's own store for the data folder the first time a key command or
+  // retiring a tool with a key needs it. The suite's studios pass a stand-in (test/model-free-studio.mjs).
+  toolKeys = null,
   // A fresh data folder starts at No projects yet (v1.0 item 24); the game organization and its starter tasks are
   // the `game-studio` preset, chosen with STUDIO_ORGANIZATION_PRESET.
   bootstrap = {
@@ -339,6 +345,15 @@ export function createStudio({
   packageBoundary(store.directory);
   const key = directorKey(store.directory),
     director = directorAccess(key);
+  // The tools' credential store, made only when a key command or retiring first calls it.
+  let keyStore = toolKeys;
+  const credentials = () => (keyStore ??= toolKeyStore({ directory: store.directory }));
+  const toolCredentials = {
+    put: (id, value) => credentials().put(id, value),
+    remove: id => credentials().remove(id),
+    read: id => credentials().read(id),
+    has: id => credentials().has(id),
+  };
   let runner;
   const measures = createLoadMeasures();
   const planningContext = (org, repair, projectId) =>
@@ -1281,9 +1296,10 @@ export function createStudio({
           return json(res, created, 201);
         }
         // The director's changes to the studio's tools (1.4, tools, step 3), which belong to no project: add one, change
-        // one by naming the revision it changes, or retire one, which keeps it. A stale revision or a retired tool
-        // answers 409, and each answer is the tool as the director reads it. There is no delete. Each write goes on the
-        // change stream as { type: 'tool', id, revision }, for every tab (core/store.mjs).
+        // one by naming the revision it changes, set, replace or remove its key, or retire one, which keeps it and
+        // removes its key. A stale revision or a retired tool answers 409, and each answer is the tool as the director
+        // reads it. There is no delete. Each write goes on the change stream as { type: 'tool', id, revision }, for
+        // every tab (core/store.mjs). A key reaches only the credential store: no answer, refusal or record repeats it.
         if (parts[1] === 'tools') {
           if (!data || typeof data !== 'object' || Array.isArray(data)) fail('Send a tool command as a JSON object.');
           const asDirector = { reader: 'director' };
@@ -1301,8 +1317,21 @@ export function createStudio({
             const id = toolId(parts[2]);
             if (Object.keys(data).some(field => field !== 'expectedRevision'))
               fail('Retiring a tool takes only expectedRevision.');
-            const retired = retireTool(store, id, toolRevision(data));
+            const retired = retireTool(store, id, toolRevision(data), 'director', toolCredentials);
             return json(res, { tool: readTool(store, retired.id, asDirector) });
+          }
+          // A key given as text sets or replaces the tool's key; key: null removes it.
+          if (parts.length === 4 && parts[3] === 'key' && req.method === 'POST') {
+            const id = toolId(parts[2]);
+            if (Object.keys(data).some(field => !['projectId', 'expectedRevision', 'key'].includes(field)))
+              fail("A tool's key command takes only expectedRevision and key.");
+            if (!Object.hasOwn(data, 'key')) fail('Send the key to set as key, or key: null to remove it.');
+            const expectedRevision = toolRevision(data),
+              changed =
+                data.key === null
+                  ? removeToolKey(store, toolCredentials, id, expectedRevision)
+                  : setToolKey(store, toolCredentials, id, expectedRevision, data.key);
+            return json(res, { tool: readTool(store, changed.id, asDirector) });
           }
           fail('Unknown controller route.', 404);
         }

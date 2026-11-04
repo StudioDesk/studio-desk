@@ -48,6 +48,27 @@ const fixtureBuiltInSandbox = runner => ({
   status: () => ({ state: runner()?.sourceCheckCommand ? 'ready' : 'unsupported' }),
   setup: () => false,
 });
+// The tools' credential store as the suite's studios see it (1.4, tools), never this computer's own protected storage,
+// Keychain or Secret Service: it keeps keys in memory and records every call it gets, as [operation, tool ID], never
+// the key. Each studio gets its own unless a test passes its own `toolKeys`.
+export function standInToolKeys() {
+  const held = new Map(),
+    calls = [];
+  const call = (operation, id, act) => {
+    calls.push([operation, id]);
+    return act();
+  };
+  return {
+    kind: 'stand-in',
+    lessSafe: false,
+    held,
+    calls,
+    put: (id, key) => call('put', id, () => void held.set(id, key)),
+    remove: id => call('remove', id, () => void held.delete(id)),
+    read: id => call('read', id, () => (held.has(id) ? held.get(id) : null)),
+    has: id => call('has', id, () => held.has(id)),
+  };
+}
 // Every request needs the director's session or key (C-01, src/director-access.mjs). The suite's requests act as
 // the director: fetch sends a started studio's credentials to that studio's own address, so every test still
 // passes through the check. A command (any method but GET or HEAD), or a request that carries the page's request
@@ -95,6 +116,7 @@ export function createStudio(options = {}) {
     // The suite's studios start from the game organization and its starter tasks unless a test chooses.
     bootstrap: { organizationPreset: 'game-studio', workflowPresets: ['game-production'] },
     ...options,
+    toolKeys: options.toolKeys ?? standInToolKeys(),
     runnerOptions: {
       packageInstallCommand: fixtureNpm,
       builtInSandbox: fixtureBuiltInSandbox(() => app?.runner),

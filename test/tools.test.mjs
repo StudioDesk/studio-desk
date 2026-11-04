@@ -636,16 +636,17 @@ test("every add, change and retire goes on the change stream with the tool's ID 
   assert.deepEqual(last, { type: 'tool', id: 'tool-elsewhere', revision: 4 });
 });
 
-test('the director may change or retire an active tool; a retired one and any other reader take no action', t => {
+test('the director may change or retire an active tool and set its key, and remove one once set; a retired one and any other reader take no action', t => {
   const { store } = studio(t);
   const active = addTool(store, command()),
     retired = retireTool(store, addTool(store, studioCall()).id, 1),
     find = () => true;
-  assert.deepEqual(readTool(store, active.id, { find }).actions, ['change', 'retire']);
+  const director = ['change', 'retire', 'set-key'];
+  assert.deepEqual(readTool(store, active.id, { find }).actions, director);
   assert.deepEqual(readTool(store, retired.id, { find }).actions, []);
   assert.deepEqual(
     readTools(store, { find }).map(tool => tool.actions),
-    [['change', 'retire'], []],
+    [director, []],
   );
   for (const reader of ['attempt-d4508f47', 'W-02', 'Director', '', null])
     assert.deepEqual(
@@ -654,12 +655,25 @@ test('the director may change or retire an active tool; a retired one and any ot
       `reader ${reader}`,
     );
   assert.deepEqual(readTool(store, active.id, { reader: 'attempt-d4508f47', find }).actions, []);
-  assert.deepEqual(toolActions(active, 'director'), ['change', 'retire']);
+  assert.deepEqual(toolActions(active, 'director'), director);
   assert.deepEqual(toolActions(retired, 'director'), []);
   assert.deepEqual(toolActions(active, 'attempt-d4508f47'), []);
   // A read with no options is the director's.
   assert.deepEqual(readTool(store, retired.id).actions, []);
-  assert.deepEqual(readTool(store, addTool(store, studioCall()).id).actions, ['change', 'retire']);
+  assert.deepEqual(readTool(store, addTool(store, studioCall()).id).actions, director);
+
+  // Once a key is set the director may remove it too; no other reader may, and removing it takes the action away.
+  const keys = credentials(),
+    keyed = setToolKey(store, keys, active.id, 1, testKey);
+  assert.deepEqual(readTool(store, active.id, { find }).actions, [...director, 'remove-key']);
+  assert.deepEqual(toolActions(keyed, 'director'), [...director, 'remove-key']);
+  assert.deepEqual(readTool(store, active.id, { reader: 'attempt-d4508f47', find }).actions, []);
+  removeToolKey(store, keys, active.id, 2);
+  assert.deepEqual(readTool(store, active.id, { find }).actions, director);
+  // A record whose key state is not well formed reads as no key set, and offers no removal.
+  assert.deepEqual(toolActions({ ...keyed, key: { set: true } }, 'director'), director);
+  // A retired tool takes no action, even one whose record says a key is set.
+  assert.deepEqual(toolActions({ ...keyed, retiredAt: keyed.updatedAt }, 'director'), []);
 });
 
 test("every read's key says only whether a key is set, when and its last four, and the list holds no other key field", t => {
@@ -1058,7 +1072,7 @@ test("a command's read says found, or missing with where to get it, from an inje
     by: 'director',
     retiredAt: null,
     availability: { state: 'found' },
-    actions: ['change', 'retire'],
+    actions: ['change', 'retire', 'set-key'],
   });
   refusedWith(() => readTool(store, 'tool-missing', { find }), 404, notFound);
 });

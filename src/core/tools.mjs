@@ -504,10 +504,14 @@ export function retireTool(store, id, expectedRevision, by = 'director', keys = 
   });
 }
 
-// What a reader may do with a tool, worked out by the controller: the director may change or retire an active tool;
-// a retired tool takes no action, and any other reader (an agent's attempt) none either.
+// What a reader may do with a tool, worked out by the controller: the director may change or retire an active tool and
+// set or replace its key, and remove the key once one is set; a retired tool takes no action, and any other reader (an
+// agent's attempt) none either.
 export function toolActions(record, reader) {
-  return reader === 'director' && !record?.retiredAt ? ['change', 'retire'] : [];
+  if (reader !== 'director' || record?.retiredAt) return [];
+  const actions = ['change', 'retire', 'set-key'];
+  if (toolKey(record?.key).set) actions.push('remove-key');
+  return actions;
 }
 
 // A tool as read: its stored fields, whether a key is set, when and its last four characters and nothing else about a

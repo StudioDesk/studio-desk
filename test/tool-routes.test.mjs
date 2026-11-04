@@ -1,14 +1,17 @@
 // The director's tool reads and changes through the controller (1.4, tools, step 3): GET /api/tools and /api/tools/:id,
-// POST /api/tools, PATCH /api/tools/:id and POST /api/tools/:id/retire, studio-wide and the director's alone. An
-// agent's attempt token opens none of them, and each change reaches every tab's change list as { type: 'tool', id,
-// revision }. Model-free: the commands name a program no computer has, so whether one is found never depends on it.
+// POST /api/tools, PATCH /api/tools/:id, POST /api/tools/:id/retire and POST /api/tools/:id/key, studio-wide and the
+// director's alone. An agent's attempt token opens none of them, and each change reaches every tab's change list as
+// { type: 'tool', id, revision }. Model-free: the commands name a program no computer has, so whether one is found
+// never depends on it, and every studio keeps tools' keys in an in-memory stand-in credential store, never this
+// computer's own (test/model-free-studio.mjs).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import util from 'node:util';
 import { setup } from './studio-setup.mjs';
-import { createStudio } from './model-free-studio.mjs';
+import { createStudio, standInToolKeys } from './model-free-studio.mjs';
 import { closeAndRemove } from './fixture-cleanup.mjs';
 import { employeeTestsAllowed } from '../src/connectors/employee-tests.mjs';
 
@@ -37,7 +40,8 @@ const studioCall = (fields = {}) => ({
 });
 const toolId = /^tool-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const unknownId = 'tool-00000000-0000-4000-8000-000000000000';
-// The fields core/tools.mjs refuses as a key's; a read carries only `key`, always { set: false }.
+// The fields core/tools.mjs refuses as a key's; a read carries only `key`: { set: false }, or exactly
+// { set: true, setAt, lastFour } once a key is set.
 const keyLike = /key|secret|token|password|passwd|credential|auth|header|cookie/i;
 
 // A request to a started studio, answered with its status, text and JSON. A command carries the page's request token
@@ -72,7 +76,8 @@ const one = (c, id, options) => call(c, 'GET', `/api/tools/${id}`, undefined, op
 // This start's ID, which a tab sends with what it last saw.
 const startOf = async c => (await (await fetch(`${c.origin}/api/changes?after=0`)).json()).start;
 
-// No answer holds a key field other than a tool's `key`, which reads as not set, and none holds the director's key.
+// No answer holds a key field other than a tool's `key`, which reads as not set or as set with when and its last four
+// characters, and none holds the director's key.
 function assertNoKey(c, answer, where) {
   assert.ok(!answer.text.includes(c.app.directorKey), `${where} holds the director's key`);
   const walk = (value, at) => {
@@ -80,7 +85,11 @@ function assertNoKey(c, answer, where) {
     if (!value || typeof value !== 'object') return;
     for (const [field, inner] of Object.entries(value)) {
       if (field === 'key') {
-        assert.deepEqual(inner, { set: false }, `${at}.key`);
+        if (inner?.set === true) {
+          assert.deepEqual(Object.keys(inner).sort(), ['lastFour', 'set', 'setAt'], `${at}.key`);
+          assert.equal(new Date(inner.setAt).toISOString(), inner.setAt, `${at}.key.setAt`);
+          assert.equal([...inner.lastFour].length, 4, `${at}.key.lastFour`);
+        } else assert.deepEqual(inner, { set: false }, `${at}.key`);
         continue;
       }
       assert.doesNotMatch(field, keyLike, `${at}.${field}`);
@@ -106,7 +115,7 @@ test('the director adds a command and a studio call and reads them back, each wi
   assert.equal(added.retiredAt, null);
   assert.deepEqual(added.key, { set: false });
   assert.deepEqual(added.availability, { state: 'missing', getFrom });
-  assert.deepEqual(added.actions, ['change', 'retire']);
+  assert.deepEqual(added.actions, ['change', 'retire', 'set-key']);
   assert.equal(added.by, 'director');
 
   // An ID in the input is not the director's to choose: the controller names every tool.
@@ -120,7 +129,7 @@ test('the director adds a command and a studio call and reads them back, each wi
   assert.deepEqual(issues.operations, studioCall().operations);
   assert.equal(issues.availability, null, 'A studio call has no program to find.');
   assert.deepEqual(issues.key, { set: false });
-  assert.deepEqual(issues.actions, ['change', 'retire']);
+  assert.deepEqual(issues.actions, ['change', 'retire', 'set-key']);
 
   const listed = await list(c);
   assert.equal(listed.status, 200);
@@ -191,7 +200,7 @@ test('a change names the current revision; a stale one, or any change once retir
   assert.equal(tool.revision, 2);
   assert.equal(tool.purpose, 'Encodes the trailer.');
   assert.equal(tool.createdAt, added.createdAt);
-  assert.deepEqual(tool.actions, ['change', 'retire']);
+  assert.deepEqual(tool.actions, ['change', 'retire', 'set-key']);
   assertNoKey(c, changed, 'the change');
 
   // A change from someone who last read revision 1 would overwrite revision 2 unseen.
@@ -394,4 +403,355 @@ test('each tool change reaches a tab following a project and one following none,
       'The changes are in the order they were made.',
     );
   }
+});
+
+// The tools' key command (1.4, tools): POST /api/tools/:id/key with { expectedRevision, key } sets or replaces a
+// tool's key, and key: null removes it. The studios below keep keys in a recording stand-in credential store, which
+// holds every key in memory and records each call it gets as [operation, tool ID].
+const testKey = 'sd-test-key-QX7J-9481',
+  secondKey = 'sd-test-key-ZP3M-5502';
+const setKey = (c, id, input, options) => call(c, 'POST', `/api/tools/${id}/key`, input, options);
+const withoutSeq = changes => changes.map(({ seq, ...change }) => change);
+const holdsKey = text => [testKey, secondKey].some(key => text.includes(key));
+const only = "A tool's key command takes only expectedRevision and key.";
+// The tool command each action the director reads is sent as.
+const actionRoutes = {
+  change: 'PATCH /api/tools/:id',
+  retire: 'POST /api/tools/:id/retire',
+  'set-key': 'POST /api/tools/:id/key',
+  'remove-key': 'POST /api/tools/:id/key',
+};
+
+// A started studio whose tools' keys go to a recording stand-in credential store, with its data folder.
+async function keyStudio(t) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-test-')),
+    keys = standInToolKeys(),
+    app = createStudio({ directory, port: 0, toolKeys: keys });
+  const origin = await app.start();
+  t.after(() => closeAndRemove(app, directory));
+  const page = await (await fetch(origin)).text();
+  return { app, origin, directory, keys, token: page.match(/name="studio-token" content="([^"]+)"/)[1] };
+}
+// The tool changes a tab missed since `after`, without their seq, and the whole answer's text.
+async function toolChangesSince(c, start, after) {
+  const answer = await fetch(`${c.origin}/api/changes?after=${after}&start=${start}`),
+    text = await answer.text(),
+    missed = JSON.parse(text);
+  assert.equal(missed.reload, undefined);
+  return { text, tools: withoutSeq(missed.changes.filter(item => item.type === 'tool')) };
+}
+// One tab's change stream that names no project, kept as text until closed.
+async function watch(origin) {
+  const controller = new AbortController(),
+    response = await fetch(origin + '/api/events', { signal: controller.signal });
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader(),
+    decoder = new TextDecoder();
+  let text = '';
+  const reading = (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        text += decoder.decode(value, { stream: true });
+      }
+    } catch {
+      // Aborted when the test closes the stream.
+    }
+  })();
+  return {
+    get text() {
+      return text;
+    },
+    async close() {
+      controller.abort();
+      await reading;
+    },
+  };
+}
+// Every file under a folder, at any depth.
+const filesUnder = directory =>
+  fs
+    .readdirSync(directory, { withFileTypes: true, recursive: true })
+    .filter(entry => entry.isFile())
+    .map(entry => path.join(entry.parentPath, entry.name));
+
+test("the director sets, replaces and removes a tool's key with one command, and the key shows nowhere but the credential store", async t => {
+  // What the controller writes to the console, kept as it is written.
+  const consoleMethods = ['log', 'warn', 'error'].map(method => t.mock.method(console, method));
+  const c = await keyStudio(t);
+  const { tool } = (await add(c, command())).data;
+  assert.deepEqual(tool.actions, ['change', 'retire', 'set-key']);
+  const stream = await watch(c.origin),
+    start = await startOf(c),
+    first = c.app.store.version,
+    texts = [];
+
+  // Each command answers the tool as the director reads it, raises the revision and puts exactly the tool's change on
+  // the change stream.
+  const step = async (input, options) => {
+    const after = c.app.store.version,
+      answer = await setKey(c, tool.id, input, options);
+    assert.equal(answer.status, 200, answer.text);
+    assertNoKey(c, answer, `the key command at revision ${input.expectedRevision}`);
+    assert.equal(answer.data.tool.revision, input.expectedRevision + 1);
+    const missed = await toolChangesSince(c, start, after);
+    assert.deepEqual(missed.tools, [{ type: 'tool', id: tool.id, revision: input.expectedRevision + 1 }]);
+    texts.push(answer.text, missed.text);
+    return answer.data.tool;
+  };
+
+  const set = await step({ expectedRevision: 1, key: testKey });
+  assert.deepEqual(set.key, { set: true, setAt: set.key.setAt, lastFour: '9481' });
+  assert.equal(new Date(set.key.setAt).toISOString(), set.key.setAt);
+  assert.deepEqual(set.actions, ['change', 'retire', 'set-key', 'remove-key']);
+  assert.deepEqual([...c.keys.held], [[tool.id, testKey]]);
+  assert.deepEqual((await one(c, tool.id)).data, { tool: set });
+
+  const replaced = await step({ expectedRevision: 2, key: secondKey });
+  assert.deepEqual(replaced.key, { set: true, setAt: replaced.key.setAt, lastFour: '5502' });
+  assert.ok(replaced.key.setAt >= set.key.setAt);
+  assert.deepEqual(replaced.actions, ['change', 'retire', 'set-key', 'remove-key']);
+  assert.deepEqual([...c.keys.held], [[tool.id, secondKey]]);
+
+  const removed = await step({ expectedRevision: 3, key: null });
+  assert.deepEqual(removed.key, { set: false });
+  assert.deepEqual(removed.actions, ['change', 'retire', 'set-key']);
+  assert.equal(c.keys.held.size, 0);
+  assert.deepEqual((await one(c, tool.id)).data, { tool: removed });
+
+  // Sent with the director's key and no request token, it works, and its line in the activity names only the method
+  // and the route.
+  const keyed = { ...plain, token: false, headers: { 'x-studio-key': c.app.directorKey } };
+  const keyedSet = await step({ expectedRevision: 4, key: testKey }, keyed);
+  assert.equal(keyedSet.key.lastFour, '9481');
+  assert.deepEqual([...c.keys.held], [[tool.id, testKey]]);
+  assert.deepEqual(
+    c.app.store.db
+      .prepare("SELECT message FROM events WHERE kind='director_key' ORDER BY seq")
+      .all()
+      .map(row => row.message),
+    [`A local tool sent POST /api/tools/${tool.id}/key with the director's key.`],
+  );
+
+  // A refusal that carries the key repeats none of it.
+  for (const input of [
+    { expectedRevision: 1, key: secondKey },
+    { expectedRevision: 5, key: `${secondKey}\n` },
+    { expectedRevision: 5, key: secondKey, note: testKey },
+  ]) {
+    const refused = await setKey(c, tool.id, input);
+    assert.ok(refused.status >= 400, refused.text);
+    texts.push(refused.text);
+  }
+  for (const read of [await list(c), await one(c, tool.id)]) {
+    assert.equal(read.status, 200);
+    assertNoKey(c, read, 'a read');
+    texts.push(read.text);
+  }
+  const all = await toolChangesSince(c, start, first);
+  assert.deepEqual(
+    all.tools,
+    [2, 3, 4, 5].map(revision => ({ type: 'tool', id: tool.id, revision })),
+  );
+  texts.push(all.text);
+
+  // The change stream carried each change, and none of the key.
+  const deadline = Date.now() + 5000;
+  while (!stream.text.includes('"revision":5') && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+  await stream.close();
+  assert.ok(stream.text.includes(tool.id) && stream.text.includes('"revision":5'), 'The stream carried the changes.');
+  assert.ok(!holdsKey(stream.text), 'The change stream holds no key.');
+
+  for (const text of texts) assert.ok(!holdsKey(text), `An answer holds a key: ${text.slice(0, 200)}`);
+  for (const table of ['settings', 'events'])
+    assert.ok(
+      !holdsKey(JSON.stringify(c.app.store.db.prepare(`SELECT * FROM ${table}`).all())),
+      `A row of ${table} holds a key.`,
+    );
+  // The data folder's files, the database and its journal files included, hold no byte of either key.
+  const files = filesUnder(c.directory);
+  assert.ok(
+    files.some(file => path.basename(file) === 'studio.sqlite'),
+    'The data folder holds the database.',
+  );
+  for (const file of files) {
+    const bytes = fs.readFileSync(file);
+    for (const key of [testKey, secondKey])
+      for (const encoding of ['utf8', 'utf16le'])
+        assert.ok(!bytes.includes(Buffer.from(key, encoding)), `${path.relative(c.directory, file)} holds a key.`);
+  }
+  const written = consoleMethods.flatMap(method => method.mock.calls.map(entry => util.inspect(entry.arguments)));
+  assert.ok(!written.some(holdsKey), 'Nothing written to the console holds a key.');
+  // Only the stand-in holds it.
+  assert.deepEqual([...c.keys.held], [[tool.id, testKey]]);
+});
+
+test('retiring a tool with a key set removes the key from the credential store', async t => {
+  const c = await keyStudio(t);
+  const { tool } = (await add(c, command())).data;
+  assert.equal((await setKey(c, tool.id, { expectedRevision: 1, key: testKey })).status, 200);
+  assert.deepEqual([...c.keys.held], [[tool.id, testKey]]);
+
+  const retired = await retire(c, tool.id, { expectedRevision: 2 });
+  assert.equal(retired.status, 200, retired.text);
+  assert.equal(c.keys.held.size, 0, 'The stand-in holds no key.');
+  assert.deepEqual(retired.data.tool.key, { set: false });
+  assert.deepEqual(retired.data.tool.actions, []);
+  assert.equal(retired.data.tool.revision, 3);
+  assert.equal(typeof retired.data.tool.retiredAt, 'string');
+  assertNoKey(c, retired, 'the retired tool');
+  assert.ok(!holdsKey(retired.text));
+  assert.deepEqual((await one(c, tool.id)).data, { tool: retired.data.tool });
+
+  // A tool with no key retires without calling the credential store.
+  const { tool: other } = (await add(c, studioCall())).data,
+    calls = c.keys.calls.length;
+  assert.equal((await retire(c, other.id, { expectedRevision: 1 })).status, 200);
+  assert.equal(c.keys.calls.length, calls);
+});
+
+test('each refusal of the key command answers its status and plain words before the credential store is called', async t => {
+  const c = await keyStudio(t);
+  const { tool } = (await add(c, command())).data;
+  // At revision 2 with no key set, and a second tool retired.
+  const changed = await change(c, tool.id, { expectedRevision: 1, ...command({ purpose: 'Encodes the trailer.' }) });
+  assert.equal(changed.status, 200, changed.text);
+  const { tool: gone } = (await add(c, studioCall())).data;
+  assert.equal((await retire(c, gone.id, { expectedRevision: 1 })).status, 200);
+  const before = c.app.store.tools();
+
+  for (const [id, input, status, message] of [
+    [tool.id, { expectedRevision: 1, key: testKey }, 409, 'Tool changed. Refresh before saving.'],
+    [gone.id, { expectedRevision: 2, key: testKey }, 409, 'This tool is retired, so it cannot have a key.'],
+    [gone.id, { expectedRevision: 2, key: null }, 409, 'This tool is retired, so it cannot have a key.'],
+    [tool.id, { expectedRevision: 2, key: testKey.slice(0, 11) }, 400, "A tool's key is at least 12 characters."],
+    [
+      tool.id,
+      { expectedRevision: 2, key: `${testKey}\nsecond line` },
+      400,
+      "A tool's key is one line, with no line break.",
+    ],
+    [tool.id, { expectedRevision: 2, key: `${testKey}\r` }, 400, "A tool's key is one line, with no line break."],
+    [tool.id, { expectedRevision: 2, key: 123456789012345 }, 400, "A tool's key is text."],
+    [tool.id, { expectedRevision: '2', key: testKey }, 400, 'expectedRevision must be a whole number from 1.'],
+    [tool.id, { expectedRevision: 1.5, key: testKey }, 400, 'expectedRevision must be a whole number from 1.'],
+    [tool.id, { key: testKey }, 400, 'Name the revision this changes as expectedRevision, from the tool as last read.'],
+    [tool.id, { expectedRevision: 2, key: testKey, name: 'Video encoder' }, 400, only],
+    [tool.id, { expectedRevision: 2, apiKey: testKey }, 400, only],
+    [tool.id, { expectedRevision: 2 }, 400, 'Send the key to set as key, or key: null to remove it.'],
+    [tool.id, { expectedRevision: 2, key: null }, 409, 'This tool has no key to remove.'],
+    // A projectId is allowed beside the two fields, as the other tool commands allow it.
+    [tool.id, { projectId: 'project-legacy', expectedRevision: 2, key: null }, 409, 'This tool has no key to remove.'],
+    [unknownId, { expectedRevision: 1, key: testKey }, 404, 'Tool not found.'],
+    ['not-a-tool', { expectedRevision: 1, key: testKey }, 404, 'Tool not found.'],
+  ]) {
+    const refused = await setKey(c, id, input);
+    assert.equal(refused.status, status, `${JSON.stringify(input)}: ${refused.text}`);
+    assert.equal(refused.data.error, message);
+    assert.ok(!holdsKey(refused.text) && !refused.text.includes('sd-test-key'), 'A refusal repeats no key.');
+  }
+  const json = await call(c, 'POST', `/api/tools/${tool.id}/key`, [testKey]);
+  assert.equal(json.status, 400);
+  assert.equal(json.data.error, 'Send a tool command as a JSON object.');
+
+  // Neither the session nor the key: 401, even with this start's request token.
+  const unsigned = await setKey(c, tool.id, { expectedRevision: 2, key: testKey }, plain);
+  assert.equal(unsigned.status, 401, unsigned.text);
+  assert.match(unsigned.data.error, /launch/);
+  // The session without the request token: 403.
+  const cookie = (await fetch(c.app.launchUrl, { ...plain, redirect: 'manual' })).headers
+    .get('set-cookie')
+    .split(';')[0];
+  const session = await setKey(
+    c,
+    tool.id,
+    { expectedRevision: 2, key: testKey },
+    {
+      ...plain,
+      token: false,
+      headers: { cookie },
+    },
+  );
+  assert.equal(session.status, 403, session.text);
+  assert.match(session.data.error, /X-Studio-Token/);
+  // An attempt's test token: 401, with the page's request token as well.
+  const attemptId = 'attempt-tool-key',
+    token = 'b'.repeat(64);
+  c.app.runner.active.set(attemptId, {
+    attempt: { id: attemptId, taskId: 'T-tool-key' },
+    employeeTests: { token, child: null },
+  });
+  try {
+    assert.ok(employeeTestsAllowed(c.app.runner.active.get(attemptId), token));
+    const agent = { ...plain, token: false, headers: { 'x-studio-attempt-token': token } };
+    for (const options of [agent, { ...agent, token: true }]) {
+      const refused = await setKey(c, tool.id, { expectedRevision: 2, key: testKey }, options);
+      assert.equal(refused.status, 401, refused.text);
+      assert.ok(!holdsKey(refused.text));
+    }
+  } finally {
+    c.app.runner.active.delete(attemptId);
+  }
+  for (const answer of [unsigned, session]) assert.ok(!holdsKey(answer.text));
+
+  assert.deepEqual(c.keys.calls, [], 'The credential store was never called.');
+  assert.equal(c.keys.held.size, 0);
+  assert.deepEqual(c.app.store.tools(), before, 'Nothing refused changed a tool.');
+});
+
+test('a record that cannot be saved after the credential store took a replacement keeps the old key and the tool as they were', async t => {
+  const c = await keyStudio(t);
+  const { tool } = (await add(c, command())).data;
+  assert.equal((await setKey(c, tool.id, { expectedRevision: 1, key: testKey })).status, 200);
+  const before = await one(c, tool.id),
+    start = await startOf(c),
+    after = c.app.store.version;
+  c.keys.calls.length = 0;
+
+  // putTool fails once, after the stand-in has taken the replacement.
+  const putTool = t.mock.method(c.app.store, 'putTool');
+  putTool.mock.mockImplementationOnce(() => {
+    throw new Error('The disk is full.');
+  });
+  const failed = await setKey(c, tool.id, { expectedRevision: 2, key: secondKey });
+  putTool.mock.restore();
+  assert.equal(failed.status, 400, failed.text);
+  assert.equal(failed.data.error, 'The disk is full.');
+  assert.ok(!holdsKey(failed.text));
+  assert.deepEqual(c.keys.calls, [
+    ['read', tool.id],
+    ['put', tool.id],
+    ['put', tool.id],
+  ]);
+  assert.deepEqual([...c.keys.held], [[tool.id, testKey]], 'The stand-in holds the old key again.');
+  assert.deepEqual((await one(c, tool.id)).data, before.data, 'The tool reads exactly as before.');
+  assert.deepEqual((await toolChangesSince(c, start, after)).tools, [], 'No tool change went on the stream.');
+});
+
+test('the director reads the key actions an active tool offers, and each names a route the table lists', async t => {
+  const c = await keyStudio(t);
+  const table = await call(c, 'GET', '/api/routes');
+  assert.equal(table.status, 200);
+  const listed = new Set(table.data.routes.map(route => `${route.method} ${route.path}`));
+  assert.ok(listed.has('POST /api/tools/:id/key'));
+
+  const { tool } = (await add(c, studioCall())).data,
+    seen = [tool.actions];
+  assert.deepEqual(tool.actions, ['change', 'retire', 'set-key']);
+  const set = await setKey(c, tool.id, { expectedRevision: 1, key: testKey });
+  assert.deepEqual(set.data.tool.actions, ['change', 'retire', 'set-key', 'remove-key']);
+  assert.deepEqual((await one(c, tool.id)).data.tool.actions, ['change', 'retire', 'set-key', 'remove-key']);
+  assert.deepEqual(
+    (await list(c)).data.tools.map(item => item.actions),
+    [['change', 'retire', 'set-key', 'remove-key']],
+  );
+  seen.push(set.data.tool.actions);
+  const retired = await retire(c, tool.id, { expectedRevision: 2 });
+  assert.deepEqual(retired.data.tool.actions, []);
+  assert.deepEqual((await one(c, tool.id)).data.tool.actions, []);
+
+  const actions = [...new Set(seen.flat())];
+  assert.deepEqual(actions.sort(), Object.keys(actionRoutes).sort(), 'Every action has its command.');
+  for (const action of actions) assert.ok(listed.has(actionRoutes[action]), `${action}: ${actionRoutes[action]}`);
 });
