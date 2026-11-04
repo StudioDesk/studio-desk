@@ -2419,6 +2419,54 @@ test('adding a project for a git repository checks the repository and its tests 
   );
 });
 
+// Studio desk's own profile name is refused for another project's repository before its tests run or anything is
+// recorded.
+test("adding a project whose repository profile uses Studio desk's own name is refused before its tests run", async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    root = path.join(c.directory, 'desk-like'),
+    marker = path.join(c.directory, 'repository-tests-ran.txt'),
+    write = (file, text) => {
+      fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+      fs.writeFileSync(path.join(root, file), text);
+    };
+  write('README.md', '# A repository\n');
+  write('lib/index.mjs', 'export {};\n');
+  // Its one test leaves a file behind if it ever runs.
+  write(
+    'tests/ran.test.mjs',
+    "import test from 'node:test';\nimport fs from 'node:fs';\n" +
+      `test('leaves a mark', () => fs.writeFileSync(${JSON.stringify(marker)}, 'ran'));\n`,
+  );
+  git(root, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  git(root, ['config', 'core.autocrlf', 'false']);
+  git(root, ['config', 'user.name', 'Fixture director']);
+  git(root, ['config', 'user.email', 'fixture@example.invalid']);
+  git(root, ['config', 'commit.gpgsign', 'false']);
+  git(root, ['add', '-A']);
+  git(root, ['commit', '--quiet', '-m', 'A repository']);
+  const inspected = await c.request('/api/projects/inspect-repository', { root });
+  assert.equal(inspected.status, 200, JSON.stringify(inspected.data));
+  const profile = { ...inspected.data.profile, id: 'studio-desk' },
+    before = store.projects().length,
+    events = store.events().length,
+    refused = await c.request('/api/projects', { name: 'Desk like', repository: { root, profile } });
+  assert.equal(refused.status, 400);
+  assert.equal(
+    refused.data.error,
+    "studio-desk is Studio desk's own profile name; give this repository's profile another name.",
+  );
+  assert.equal(store.projects().length, before);
+  assert.ok(!store.projects().some(project => project.name === 'Desk like'));
+  assert.ok(
+    !store
+      .events()
+      .slice(events)
+      .some(event => event.kind === 'project_created'),
+  );
+  assert.equal(fs.existsSync(marker), false);
+});
+
 // The dashboard's folder browser reads folder names only through the protected API: a POST with the request
 // token, so a page without the dashboard's token cannot read them.
 test('the folder list answers the dashboard with its request token and nothing else', async t => {

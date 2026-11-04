@@ -72,11 +72,15 @@ export function projectRepository(store, projectId, root, runtime) {
   if (taken) throw new Error(`Project ${taken.name || taken.id} already works on this repository.`);
   return { root: real, ...state };
 }
+// Studio desk's own profile id means its own checks, limits, root-file rules and package installs: only the
+// controller's own source, which records no project source, uses it.
+export const reservedProfile = `${studioDeskProfile.id} is Studio desk's own profile name; give this repository's profile another name.`;
 // Records a project's own repository with a valid profile. Adding a project from the dashboard
 // first checks that the tree is clean and its tests run (step 4b).
 export function recordProjectSource(store, projectId, { root, profile }, runtime) {
   const { root: real } = projectRepository(store, projectId, root, runtime);
   validateSourceProfile(profile);
+  if (profile.id === studioDeskProfile.id) throw new Error(reservedProfile);
   const project = store.project(projectId);
   project.source = { root: real, profile: structuredClone(profile) };
   store.putProject(project);
@@ -200,6 +204,12 @@ export function inspectRepository(store, root, runtime, profile, projectId = nul
     clean = !git(repository.root, ['status', '--porcelain', '--untracked-files=no']),
     problems = clean ? [] : [unclean];
   profile = profile ? validateSourceProfile(structuredClone(profile)) : proposeSourceProfile(repository.root);
+  // A project already recorded with Studio desk's own profile id keeps it as it is.
+  if (
+    profile.id === studioDeskProfile.id &&
+    !(projectId && store.project(projectId)?.source?.profile?.id === studioDeskProfile.id)
+  )
+    problems.push(reservedProfile);
   let plan = null;
   try {
     plan = sourcePlan(repository.root, profile);
