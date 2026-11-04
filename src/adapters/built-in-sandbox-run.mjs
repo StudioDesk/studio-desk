@@ -94,13 +94,18 @@ fs.writeFileSync(
   }),
 );
 // One of the computer's built-in sandbox sessions, which a sixth session at once on Windows could not set up (C-43):
-// this run waits in turn for one, shared with every other copy of Studio desk here, npm run verify included.
-const releaseSession = windows
-  ? await takeBuiltInSandboxSession(builtInSandboxSessionFolder(files), {
+// this run waits in turn for one, shared with every other copy of Studio desk here, npm run verify included. A run that
+// gets none within the wait's bound ends as any other run does, saying why, with its folder and grant cleaned up.
+let releaseSession = () => {};
+if (windows)
+  try {
+    releaseSession = await takeBuiltInSandboxSession(builtInSandboxSessionFolder(files), {
       onWait: slots =>
         console.error(`Waiting for a built-in sandbox session: all ${slots} are in use on this computer.`),
-    })
-  : () => {};
+    });
+  } catch (error) {
+    finish(error.message, 1);
+  }
 const child = spawn(
   process.execPath,
   [files.cli, '--settings', settings, '-c', builtInSandboxCommandLine(node, launcher, instructions)],

@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { directorKeyName, directorSecretNames } from '../director-access.mjs';
+import { processEnded } from './process.mjs';
 
 export const builtInSandboxVersion = '0.0.81';
 const studioRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -444,23 +445,37 @@ export const builtInSandboxSessionsAtOnce = 4;
 // computer uses, so the controller and npm run verify share them.
 export const builtInSandboxSessionFolder = files => path.join(path.dirname(files.sharedSrtWin), 'sessions');
 
-const holderAlive = pid => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === 'EPERM';
-  }
+// How long a run waits for a session before it stops with a plain reason: ten minutes, well under the shortest time limit
+// a candidate's tests run with, so a run that cannot get one says why rather than being stopped at its limit.
+export const builtInSandboxSessionWaitMs = 10 * 60 * 1000;
+const waitedFor = ms => {
+  const [count, unit] = ms >= 60000 ? [Math.round(ms / 60000), 'minute'] : [Number((ms / 1000).toFixed(1)), 'second'];
+  return `${count} ${unit}${count === 1 ? '' : 's'}`;
 };
 
 // Takes one of the computer's session slots, waiting in turn while all are taken, and answers the function that gives
-// it back. A slot is a file made only if absent; a slot whose holder has ended (stopped hard, say) is free again. Two
-// waiters freeing the same ended slot at the same moment could share it, which the spare session above absorbs.
+// it back. A slot is a file made only if absent; a slot whose holder has ended (stopped hard, say) is free again. A
+// slot records its holder's ID and when it was taken, after the holder started, so a process that now has the ID but
+// started later is not the holder (Windows hands freed IDs on quickly), through the check every caller shares; a slot
+// without a readable time keeps the ID-only answer. Reading a start time starts PowerShell on Windows, so a holder found
+// genuine is asked again only by its ID (`alive` without a time) on later passes for as long as its slot reads the same.
+// Two waiters freeing the same ended slot at the same moment could share it, which the spare session above absorbs.
+// With no slot free after `waitBoundMs`, it stops with a plain reason and changes no slot.
 export async function takeBuiltInSandboxSession(
   folder,
-  { slots = builtInSandboxSessionsAtOnce, pid = process.pid, alive = holderAlive, waitMs = 500, onWait } = {},
+  {
+    slots = builtInSandboxSessionsAtOnce,
+    pid = process.pid,
+    readStartTime,
+    alive = (holder, since) => !processEnded(holder, since, { readStartTime }),
+    waitMs = 500,
+    waitBoundMs = builtInSandboxSessionWaitMs,
+    onWait,
+  } = {},
 ) {
   fs.mkdirSync(folder, { recursive: true });
+  const started = Date.now(),
+    genuine = new Set();
   for (let waited = false; ; waited = true) {
     for (let slot = 0; slot < slots; slot++) {
       const file = path.join(folder, `slot-${slot}.lock`);
@@ -474,19 +489,30 @@ export async function takeBuiltInSandboxSession(
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
       }
-      let holder = null;
+      let text = '',
+        holder = null;
       try {
-        holder = JSON.parse(fs.readFileSync(file, 'utf8'));
+        text = fs.readFileSync(file, 'utf8');
+        holder = JSON.parse(text);
       } catch {
         // Being written, or just given back: the next pass looks again.
       }
-      if (holder && Number.isInteger(holder.pid) && !alive(holder.pid)) {
+      if (!holder || !Number.isInteger(holder.pid)) continue;
+      const known = genuine.has(text);
+      if (alive(holder.pid, known ? null : holder.since)) genuine.add(text);
+      else {
+        genuine.delete(text);
         fs.rmSync(file, { force: true });
         slot--;
       }
     }
     if (!waited) onWait?.(slots);
-    await new Promise(resolve => setTimeout(resolve, waitMs));
+    const elapsed = Date.now() - started;
+    if (elapsed >= waitBoundMs)
+      throw new Error(
+        `All ${slots} of this computer's built-in sandbox sessions stayed in use by runs still going, so this run stopped after waiting ${waitedFor(elapsed)} for one.`,
+      );
+    await new Promise(resolve => setTimeout(resolve, Math.min(waitMs, waitBoundMs - elapsed)));
   }
 }
 

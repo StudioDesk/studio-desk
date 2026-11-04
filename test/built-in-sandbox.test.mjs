@@ -19,6 +19,7 @@ import {
   builtInSandboxRunner,
   builtInSandboxRuntimeEnvironment,
   builtInSandboxSecrets,
+  builtInSandboxSessionWaitMs,
   builtInSandboxSettings,
   builtInSandboxState,
   builtInSandboxVersion,
@@ -63,6 +64,89 @@ test("the computer's built-in sandbox sessions are taken in turn, an ended holde
   third();
   fourth();
   assert.deepEqual(fs.readdirSync(folder), []);
+});
+
+// A slot as a run writes it: its holder's ID and when it took the slot, after the holder started.
+const writeSlot = (folder, slot, pid, since) =>
+  fs.writeFileSync(path.join(folder, `slot-${slot}.lock`), JSON.stringify({ pid, since }));
+const sessionFolder = t => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-sessions-'));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  return folder;
+};
+
+test('a slot whose ID now belongs to a process started after the slot was taken is freed for the next run', async t => {
+  const folder = sessionFolder(t),
+    since = '2026-11-01T08:00:00.000Z',
+    asked = [];
+  // This test's own process is alive and answers its ID, but the start time read says it started a day after the slot.
+  writeSlot(folder, 0, process.pid, since);
+  const release = await takeBuiltInSandboxSession(folder, {
+    slots: 1,
+    pid: 4242,
+    waitMs: 10,
+    waitBoundMs: 2000,
+    readStartTime: holder => (asked.push(holder), new Date('2026-11-02T08:00:00.000Z')),
+  });
+  assert.deepEqual(asked, [process.pid]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8')).pid, 4242);
+  release();
+  assert.deepEqual(fs.readdirSync(folder), []);
+});
+
+test('a slot whose live holder started before the slot was taken stays taken, its start time read once', async t => {
+  const folder = sessionFolder(t),
+    since = new Date().toISOString();
+  let reads = 0;
+  writeSlot(folder, 0, process.pid, since);
+  let taken = null;
+  const taking = takeBuiltInSandboxSession(folder, {
+    slots: 1,
+    pid: 4243,
+    waitMs: 10,
+    waitBoundMs: 5000,
+    readStartTime: () => (reads++, new Date(Date.parse(since) - 60000)),
+  }).then(release => (taken = release));
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(taken, null, 'still waiting');
+  assert.equal(reads, 1, 'asked once across several passes');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8')).pid, process.pid);
+  // The holder gives its slot back, and the waiter takes it.
+  fs.rmSync(path.join(folder, 'slot-0.lock'));
+  await taking;
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8')).pid, 4243);
+  taken();
+});
+
+test('a run that finds every session held by runs still going stops after its wait bound, saying so, and changes no slot', async t => {
+  const folder = sessionFolder(t),
+    since = new Date().toISOString(),
+    slotFiles = () => fs.readdirSync(folder).map(name => [name, fs.readFileSync(path.join(folder, name), 'utf8')]);
+  writeSlot(folder, 0, process.pid, since);
+  writeSlot(folder, 1, process.pid, new Date(Date.parse(since) + 1).toISOString());
+  const before = slotFiles(),
+    waits = [];
+  let reads = 0;
+  const begun = Date.now();
+  await assert.rejects(
+    takeBuiltInSandboxSession(folder, {
+      slots: 2,
+      pid: 4244,
+      waitMs: 10,
+      waitBoundMs: 120,
+      onWait: slots => waits.push(slots),
+      readStartTime: () => (reads++, new Date(Date.parse(since) - 60000)),
+    }),
+    error =>
+      /^All 2 of this computer's built-in sandbox sessions stayed in use by runs still going, so this run stopped after waiting [\d.]+ seconds? for one\.$/.test(
+        error.message,
+      ),
+  );
+  assert.ok(Date.now() - begun >= 120, 'waited out its bound');
+  assert.equal(reads, 2, 'each holder asked once');
+  assert.deepEqual(waits, [2]);
+  assert.deepEqual(slotFiles(), before);
+  assert.equal(builtInSandboxSessionWaitMs, 10 * 60 * 1000);
 });
 
 test("before a Windows run the director's key and launch link above the copy are denied to the sandbox group, or the run stops", t => {
