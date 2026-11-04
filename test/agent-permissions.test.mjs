@@ -14,8 +14,10 @@ import {
   agentPermissions,
   allowedToolRules,
   applyAgentPermissions,
+  approveCommands,
   attemptPermissions,
   commandRule,
+  permissionRules,
   permissionsPrompt,
   recordDenial,
 } from '../src/core/agent-permissions.mjs';
@@ -92,6 +94,69 @@ test('an approved command is a plain prefix, and auto mode follows the task, the
   assert.equal(attempt.commandDenials.length, MAX_COMMAND_DENIALS);
   assert.equal(attempt.commandDenials[0].reason.length, 300);
   assert.equal(attempt.commandDenials.filter(item => item.command === 'cmd 0').length, 1, 'A repeat is kept once.');
+});
+
+test('a shell or a program that runs scripts is refused on its own, and an earlier approval of one never applies', () => {
+  const plainRefusal = name =>
+    `${name} cannot be approved on its own: approving a shell or a program that runs scripts lets an agent run anything with it, including reading the director's key. Approve a narrower command, such as node --test.`;
+  for (const bad of [
+    'node',
+    'npm',
+    'npx',
+    'bash',
+    'cmd',
+    'powershell',
+    'pwsh',
+    'python',
+    'NODE',
+    'C:/Program/nodejs/node.exe',
+    'node.exe',
+    'npm.cmd',
+    'node -e',
+    'node --eval',
+    'bash -c',
+    'cmd /c',
+    'powershell -Command',
+    'npx',
+    // A folder path may hold a space; env and cmd /c run the program that follows them.
+    'C:/Program Files/nodejs/node.exe',
+    '/usr/bin/env',
+    'env node',
+    'cmd /c node',
+    'npm exec',
+  ])
+    assert.throws(() => commandRule(bad), { message: plainRefusal(bad) }, bad);
+  for (const bounded of ['node --test', 'npm run lint', 'npx vitest run', 'git status', 'env node --test'])
+    assert.equal(commandRule(bounded), bounded);
+
+  const org = { agentPermissions: { auto: false, commands: ['node --test'] } };
+  assert.throws(() => applyAgentPermissions(org, { commands: ['node'] }), { message: plainRefusal('node') });
+  assert.throws(() => approveCommands(org, ['bash -c']), /cannot be approved on its own/);
+  assert.deepEqual(
+    org.agentPermissions,
+    { auto: false, commands: ['node --test'] },
+    'A refused approval saves nothing.',
+  );
+
+  // A rule approved before this check never reaches an attempt's allowed tool rules.
+  const earlier = { agentPermissions: { auto: false, commands: ['node', 'node --test'] } };
+  assert.deepEqual(agentPermissions(earlier).commands, ['node --test']);
+  const permissions = attemptPermissions(earlier, {});
+  assert.deepEqual(permissions.commands, ['node --test']);
+  const rules = permissionRules(permissions);
+  assert.deepEqual(rules, ['Bash(node --test)', 'Bash(node --test *)']);
+  assert.ok(!rules.includes('Bash(node)') && !rules.includes('Bash(node *)'), rules.join(' '));
+  assert.throws(
+    () => approveCommands(earlier, ['node']),
+    /cannot be approved on its own/,
+    'It cannot be approved again.',
+  );
+  // A later Settings save drops it instead of failing, whether it sends the list back or changes auto mode only.
+  applyAgentPermissions(earlier, { commands: ['node', 'node --test', 'npm run lint'] });
+  assert.deepEqual(earlier.agentPermissions, { auto: false, commands: ['node --test', 'npm run lint'] });
+  const other = { agentPermissions: { auto: false, commands: ['bash', 'node --test'] } };
+  applyAgentPermissions(other, { auto: true });
+  assert.deepEqual(other.agentPermissions, { auto: true, commands: ['node --test'] });
 });
 
 async function setup(t) {
@@ -265,6 +330,16 @@ test('a command Claude Code refuses is recorded, and the director approves it an
   assert.equal((await allow({ attemptId: attempt.id, commands: ['node --test; rm x'] })).status, 400);
   assert.equal((await allow({ attemptId: attempt.id, commands: [] })).status, 400);
   assert.equal((await allow({ attemptId: attempt.id, commands: ['node --test'], note: 'x' })).status, 400);
+  // A program that runs scripts, approved on its own, is refused in plain words and starts nothing.
+  const interpreter = await allow({ attemptId: attempt.id, commands: ['node'] });
+  assert.equal(interpreter.status, 400);
+  assert.equal(
+    interpreter.data.error,
+    "node cannot be approved on its own: approving a shell or a program that runs scripts lets an agent run anything with it, including reading the director's key. Approve a narrower command, such as node --test.",
+  );
+  assert.equal(c.app.store.task(task.id).commandApprovals, undefined, 'No command approval is recorded.');
+  assert.equal(c.app.store.task(task.id).lastAttemptId, attempt.id, 'Nothing starts.');
+  assert.equal(c.app.store.task(task.id).status, 'blocked');
   assert.equal(c.app.store.organization().agentPermissions, undefined, 'A refused approval changes nothing.');
 
   const allowed = await allow({ attemptId: attempt.id, commands: ['node  --test'] });

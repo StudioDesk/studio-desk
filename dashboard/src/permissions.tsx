@@ -14,12 +14,82 @@ const word = /^[A-Za-z0-9._/:=@+-]+$/;
 export const autoRisk =
   "Claude Code's own classifier, not the controller, then decides which commands its agents run, and on Windows they run with your account's rights, with no sandbox.";
 
-// An approved command is a prefix of plain words: no shell operators, quotes, variables or wildcards.
+// Shells and programs that run scripts, with the options that run what follows them ('' when the program runs the
+// command after it directly): the controller's list (src/core/agent-permissions.mjs). Approved alone, or with only
+// such an option, one lets an agent run anything.
+const nodeRuns = ['-e', '--eval', '-p', '--print'],
+  shellRuns = ['-c'],
+  powershellRuns = ['-c', '-command', '-e', '-ec', '-enc', '-encodedcommand'];
+const scriptRunners: Record<string, string[]> = {
+  node: nodeRuns,
+  nodejs: nodeRuns,
+  npm: ['exec', 'x'],
+  npx: [''],
+  pnpm: ['exec', 'dlx'],
+  pnpx: [''],
+  yarn: ['exec', 'dlx'],
+  bun: [...nodeRuns, 'x', 'exec'],
+  bunx: [''],
+  deno: ['eval'],
+  python: ['-c'],
+  python3: ['-c'],
+  py: ['-c'],
+  pip: [],
+  perl: ['-e'],
+  ruby: ['-e'],
+  php: ['-r'],
+  powershell: powershellRuns,
+  pwsh: powershellRuns,
+  cmd: ['/c', '/k'],
+  bash: shellRuns,
+  sh: shellRuns,
+  zsh: shellRuns,
+  dash: shellRuns,
+  fish: shellRuns,
+  ksh: shellRuns,
+  wsl: ['', '-e', '--exec'],
+  env: [''],
+  cscript: [],
+  wscript: [],
+  mshta: [],
+};
+
+// A program's name without its folder, case or Windows ending: C:/Program Files/nodejs/node.exe is node.
+const programName = (path: string) =>
+  path
+    .slice(path.lastIndexOf('/') + 1)
+    .toLowerCase()
+    .replace(/\.(exe|cmd|bat|ps1)$/, '')
+    .replace(/^(python|pip)\d+(\.\d+)*$/, '$1');
+
+// Whether a rule's words name a shell or script runner and nothing else that bounds it.
+function unbounded(words: string[]): boolean {
+  for (let end = 1; end <= (words[0]!.includes('/') ? words.length : 1); end++) {
+    const name = programName(words.slice(0, end).join(' '));
+    const runs = Object.hasOwn(scriptRunners, name) ? scriptRunners[name]! : null;
+    if (!runs) continue;
+    let rest = words.slice(end).filter(item => item !== '--');
+    // env runs what follows its options and settings.
+    if (name === 'env') {
+      const command = rest.findIndex(item => !item.startsWith('-') && !item.includes('='));
+      rest = command < 0 ? [] : rest.slice(command);
+    }
+    if (!rest.length) return true;
+    if (runs.includes('') && unbounded(rest)) return true;
+    return runs.includes(rest[0]!.toLowerCase()) && (rest.length === 1 || unbounded(rest.slice(1)));
+  }
+  return false;
+}
+
+// An approved command is a prefix of plain words: no shell operators, quotes, variables or wildcards, and a shell
+// or script runner needs more words that bound what it runs.
 export function commandProblem(value: string) {
   const words = value.trim().split(/\s+/),
     text = words.join(' ');
-  return !text || text.length > 200 || text.startsWith('-') || !words.every(item => word.test(item))
-    ? 'Use 1 to 200 characters of letters, digits, spaces and . _ / : = @ + -, not starting with -.'
+  if (!text || text.length > 200 || text.startsWith('-') || !words.every(item => word.test(item)))
+    return 'Use 1 to 200 characters of letters, digits, spaces and . _ / : = @ + -, not starting with -.';
+  return unbounded(words)
+    ? `${text} cannot be approved on its own: approving a shell or a program that runs scripts lets an agent run anything with it, including reading the director's key. Approve a narrower command, such as node --test.`
     : null;
 }
 
@@ -39,7 +109,8 @@ export function ClaudeCommands({ projectId, shell }: { projectId: string; shell:
   const toast = useToast(),
     settings = shell.agentPermissions ?? {},
     auto = settings.auto === true,
-    commands = settings.commands ?? [],
+    // A rule approved before the controller refused it never applies, and the next save drops it.
+    commands = (settings.commands ?? []).filter(command => !commandProblem(command)),
     [draft, setDraft] = useState(''),
     problem = draft.trim() ? commandProblem(draft) : null;
   const save = useMutation({
