@@ -4,7 +4,9 @@
 // keeps the turn, and nothing is started again. Model-free: records in a temporary store, reopened as a restart
 // does, with the pid and start time of a process that has exited or of one still running (or of a running one recorded
 // as started an hour before it did, as a later process that now has a recorded ID reads); the agent's own run uses the
-// protocol fixtures.
+// protocol fixtures. An attempt whose own process ran in a job of its own (processJob, src/adapters/process-job.mjs) is
+// over once the controller that held the job's only handle has stopped, so after a restart its recorded ID, which may be
+// another program's by then, is not checked; its agent's run of the whole suite, outside that job, still is.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -17,6 +19,7 @@ import { waitFor } from './wait-for.mjs';
 import { testTurnResource } from '../src/core/test-turn.mjs';
 import { attemptResource } from '../src/core/store.mjs';
 import { recordedProcessesEnded } from '../src/core/orchestrator.mjs';
+import { live, processStartTimes } from '../src/adapters/process.mjs';
 
 const tests = fileURLToPath(new URL('./fixture-source-check.mjs', import.meta.url)),
   claudeFixture = fileURLToPath(new URL('./fixture-claude.mjs', import.meta.url)),
@@ -50,6 +53,11 @@ const turnEvents = (store, attemptId) =>
   store.events().filter(event => event.kind === 'test_turn' && event.attempt_id === attemptId);
 const freed =
   /^The test turn was freed: the run that held it had ended when the controller started again\. Only the run's own process was checked; processes it started are not tracked yet and may outlive it\.$/;
+// The same, for an attempt whose own process ran in a job of its own.
+const freedWithJob =
+  /^The test turn was freed: the run that held it ran in a job of its own, which ended with the controller, so nothing it started still runs\.$/;
+const freedWithJobAndSuite =
+  /^The test turn was freed: the run that held it ran in a job of its own, which ended with the controller, so nothing it started still runs\. Its agent's run of the whole suite ran outside that job: only that run's own process was checked; processes it started are not tracked yet and may outlive it\.$/;
 const project = 'source:project-legacy:fixture-held';
 
 const hour = 60 * 60 * 1000;
@@ -410,4 +418,109 @@ test("an agent's run of the whole suite records its process while it holds the t
   assert.equal(holder(store), null);
   assert.equal((await c.request(`/api/tasks/${c.taskId}/cancel`)).status, 202);
   await c.wait(c.taskId, 'cancelled');
+});
+
+// A running process of another program that now has the ID a jobbed attempt recorded, as Windows hands out a freed ID
+// quickly: recorded with its true start time, so the process check alone would take it for the attempt's.
+test('an attempt that ran in a job of its own is over after a restart: its turn is freed and Reconcile goes ahead without checking its process', async t => {
+  const c = await restartStudio(t),
+    other = liveProcess(t, { leader: true });
+  running(c.app.store, {
+    taskId: 'T-held',
+    attemptId: 'attempt-held',
+    fields: { pid: other.pid, pidStartedAt: other.startedAt, processJob: true },
+    resources: [project, testTurnResource],
+  });
+  // Neither the start time reader nor a signal to the recorded ID decides it.
+  const reads = t.mock.method(processStartTimes, 'read', () => 'unknown'),
+    signals = t.mock.method(process, 'kill'),
+    signalled = () => signals.mock.calls.filter(call => Math.abs(call.arguments[0]) === other.pid);
+  const { store, runner } = await restart(c);
+  const held = store.attempt('attempt-held');
+  assert.equal(held.status, 'interrupted');
+  assert.equal(held.processJob, true);
+  assert.equal(held.processJobEndedAt, held.finishedAt, 'Its job ended with the previous controller.');
+  assert.equal(store.task('T-held').status, 'blocked');
+  assert.equal(holder(store), null, 'The turn is free.');
+  assert.deepEqual(leasesOf(store, 'attempt-held'), [attemptResource('attempt-held'), project].sort());
+  assert.equal(turnEvents(store, 'attempt-held').length, 1);
+  assert.match(turnFreedMessage(store), freedWithJob);
+  assert.equal(runner.active.has('attempt-held'), false, 'Nothing is started again.');
+  runner.reconcile('T-held');
+  assert.equal(store.task('T-held').status, 'ready');
+  assert.ok(store.attempt('attempt-held').reconciledAt);
+  assert.deepEqual(leasesOf(store, 'attempt-held'), [], 'Its reservations are released.');
+  assert.equal(reads.mock.callCount(), 0, 'Its start time was never read.');
+  assert.deepEqual(signalled(), [], 'Its recorded ID was never signalled.');
+  // The process holding the ID still runs, and without the mark the process check would take it for the attempt's.
+  signals.mock.restore();
+  reads.mock.restore();
+  assert.doesNotThrow(() => process.kill(other.pid, 0), 'The recorded ID still answers.');
+  assert.equal(live({ ...store.attempt('attempt-held'), processJobEndedAt: undefined }), true);
+  assert.equal(live(store.attempt('attempt-held')), false);
+});
+
+test('an attempt without a job keeps its process check after a restart: a live recorded ID keeps the turn and refuses Reconcile', async t => {
+  const c = await restartStudio(t),
+    alive = liveProcess(t, { leader: true });
+  running(c.app.store, {
+    taskId: 'T-held',
+    attemptId: 'attempt-held',
+    fields: { pid: alive.pid, pidStartedAt: alive.startedAt },
+    resources: [project, testTurnResource],
+  });
+  const { store, runner } = await restart(c);
+  const held = store.attempt('attempt-held');
+  assert.equal(held.status, 'interrupted');
+  assert.equal(held.processJobEndedAt, undefined, 'Only an attempt that ran in a job is marked.');
+  assert.equal(holder(store), 'attempt-held', 'The turn stays held.');
+  assert.deepEqual(turnEvents(store, 'attempt-held'), []);
+  assert.throws(
+    () => runner.reconcile('T-held'),
+    /^Error: Attempt attempt-held still has a live process\/group\. Stop it in your terminal before reconciling\.$/,
+  );
+  assert.equal(store.task('T-held').status, 'blocked');
+  assert.deepEqual(
+    leasesOf(store, 'attempt-held'),
+    [attemptResource('attempt-held'), project, testTurnResource].sort(),
+  );
+  await alive.stop();
+  runner.reconcile('T-held');
+  assert.deepEqual(leasesOf(store, 'attempt-held'), []);
+});
+
+test("a jobbed attempt whose agent's run of the whole suite may still run keeps the turn after restart", async t => {
+  const c = await restartStudio(t),
+    suite = liveProcess(t, { leader: false });
+  running(c.app.store, {
+    taskId: 'T-held',
+    attemptId: 'attempt-held',
+    fields: { ...recorded({ own: exited(), suite }), processJob: true },
+    resources: [project, testTurnResource],
+  });
+  const { store, runner } = await restart(c);
+  const held = store.attempt('attempt-held');
+  assert.equal(held.status, 'interrupted');
+  assert.ok(held.processJobEndedAt);
+  assert.equal(holder(store), 'attempt-held', 'The suite ran outside the job: the turn stays held.');
+  assert.deepEqual(turnEvents(store, 'attempt-held'), []);
+  assert.equal(recordedProcessesEnded(held), false);
+  await suite.stop();
+  assert.equal(recordedProcessesEnded(held), true, 'Once it exits, it is gone.');
+  runner.reconcile('T-held');
+  assert.deepEqual(leasesOf(store, 'attempt-held'), []);
+});
+
+test("a jobbed attempt's freed turn says its agent's run of the whole suite was checked by its own process only", async t => {
+  const c = await restartStudio(t);
+  running(c.app.store, {
+    taskId: 'T-held',
+    attemptId: 'attempt-held',
+    fields: { ...recorded({ own: exited(), suite: exited() }), processJob: true },
+    resources: [project, testTurnResource],
+  });
+  const { store } = await restart(c);
+  assert.equal(holder(store), null, 'The turn is free.');
+  assert.equal(turnEvents(store, 'attempt-held').length, 1);
+  assert.match(turnFreedMessage(store), freedWithJobAndSuite);
 });

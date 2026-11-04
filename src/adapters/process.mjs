@@ -155,8 +155,12 @@ export function processEnded(pid, startedAt, { readStartTime = processStartTimes
 
 // Whether an attempt's process is still running: on macOS and Linux the process group it leads, on Windows the process
 // itself. a.pidStartedAt (an ISO time) is the attempt's own start time when it recorded one; with it, a leader ID that
-// now belongs to a later process is not live.
+// now belongs to a later process is not live. a.processJobEndedAt is recorded only when a controller starts again on an
+// attempt the previous one left running in a job of its own (a.processJob, src/adapters/process-job.mjs, Runner's
+// constructor): that job ended with the controller that held its only handle, so nothing of the attempt runs, and its
+// ID, which Windows may have handed to another program since, is neither signalled nor looked up.
 export function live(a) {
+  if (a.processJobEndedAt) return false;
   const windows = process.platform === 'win32';
   return !recordedEnded(a.pid, windows ? a.pid : -a.pid, a.pidStartedAt, !windows, processStartTimes.read);
 }

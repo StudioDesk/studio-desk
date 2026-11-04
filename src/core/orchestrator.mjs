@@ -57,16 +57,18 @@ const resetSources = { report: ", from the CLI's own report", message: ", read f
 
 // Whether every process an interrupted attempt recorded is confirmed gone, so the computer's test turn it held is no
 // longer in use (Runner's constructor): its own process (a.pid with a.pidStartedAt, its CLI or its candidate tests'
-// current step, checked as reconciliation checks it, live()) and its agent's run of the whole suite (a.employeeTestPid
+// current step, checked as reconciliation checks it, live(), which counts it over without a check when its job ended
+// with the previous controller, a.processJobEndedAt) and its agent's run of the whole suite (a.employeeTestPid
 // with a.employeeTestStartedAt, connectors/employee-tests.mjs, checked by the shared processEnded() as the one process
-// it is on every platform, since it is started without a group of its own). Both use the shared identity check
-// (adapters/process.mjs): a recorded start time lets an ID that a later process now holds count as gone; an attempt
-// recorded without one keeps the ID-only answer. The one check, so containing each run (C-07) can strengthen it: until
-// then a gone root process is the evidence used, and the processes a run started are not checked; on Windows they can
-// outlive it.
+// it is on every platform, since it is started without a group of its own and outside the attempt's job). Both use the
+// shared identity check (adapters/process.mjs): a recorded start time lets an ID that a later process now holds count as gone; an attempt
+// recorded without one keeps the ID-only answer. The one check, so containing each run (C-07) strengthens it: a run in
+// a job of its own ended whole with the controller; for any other run a gone root process is the evidence used, and
+// the processes it started are not checked; on Windows they can outlive it.
 export function recordedProcessesEnded(a) {
   return (
-    !live({ pid: a.pid, pidStartedAt: a.pidStartedAt }) && processEnded(a.employeeTestPid, a.employeeTestStartedAt)
+    !live({ pid: a.pid, pidStartedAt: a.pidStartedAt, processJobEndedAt: a.processJobEndedAt }) &&
+    processEnded(a.employeeTestPid, a.employeeTestStartedAt)
   );
 }
 // Puts back fields of an in-memory record that a rolled-back transaction changed, so it matches what is saved.
@@ -77,6 +79,14 @@ function restoreFields(record, fields) {
 }
 const turnFreedOnRestart =
   "The test turn was freed: the run that held it had ended when the controller started again. Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";
+// For an attempt whose own process ran in a job of its own: the job ended with the controller, so nothing it started
+// runs. Its agent's run of the whole suite runs outside that job, so when one was recorded the text says only its own
+// process was checked.
+const turnFreedWithJob = a =>
+  'The test turn was freed: the run that held it ran in a job of its own, which ended with the controller, so nothing it started still runs.' +
+  (a.employeeTestPid
+    ? " Its agent's run of the whole suite ran outside that job: only that run's own process was checked; processes it started are not tracked yet and may outlive it."
+    : '');
 
 export class Runner {
   constructor(store, options = {}) {
@@ -146,6 +156,10 @@ export class Runner {
         const t = store.task(a.taskId);
         a.status = 'interrupted';
         a.finishedAt = new Date().toISOString();
+        // Its process ran in a job of its own (C-07), whose only handle the previous controller's wrapper held: the
+        // job, and everything in it, ended with that controller. Recorded only here, so live() need not ask about an ID
+        // that may now be another program's; an attempt this controller quarantines keeps its process check.
+        if (a.processJob) a.processJobEndedAt = a.finishedAt;
         // Queued work leaves the queue until it is reconciled; the attempt records that it was queued, so Reconcile
         // puts it back (holdQueue, restoreQueue).
         this.holdQueue(a, t);
@@ -163,7 +177,7 @@ export class Runner {
           recordedProcessesEnded(a)
         ) {
           store.releaseResource(testTurnResource, a.id);
-          store.event('test_turn', t.id, a.id, turnFreedOnRestart);
+          store.event('test_turn', t.id, a.id, a.processJobEndedAt ? turnFreedWithJob(a) : turnFreedOnRestart);
         }
       });
       // Unknown operation endings stay unmatched. This is an observation of interruption,
