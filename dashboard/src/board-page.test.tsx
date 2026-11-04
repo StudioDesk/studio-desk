@@ -498,9 +498,14 @@ test("approving a Planned card moves it to its approved status's column with bot
     standing: { Planned: { cards: [], count: '0' }, Ready: { cards: ['Planned work', 'Ready work'], count: '2' } },
     reads: [],
   });
-  // The stream's change for the same command reads the task again and leaves the board as it is.
+  // The stream's change for the same command reads the task and the list of calls again and leaves the board as it is.
   latest().emit('change', { version: answer!.version, start: answer!.start, changes: answer!.changes });
-  await waitFor(() => expect(controller.reads().slice(reads)).toEqual(['/api/tasks/T-plan?projectId=project-x']));
+  await waitFor(() =>
+    expect([...controller.reads().slice(reads)].sort()).toEqual([
+      '/api/projects/project-x/calls',
+      '/api/tasks/T-plan?projectId=project-x',
+    ]),
+  );
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(standing()).toEqual({
     Planned: { cards: [], count: '0' },

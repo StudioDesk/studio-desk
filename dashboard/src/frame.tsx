@@ -2,9 +2,10 @@
 // project, chosen October 22): a rail with a tile for each project, then the current project's sidebar with Find
 // a project (Ctrl K), New idea (N), its pages and the controller's status. At 860px and under, a top bar names the
 // project and opens the search, and bottom tabs carry the pages with New idea in the middle. The sidebar's Needs you
-// count is the current project's (the director, October 22); each tile on the rail counts its own project's calls,
-// pointing at or focusing another project's count shows them in a card beside it, each line opening its call's page
-// there, and the tab's title counts every project's (the attention indicator, October 29). With the chat box switched
+// count is the current project's (the director, October 22); each tile on the rail counts its own project's calls
+// as the controller lists them (rail-calls.ts), pointing at or focusing another project's count shows them in a card
+// beside it, each line opening its call's page there, and the tab's title counts every project's (the attention
+// indicator, October 29). With the chat box switched
 // on (chat-box.ts), New idea and N open the chat box beside the page instead (chat-panel.tsx), and the sidebar
 // lists the talks going (talks.ts), each opening its conversation there.
 import { Outlet, useRouter, useRouterState } from '@tanstack/react-router';
@@ -281,8 +282,9 @@ export function ProjectFrame({ projectId }: { projectId: string }) {
     project = projects.find(item => item.id === projectId) ?? { id: projectId, name: shell?.project.name ?? '' },
     index = projects.findIndex(item => item.id === projectId),
     page = currentPage(path, projectId),
-    decisions = state ? liveSummary(state).decisions : 0,
     rail = useRailCalls(projectId, projects),
+    // The open project's calls as the controller lists them, the count its tile and Today show.
+    decisions = rail.calls[projectId]?.count ?? 0,
     href = (suffix: string) => `/p/${projectId}${suffix}`;
   const show = (id: string, tile: HTMLElement) => setPeek({ id, tile, place: cardPlace(tile.getBoundingClientRect()) }),
     hide = (id: string) => setPeek(open => (open?.id === id ? null : open)),

@@ -83,36 +83,41 @@ test("the page loads its task with the project's shared records, and a change fe
   open();
   expect(await screen.findByRole('heading', { level: 1, name: 'Show finished results' })).toBeTruthy();
   expect(latest().url).toBe('/api/events?projectId=project-x');
-  // Pages read once the stream has opened, so nothing is read twice; the attempt shown reads its full record, and the
-  // rail reads Project Y's shell and live set once for its count.
+  // Pages read once the stream has opened, so nothing is read twice; the attempt shown reads its full record, the
+  // frame reads each project's list of calls for the sidebar and the rail, and the rail reads Project Y's shell and
+  // live set once.
   await waitFor(() =>
     expect([...controller.reads()].sort()).toEqual([
       detailUrl,
+      '/api/projects/project-x/calls',
       '/api/projects/project-x/live',
       '/api/projects/project-x/shell',
+      '/api/projects/project-y/calls',
       '/api/projects/project-y/live',
       '/api/projects/project-y/shell',
       taskUrl,
     ]),
   );
-  // Another task and a run: the live set reloads, and nothing is read for the task no page holds.
+  // Another task and a run: the live set and the list of calls reload, and nothing is read for the task no page holds.
   change(11, [
     { seq: 11, type: 'task', id: 'T-2', projectId: 'project-x' },
     { seq: 11, type: 'attempt', id: 'attempt-9', taskId: 'T-2', projectId: 'project-x' },
     { seq: 11, type: 'run', id: 'run-1', projectId: 'project-x' },
   ]);
-  await waitFor(() => expect(controller.reads()).toHaveLength(7));
+  await waitFor(() => expect(controller.reads()).toHaveLength(10));
   await new Promise(resolve => setTimeout(resolve, 50));
-  expect(controller.reads().at(-1)).toBe('/api/projects/project-x/live');
-  expect(controller.reads()).toHaveLength(7);
+  expect(controller.reads().slice(8).sort()).toEqual(['/api/projects/project-x/calls', '/api/projects/project-x/live']);
+  expect(controller.reads()).toHaveLength(10);
   edit({ title: 'Show finished results inline' });
   change(12, [{ seq: 12, type: 'task', id: 'T-1', projectId: 'project-x' }]);
   expect(await screen.findByRole('heading', { name: 'Show finished results inline' })).toBeTruthy();
   controller.attempts = [{ ...controller.attempts[0]!, status: 'succeeded', result: { summary: 'Halfway.' } }];
   change(13, [{ seq: 13, type: 'attempt', id: 'attempt-1', taskId: 'T-1', projectId: 'project-x' }]);
   expect(await screen.findByText('Halfway.')).toBeTruthy();
-  // A change to the shown attempt reads its full record again; one to the task alone does not.
-  await waitFor(() => expect(controller.reads().slice(7).sort()).toEqual([detailUrl, taskUrl, taskUrl]));
+  // A change to the shown attempt reads its full record again; one to the task alone does not. Each change reads the
+  // list of calls again.
+  const calls = '/api/projects/project-x/calls';
+  await waitFor(() => expect(controller.reads().slice(10).sort()).toEqual([detailUrl, calls, calls, taskUrl, taskUrl]));
 });
 
 test('a brief written in Markdown reads as formatted text, not as its marks', async () => {

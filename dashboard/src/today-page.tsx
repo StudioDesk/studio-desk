@@ -1,10 +1,18 @@
 // Today (the canvas's Today and Today on a phone, v1.0 item 23): the page's sentence, the New idea box, the calls
 // only the director can make with their evidence and the real actions, what moves without them, who is on the
 // floor and what shipped today. Every action asks the controller for the same recorded step the task page would.
-import { notifyManager, useMutation } from '@tanstack/react-query';
+import { notifyManager, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
-import { send, type AttemptSummary, type Task, type Worker } from './api';
+import {
+  onRecords,
+  send,
+  type AttemptSummary,
+  type CommandRecords,
+  type DirectorCall,
+  type Task,
+  type Worker,
+} from './api';
 import { askedPaths, commandRequest, decisionState, fileRequest, sendIdeaLimit, storyIdea } from './decisions';
 import { plural, took, totalsOf, diffStatOf, sandboxed, openPhaseOf, testingPhases } from './evidence';
 import { AgentAvatar } from './design/avatar';
@@ -18,7 +26,7 @@ import { workerName } from './names';
 import { NoteDialog, overReview } from './note-dialog';
 import { AnswerBox, QuestionCard } from './question-card';
 import { changeableAnswer, type Answer } from './questions';
-import { finishedState, useFinished, useStudio } from './records';
+import { callKey, finishedState, queryKeys, servedItems, useCalls, useFinished, useStudio } from './records';
 import {
   active,
   integrationAction,
@@ -53,13 +61,16 @@ import { useNow } from './use-now';
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60000));
 
-// One recorded step at a time, with the controller's answer as a toast.
+// One recorded step at a time, with the controller's answer as a toast. The controller's list of calls is read again
+// after each step: here when the answer carried no records, and by the page's listener (TodayPage) when it did.
 function useAct(projectId: string) {
-  const toast = useToast();
+  const toast = useToast(),
+    client = useQueryClient();
   const request = useMutation({
     mutationFn: ({ path, body = {} }: { path: string; body?: Record<string, unknown>; done?: Done }) =>
       send<Record<string, unknown>>(path, { projectId, ...body }),
     onSuccess: (result, { done }) => {
+      if (!result?.records) void client.invalidateQueries({ queryKey: queryKeys.calls(projectId) });
       const message = done?.(result);
       // With the records the answer carried (records.ts), which the page hears on the query client's next notice.
       if (message) notifyManager.schedule(() => toast(message));
@@ -1417,8 +1428,29 @@ function Moving({
   );
 }
 
+// The tasks a command's answer names: those it changed and those whose pages it carried.
+const answeredTasks = (records: CommandRecords) => [
+  ...(records.tasks ?? []).map(page => page.task.id),
+  ...(records.changes ?? []).flatMap(change => {
+    const id = change.type === 'task' && change.id !== undefined ? change.id : change.taskId;
+    return id === undefined || id === null ? [] : [String(id)];
+  }),
+];
+
+// The tasks a served call stands for: its task, a cleanup's steps or the work waiting on a hold.
+const callTasks = (call: DirectorCall) => (call.type === 'task' ? [call.taskId] : call.taskIds);
+
 export function TodayPage({ projectId }: { projectId: string }) {
-  const { state, error, shell } = useStudio(projectId),
+  const studio = useStudio(projectId),
+    { state, shell } = studio,
+    // What needs the director now, as the controller lists it: Your calls, its count and the title's.
+    served = useCalls(projectId),
+    error = studio.error ?? served.error,
+    client = useQueryClient(),
+    // How many times the list has been read, and the tasks commands' answers named since its last read: a call the
+    // director just made leaves at once, before the list is read again, once the page's own records drop it too.
+    read = client.getQueryState(queryKeys.calls(projectId))?.dataUpdateCount ?? 0,
+    [answered, setAnswered] = useState<{ read: number; ids: Set<string> }>({ read: -1, ids: new Set() }),
     finished = useFinished(projectId, 5),
     // Finished ideas come newest finished first. While the last one read finished today, the next page may hold more
     // that shipped today (November 2, 2026: Today counted three of the five that shipped).
@@ -1433,6 +1465,18 @@ export function TodayPage({ projectId }: { projectId: string }) {
     [shell, finished.data],
   );
   const finishedStories = useMemo(() => (earlier ? runStories(earlier) : []), [earlier]);
+  useEffect(
+    () =>
+      onRecords(records => {
+        if (records.projectId !== projectId) return;
+        const now = client.getQueryState(queryKeys.calls(projectId))?.dataUpdateCount ?? 0,
+          ids = answeredTasks(records);
+        setAnswered(before => ({ read: now, ids: new Set([...(before.read === now ? before.ids : []), ...ids]) }));
+        // A command the page sent: the list is read again at once, before the stream's message for the same change.
+        void client.invalidateQueries({ queryKey: queryKeys.calls(projectId) });
+      }),
+    [client, projectId],
+  );
   const looks = useMemo(() => (state ? agentLooks(projectId, state.workers) : new Map()), [projectId, state]);
   if (error)
     return (
@@ -1440,16 +1484,27 @@ export function TodayPage({ projectId }: { projectId: string }) {
         The project could not be loaded: {error.message}
       </p>
     );
-  if (!state)
+  if (!state || !served.data)
     return (
       <p role="status" className="sd-meta">
         Loading the project…
       </p>
     );
-  const { stories, items, decisions } = liveSummary(state),
-    calls = items.filter(item => item.requiresDirector),
+  const { stories, items } = liveSummary(state),
+    // The page's own records' calls, whose work the waits fold leaves out; Your calls lists the controller's.
+    own = items.filter(item => item.requiresDirector),
     waits = items.filter(item => !item.requiresDirector),
     allStories = [...stories, ...finishedStories],
+    ownKeys = new Set(own.map(callKey)),
+    left = served.data.items.filter(
+      call => answered.read === read && callTasks(call).some(id => answered.ids.has(id)) && !ownKeys.has(callKey(call)),
+    ),
+    calls = servedItems(
+      served.data.items.filter(call => !left.includes(call)),
+      state,
+      allStories,
+    ),
+    decisions = Math.max(0, served.data.count - left.length),
     shipped = shippedToday(allStories, [...state.attempts, ...(earlier?.attempts ?? [])]),
     agents = floorOf(state, looks),
     kinds = state.organizationConfiguration?.taskKinds ?? [],
@@ -1507,11 +1562,7 @@ export function TodayPage({ projectId }: { projectId: string }) {
             )}
           </div>
           {calls.map(item => (
-            <Call
-              key={isHold(item) ? `hold:${item.provider}` : isCleanup(item) ? `cleanup:${item.run.id}` : item.taskId}
-              {...props}
-              item={item}
-            />
+            <Call key={callKey(item)} {...props} item={item} />
           ))}
           {!calls.length && (
             <div className="sd-card sd-card--quiet" style={{ padding: 'var(--space-16) 18px', color: 'var(--ink-2)' }}>
@@ -1521,7 +1572,7 @@ export function TodayPage({ projectId }: { projectId: string }) {
                 : 'Send an idea, and the calls it needs appear here.'}
             </div>
           )}
-          <Moving projectId={projectId} state={state} items={waits} calls={calls} />
+          <Moving projectId={projectId} state={state} items={waits} calls={own} />
         </section>
         <aside className="sd-columns__side sd-wide-only" aria-label="On the floor">
           <h2 className="sd-section-title">On the floor</h2>

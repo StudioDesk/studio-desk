@@ -6,11 +6,12 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary, CommandRecords, LibraryProposal, Live, Task } from './api';
+import type { AttemptSummary, CommandRecords, DirectorCalls, LibraryProposal, Live, Task } from './api';
 import { App } from './app';
 import type { Answer, Question } from './questions';
 import { createAppRouter } from './router';
 import {
+  callsOf,
   createStream,
   decisionStates,
   fakeController,
@@ -25,8 +26,34 @@ import {
 import { when } from './today';
 
 let controller: Controller;
+// Each project's list of calls as the controller lists them over that project's records (test-controller.ts callsOf),
+// changed where a test changes it: Project X's from the stand-in's own answer, another project's over the shell and
+// live set the test gives it. A change may hold the answer back by answering with a promise.
+let served: Record<string, (list: DirectorCalls) => DirectorCalls | Promise<DirectorCalls>>;
 beforeEach(() => {
   controller = fakeController();
+  served = {};
+  const standIn = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: string, options: RequestInit = {}) => {
+    const [, id] = /^\/api\/projects\/([^/?]+)\/calls$/.exec(String(input)) ?? [];
+    if (!id || (id === 'project-x' && !served[id]) || (options.method ?? 'GET') !== 'GET')
+      return standIn(input, options);
+    controller.requests.push({ url: String(input), method: 'GET' });
+    const live = controller.lives[id] ?? { tasks: [], attempts: [], runs: [] },
+      records =
+        id === 'project-x'
+          ? controller
+          : {
+              ...controller,
+              shell: controller.shells[id]!,
+              tasks: live.tasks,
+              attempts: live.attempts,
+              runs: live.runs,
+            },
+      rule = callsOf(records, id),
+      list = await (served[id] ? served[id](rule) : rule);
+    return { ok: true, status: 200, json: async () => structuredClone(list) };
+  });
 });
 afterEach(() => {
   cleanup();
@@ -694,7 +721,7 @@ test('Today with nobody working sets no running-time clock', async () => {
   expect(interval.mock.calls.map(call => call[1]).filter(period => period === 1000 || period === 30000)).toEqual([]);
 });
 
-test('a change to running work fetches that task alone and updates Today in place', async () => {
+test('a change to running work fetches that task alone with the list of calls, and updates Today in place', async () => {
   controller.tasks = [taskFixture('T-2', { title: 'Build the board', status: 'running', lastAttemptId: 'attempt-2' })];
   controller.attempts = [
     { id: 'attempt-2', taskId: 'T-2', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
@@ -709,7 +736,10 @@ test('a change to running work fetches that task alone and updates Today in plac
     changes: [{ seq: 5, type: 'task', id: 'T-2', projectId: 'project-x' }],
   });
   expect(await screen.findByRole('link', { name: 'Build the work board' })).toBeTruthy();
-  expect(controller.reads().slice(before)).toEqual(['/api/tasks/T-2?projectId=project-x']);
+  expect(controller.reads().slice(before).sort()).toEqual([
+    '/api/projects/project-x/calls',
+    '/api/tasks/T-2?projectId=project-x',
+  ]);
 });
 
 test('Today reads the first page of finished runs once, for what shipped today', async () => {
@@ -921,13 +951,22 @@ test("Approve takes the call off Today and lowers the calls' count with its toas
   );
   const card = within(within(region).getByRole('heading', { name: 'Add the board' }).closest('article')!),
     seen = whenShown('Approved “Add the board”.', () => callsShown(region));
+  // The list read again after the command has not answered yet: the call leaves at once all the same.
+  served['project-x'] = () => new Promise<DirectorCalls>(() => {});
+  const asked = controller.reads().length;
   await user.click(card.getByRole('button', { name: 'Approve work' }));
   expect(await seen).toEqual({ cards: ['Add the list'], count: '1 waiting on you' });
   expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('One call is yours to make.');
-  // The stream's change for the same command reads the task again and leaves Today as it is.
+  expect(controller.reads().slice(asked)).toEqual(['/api/projects/project-x/calls']);
+  // The stream's change for the same command reads the task and the list again and leaves Today as it is.
   const before = controller.reads().length;
   latest().emit('change', { version: answer!.version, start: answer!.start, changes: answer!.changes });
-  await waitFor(() => expect(controller.reads().slice(before)).toEqual(['/api/tasks/T-1?projectId=project-x']));
+  await waitFor(() =>
+    expect(controller.reads().slice(before).sort()).toEqual([
+      '/api/projects/project-x/calls',
+      '/api/tasks/T-1?projectId=project-x',
+    ]),
+  );
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(callsShown(region)).toEqual({ cards: ['Add the list'], count: '1 waiting on you' });
   expect(screen.getByText('Approved “Add the board”.')).toBeTruthy();
@@ -952,6 +991,36 @@ test("a refused Approve leaves Today's calls and their count as they were and sh
   expect(callsShown(region)).toEqual({ cards: ['Add the board', 'Add the list'], count: '2 waiting on you' });
   expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
   expect(posted().map(request => request.url)).toEqual(['/api/tasks/T-1/approve-work']);
+});
+
+test("Your calls lists the controller's calls in its order, and its count and the title's are the served count", async () => {
+  controller.tasks = proposed();
+  // The controller lists the two plans the other way round from the page's own records.
+  served['project-x'] = list => ({ ...list, items: [...list.items].reverse() });
+  open();
+  const region = await calls();
+  await waitFor(() =>
+    expect(callsShown(region)).toEqual({ cards: ['Add the list', 'Add the board'], count: '2 waiting on you' }),
+  );
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
+  // Then one fewer than the records give: the stream reports a change and the list read again leaves the board out,
+  // though the page's own records still hold it waiting for approval.
+  served['project-x'] = list => ({
+    ...list,
+    items: list.items.filter(item => item.type !== 'task' || item.taskId !== 'T-1'),
+    count: 1,
+  });
+  latest().emit('change', {
+    version: 2,
+    start: 'start-a',
+    changes: [{ seq: 2, type: 'task', id: 'T-1', projectId: 'project-x' }],
+  });
+  await waitFor(() => expect(callsShown(region)).toEqual({ cards: ['Add the list'], count: '1 waiting on you' }));
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('One call is yours to make.');
+  expect(document.title).toBe('(1) Studio desk');
+  expect(screen.getAllByLabelText('1 call for you').length).toBeGreaterThan(0);
+  // Nothing of the plan left out moves on its own: it is not a wait.
+  expect(screen.queryByText('Moving on their own, nothing to do')).toBeNull();
 });
 
 // An agent's question (1.2 step 2) as the controller records it (src/core/questions.mjs readQuestion): the attempt

@@ -7,6 +7,7 @@
 import { useInfiniteQuery, useQuery, type InfiniteData, type QueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import {
+  callsUrl,
   finishedUrl,
   getJSON,
   liveUrl,
@@ -17,6 +18,9 @@ import {
   type Change,
   type ChangeMessage,
   type CommandRecords,
+  type DirectorCall,
+  type DirectorCalls,
+  type DirectorTaskCall,
   type FinishedPage,
   type IdeaName,
   type Live,
@@ -31,7 +35,7 @@ import {
   type TestRecordRun,
 } from './api';
 import { useStreamReady } from './stream-context';
-import { settled, type StudioState } from './studio-runs';
+import { explain, settled, type HomeItem, type NeedsItem, type RunStory, type StudioState } from './studio-runs';
 
 // Query names start with the project, so a reload refreshes only that project's records.
 export const queryKeys = {
@@ -55,6 +59,8 @@ export const queryKeys = {
   settledCounts: (projectId: string) => [projectId, 'settled', 'counts'] as const,
   // The project's release lines and milestones, for the Releases page and every release chip.
   releases: (projectId: string) => [projectId, 'releases'] as const,
+  // What needs the director now, as the controller lists it (GET /api/projects/<id>/calls).
+  calls: (projectId: string) => [projectId, 'calls'] as const,
 };
 
 const taskTypes = new Set(['task', 'attempt', 'event']);
@@ -108,7 +114,14 @@ export class RecordSync {
 
   async apply(message: ChangeMessage) {
     if (message.reload) return void (await this.client.invalidateQueries({ queryKey: [this.projectId] }));
-    await this.changed(message.changes ?? []);
+    const changes = message.changes ?? [];
+    // The controller's list of calls is read again with every change the stream reports: those that refresh the live
+    // set, and the settings and usage holds the shell holds. A read under way is dropped for one after the change. A
+    // command's answer leaves it to the page that sent the command and to the stream's message for the same change.
+    await Promise.all([
+      changes.length ? this.client.invalidateQueries({ queryKey: queryKeys.calls(this.projectId) }) : null,
+      this.changed(changes),
+    ]);
   }
 
   // A command's answer names what it changed as the stream's message for it will, with the page of each task it
@@ -366,6 +379,88 @@ export function useLive(projectId: string) {
     enabled: useStreamReady(),
     queryKey: queryKeys.live(projectId),
     queryFn: ({ signal }) => readLive(projectId, signal),
+  });
+}
+
+// What needs the director now in the project, as the controller lists it (GET /api/projects/<id>/calls), in its
+// order. It is read again with every change the project's stream reports and every command's answer (RecordSync).
+export function useCalls(projectId: string) {
+  return useQuery({
+    enabled: useStreamReady(),
+    queryKey: queryKeys.calls(projectId),
+    queryFn: ({ signal }) => getJSON<DirectorCalls>(callsUrl(projectId), signal),
+  });
+}
+
+// A call's name on a page, served or worked out from the records: its task, its idea's cleanup or its CLI's hold.
+export function callKey(call: DirectorCall | HomeItem) {
+  if ('type' in call)
+    return call.type === 'hold'
+      ? `hold:${call.provider}`
+      : call.type === 'cleanup'
+        ? `cleanup:${call.runId}`
+        : call.taskId;
+  if ('members' in call) return `cleanup:${call.run.id}`;
+  return 'provider' in call ? `hold:${call.provider}` : call.taskId;
+}
+
+// A served task's call as the pages' cards read it: the served words and attempt, with the refused commands and the
+// idea the page's own records hold.
+function needsItem(call: DirectorTaskCall, state: StudioState, stories: RunStory[], cleanup = false) {
+  const task = state.tasks.find(record => record.id === call.taskId),
+    commands = task && call.kind === 'command-request' ? explain(task, state).commands : undefined,
+    run = !cleanup && call.runId ? stories.find(story => story.id === call.runId) : undefined;
+  const item: NeedsItem & { run?: RunStory } = {
+    taskId: call.taskId,
+    kind: call.kind,
+    reason: call.reason,
+    details: call.details,
+    next: call.next,
+    action: call.action,
+    requiresDirector: true,
+    text: call.reason,
+    cleanup,
+    canClose: call.canClose,
+    ...(call.attemptId ? { attemptId: call.attemptId } : {}),
+    ...(commands ? { commands } : {}),
+    ...(run ? { run } : {}),
+  };
+  return item;
+}
+
+// The served calls, in the served order, as the items the pages draw: each task's call joined with the task, attempts
+// and idea the records hold, a cleanup with its members and its idea, and a hold with its CLI. A cleanup whose idea
+// the records do not hold has nothing to draw it by and is left out.
+export function servedItems(calls: DirectorCall[], state: StudioState, stories: RunStory[]): HomeItem[] {
+  return calls.flatMap((call): HomeItem[] => {
+    if (call.type === 'hold')
+      return [
+        {
+          kind: 'subscription-hold',
+          provider: call.provider,
+          label: call.label,
+          resetAt: null,
+          resetTime: null,
+          taskIds: call.taskIds,
+          reason: call.reason,
+          next: call.next,
+          action: call.action,
+          requiresDirector: true,
+        },
+      ];
+    if (call.type === 'cleanup') {
+      const run = stories.find(story => story.id === call.runId);
+      if (!run) return [];
+      return [
+        {
+          run,
+          members: call.members.map(member => needsItem(member, state, stories, true)),
+          taskIds: call.taskIds,
+          requiresDirector: true,
+        },
+      ];
+    }
+    return [needsItem(call, state, stories)];
   });
 }
 

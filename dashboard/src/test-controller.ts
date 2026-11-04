@@ -416,13 +416,23 @@ export function fakeController(projectId = 'project-x'): Controller {
         return controller.templates
           ? respond(controller.templates)
           : respond({ error: 'Unknown controller route.' }, false);
-      // Another project the test names reads its shell, the live set the test gives it, and no other records.
+      // Another project the test names reads its shell, the live set the test gives it, its list of calls worked out
+      // over those, and no other records.
       const [, other, page] = path.match(/^\/api\/projects\/([^/]+)\/([a-z]+)$/) ?? [],
-        otherShell = other && other !== projectId ? controller.shells[decodeURIComponent(other)] : undefined;
+        otherId = other ? decodeURIComponent(other) : undefined,
+        otherShell = otherId && otherId !== projectId ? controller.shells[otherId] : undefined;
       if (otherShell && page) {
+        const live = controller.lives[otherId!] ?? { tasks: [], attempts: [], runs: [] };
+        if (page === 'calls')
+          return respond(
+            callsOf(
+              { ...controller, shell: otherShell, tasks: live.tasks, attempts: live.attempts, runs: live.runs },
+              otherId!,
+            ),
+          );
         const records: Record<string, unknown> = {
           shell: otherShell,
-          live: controller.lives[decodeURIComponent(other!)] ?? { tasks: [], attempts: [], runs: [] },
+          live,
           runs: { runs: [], next: null },
           settled: { tasks: [], attempts: [], next: null, counts: { accepted: 0, closed: 0 } },
           people: { tasks: 0, accepted: { total: 0, workers: {}, teams: {} }, goals: {} },
