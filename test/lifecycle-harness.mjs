@@ -420,7 +420,9 @@ async function play(c, step) {
         title: `Lifecycle notes ${step.task}`,
         brief: 'Write the notes the direction names.',
         acceptance: 'The notes hold what the direction says.',
-        planned: true,
+        // Work waits for the director's approval, unless the step adds it approved (a shrunk sequence folds an
+        // approval into its add; see foldApprovals).
+        planned: !step.approved,
         maxSeconds: step.maxSeconds,
         execution: { provider: 'claude', mode: 'workspace' },
       },
@@ -571,7 +573,9 @@ export async function runSequence(steps, { factory = modelFreeStudio, counters =
 // ---------------------------------------------------------------------------------------------------------------
 // Shrinking: chunks are removed, then single steps, and a candidate is kept only when it still breaks the same rule.
 // `fails(steps)` answers the rule a sequence breaks, or null. Works on any list, so it is tested without a studio.
-export async function shrink(steps, fails, rule) {
+// When no single step can go, `simplify(steps)` offers simpler forms of the sequence, each with fewer steps; the first
+// that still breaks the rule is kept and removal starts again from it.
+export async function shrink(steps, fails, rule, simplify = () => []) {
   rule ??= await fails(steps);
   if (!rule) return steps;
   let current = steps,
@@ -586,9 +590,33 @@ export async function shrink(steps, fails, rule) {
       } else start += size;
     }
     if (size > 1) size = Math.max(1, Math.floor(size / 2));
-    else if (!changed) break;
+    else if (!changed) {
+      let simpler = null;
+      for (const candidate of simplify(current))
+        if (candidate.length < current.length && (await fails(candidate)) === rule) {
+          simpler = candidate;
+          break;
+        }
+      if (!simpler) break;
+      current = simpler;
+    }
   }
   return current;
+}
+
+// The lifecycle's simpler forms: work added as planned and approved later is added approved instead, and the approval
+// step goes. One candidate for each approval of work the sequence adds before it.
+export function foldApprovals(steps) {
+  const candidates = [];
+  steps.forEach((step, index) => {
+    if (step.kind !== 'act' || step.action !== 'approve') return;
+    const added = steps.findIndex(item => item.kind === 'add' && item.task === step.task);
+    if (added < 0 || added > index || steps[added].approved) return;
+    candidates.push(
+      steps.flatMap((item, at) => (at === index ? [] : at === added ? [{ ...item, approved: true }] : [item])),
+    );
+  });
+  return candidates;
 }
 
 // Steps as they replay: a director action is named by the listed action it sent, and skipped steps are left out.
@@ -622,7 +650,7 @@ export async function exploreLifecycles({ seed, runs, length, factory = modelFre
     );
     if (!violation) continue;
     const fails = async candidate => (await runSequence(candidate, { factory })).violation?.rule ?? null,
-      shrunk = await shrink(replayable(ran.slice(0, violation.step + 1)), fails, violation.rule),
+      shrunk = await shrink(replayable(ran.slice(0, violation.step + 1)), fails, violation.rule, foldApprovals),
       last = (await runSequence(shrunk, { factory })).violation;
     const failure = { seed: own, rule: violation.rule, message: last?.message ?? violation.message, steps: shrunk };
     return { counters, sequences, failure: { ...failure, test: asTest(failure) } };
