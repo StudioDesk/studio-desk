@@ -89,6 +89,7 @@ const table = [
     ...optional(['before', 'after', 'limit']),
   ]),
   read('/api/projects/:id/live', "The project's live work a page at a time.", optional(['before', 'limit'])),
+  read('/api/projects/:id/calls', 'What needs the director now, each with the actions it offers; reading runs none.'),
   read('/api/projects/:id/library', "The project's library, every entry with its revisions."),
   read('/api/projects/:id/library/:entryId/readers', 'The attempts that read a library entry, newest first.'),
   read('/api/projects/:id/library/:entryId/revisions/:revision', "One library revision's bytes, as an inert file."),

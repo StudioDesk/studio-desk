@@ -26,3 +26,12 @@ export function taskActionsFor(store, projectId, page, shared) {
   const state = withPage({ ...store.shell(projectId), ...shared, ...liveRecords(store, projectId) }, page);
   return globalThis.StudioTaskActions.taskActions(page.task, state);
 }
+
+// One task's read with the actions the director may take on it now: what GET /api/tasks/:id answers. `taskPage` reads
+// the task's page, (projectId, record) => { task, attempts, version }, as the server reads it; `shared` is as above.
+// The task read and the project's list of calls (core/director-calls.mjs) both answer through it, so a task's actions
+// in the two never differ.
+export function taskRead(store, projectId, record, { taskPage, shared }) {
+  const page = taskPage(projectId, record);
+  return { ...page, actions: taskActionsFor(store, projectId, page, shared) };
+}

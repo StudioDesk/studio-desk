@@ -99,6 +99,9 @@ interface StudioRunsModule {
   awaitedSource(task: Task, find: (id: string) => Task | undefined): Task | null;
   integrationReview(task: Task, attempts: AttemptSummary[], pending: unknown, tasks: Task[]): AttemptSummary | null;
   holdItems(state: StudioState, explain: (task: Task, state: StudioState) => Explanation): HoldItem[];
+  integrationAction(state: StudioState, task: Task, attempt: AttemptSummary): string;
+  directorExplanation(task: Task, state: StudioState): Explanation;
+  needsYouItems(state: StudioState, runs: RunStory[]): HomeItem[];
 }
 
 // One action the story page offers on a task (public/task-actions.js): the words on its button, the route it is sent
@@ -169,49 +172,13 @@ export const recordedAttempt = (state: StudioState, task: Task, id = task.lastAt
       attempt.id === id && attempt.taskId === task.id && (!attempt.projectId || attempt.projectId === state.project.id),
   );
 
-export function integrationAction(state: StudioState, task: Task, attempt: AttemptSummary) {
-  const retry =
-    ['rejected', 'abandoned'].includes(attempt.sourceIntegration?.state ?? '') ||
-    (task.sourceStage?.phase === 'integration' && task.sourceStage.current === 'failed') ||
-    !!(task.sourceStage?.['reason' as never] || task.reason) ||
-    /could not request integration|approve it yourself/i.test(String(task.autonomyNote ?? ''));
-  if (state.autonomy?.policy?.enabled || task.sourceStage)
-    return retry ? 'Approve integration again' : 'Approve integration';
-  return retry ? 'Integrate again' : 'Integrate reviewed source';
-}
+// The words of a passing review's integration action in the older two-task layout (public/runs.js integrationAction).
+export const integrationAction = (state: StudioState, task: Task, attempt: AttemptSummary) =>
+  rules.integrationAction(state, task, attempt);
 
-// The current dashboard's explanation (app-core.js taskExplanation): the shared rules, plus a passing review in
-// the older two-task layout that waits for integration.
-export function explain(task: Task, state: StudioState): Explanation {
-  const explanation = rules.taskExplanation(task, state),
-    accepted = recordedAttempt(state, task, task.acceptedAttemptId),
-    journal = accepted?.sourceIntegration;
-  if (explanation.kind === 'denied' && task.reason) return { ...explanation, details: [String(task.reason)] };
-  if (
-    !task.sourceStage &&
-    !task.closed &&
-    task.kind === 'studio-development:change-review' &&
-    task.status === 'done' &&
-    accepted &&
-    (!journal || ['rejected', 'abandoned'].includes(journal.state ?? '')) &&
-    accepted.candidateReviewVerdict === 'pass'
-  ) {
-    const action = integrationAction(state, task, accepted);
-    return {
-      ...explanation,
-      kind: journal ? 'integration-stopped' : 'integration-approval',
-      reason: journal
-        ? 'The last integration did not complete.'
-        : 'The current independent review passed and awaits integration approval.',
-      next: journal
-        ? `Inspect the recorded failure and resolve it before using ${action}.`
-        : `Use ${action} to request controller-owned integration.`,
-      action,
-      requiresDirector: true,
-    };
-  }
-  return explanation;
-}
+// The director's explanation of a task (public/runs.js directorExplanation): the shared rules, plus a passing review
+// in the older two-task layout that waits for integration. The controller's list of calls reads the same rule.
+export const explain = (task: Task, state: StudioState): Explanation => rules.directorExplanation(task, state);
 
 // Each CLI's usage hold once, with its reset time when the CLI named one and the work waiting on it.
 export const usageHolds = (state: StudioState) => rules.holdItems(state, explain);
@@ -254,30 +221,10 @@ export type HomeItem = (NeedsItem & { run?: RunStory }) | CleanupItem | HoldItem
 export const isCleanup = (item: HomeItem): item is CleanupItem => 'members' in item;
 export const isHold = (item: HomeItem): item is HoldItem => 'kind' in item && item.kind === 'subscription-hold';
 
-// What Home lists (app-pages.js needsYouItems): each run's items, its unstarted steps waiting on stopped work
-// as one cleanup, then work outside any run, then each CLI's usage hold with no known reset, once.
-export function needsYouItems(state: StudioState, runs: RunStory[]): HomeItem[] {
-  const runOf = rules.runMembership(state.tasks),
-    seen = new Set<string>(),
-    items: HomeItem[] = [];
-  for (const run of runs) {
-    const rows = run.needsYou.filter(item => !seen.has(item.taskId));
-    rows.forEach(item => seen.add(item.taskId));
-    const cleanup = rows.filter(item => item.cleanup);
-    rows.filter(item => !item.cleanup).forEach(item => items.push({ ...item, run }));
-    if (cleanup.length)
-      items.push({
-        run,
-        members: cleanup,
-        taskIds: cleanup.map(item => item.taskId),
-        requiresDirector: cleanup.some(item => item.requiresDirector),
-      });
-  }
-  const standalone = state.tasks.filter(task => !runOf.has(task.id) && !seen.has(task.id));
-  items.push(...rules.needsYou(state, standalone, explain));
-  items.push(...rules.holdItems(state, explain).filter(hold => hold.requiresDirector));
-  return items;
-}
+// What Home lists (public/runs.js needsYouItems): each run's items, its unstarted steps waiting on stopped work as
+// one cleanup, then work outside any run, then each CLI's usage hold with no known reset, once. The controller's list
+// of what needs the director now (GET /api/projects/:id/calls) runs the same rule.
+export const needsYouItems = (state: StudioState, runs: RunStory[]): HomeItem[] => rules.needsYouItems(state, runs);
 
 // The live set's stories and Needs you items, worked out once for each version of the records, since the
 // sidebar's count and Home both read them.

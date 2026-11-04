@@ -1519,6 +1519,84 @@
       };
     });
   }
+  // The attempt a task records under the name given, from this project's summaries.
+  const recordedAttempt = (state, task, id = task.lastAttemptId) =>
+    (state.attempts || []).find(
+      attempt =>
+        attempt.id === id &&
+        attempt.taskId === task.id &&
+        (!attempt.projectId || attempt.projectId === state.project.id),
+    );
+  // The words of the integration action a passing review in the older two-task layout offers: approving it under the
+  // house rules or on a staged story, integrating it otherwise, and again after an integration that did not complete.
+  function integrationAction(state, task, attempt) {
+    const retry =
+      ['rejected', 'abandoned'].includes(attempt.sourceIntegration?.state ?? '') ||
+      (task.sourceStage?.phase === 'integration' && task.sourceStage.current === 'failed') ||
+      !!(task.sourceStage?.reason || task.reason) ||
+      /could not request integration|approve it yourself/i.test(String(task.autonomyNote ?? ''));
+    if (state.autonomy?.policy?.enabled || task.sourceStage)
+      return retry ? 'Approve integration again' : 'Approve integration';
+    return retry ? 'Integrate again' : 'Integrate reviewed source';
+  }
+  // The director's explanation of a task (the dashboard's explain): the shared taskExplanation, with a denied task's
+  // reason as its detail, plus a passing review in the older two-task layout that waits for integration.
+  function directorExplanation(task, state) {
+    const explanation = taskExplanation(task, state),
+      accepted = recordedAttempt(state, task, task.acceptedAttemptId),
+      journal = accepted?.sourceIntegration;
+    if (explanation.kind === 'denied' && task.reason) return { ...explanation, details: [String(task.reason)] };
+    if (
+      !task.sourceStage &&
+      !task.closed &&
+      task.kind === 'studio-development:change-review' &&
+      task.status === 'done' &&
+      accepted &&
+      (!journal || ['rejected', 'abandoned'].includes(journal.state ?? '')) &&
+      accepted.candidateReviewVerdict === 'pass'
+    ) {
+      const action = integrationAction(state, task, accepted);
+      return {
+        ...explanation,
+        kind: journal ? 'integration-stopped' : 'integration-approval',
+        reason: journal
+          ? 'The last integration did not complete.'
+          : 'The current independent review passed and awaits integration approval.',
+        next: journal
+          ? `Inspect the recorded failure and resolve it before using ${action}.`
+          : `Use ${action} to request controller-owned integration.`,
+        action,
+        requiresDirector: true,
+      };
+    }
+    return explanation;
+  }
+  // What Today lists as the project's calls, from the run stories given (each told by buildRunStories): each run's
+  // items, its unstarted steps waiting on stopped work as one cleanup, then work outside any run, then each CLI's
+  // usage hold with no known reset, once. Items whose requiresDirector is false only wait; the controller's list of
+  // what needs the director now (src/core/director-calls.mjs) keeps the others.
+  function needsYouItems(state, runs) {
+    const runOf = runMembership(state.tasks || []),
+      seen = new Set(),
+      items = [];
+    for (const run of runs) {
+      const rows = run.needsYou.filter(item => !seen.has(item.taskId));
+      rows.forEach(item => seen.add(item.taskId));
+      const cleanup = rows.filter(item => item.cleanup);
+      rows.filter(item => !item.cleanup).forEach(item => items.push({ ...item, run }));
+      if (cleanup.length)
+        items.push({
+          run,
+          members: cleanup,
+          taskIds: cleanup.map(item => item.taskId),
+          requiresDirector: cleanup.some(item => item.requiresDirector),
+        });
+    }
+    const standalone = (state.tasks || []).filter(task => !runOf.has(task.id) && !seen.has(task.id));
+    items.push(...needsYou(state, standalone, directorExplanation));
+    items.push(...holdItems(state, directorExplanation).filter(hold => hold.requiresDirector));
+    return items;
+  }
   // Every commit a run's integrations made, in the order they finished.
   function committed(journals) {
     const commits = [
@@ -1757,5 +1835,8 @@
     taskExplanation,
     needsYou,
     holdItems,
+    integrationAction,
+    directorExplanation,
+    needsYouItems,
   });
 })();

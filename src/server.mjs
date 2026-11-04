@@ -72,7 +72,8 @@ import { applyAgentPermissions, approveCommands, commandRule, taskAutoMode } fro
 import { employeeTestsAllowed, runEmployeeTests, savedTestRun } from './connectors/employee-tests.mjs';
 import { attemptTrace } from './core/attempt-trace.mjs';
 import { storyActivity } from './core/story-activity.mjs';
-import { taskActionsFor } from './core/task-actions.mjs';
+import { taskRead } from './core/task-actions.mjs';
+import { directorCalls } from './core/director-calls.mjs';
 import { routes, rulesFor } from './core/routes.mjs';
 import { validateReview } from './packs/game-production/contracts.mjs';
 import { validatePlan } from './planning.mjs';
@@ -859,6 +860,10 @@ export function createStudio({
       if (parts[0] === 'api' && parts[1] === 'projects' && parts.length === 4 && req.method === 'GET') {
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });
+        // What needs the director now: the shared rules' calls from the shell and the whole live set, those only the
+        // director's decision moves, each task's with the actions its task read answers (core/director-calls.mjs).
+        if (parts[3] === 'calls')
+          return json(res, directorCalls(store, projectId, { taskPage, shared: common(projectId), registries }));
         // One chat of the project a page at a time (team chat): the newest page, the page before a message's seq, or
         // what came after one, always newest last, with the highest seq read as the point a reader resumes from.
         if (parts[3] === 'messages') {
@@ -1018,8 +1023,7 @@ export function createStudio({
         // A story's pages for the visual check, its planned ones until the director changes them (1.2 step 8).
         if (parts[3] === 'pages') return json(res, storyPagesView(store, record));
         if (parts[3]) return json(res, storyActivity(store, record));
-        const page = taskPage(queryProject, record);
-        return json(res, { ...page, actions: taskActionsFor(store, queryProject, page, common(queryProject)) });
+        return json(res, taskRead(store, queryProject, record, { taskPage, shared: common(queryProject) }));
       }
       // The controller's own measures (C-18): event-loop delay, scheduler passes, requests, memory and record sizes.
       if (url.pathname === '/api/health/load' && req.method === 'GET') return json(res, measures.snapshot(store));
