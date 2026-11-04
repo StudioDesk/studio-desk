@@ -40,6 +40,9 @@
     return source && !['done', 'failed', 'cancelled', 'denied'].includes(source.status) ? source : null;
   };
 
+  // What a story whose plan the code moved past says when its note records no reason of its own.
+  const outdatedReason =
+    'The code moved on since this story was planned. Close it and send its remaining work as a new idea.';
   // source-story-stages-v1 is additive task metadata. Attempts remain separate,
   // immutable records under the same task ID, with the execution kind in assignment.
   const sourceStage = task =>
@@ -867,6 +870,19 @@
       }
       return result(kind, why, recovery, action, [error]);
     }
+    // A source story whose plan the code moved past (sourceStage.outdated, noted when the controller refused its Start
+    // or an edit of its files for that reason): neither starting it again nor editing its files can work, so it reads
+    // the recorded plain reason, not the refusal naming files, and asks the director to send its work as a new idea.
+    if (stage?.outdated && !['running', 'stopping'].includes(task.status))
+      return {
+        ...result(
+          'outdated',
+          (typeof stage.outdated.reason === 'string' && stage.outdated.reason.trim()) || outdatedReason,
+          'Use Close and send as a new idea. Its remaining work gets fresh checks and a new plan, and the story closes once the new idea is taken in.',
+          'Close and send as a new idea',
+        ),
+        details: [],
+      };
     if (task.status === 'done') {
       if (stage?.current === 'failed' && stage.review?.verdict === 'needs-work' && currentReview)
         return result(

@@ -3154,3 +3154,78 @@ test("a run waiting for the computer's test turn says whose suite it waits for a
   assert.equal(dashboardAttempt(staged.attempts[1]).sourceIntegration.testTurn, undefined);
   assert.equal(paged(staged).reason, 'The controller is integrating the approved change.');
 });
+
+test('a story whose plan the code moved past reads the recorded plain reason, not the refusal naming files, and needs the director', () => {
+  const refusal =
+      'src/core/created.mjs now exists or collides with an existing path, so it cannot be created. Request fresh measured evidence and a new breakdown.',
+    recorded =
+      'The code moved on since this story was planned: another story has since created or changed files it was planned to create or change. Close it and send its remaining work as a new idea.',
+    // The note as the controller records it (src/connectors/source-changes.mjs noteOutdated).
+    stage = (note = { reason: recorded }) => ({
+      version: 'source-story-stages-v1',
+      phase: 'implementing',
+      history: [],
+      outdated: { ...note, files: ['src/core/created.mjs'], at: at(3) },
+    }),
+    story = (fields = {}, attemptFields = null) =>
+      explanationFixture(
+        { kind: 'studio-development:change', status: 'blocked', reason: refusal, sourceStage: stage(), ...fields },
+        attemptFields,
+      ),
+    // A path, a file name or a record's identifier.
+    identifiers = /[\\/]|\.mjs|\.md|T-[0-9a-f]|attempt-/i,
+    plain = value => JSON.parse(JSON.stringify(value));
+  // A story whose Start was refused before it ever ran.
+  const s = story();
+  let e = explain(s);
+  assert.equal(e.kind, 'outdated');
+  assert.equal(e.reason, recorded);
+  assert.doesNotMatch(e.reason, identifiers);
+  assert.doesNotMatch(e.next, identifiers);
+  assert.deepEqual(plain(e.details), [], 'The refusal naming files stays out of the account.');
+  assert.equal(e.action, 'Close and send as a new idea');
+  assert.equal(e.requiresDirector, true);
+  // Needs you lists it with the same plain words, and its run needs the director.
+  const items = context.StudioRuns.needsYou(s);
+  assert.deepEqual(plain(items.map(item => [item.taskId, item.kind, item.text, item.requiresDirector])), [
+    ['E', 'outdated', recorded, true],
+  ]);
+  const run = buildRunStories({
+    ...s,
+    tasks: s.tasks.map(item => ({ ...item, workflowReference: { runId: 'outdated', name: 'Outdated' } })),
+  })[0];
+  assert.equal(run.outcome.label, 'Needs you');
+  // A note with no reason of its own reads the plain fallback.
+  e = explain(story({ sourceStage: stage({}) }));
+  assert.equal(e.kind, 'outdated');
+  assert.equal(
+    e.reason,
+    'The code moved on since this story was planned. Close it and send its remaining work as a new idea.',
+  );
+  // A blocked editor whose file request the controller would refuse reads the note, not the file request.
+  e = explain(
+    story(
+      {},
+      {
+        status: 'blocked',
+        finishedAt: at(2),
+        scopeRequest: {
+          files: ['test/by-hand.test.mjs'],
+          newFiles: [],
+          deleteFiles: [],
+          reason: 'The test added by hand pins the old wording.',
+          problem:
+            'The story lists unsupported or unrecorded source file test/by-hand.test.mjs; choose an allowed existing path from the measured manifest.',
+        },
+      },
+    ),
+  );
+  assert.equal(e.kind, 'outdated');
+  assert.equal(e.reason, recorded);
+  assert.deepEqual(plain(e.details), []);
+  // Running or closed work still reads as it is.
+  assert.equal(explain(story({ status: 'running' }, { status: 'running', finishedAt: null })).kind, 'running');
+  assert.equal(explain(story({ status: 'denied' })).kind, 'denied');
+  // A story with no note reads the refusal as before.
+  assert.notEqual(explain(story({ sourceStage: { ...stage(), outdated: undefined } })).kind, 'outdated');
+});

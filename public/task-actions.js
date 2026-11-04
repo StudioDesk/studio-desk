@@ -2,7 +2,10 @@
 // each with the words on its button, the route it is sent to and the body fields that route takes (src/server.mjs's
 // task commands). They are the conditions of the story page (dashboard/src/decisions.ts decisionState and
 // dashboard/src/task-decisions.tsx TaskDecisions, with the question card's Answer and a command request's Allow
-// commands), written once more so the controller can run them too; the page keeps its own until it reads these.
+// commands), written once more so the controller can run them too; the page keeps its own until it reads these. Where
+// they differ from the page, they say so: a story whose plan the code moved past (sourceStage.outdated) offers Close and
+// send as a new idea in place of Start assignment and Allow and continue, and a file request that carries a problem
+// offers no Allow and continue; the page follows in its own story.
 // Nothing here sends anything or reads the page. Loaded after runs.js, whose rules (globalThis.StudioRuns) it reads.
 (() => {
   const unsettledStates = ['interrupted', 'quarantined', 'uncertain'];
@@ -92,7 +95,8 @@
     return { files: line('Files'), newFiles: line('New files'), deleteFiles: line('Delete') };
   };
   // A blocked editor's usable file request, and the paths approving it as asked gives the story (decisions.ts
-  // fileRequest).
+  // fileRequest). A request that carries a problem is one the controller found it would refuse as asked (the check of
+  // a file request, src/connectors/source-changes.mjs), so it is not usable.
   const fileRequest = (task, state) => {
     const latest = state.attempts.find(attempt => attempt.id === task.lastAttemptId),
       edits = task.scopeEdits ?? [],
@@ -105,7 +109,7 @@
         !edits.some(edit => edit.at >= String(latest.finishedAt ?? ''))
           ? latest
           : null,
-      request = requested && scope?.reason ? scope : null,
+      request = requested && scope?.reason && !scope.problem ? scope : null,
       current = storyPaths(task),
       join = (one, other) => [...new Set([...(one ?? []), ...(other ?? [])])],
       worked = state.attempts.some(
@@ -249,7 +253,16 @@
       files = fileRequest(task, state),
       asking = waitingQuestion(task, state.attempts),
       { used, allowed } = attemptsUsed(task, attempts),
-      pastLimit = task.maxAttempts !== undefined && used >= allowed;
+      pastLimit = task.maxAttempts !== undefined && used >= allowed,
+      // The code moved past the story's plan (src/connectors/source-changes.mjs noteOutdated): the controller refuses
+      // its Start and any edit of its files, and only a new idea carries its work on. Close and send as a new idea takes
+      // what Close takes, and a story that never started, as Deny does (src/core/idea-intake.mjs sendStoryAsIdea).
+      outdated = task.kind === 'studio-development:change' && !!task.sourceStage?.outdated,
+      neverStarted =
+        approval?.status === 'approved' &&
+        !attempts.length &&
+        !['running', 'stopping', 'review', 'done', 'denied', 'backlog'].includes(task.status),
+      sendable = outdated && !closed && task.status !== 'denied' && (closable || neverStarted);
     const step = (route, fields = [], method = 'POST') => ({
       method,
       path: `/api/tasks/${id}/${route}`,
@@ -268,7 +281,7 @@
       offer('deny-Withdraw approval and deny', 'Withdraw approval and deny', 'default', deny());
     if (!approval && !task.lastAttemptId && ['ready', 'blocked'].includes(task.status))
       offer('deny-Close this step', 'Close this step', 'quiet', deny(), true);
-    if (files.request && files.requested)
+    if (files.request && files.requested && !outdated)
       offer(
         'allow-files',
         'Allow and continue',
@@ -283,10 +296,18 @@
           field('note', false, 'note'),
         ]),
       );
+    if (sendable)
+      offer(
+        'send-as-idea',
+        'Close and send as a new idea',
+        'primary',
+        step('send-as-idea', [field('idea', false, 'text')]),
+      );
     if (
       !live &&
       !closed &&
       !unsettled &&
+      !outdated &&
       explanation.kind !== 'fixed-limit' &&
       ['ready', 'blocked', 'failed', 'cancelled'].includes(task.status)
     )

@@ -4,8 +4,13 @@
 // list leaves out, and reading runs none of them.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Runner } from '../src/runner.mjs';
+import { approveWork } from '../src/core/proposals.mjs';
+import { git } from '../src/connectors/source-integration.mjs';
 import { setup } from './studio-setup.mjs';
+import { setup as sourceSetup } from './source-story-setup.mjs';
 import '../public/runs.js';
 import '../public/task-actions.js';
 
@@ -122,6 +127,13 @@ const send = (c, page, label) => {
     }
   return c.request(action.path, body, action.method);
 };
+// The task's record and its attempts. A story whose plan the code moved past notes when a refusal last saw that
+// (sourceStage.outdated.at); a refusal that sees it again changes nothing else.
+const recorded = (c, id) => {
+  const task = structuredClone(c.app.store.task(id));
+  if (task.sourceStage?.outdated) delete task.sourceStage.outdated.at;
+  return JSON.stringify([task, c.app.store.attempts(id)]);
+};
 // Sends an action the list leaves out, and checks the controller refuses it and the task stays as it was.
 const refused = async (c, page, label, route) => {
   assert.equal(
@@ -129,10 +141,10 @@ const refused = async (c, page, label, route) => {
     false,
     `${label} is left out.`,
   );
-  const before = JSON.stringify([c.app.store.task(page.task.id), c.app.store.attempts(page.task.id)]),
+  const before = recorded(c, page.task.id),
     answer = await c.request(`/api/tasks/${encodeURIComponent(page.task.id)}/${route}`, { projectId });
   assert.ok(answer.status >= 400 && answer.status < 500, `${label} answered ${answer.status}.`);
-  assert.equal(JSON.stringify([c.app.store.task(page.task.id), c.app.store.attempts(page.task.id)]), before);
+  assert.equal(recorded(c, page.task.id), before);
 };
 
 test('ready, proposed, in review and running work: listed actions are accepted, left-out ones refused', async t => {
@@ -208,4 +220,91 @@ test('an interrupted attempt lists only Reconcile, and closed work lists nothing
   assert.equal(c.app.store.task(interrupted).status, 'blocked');
   const cut = await actionsOf(c, interrupted, ['Reconcile interrupted attempt']);
   await refused(c, cut, 'Start assignment', 'start');
+});
+
+// The source story fixture whose project takes ideas as a source project does (fresh checks, then a breakdown).
+const sourceStudio = async t => {
+  const c = await sourceSetup(t),
+    { store } = c.app,
+    org = store.organization(),
+    kinds = ['checks', 'breakdown', 'change', 'change-review'].map(name => `studio-development:${name}`);
+  org.taskKinds = [...new Set([...(org.taskKinds || []), ...kinds])];
+  org.kindOwners = { ...org.kindOwners, [kinds[0]]: 'W-06', [kinds[1]]: 'W-01' };
+  store.setOrganization(org);
+  return c;
+};
+const created = 'src/core/created.mjs';
+
+test('a story blocked on a file another story has since created lists Close and send as a new idea, and Start and Allow and continue are refused', async t => {
+  const c = await sourceStudio(t),
+    { store, runner } = c.app,
+    // Two unrelated stories from one breakdown both planned to create the same file.
+    { ids } = await c.breakdown([
+      { files: ['src/core/workflows.mjs'], newFiles: [created], dependencies: [] },
+      { files: ['src/core/projects.mjs'], newFiles: [created], dependencies: [] },
+    ]),
+    id = ids[1];
+  for (const story of ids) approveWork(store, runner.registries, store.task(story));
+  runner.start(ids[0]);
+  const { review } = await c.toReview(ids[0]);
+  c.integrated(ids[0], review, { [created]: 'export const created = 1;\n' });
+  // The director's Start is refused, and the story notes that its plan is out of date.
+  const start = await c.request(`/api/tasks/${id}/start`, { projectId });
+  assert.ok(start.status >= 400 && start.status < 500, JSON.stringify(start.data));
+  assert.ok(store.task(id).sourceStage?.outdated, 'The story notes that its plan is out of date.');
+  assert.equal(store.attempts(id).length, 0);
+  // The story never started: the new idea is offered beside withdrawing its approval.
+  const page = await actionsOf(c, id, ['Close and send as a new idea', 'Withdraw approval and deny']);
+  const sending = page.actions.find(action => action.label === 'Close and send as a new idea');
+  assert.equal(sending.method, 'POST');
+  assert.equal(sending.path, `/api/tasks/${id}/send-as-idea`);
+  assert.deepEqual(
+    sending.fields.map(({ name, required }) => [name, required]),
+    [
+      ['projectId', true],
+      ['idea', false],
+    ],
+  );
+  await refused(c, page, 'Start assignment', 'start');
+  await refused(c, page, 'Allow and continue', 'edit-scope');
+  // Sending the listed action closes the story once its remaining work is taken in as a new idea; the project's
+  // dispatch is held so the new idea's steps wait instead of running.
+  store.putProject({ ...store.project(projectId), dispatchPaused: true });
+  const sent = await send(c, page, 'Close and send as a new idea');
+  assert.equal(sent.status, 201, JSON.stringify(sent.data));
+  assert.equal(sent.data.closed, id);
+  assert.equal(store.task(id).status, 'denied');
+  assert.equal(store.task(id).sentAsIdea.runId, sent.data.runId);
+  await actionsOf(c, id, []);
+});
+
+test('a blocked editor whose file request names a file outside the measured list is offered no Allow and continue', async t => {
+  const c = await sourceStudio(t),
+    { store, runner } = c.app,
+    byHand = 'test/by-hand.test.mjs',
+    reason = 'The test added by hand pins the old wording.',
+    { ids } = await c.breakdown([
+      { files: ['src/core/workflows.mjs'], dependencies: [] },
+      { files: ['src/core/projects.mjs'], dependencies: [] },
+    ]),
+    id = ids[0];
+  // A file committed after the breakdown's checks measured the source: it exists now, but not in the measured list.
+  fs.writeFileSync(path.join(c.root, byHand), '// Added by hand\n');
+  git(c.root, ['add', byHand]);
+  git(c.root, ['commit', '--quiet', '-m', 'Add a test by hand']);
+  approveWork(store, runner.registries, store.task(id));
+  store.putTask({ ...store.task(id), direction: `block-request ${JSON.stringify({ files: [byHand], reason })}` });
+  runner.start(id);
+  const blocked = await c.wait(id, 'blocked');
+  assert.ok(blocked.scopeRequest.problem, 'The request records why approving it would be refused.');
+  assert.ok(store.task(id).sourceStage?.outdated, 'The story notes that its plan is out of date.');
+  let page = await actionsOf(c, id, ['Close and send as a new idea', 'Close']);
+  await refused(c, page, 'Allow and continue', 'edit-scope');
+  // A request that carries a problem is not usable on its own: without the note, Start is offered and Allow and
+  // continue is not.
+  const story = store.task(id);
+  delete story.sourceStage.outdated;
+  store.putTask(story);
+  page = await actionsOf(c, id, ['Start assignment', 'Close']);
+  await refused(c, page, 'Allow and continue', 'edit-scope');
 });
