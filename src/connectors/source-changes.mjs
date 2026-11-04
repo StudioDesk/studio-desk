@@ -1703,7 +1703,13 @@ export function sourceStoryReturnable(store, task) {
       needsNote: !checks && !notes.length,
     };
   }
-  if (stage.current !== 'failed' || review.verdict !== 'needs-work') return null;
+  if (review.verdict !== 'needs-work') return null;
+  // The director may have integrated over the review (MP-019): while that merge is recorded and not settled as stopped,
+  // the story is not sent back, so its journal and the repository it holds wait for Reconcile source integration.
+  // A merge reconciled as stopped before it landed leaves the story waiting for integration; it may go back then too.
+  const journal = attempt.sourceIntegration;
+  if (journal && !['rejected', 'abandoned'].includes(journal.state)) return null;
+  if (stage.current !== 'failed' && !(journal && stage.current === 'waiting-for-integration')) return null;
   const { summary, findings } = report();
   return {
     findings: [
@@ -2367,8 +2373,19 @@ function reconcileMerge(runtime, task, review, journal) {
   return result;
 }
 export function restoreSourceIntegration(runtime, task) {
-  const store = runtime.store;
-  task = sourceIntegrationTarget(store, task, task.acceptedAttemptId, task.sourceStage?.review?.hash);
+  const store = runtime.store,
+    ref = task.sourceStage?.review,
+    // A merge the director approved over the review that requested changes is checked with the reason its journal
+    // recorded, so it can be reconciled too; any other journal is checked exactly as before.
+    recorded =
+      task.kind === 'studio-development:change' && ref?.attemptId && ref.attemptId === task.acceptedAttemptId
+        ? store.attempt(ref.attemptId)?.sourceIntegration
+        : undefined,
+    override =
+      recorded?.reviewOverride && recorded.reviewHash === ref.hash
+        ? { reason: recorded.reviewOverride.reason }
+        : undefined;
+  task = sourceIntegrationTarget(store, task, task.acceptedAttemptId, ref?.hash, { override });
   const review = store.attempt(task.acceptedAttemptId),
     journal = review.sourceIntegration;
   if (
