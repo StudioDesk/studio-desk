@@ -8,6 +8,16 @@ if (mode === 'slower') await new Promise(resolve => setTimeout(resolve, 4000));
 if (mode === 'outlast') await new Promise(resolve => setTimeout(resolve, 9000));
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'malformed') console.log('No test totals');
+// A run that stops before any test: only an error on its error output, and exit 1.
+else if (mode === 'missing-module') {
+  process.stderr.write('Error: Cannot find module fixture-missing\n');
+  process.exitCode = 1;
+}
+// A run whose error output is longer than a merge keeps of it: 6,000 characters, then its last line.
+else if (mode === 'long-errors') {
+  process.stderr.write('x'.repeat(6000) + '\nError: the end of a long error output\n');
+  process.exitCode = 1;
+}
 // The given number of passing tests (the next argument); 'count 0' reports a run of no tests.
 else if (mode === 'count') {
   const count = Number(process.argv[3]);

@@ -828,8 +828,20 @@ export interface Journal {
   method?: string;
   approvedBy?: { type?: string; revision?: number };
   repository?: { commit?: string; branch?: string };
-  verification?: { totals?: { pass?: number; tests?: number }; formatter?: string };
+  verification?: {
+    totals?: { pass?: number; tests?: number };
+    formatter?: string;
+    outputs?: { install?: string; format?: string; build?: string; errors?: string };
+  };
 }
+
+// What each verification step printed, in the order they run, named in plain words.
+const printedOutputs = [
+  ['install', 'What the install printed'],
+  ['format', 'What the formatter printed'],
+  ['build', 'What the build printed'],
+  ['errors', 'What the test run printed as errors'],
+] as const;
 
 // A reviewed change's integration: who approved it, its commit and verification, and the full record, with the
 // merge's whole test record once it recorded a verification. `attemptId` is the attempt holding the journal.
@@ -843,7 +855,8 @@ export function IntegrationJournal({
   journal: Journal;
 }) {
   const commit = journal.repository?.commit,
-    totals = journal.verification?.totals;
+    totals = journal.verification?.totals,
+    outputs = journal.verification?.outputs;
   return (
     <>
       <p style={{ margin: 0, color: 'var(--ink-2)' }}>
@@ -862,6 +875,18 @@ export function IntegrationJournal({
             journal.verification?.formatter ? `formatting with ${journal.verification.formatter}` : 'the merge'
           }.`}
       </p>
+      {printedOutputs.map(([name, label]) =>
+        outputs?.[name] ? (
+          <details
+            key={name}
+            className="sd-disclosure"
+            open={name === 'errors' && journal.state === 'rejected' ? true : undefined}
+          >
+            <summary>{label}</summary>
+            <pre className="sd-code sd-code--block sd-code--wrap">{outputs[name]}</pre>
+          </details>
+        ) : null,
+      )}
       <details className="sd-disclosure">
         <summary>Recorded source integration{journal.method === 'merge' ? '' : ' and backups'}</summary>
         <pre className="sd-code sd-code--block">{JSON.stringify(journal, null, 2)}</pre>

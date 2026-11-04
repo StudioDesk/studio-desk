@@ -226,6 +226,62 @@ test('the record page of a chosen build shows it and what it received, and a lan
   expect(record.getByText('Recorded source integration')).toBeTruthy();
 });
 
+// The review's integration stopped, with the verification it recorded.
+const rejected = (verification: NonNullable<AttemptSummary['sourceIntegration']>['verification']) => {
+  story(true);
+  controller.attempts[2]!.sourceIntegration = {
+    state: 'rejected',
+    error: 'The test run did not report complete totals.',
+    verification,
+  };
+};
+const printedLabels = [
+  'What the install printed',
+  'What the formatter printed',
+  'What the build printed',
+  'What the test run printed as errors',
+];
+
+test("a rejected integration's record shows what its steps printed, its test run's errors open", async () => {
+  rejected({
+    outputs: {
+      format: 'Checking formatting...\nAll matched files use Prettier code style!',
+      errors: 'Error: Cannot find module fixture-missing',
+    },
+  });
+  open('/p/project-x/tasks/T-1/attempts/attempt-review/record');
+  const record = within(await recordOf());
+  const sentence = await record.findByText(/^Source integration:/, {}, { timeout: 5000 });
+  expect(sentence.textContent).toContain('rejected');
+  const errors = record.getByText('What the test run printed as errors').closest('details')!;
+  expect(errors.open).toBe(true);
+  expect(errors.className).toBe('sd-disclosure');
+  const text = within(errors).getByText('Error: Cannot find module fixture-missing');
+  expect(text.tagName).toBe('PRE');
+  expect(text.className).toBe('sd-code sd-code--block sd-code--wrap');
+  const format = record.getByText('What the formatter printed').closest('details')!;
+  expect(format.open).toBe(false);
+  expect(format.textContent).toContain('All matched files use Prettier code style!');
+  // Only the steps that printed something; below the integration sentence, above the full recorded integration.
+  expect(record.queryByText('What the install printed')).toBeNull();
+  expect(record.queryByText('What the build printed')).toBeNull();
+  const full = record.getByText(/^Recorded source integration/).closest('details')!;
+  for (const shown of [format, errors]) {
+    expect(sentence.compareDocumentPosition(shown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(shown.compareDocumentPosition(full) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+});
+
+test('an integration that recorded no outputs shows none of them', async () => {
+  rejected({ conflicts: [] });
+  open('/p/project-x/tasks/T-1/attempts/attempt-review/record');
+  const record = within(await recordOf());
+  const sentence = await record.findByText(/^Source integration:/, {}, { timeout: 5000 });
+  expect(sentence.textContent).toContain('rejected');
+  expect(record.getByText(/^Recorded source integration/)).toBeTruthy();
+  for (const label of printedLabels) expect(record.queryByText(label)).toBeNull();
+});
+
 test('an attempt the story does not have says so, with a way back to the story', async () => {
   story();
   open('/p/project-x/tasks/T-1/attempts/attempt-elsewhere/record');

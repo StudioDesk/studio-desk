@@ -490,12 +490,25 @@ export function tooFewTests(totals, plan, profile, journal) {
       : `that ${line}`
   }.`;
 }
+// The end of what a verification step printed (outputs, 1.2.0), or undefined when it printed nothing.
+export const outputLimit = 4000;
+const printed = text => (String(text || '').trim() ? String(text).slice(-outputLimit) : undefined);
+// Why a test run that reported no complete totals failed: its error output's last line, when it printed one.
+const noTotals = errors =>
+  `The test run did not report complete totals.${lastLine(errors) ? ` Its error output ends: ${lastLine(errors)}` : ''}`;
 // Builds the integration in its worktree, checked out at the tip it will fast-forward from:
 // merges the candidate commit onto it (three-way), formats only the changed files that remain
 // and runs the full suite on the result. Nothing outside the worktree changes.
 // The profile (the candidate's) names the formatter, or none, and the snapshot the suite runs on; the
-// candidate's recorded configuration names the test sandbox, the one its own tests ran in.
+// candidate's recorded configuration names the test sandbox, the one its own tests ran in. Every result, passing or
+// failing, carries outputs: the end of what the install, formatter, build and test run (its error output) printed,
+// each only when that step ran and printed something, so the story's record shows them after the folder is gone.
 export async function verifyIntegration(runtime, journal, directory, configuration, profile = studioDeskProfile) {
+  const outputs = {},
+    keep = (name, text) => {
+      const tail = printed(text);
+      if (tail !== undefined) outputs[name] = tail;
+    };
   try {
     const startedAt = new Date().toISOString(),
       formatter = profile.formatter,
@@ -537,6 +550,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
             phase,
           });
         fs.writeFileSync(path.join(directory, 'format-output.txt'), formatted.stdout + formatted.stderr);
+        keep('format', formatted.stdout + formatted.stderr);
         if (formatted.exitCode !== 0 || formatted.timedOut)
           throw Object.assign(
             new Error(
@@ -585,6 +599,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
           phase,
         });
         fs.writeFileSync(path.join(directory, 'install-output.txt'), installed.stdout + installed.stderr);
+        keep('install', installed.stdout + installed.stderr);
         if (installed.exitCode !== 0 || installed.timedOut)
           throw Object.assign(
             new Error(
@@ -632,6 +647,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
           );
         }
         fs.writeFileSync(path.join(directory, 'build-output.txt'), result.stdout + result.stderr);
+        keep('build', result.stdout + result.stderr);
         const passed = buildPassed(result);
         built = {
           name: 'Integration build',
@@ -670,6 +686,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
       });
       fs.writeFileSync(path.join(directory, 'test-output.txt'), tested.stdout);
       fs.writeFileSync(path.join(directory, 'test-errors.txt'), tested.stderr);
+      keep('errors', tested.stderr);
       if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash)
         throw Object.assign(new Error('A test changed the verified source.'), {
           phaseEvidence: testPhaseEvidence(tested.stdout),
@@ -688,10 +705,12 @@ export async function verifyIntegration(runtime, journal, directory, configurati
         // A run that passed can still have counted too few tests: none from a source that holds test files, or fewer
         // than the line last passed with (journal.testFloor, recorded for a story's merge).
         short = ran ? tooFewTests(totals, plan, profile, journal) : null,
-        passed = ran && !short;
+        passed = ran && !short,
+        // A run with no complete totals says why when its error output does (carries and releases read it too).
+        reason = short || (totals ? null : noTotals(tested.stderr));
       return {
         passed,
-        ...(short ? { error: short } : {}),
+        ...(reason ? { error: reason } : {}),
         phaseId: 'integration.verification',
         failedTests,
         checks: [
@@ -718,6 +737,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
         timedOut: tested.timedOut,
         startedAt,
         finishedAt: new Date().toISOString(),
+        outputs,
       };
     };
     return await observeIntegrationPhase(runtime, journal, 'integration.verification', async phase => {
@@ -734,6 +754,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
       error: error.message,
       ...error.verification,
       ...(error.conflicts ? { conflicts: error.conflicts } : {}),
+      outputs,
     };
   }
 }

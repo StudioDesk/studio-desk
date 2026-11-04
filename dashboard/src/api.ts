@@ -28,7 +28,13 @@ export interface AttemptSummary {
   sourceIntegration?: {
     state?: string;
     error?: string;
-    verification?: { conflicts?: string[]; landedSince?: { commits: number; stories: string[] } };
+    verification?: {
+      conflicts?: string[];
+      landedSince?: { commits: number; stories: string[] };
+      // The end of what the merge's install, formatter, build and test run (its error output) printed, each only
+      // when that step ran and printed something.
+      outputs?: { install?: string; format?: string; build?: string; errors?: string };
+    };
   } | null;
   // A fix integrated on an older line, carried to each newer one (1.1 step 4), or brought back to older ones by the
   // director (`back`), with the stories whose carry to the same line it waits for (`after`).

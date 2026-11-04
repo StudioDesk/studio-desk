@@ -204,6 +204,17 @@ export function dashboardAttempt(data, timing, openPhase = null) {
               })),
             }
           : {}),
+        // The end of what the install, formatter, build and test run (its error output) printed (1.2.0), each bounded
+        // as the merge recorded it.
+        ...(verification.outputs && typeof verification.outputs === 'object'
+          ? {
+              outputs: Object.fromEntries(
+                ['install', 'format', 'build', 'errors']
+                  .filter(name => typeof verification.outputs[name] === 'string' && verification.outputs[name])
+                  .map(name => [name, shortText(verification.outputs[name], 4000)]),
+              ),
+            }
+          : {}),
         // The files that conflicted, so the story offers Merge onto the current source (1.1 step 3).
         ...(verification.conflicts
           ? { conflicts: verification.conflicts.slice(0, 20).map(file => shortText(file)) }
