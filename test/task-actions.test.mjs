@@ -421,3 +421,248 @@ test('a running integration lists no Reconcile source integration, and a reconci
   assert.equal((await send(c, page, 'Integrate again')).status, 200);
   assert.equal((await c.settled(review)).state, 'integrated');
 });
+
+// The sweep: every action listed on each sample story, sent on a fresh copy of that sample, is accepted. Each sample
+// is built on controller records with a temporary git source (the source story fixture) and its model-free CLI and
+// checks; it answers its studio and the story's ID. The labels are what the sample lists.
+const twoStories = [
+  { files: ['src/core/workflows.mjs'], dependencies: [] },
+  { files: ['src/core/projects.mjs'], dependencies: [] },
+];
+// Starts a story whose editor stops as the direction asks, and answers the attempt it stopped.
+const stopped = async (c, id, direction) => {
+  const { store, runner } = c.app;
+  if (store.task(id).approval?.status !== 'approved') approveWork(store, runner.registries, store.task(id));
+  store.putTask({ ...store.task(id), direction });
+  runner.start(id);
+  return c.wait(id, 'blocked');
+};
+const asking = request => `block-request ${JSON.stringify(request)}`;
+const samples = [
+  {
+    name: 'ready work',
+    labels: ['Start assignment', 'Withdraw approval and deny'],
+    build: async t => {
+      const c = await sourceStudio(t);
+      return { c, id: c.taskId };
+    },
+  },
+  {
+    name: 'proposed work',
+    labels: ['Approve work', 'Deny work'],
+    build: async t => {
+      const c = await sourceStudio(t),
+        { ids } = await c.breakdown(twoStories);
+      return { c, id: ids[0] };
+    },
+  },
+  {
+    name: 'a result in review',
+    labels: ['Accept result', 'Request revision', 'Close without accepting'],
+    build: async t => {
+      const c = await sourceStudio(t);
+      await c.start();
+      // The trusted protocol seam marks the fixture's checks as measured, as a real attempt's are.
+      c.measuredFixture(await c.wait(c.taskId));
+      return { c, id: c.taskId };
+    },
+  },
+  {
+    name: 'a stop without a question',
+    labels: ['Start assignment', 'Close'],
+    build: async t => {
+      const c = await sourceStudio(t),
+        attempt = await stopped(c, c.taskId, 'block');
+      assert.equal(attempt.question?.ask, undefined, 'The editor stopped without asking.');
+      assert.equal(attempt.scopeRequest, undefined, 'The editor stopped without a file request.');
+      return { c, id: c.taskId };
+    },
+  },
+  {
+    name: 'a story blocked on a file another story has since created',
+    labels: ['Close and send as a new idea', 'Withdraw approval and deny'],
+    build: async t => {
+      const c = await sourceStudio(t),
+        { store, runner } = c.app,
+        { ids } = await c.breakdown([
+          { files: ['src/core/workflows.mjs'], newFiles: [created], dependencies: [] },
+          { files: ['src/core/projects.mjs'], newFiles: [created], dependencies: [] },
+        ]);
+      for (const story of ids) approveWork(store, runner.registries, store.task(story));
+      runner.start(ids[0]);
+      const { review } = await c.toReview(ids[0]);
+      c.integrated(ids[0], review, { [created]: 'export const created = 1;\n' });
+      const start = await c.request(`/api/tasks/${ids[1]}/start`, { projectId });
+      assert.ok(start.status >= 400 && start.status < 500, JSON.stringify(start.data));
+      assert.ok(store.task(ids[1]).sourceStage?.outdated, 'The story notes that its plan is out of date.');
+      return { c, id: ids[1] };
+    },
+  },
+  {
+    name: 'a blocked editor whose file request is usable',
+    labels: ['Allow and continue', 'Start assignment', 'Close'],
+    build: async t => {
+      const c = await sourceStudio(t),
+        { ids } = await c.breakdown(twoStories),
+        request = {
+          files: ['src/core/projects.mjs'],
+          newFiles: ['src/core/wording.mjs'],
+          reason: 'It pins the wording.',
+        },
+        attempt = await stopped(c, ids[0], asking(request));
+      assert.equal(attempt.scopeRequest.problem, undefined, 'The request is one the controller would accept.');
+      return { c, id: ids[0] };
+    },
+  },
+  {
+    name: 'a blocked editor whose file request names a file outside the measured list',
+    labels: ['Close and send as a new idea', 'Close'],
+    build: async t => {
+      const c = await sourceStudio(t),
+        byHand = 'test/by-hand.test.mjs',
+        { ids } = await c.breakdown(twoStories);
+      // Committed after the breakdown's checks measured the source.
+      fs.writeFileSync(path.join(c.root, byHand), '// Added by hand\n');
+      git(c.root, ['add', byHand]);
+      git(c.root, ['commit', '--quiet', '-m', 'Add a test by hand']);
+      const attempt = await stopped(c, ids[0], asking({ files: [byHand], reason: 'The hand-added test pins it.' }));
+      assert.ok(attempt.scopeRequest.problem, 'The request records why approving it would be refused.');
+      return { c, id: ids[0] };
+    },
+  },
+  {
+    name: 'a blocked editor whose file request names a file its prerequisite created',
+    labels: ['Allow and continue', 'Start assignment', 'Close'],
+    build: async t => {
+      const c = await sourceStudio(t),
+        { store, runner } = c.app,
+        { ids } = await c.breakdown([
+          { files: ['src/core/workflows.mjs'], newFiles: [created], dependencies: [] },
+          { files: ['src/core/projects.mjs'], dependencies: ['workflow'] },
+        ]),
+        reason = 'The module the earlier story created needs the new wording.';
+      approveWork(store, runner.registries, store.task(ids[0]));
+      runner.start(ids[0]);
+      const { review } = await c.toReview(ids[0]);
+      c.integrated(ids[0], review, created, '// Created by the earlier story in the chain\n');
+      const attempt = await stopped(c, ids[1], asking({ files: [created], reason }));
+      assert.deepEqual(attempt.scopeRequest, { files: [], newFiles: [created], deleteFiles: [], reason });
+      return { c, id: ids[1] };
+    },
+  },
+];
+
+// Sends one listed action with its method and path, each field the records fill and a model-free value for each
+// required field they leave empty.
+const deliver = async (c, action) => {
+  const body = {};
+  for (const item of action.fields)
+    if ('value' in item) body[item.name] = item.value;
+    else if (item.required) {
+      assert.ok(item.name in values, `A model-free value for ${item.name}.`);
+      body[item.name] = values[item.name];
+    }
+  const res = await fetch(c.origin + action.path, {
+    method: action.method,
+    headers: { 'Content-Type': 'application/json', 'X-Studio-Token': c.token },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, data: await res.json() };
+};
+// The controller's own stops of the task after the event seq given: a refused start records a blocked event that
+// names no attempt.
+const latestEvent = c => c.app.store.events(null, { logs: false }).at(-1)?.seq ?? 0;
+const controllerStops = (c, id, after) =>
+  c.app.store
+    .events(null, { logs: false })
+    .filter(event => event.seq > after && event.task_id === id && event.kind === 'blocked' && !event.attempt_id);
+// An action is accepted when its answer is 2xx and it did not block the task again: a start it asks for is not
+// refused, and the controller stopped the task only where its answer says the work is queued to wait.
+const accepted = (c, id, label, answer, before) => {
+  assert.ok(
+    answer.status >= 200 && answer.status < 300,
+    `${label} answered ${answer.status}: ${JSON.stringify(answer.data)}`,
+  );
+  const start = answer.data?.start;
+  assert.notEqual(start?.ok, false, `${label} blocked the task again: ${JSON.stringify(start)}`);
+  if (answer.data?.queued !== true && start?.queued !== true)
+    assert.deepEqual(
+      controllerStops(c, id, before).map(event => event.message),
+      [],
+      `${label} blocked the task again.`,
+    );
+};
+// Where the list leaves out Allow and continue on a story whose editor asked for files or whose plan the code moved
+// past, the edit it would send: the story's paths with the requested ones and a reason. Elsewhere an edit of the file
+// list is the page's own form rather than a listed action, so only a request that names no paths is sent.
+const leftOutEdit = (c, task) => {
+  const latest = task.lastAttemptId ? c.app.store.attempt(task.lastAttemptId) : null,
+    request = latest?.scopeRequest;
+  if (!request && !task.sourceStage?.outdated) return {};
+  const line = label =>
+      (
+        String(task.brief ?? '')
+          .split('\n')
+          .find(text => text.startsWith(label + ': ')) ?? ''
+      )
+        .slice(label.length + 2)
+        .split(', ')
+        .filter(Boolean),
+    join = (label, list) => [...new Set([...line(label), ...(request?.[list] ?? [])])];
+  return {
+    files: join('Files', 'files'),
+    newFiles: join('New files', 'newFiles'),
+    deleteFiles: join('Delete', 'deleteFiles'),
+    reason: request?.reason ?? values.reason,
+    ...(request ? { request: latest.id } : {}),
+  };
+};
+
+// Whether the story's out-of-date note came from its editor's file request: every file it names is one the latest
+// attempt's request asked for.
+const outdatedByRequest = (c, task) => {
+  const files = task.sourceStage?.outdated?.files ?? [],
+    request = task.lastAttemptId ? c.app.store.attempt(task.lastAttemptId)?.scopeRequest : null,
+    asked = new Set([...(request?.files ?? []), ...(request?.newFiles ?? []), ...(request?.deleteFiles ?? [])]);
+  return files.length > 0 && files.every(file => asked.has(file));
+};
+
+for (const sample of samples)
+  test(`the sweep on ${sample.name}: each listed action is accepted, and Start and edit-scope left out are refused`, async t => {
+    await t.test('reads its actions and refuses the left-out ones', async t => {
+      const { c, id } = await sample.build(t),
+        page = await actionsOf(c, id, sample.labels);
+      for (const [label, route] of [
+        ['Start assignment', 'start'],
+        ['Allow and continue', 'edit-scope'],
+      ]) {
+        if (page.actions.some(action => action.path.endsWith(`/${route}`))) continue;
+        assert.equal(
+          page.actions.some(action => action.label === label),
+          false,
+          `${label} is left out.`,
+        );
+        // The list leaves out Start on every out-of-date story, since restarting one whose editor needs a file it
+        // cannot be given only blocks again. Where the note came only from a file request, the story's own files are
+        // still current and the controller still accepts Start; story T-d3193a7e ("The controller refuses every task
+        // command its action list does not offer now") makes it refuse this one, so only its refusal is skipped here.
+        if (route === 'start' && outdatedByRequest(c, c.app.store.task(id))) continue;
+        const before = recorded(c, id),
+          answer = await c.request(`/api/tasks/${encodeURIComponent(id)}/${route}`, {
+            projectId,
+            ...(route === 'edit-scope' ? leftOutEdit(c, c.app.store.task(id)) : {}),
+          });
+        assert.ok(answer.status >= 400 && answer.status < 500, `${label} answered ${answer.status}.`);
+        assert.equal(recorded(c, id), before, `${label}, refused, changes nothing.`);
+      }
+    });
+    // Each listed action on a fresh copy of the sample, so none is sent after another changed the story.
+    for (const label of sample.labels)
+      await t.test(`sends ${label}`, async t => {
+        const { c, id } = await sample.build(t),
+          page = await actionsOf(c, id, sample.labels),
+          before = latestEvent(c),
+          action = page.actions.find(item => item.label === label);
+        accepted(c, id, label, await deliver(c, action), before);
+      });
+  });
