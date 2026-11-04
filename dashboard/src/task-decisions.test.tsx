@@ -9,7 +9,15 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary, Task } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
+import {
+  createStream,
+  decisionStates,
+  fakeController,
+  outdatedReason,
+  outsideMeasured,
+  taskFixture,
+  type Controller,
+} from './test-controller';
 
 let controller: Controller;
 beforeEach(() => {
@@ -965,4 +973,68 @@ test('a stopped bring-back offers Bring back again, and Not needed speaks of bri
     }),
   );
   await waitFor(() => expect(toast().textContent).toBe('Not bringing the fix back to release/1.0.'));
+});
+
+// The code moved past the story's plan: the page reads the controller's plain reason and offers only the step that
+// works, which sends the idea text the director edited.
+test('a story the code moved past offers Close and send as a new idea with the idea to edit, and no Start', async () => {
+  const user = userEvent.setup();
+  controller.command = url => (url.endsWith('/send-as-idea') ? { ok: true, closed: 'T-1', runId: 'run-9' } : {});
+  const task = decisionStates['a story the code moved past']!(controller);
+  open(task);
+  const region = await decisions();
+  expect(region.getByText(outdatedReason)).toBeTruthy();
+  const send = row(region).getByRole('button', { name: 'Close and send as a new idea' });
+  expect(isPrimary(send)).toBe(true);
+  expect(region.queryByRole('button', { name: 'Start assignment' })).toBeNull();
+  expect(region.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
+  expect(region.queryByRole('button', { name: 'Edit the file list' })).toBeNull();
+  // No file names or record names in what the director reads there.
+  expect(screen.getByRole('region', { name: 'Where it stands' }).textContent).not.toMatch(/outdated|sourceStage|\.mjs/);
+  await user.click(send);
+  const dialog = within(await screen.findByRole('dialog', { name: 'Close and send as a new idea?' })),
+    idea = dialog.getByLabelText('The new idea') as HTMLTextAreaElement;
+  expect(idea.value).toBe(
+    `${task.title}\n\nIt continues work an earlier story planned, which the code has since moved past.`,
+  );
+  await user.clear(idea);
+  await user.type(idea, 'Show the route in plain words.');
+  await user.click(dialog.getByRole('button', { name: 'Close and send as a new idea' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/send-as-idea',
+      method: 'POST',
+      body: { projectId: 'project-x', idea: 'Show the route in plain words.' },
+    }),
+  );
+  expect(await screen.findByText(`Closed “${task.title}” and sent its work as a new idea.`)).toBeTruthy();
+  expect((await screen.findByRole('link', { name: "Open the new idea's run" })).getAttribute('href')).toBe(
+    '/p/project-x/runs/run-9',
+  );
+});
+
+// Sent unchanged, the controller composes the idea itself, with the story's plain planned summary.
+test('a story the code moved past sent with its idea unchanged leaves the idea to the controller', async () => {
+  const user = userEvent.setup();
+  open(decisionStates['a story the code moved past']!(controller));
+  await user.click((await decisions()).getByRole('button', { name: 'Close and send as a new idea' }));
+  const dialog = within(await screen.findByRole('dialog', { name: 'Close and send as a new idea?' }));
+  await user.click(dialog.getByRole('button', { name: 'Close and send as a new idea' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/send-as-idea',
+      method: 'POST',
+      body: { projectId: 'project-x' },
+    }),
+  );
+});
+
+// A file request the controller would refuse as asked: its problem in plain words, and no Allow and continue.
+test('a file request with a problem shows the problem and offers no Allow and continue', async () => {
+  open(decisionStates['a file request outside the measured list']!(controller));
+  const region = await decisions();
+  expect(region.getByText(new RegExp(`cannot be allowed as asked: ${outsideMeasured}`))).toBeTruthy();
+  expect(region.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
+  expect(region.queryByRole('button', { name: 'Edit the file list' })).toBeNull();
+  expect(row(region).getByRole('button', { name: 'Start assignment' })).toBeTruthy();
 });

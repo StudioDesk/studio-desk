@@ -57,6 +57,34 @@ export interface AttemptSummary {
   [field: string]: unknown;
 }
 
+// The controller's note on a source story whose plan the code moved past (an approved file is gone, a file it was to
+// create exists, or it lists a file outside the measured list): its plain reason, which the pages show, and when it
+// was noted. The refusal naming files stays in the controller's records.
+export interface OutdatedNote {
+  reason?: string;
+  at?: string;
+  [field: string]: unknown;
+}
+
+export interface SourceStage {
+  version?: string;
+  current?: string;
+  phase?: string;
+  outdated?: OutdatedNote | null;
+  [field: string]: unknown;
+}
+
+// A blocked editor's file request, with the problem the controller recorded when it found it would refuse the
+// request as asked; a request with a problem cannot be allowed as asked.
+export interface ScopeRequest {
+  files: string[];
+  newFiles: string[];
+  deleteFiles: string[];
+  reason?: string;
+  problem?: string;
+  [field: string]: unknown;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -79,7 +107,7 @@ export interface Task {
   maxSeconds?: number;
   maxAttempts?: number;
   complexity?: number | null;
-  sourceStage?: { version?: string; current?: string; phase?: string; [field: string]: unknown } | null;
+  sourceStage?: SourceStage | null;
   // The release a source story is for, once the director moved it (1.1); otherwise its idea's.
   release?: { milestoneId?: string; version: string; line?: string; by?: { type?: string } };
   [field: string]: unknown;

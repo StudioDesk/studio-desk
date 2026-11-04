@@ -617,6 +617,38 @@ const blockedStop = (fields: Partial<AttemptSummary> = {}): AttemptSummary => ({
   ...fields,
 });
 
+// The plain reason the controller notes on a story whose plan the code moved past, and the problem it records on a
+// file request it would refuse as asked.
+export const outdatedReason =
+  'A file this story was to create already exists, so the code moved on since it was planned.';
+export const outsideMeasured = 'One of the files it asked for is outside the list of files the tests measure.';
+// A story the code moved past: its attempt failed, and the controller noted the plan out of date when it refused
+// the next Start.
+export function outdatedStory(controller: Controller, fields: Partial<Task> = {}) {
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'failed',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change' },
+      result: { outcome: 'failed', summary: 'A test failed.' },
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'failed',
+    lastAttemptId: 'attempt-1',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'implementation',
+      current: 'failed',
+      outdated: { reason: outdatedReason, at: '2026-10-21T21:00:00Z' },
+    },
+    ...fields,
+  });
+}
+
 export const decisionStates: Record<string, (controller: Controller) => Task> = {
   'ready work': () => taskFixture('T-1'),
   'a waiting question': controller => {
@@ -777,6 +809,28 @@ export const decisionStates: Record<string, (controller: Controller) => Task> = 
   }),
   'a stopped bring-back': controller =>
     landedStory(controller, [{ line: 'release/1.0', state: 'rejected', back: true, approved: true }]),
+  'a story the code moved past': controller => outdatedStory(controller),
+  'a file request outside the measured list': controller => {
+    controller.attempts = [
+      blockedStop({
+        assignment: { kind: 'studio-development:change' },
+        finishedAt: '2026-10-21T21:00:00Z',
+        scopeRequest: {
+          files: ['src/core/old-route.mjs'],
+          newFiles: [],
+          deleteFiles: [],
+          reason: 'The route moved into its own file.',
+          problem: outsideMeasured,
+        },
+      }),
+    ];
+    return taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'blocked',
+      lastAttemptId: 'attempt-1',
+      brief: 'Files: src/server.mjs',
+    });
+  },
   'a closed story': controller => {
     controller.attempts = [
       {

@@ -12,8 +12,11 @@ import type { Answer, Question } from './questions';
 import { createAppRouter } from './router';
 import {
   createStream,
+  decisionStates,
   fakeController,
   latest,
+  outdatedReason,
+  outsideMeasured,
   shellFixture,
   taskFixture,
   whenShown,
@@ -1458,4 +1461,43 @@ test('other-project calls stay out of the heading while rail badges and the tab 
     }
     cleanup();
   }
+});
+
+// The code moved past a story's plan: Today's card reads the plain reason and offers Close and send as a new idea,
+// not Start or Allow and continue, and sends the idea text the director edited.
+test('a story the code moved past reads the plain reason on Today and sends its work as a new idea', async () => {
+  const user = userEvent.setup();
+  const task = decisionStates['a story the code moved past']!(controller);
+  controller.tasks = [task];
+  open();
+  const region = within(await calls()),
+    card = within((await region.findByRole('heading', { level: 3, name: task.title })).closest('article')!);
+  expect(card.getByText(outdatedReason)).toBeTruthy();
+  expect(card.queryByRole('button', { name: 'Start assignment' })).toBeNull();
+  expect(card.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
+  const send = card.getByRole('button', { name: 'Close and send as a new idea' });
+  expect(send.className).toContain('sd-btn--primary');
+  await user.click(send);
+  const dialog = within(await screen.findByRole('dialog', { name: 'Close and send as a new idea?' })),
+    idea = dialog.getByLabelText('The new idea') as HTMLTextAreaElement;
+  expect(idea.value.startsWith(task.title)).toBe(true);
+  await user.clear(idea);
+  await user.type(idea, 'Show the route in plain words.');
+  await user.click(dialog.getByRole('button', { name: 'Close and send as a new idea' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/send-as-idea',
+      method: 'POST',
+      body: { projectId: 'project-x', idea: 'Show the route in plain words.' },
+    }),
+  );
+});
+
+// A file request the controller would refuse as asked: the card says why, with no Allow and continue.
+test('a file request with a problem shows the problem on Today and offers no Allow and continue', async () => {
+  controller.tasks = [decisionStates['a file request outside the measured list']!(controller)];
+  open();
+  const region = within(await calls());
+  expect(await region.findByText(new RegExp(`cannot be allowed as asked: ${outsideMeasured}`))).toBeTruthy();
+  expect(region.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
 });

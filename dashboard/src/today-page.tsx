@@ -5,7 +5,7 @@ import { notifyManager, useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import { send, type AttemptSummary, type Task, type Worker } from './api';
-import { askedPaths, commandRequest, decisionState, fileRequest } from './decisions';
+import { askedPaths, commandRequest, decisionState, fileRequest, sendIdeaLimit, storyIdea } from './decisions';
 import { plural, took, totalsOf, diffStatOf, sandboxed, openPhaseOf, testingPhases } from './evidence';
 import { AgentAvatar } from './design/avatar';
 import type { AgentLook, AgentState } from './design/agent-kit.js';
@@ -539,6 +539,51 @@ function ChangesCall({ projectId, state, stories, looks, task }: CallProps & { t
   );
 }
 
+// The code moved past the story's plan: neither Start nor Allow and continue can work, so the card reads the plain
+// reason and offers Close and send as a new idea, whose text the director may edit first, as the story page does.
+// Unchanged, the controller composes the idea itself, with the story's plain planned summary.
+function OutdatedCall({ projectId, stories, task, item }: CallProps & { task: Task; item: NeedsItem }) {
+  const { act, busy } = useAct(projectId),
+    [asking, setAsking] = useState(false),
+    idea = storyIdea(task);
+  return (
+    <Decision
+      projectId={projectId}
+      busy={busy}
+      chip={chip('you', 'The code moved on')}
+      time={when(String(task.updatedAt ?? task.createdAt ?? ''))}
+      title={task.title}
+      origin={<Origin projectId={projectId} place={placeIn(stories, task)} />}
+      actions={[
+        { label: 'Close and send as a new idea', emphasis: 'primary', onClick: () => setAsking(true) },
+        { label: 'Open the story', emphasis: 'default', task: task.id },
+      ]}
+      note="Its remaining work gets fresh checks and a new plan."
+    >
+      <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>{item.reason}</p>
+      <NoteDialog
+        open={asking}
+        title="Close and send as a new idea?"
+        text="The code moved on since this story was planned. It closes, and its remaining work goes in as a new idea on the same release, with fresh checks and a new plan."
+        label="The new idea"
+        submit="Close and send as a new idea"
+        required
+        initial={idea}
+        limit={sendIdeaLimit}
+        onClose={() => setAsking(false)}
+        onSubmit={note => {
+          setAsking(false);
+          act(
+            taskPath(task, 'send-as-idea'),
+            note === idea.trim() ? {} : { idea: note },
+            () => `Closed “${task.title}” and sent its work as a new idea.`,
+          );
+        }}
+      />
+    </Decision>
+  );
+}
+
 // The editor stopped for files its story does not have: approve them as asked, or edit the list on the story.
 function FileRequestCall({
   projectId,
@@ -549,8 +594,17 @@ function FileRequestCall({
   item,
 }: CallProps & { task: Task; item: NeedsItem }) {
   const { act, busy } = useAct(projectId),
-    { requested, request, offered, worked, editor } = fileRequest(task, state);
-  if (!request || !requested) return <GenericCall {...{ projectId, state, stories, looks, task, item }} />;
+    { requested, request, problem, offered, worked, editor } = fileRequest(task, state);
+  // A request the controller found it would refuse as asked says why, with no Allow and continue.
+  if (!request || !requested)
+    return (
+      <GenericCall
+        {...{ projectId, state, stories, looks, task, item }}
+        detail={
+          problem ? `The files ${editor || 'the agent'} asked for cannot be allowed as asked: ${problem}` : undefined
+        }
+      />
+    );
   const asked = askedPaths(task, request);
   return (
     <Decision
@@ -749,7 +803,13 @@ function AcceptCall({ projectId, state, stories, looks, task }: CallProps & { ta
 // Any other call: what happened and what to do, with the way to the story where the action is. Start assignment,
 // which is all a step waiting for the director needs when every step waits for them (the recovery drill, October
 // 24), is a button of its own.
-function GenericCall({ projectId, stories, task, item }: CallProps & { task: Task; item: NeedsItem }) {
+function GenericCall({
+  projectId,
+  stories,
+  task,
+  item,
+  detail,
+}: CallProps & { task: Task; item: NeedsItem; detail?: string }) {
   const { act, busy } = useAct(projectId),
     start: Action[] =
       item.action === 'Start assignment'
@@ -792,6 +852,7 @@ function GenericCall({ projectId, stories, task, item }: CallProps & { task: Tas
       <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
         {item.reason} {item.next}
       </p>
+      {detail && <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>{detail}</p>}
     </Decision>
   );
 }
@@ -889,6 +950,7 @@ function Call(props: CallProps & { item: HomeItem }) {
   const decision = decisionState(task, state);
   if (decision.integrable && decision.review && decision.reviewItem) return <IntegrateCall {...props} task={task} />;
   if (decision.returnable && decision.stage?.review) return <ChangesCall {...props} task={task} />;
+  if (decision.sendable) return <OutdatedCall {...props} task={task} item={item} />;
   if (item.kind === 'scope-request') return <FileRequestCall {...props} task={task} item={item} />;
   if (item.kind === 'command-request') return <CommandCall {...props} task={task} item={item} />;
   if (item.kind === 'question') return <QuestionCall {...props} task={task} item={item} />;

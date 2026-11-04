@@ -7,7 +7,7 @@ import { Link } from '@tanstack/react-router';
 import { Fragment, useEffect, useId, useRef, useState } from 'react';
 import { send, type AttemptSummary, type Task } from './api';
 import { BringBack } from './bring-back';
-import { decisionState, fileRequest } from './decisions';
+import { decisionState, fileRequest, sendIdeaLimit, storyIdea } from './decisions';
 import { Icon } from './design/icons';
 import { NoteDialog, overReview } from './note-dialog';
 import { waitingQuestion } from './questions';
@@ -95,6 +95,8 @@ export function TaskDecisions({
 }) {
   const request = useRequest(projectId),
     [asking, setAsking] = useState<Asking | null>(null),
+    // The run of the new idea a story was sent in as, which the page links to once the controller started it.
+    [sentRun, setSentRun] = useState<string | null>(null),
     // Trying the story yourself, once its tests passed (try-actions.tsx).
     tryIt = useTry(projectId, task, studio),
     // The More actions menu's, and the Try it strip's, element ids.
@@ -124,6 +126,8 @@ export function TaskDecisions({
       mergeable,
       plan,
       proposal,
+      outdated,
+      sendable,
     } = decisionState(task, studio),
     { editor, reviewer } = storyPeople(task, studio),
     filesAsked = fileRequest(task, studio),
@@ -164,7 +168,8 @@ export function TaskDecisions({
       does: 'It will not run; a note you add is kept with the decision.',
     });
   // A blocked editor's file request, approved as asked in one step as Today approves it (MP-021).
-  if (filesAsked.request && filesAsked.requested) {
+  // Not on a story whose plan the code moved past: the controller refuses any edit of its files.
+  if (filesAsked.request && filesAsked.requested && !outdated) {
     const { requested, offered, worked } = filesAsked;
     actions.push({
       key: 'allow-files',
@@ -183,12 +188,38 @@ export function TaskDecisions({
     if (onEditFiles)
       actions.push({ key: 'edit-files', label: 'Edit the file list', emphasis: 'default', onClick: onEditFiles });
   }
+  // The code moved past the story's plan: its remaining work goes in as a new idea, whose text the director may edit
+  // first. Unchanged, the controller composes it itself, with the story's plain planned summary.
+  if (sendable) {
+    const idea = storyIdea(task);
+    actions.push({
+      key: 'send-as-idea',
+      label: 'Close and send as a new idea',
+      emphasis: 'primary',
+      onClick: () =>
+        setAsking({
+          title: 'Close and send as a new idea?',
+          text: 'The code moved on since this story was planned. It closes, and its remaining work goes in as a new idea on the same release, with fresh checks and a new plan.',
+          label: 'The new idea',
+          submit: 'Close and send as a new idea',
+          required: true,
+          initial: idea,
+          limit: sendIdeaLimit,
+          send: note =>
+            act('send-as-idea', note === idea.trim() ? {} : { idea: note }, sent => {
+              if (typeof sent.runId === 'string') setSentRun(sent.runId);
+              return `Closed “${task.title}” and sent its work as a new idea.`;
+            }),
+        }),
+    });
+  }
   // An interrupted attempt holds what it reserved until it is reconciled, and the controller refuses to start another
   // before then, so Start comes back only once Reconcile interrupted attempt (below) has settled it.
   if (
     !live &&
     !closed &&
     !unsettled &&
+    !outdated &&
     explanation.kind !== 'fixed-limit' &&
     ['ready', 'blocked', 'failed', 'cancelled'].includes(task.status)
   ) {
@@ -587,6 +618,16 @@ export function TaskDecisions({
             ))}
           </div>
         </div>
+      )}
+      {filesAsked.problem && !outdated && (
+        <p className="sd-stands__detail" style={{ margin: 0, flex: '1 1 100%' }}>
+          {`The files ${filesAsked.editor || 'the agent'} asked for cannot be allowed as asked: ${filesAsked.problem}`}
+        </p>
+      )}
+      {sentRun && (
+        <Link className="sd-btn" to="/p/$projectId/runs/$runId" params={{ projectId, runId: sentRun }}>
+          Open the new idea's run
+        </Link>
       )}
       {mergeable && landed && (
         <p className="sd-stands__detail" style={{ margin: 0, flex: '1 1 100%' }}>

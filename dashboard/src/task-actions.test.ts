@@ -52,6 +52,10 @@ const expected: Record<string, string[]> = {
   'a landed story on a project with one line': [],
   'a landed carry story': [],
   'a stopped bring-back': ['Bring back to release/1.0 again', 'Not needed on release/1.0…'],
+  // The code moved past the story's plan: the one step that works, with plain Close behind More actions.
+  'a story the code moved past': ['Close and send as a new idea', 'Close'],
+  // A file request the controller would refuse as asked: no Allow and continue, nor its file form.
+  'a file request outside the measured list': ['Start assignment', 'Close'],
   'a closed story': [],
 };
 
@@ -216,6 +220,12 @@ test('the listed routes and fields are the ones the page sends', () => {
     method: 'POST',
     path: '/api/tasks/T-1/answer',
     fields: { projectId: 'project-x', attemptId: 'attempt-1', option: 'may', text: 'may', autoMode: 'may' },
+  });
+  // Close and send as a new idea may carry the director's words for the idea.
+  expect(brief(listed('a story the code moved past')[0])).toEqual({
+    method: 'POST',
+    path: '/api/tasks/T-1/send-as-idea',
+    fields: { projectId: 'project-x', idea: 'may' },
   });
   // A held task's Release hold is a change to the task itself.
   expect(
