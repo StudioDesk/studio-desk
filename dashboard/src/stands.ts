@@ -3,7 +3,7 @@
 // renders or sends anything.
 import type { Task } from './api';
 import { plural, testingPhases, totalsOf } from './evidence';
-import { attemptsUsed, isSourceStory, phaseOf, storyPeople } from './story';
+import { isSourceStory, phaseOf, storyPeople, workAttemptsUsed, workLimit } from './story';
 import { active, type StudioState } from './studio-runs';
 
 export type TestsFact = 'passed' | 'failed' | 'running' | 'not-run';
@@ -40,13 +40,14 @@ export const factsLine = ({ tests, review, used, allowed }: Facts) =>
 
 // The facts as the story's records hold them. The tests are the current candidate's or, while the story builds one,
 // that build's: a story sent back has run none yet for its next candidate. The review is the current candidate's, so
-// it is not yet one while a story builds. Attempts are counted as attemptsUsed counts them.
+// it is not yet one while a story builds. Attempts are the work's, as workAttemptsUsed counts them: the controller's served
+// count, so a flow's second round reads "1 of 3" however many earlier rounds are on record.
 export function storyFacts(task: Task, studio: StudioState, phase: string | null = phaseOf(task, studio)): Facts {
-  const { used } = attemptsUsed(
+  const { used } = workAttemptsUsed(
       task,
       studio.attempts.filter(attempt => attempt.taskId === task.id),
     ),
-    counted = { used, allowed: task.maxAttempts };
+    counted = { used, allowed: workLimit(task) };
   if (!isSourceStory(task)) return counted;
   const { stage, build, candidate } = storyPeople(task, studio),
     live = active(task),

@@ -133,12 +133,15 @@ export function TaskDecisions({
     filesAsked = fileRequest(task, studio),
     // An agent's question waiting for an answer, which the page's Answer box sends; Start runs the work without one.
     asked = !!waitingQuestion(task, studio.attempts),
-    // Counted as the page's attempt counter counts them; the controller sets no limit for a task without one.
+    // Counted as the controller counts them before it starts the work (its served attemptCount, which attemptsUsed
+    // reads), so Start says it goes past the limit only when the controller would refuse an automatic one; the
+    // controller sets no limit for a task without one.
     { used, allowed } = attemptsUsed(
       task,
       studio.attempts.filter(attempt => attempt.taskId === task.id),
     ),
-    pastLimit = task.maxAttempts !== undefined && used >= allowed;
+    limited = task.attemptCount ? task.attemptCount.allowed !== undefined : task.maxAttempts !== undefined,
+    pastLimit = limited && used >= allowed;
   const deny = (label: string, title: string, noteLabel = 'Decision note (optional)'): Action => ({
     key: `deny-${label}`,
     label,

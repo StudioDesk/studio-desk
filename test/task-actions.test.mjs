@@ -666,3 +666,47 @@ for (const sample of samples)
         accepted(c, id, label, await deliver(c, action), before);
       });
   });
+
+// The shared rules read the attempts used from the count the controller served with the task (its attemptCount), so
+// the past-the-limit Start the actions offer is the one the controller refuses an automatic start past: a flow's
+// earlier rounds, or an attempt the environment ended, on record do not put it past the limit. A record served without
+// a count is counted as before.
+test('the past-the-limit Start follows the served attempt count, and a record without one counts as before', () => {
+  const attempts = [
+      { id: 'a1', taskId: 'T-9', status: 'failed', workerId: 'W-1' },
+      { id: 'a2', taskId: 'T-9', status: 'failed', workerId: 'W-1' },
+    ],
+    task = fields => ({
+      id: 'T-9',
+      projectId,
+      title: 'Work',
+      kind: 'general',
+      status: 'failed',
+      workerId: 'W-1',
+      maxAttempts: 2,
+      lastAttemptId: 'a2',
+      ...fields,
+    }),
+    start = (fields, records = attempts) => {
+      const record = task(fields);
+      return globalThis.StudioTaskActions.taskActions(record, {
+        project: { id: projectId },
+        tasks: [record],
+        attempts: records,
+        runs: [],
+      }).find(action => action.label === 'Start assignment')?.key;
+    };
+  // Two earlier-round attempts on record, one used of this round's two: an ordinary Start.
+  assert.equal(start({ attemptCount: { used: 1, allowed: 2 } }), 'start');
+  // The served count reaches the limit: Start past it.
+  assert.equal(start({ attemptCount: { used: 2, allowed: 2 } }), 'start-past-limit');
+  // No limit served: never past it.
+  assert.equal(start({ attemptCount: { used: 5 } }), 'start');
+  // Without a served count, the two failed attempts on record reach the limit, as before.
+  assert.equal(start({}), 'start-past-limit');
+  // ...and an attempt the controller's stop ended (its endCause) is not one of them.
+  assert.equal(
+    start({}, [attempts[0], { ...attempts[1], endCause: { cause: 'environment', detail: 'controller-stop' } }]),
+    'start',
+  );
+});

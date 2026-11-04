@@ -13,6 +13,10 @@ export interface AttemptSummary {
   finishedAt?: string | null;
   acceptedAt?: string;
   error?: string;
+  // Why it ended, as the controller records it (src/core/attempt-cause.mjs): the work itself, the studio's environment
+  // (detail controller-stop, sandbox or random-test), a usage limit or a question. Only the work's own ending uses up
+  // one of the work's attempts. Records from before it have none.
+  endCause?: { cause: string; detail?: string | null };
   // The result the agent returned, with its own checks: each one's name, pass, fail or not-run, and its evidence.
   result?: {
     outcome?: string;
@@ -112,6 +116,10 @@ export interface Task {
   controllerWait?: boolean;
   maxSeconds?: number;
   maxAttempts?: number;
+  // The automatic attempts its current stage used and allows, counted as the scheduler counts them (the controller's
+  // WorkflowRegistry.attemptCount): a flow's current round only, and none an attempt the work did not end. `allowed` is
+  // absent for a task without a limit; a record served without the registries has no attemptCount.
+  attemptCount?: { used: number; allowed?: number };
   complexity?: number | null;
   sourceStage?: SourceStage | null;
   // The release a source story is for, once the director moved it (1.1); otherwise its idea's.

@@ -323,3 +323,47 @@ test('the limit says what went past it when the records cannot say you sent it b
     '101st',
   ]);
 });
+
+// The row numbers its builds as the controller counts them (the served attemptCount): on a flow's second round the
+// current build is the first of its limit, and the earlier round's builds read as that, without a number.
+test('a flow story on its second round numbers its current build 1 of 3, as the controller served it', () => {
+  const task = story(
+      { status: 'running', maxAttempts: 3, attemptCount: { used: 1, allowed: 3 } },
+      { phase: 'implementing' },
+    ),
+    attempts = [
+      build('attempt-1', failing),
+      build('attempt-2', failing),
+      build('attempt-3', { status: 'running', testEvidence: undefined }),
+    ],
+    row = attemptRow(task, attempts);
+  expect(texts(task, attempts)).toMatchObject({
+    builds: ['Tests failed', 'Tests failed', '1 · Running now'],
+    limit: 'The house rules allow 3 automatic attempts. 1 is used and 2 are left.',
+  });
+  expect(shownName(task, row.builds[0]!).name).toBe('Build, earlier round');
+  expect(shownName(task, row.builds[2]!).name).toBe('Build 1');
+  // A record without a served count reads as before.
+  const before: Task = { ...task };
+  delete before.attemptCount;
+  expect(texts(before, attempts).limit).toBe('The house rules allow 3 automatic attempts. All 3 are used.');
+});
+
+test('an attempt the controller stopped reads without a number, and the next is the first of the served count', () => {
+  const task = story(
+      { status: 'running', maxAttempts: 2, attemptCount: { used: 1, allowed: 2 } },
+      { phase: 'implementing' },
+    ),
+    attempts = [
+      build('attempt-1', {
+        status: 'cancelled',
+        testEvidence: undefined,
+        endCause: { cause: 'environment', detail: 'controller-stop' },
+      }),
+      build('attempt-2', { status: 'running', testEvidence: undefined }),
+    ];
+  expect(texts(task, attempts)).toMatchObject({
+    builds: ['Cancelled', '1 · Running now'],
+    limit: 'The house rules allow 2 automatic attempts. 1 is used and 1 is left.',
+  });
+});

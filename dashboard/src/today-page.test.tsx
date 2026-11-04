@@ -1501,3 +1501,24 @@ test('a file request with a problem shows the problem on Today and offers no All
   expect(await region.findByText(new RegExp(`cannot be allowed as asked: ${outsideMeasured}`))).toBeTruthy();
   expect(region.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
 });
+
+// The floor names the running attempt as the controller counted it (its served attemptCount): a flow's second round
+// reads its first attempt, however many earlier rounds are on record.
+test('a flow story on its second round reads Attempt 1 of 3 on the floor, as the controller served it', async () => {
+  controller.tasks = [
+    taskFixture('T-2', {
+      title: 'Build the board',
+      status: 'running',
+      lastAttemptId: 'attempt-3',
+      attemptCount: { used: 1, allowed: 3 },
+    }),
+  ];
+  controller.attempts = [
+    { id: 'attempt-1', taskId: 'T-2', status: 'failed', workerId: 'W-1' },
+    { id: 'attempt-2', taskId: 'T-2', status: 'accepted', workerId: 'W-1' },
+    { id: 'attempt-3', taskId: 'T-2', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+  ];
+  open();
+  const live = await screen.findByRole('region', { name: 'Eli is working' });
+  expect(within(live).getByText('Attempt 1 of 3 · doing the work')).toBeTruthy();
+});

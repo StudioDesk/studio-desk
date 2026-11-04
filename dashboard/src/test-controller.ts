@@ -673,7 +673,11 @@ export const decisionStates: Record<string, (controller: Controller) => Task> = 
   'an interrupted attempt': controller => cutOff(controller, 'interrupted'),
   'a quarantined attempt': controller => cutOff(controller, 'quarantined'),
   'an interrupted attempt after reconciling': controller =>
-    cutOff(controller, 'interrupted', { reconciledAt: '2026-10-21T21:00:00Z' }),
+    cutOff(controller, 'interrupted', {
+      reconciledAt: '2026-10-21T21:00:00Z',
+      // Why it ended, as the controller records it (src/core/attempt-cause.mjs), and the count it serves.
+      endCause: { cause: 'environment', detail: 'controller-stop' },
+    }),
   'a result in review': controller => {
     controller.attempts = [
       {
@@ -695,12 +699,15 @@ export const decisionStates: Record<string, (controller: Controller) => Task> = 
         workerId: 'W-1',
         assignment: { kind: 'studio-development:change' },
         result: { outcome: 'failed', summary: 'A test failed.' },
+        endCause: { cause: 'work' },
       },
     ];
     return taskFixture('T-1', {
       kind: 'studio-development:change',
       status: 'failed',
       maxAttempts: 1,
+      // The count the controller serves with the task (WorkflowRegistry.attemptCount): its one attempt is used.
+      attemptCount: { used: 1, allowed: 1 },
       lastAttemptId: 'attempt-1',
       direction: 'Recorded direction.',
     });

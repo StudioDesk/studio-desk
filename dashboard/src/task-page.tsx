@@ -50,7 +50,6 @@ import { StoryReleaseChip } from './release-chip';
 import { SourceDiff } from './source-story';
 import { factsLine, storyFacts } from './stands';
 import {
-  attemptsUsed,
   cliName,
   houseRules,
   isSourceStory,
@@ -64,6 +63,7 @@ import {
   testingPhases,
   type Stage,
   type Step,
+  workAttemptsUsed,
 } from './story';
 import {
   attemptChip,
@@ -1032,7 +1032,8 @@ function Details({
       mode: override?.mode || (switched ? '' : owner?.mode),
     },
     last = [...attempts].reverse().find(attempt => !isReview(attempt)),
-    { used, allowed } = attemptsUsed(task, attempts),
+    // The work's attempts as the controller counts them (workAttemptsUsed), as the stands line reads them.
+    { used, allowed } = workAttemptsUsed(task, attempts),
     dependencies = task.dependencies ?? [];
   return (
     <section className="sd-card sd-sidecard" aria-label="Details" style={{ gap: 'var(--space-14)' }}>

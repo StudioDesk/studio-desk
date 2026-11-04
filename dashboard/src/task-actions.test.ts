@@ -181,6 +181,14 @@ test('the listed routes and fields are the ones the page sends', () => {
   });
   // Past the attempt limit, the same Start, whose note is the next attempt's direction.
   expect(listed('past the attempt limit')[0]!.key).toBe('start-past-limit');
+  // The served count decides it (attemptCount): one the controller counts below its limit, such as a flow's next
+  // round with the earlier round's attempt on record, is an ordinary Start; one at its limit is past it.
+  expect(
+    listed('past the attempt limit', (_, task) => ({ ...task, attemptCount: { used: 0, allowed: 1 } }))[0]!.key,
+  ).toBe('start');
+  expect(listed('ready work', (_, task) => ({ ...task, attemptCount: { used: 3, allowed: 3 } }))[0]!.key).toBe(
+    'start-past-limit',
+  );
   expect(brief(listed('a result in review').find(action => action.key === 'revise'))).toEqual({
     method: 'POST',
     path: '/api/tasks/T-1/revise',

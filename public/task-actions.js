@@ -51,10 +51,28 @@
     const answers = Array.isArray(task.answers) ? task.answers : [];
     return answers.some(answer => answer.attemptId === asking.id) ? null : asking;
   };
-  // The attempts a story has used of the ones it may (story.ts attemptsUsed and countsTowardLimit).
+  // The attempts a story has used of the ones it may (story.ts attemptsUsed and countsTowardLimit): the count the
+  // controller served with the task (its attemptCount, counted as the scheduler counts them before it starts the work),
+  // so the actions offered here and the page agree on past-the-limit. A record served without one is counted as
+  // before: only an attempt the work itself ended (its endCause), or for a record from before endCause, not one a
+  // usage limit stopped, one interrupted by the controller's stop and reconciled, nor one that asked a question.
   const countsTowardLimit = attempt =>
-    !attempt.subscriptionHold && !(attempt.status === 'interrupted' && attempt.reconciledAt) && !attempt.question?.ask;
-  const attemptsUsed = (task, attempts) => ({
+    attempt.endCause?.cause
+      ? attempt.endCause.cause === 'work'
+      : !attempt.subscriptionHold &&
+        !(attempt.status === 'interrupted' && attempt.reconciledAt) &&
+        !attempt.question?.ask;
+  const attemptsUsed = (task, attempts) => {
+    const served = task.attemptCount;
+    if (served && Number.isInteger(served.used))
+      return {
+        used: served.used,
+        allowed: served.allowed ?? task.maxAttempts ?? 0,
+        limited: served.allowed !== undefined,
+      };
+    return { ...counted(task, attempts), limited: task.maxAttempts !== undefined };
+  };
+  const counted = (task, attempts) => ({
     used: attempts.filter(
       attempt =>
         countsTowardLimit(attempt) &&
@@ -278,8 +296,8 @@
       editor = editorName(task, state),
       files = fileRequest(task, state),
       asking = waitingQuestion(task, state.attempts),
-      { used, allowed } = attemptsUsed(task, attempts),
-      pastLimit = task.maxAttempts !== undefined && used >= allowed,
+      { used, allowed, limited } = attemptsUsed(task, attempts),
+      pastLimit = limited && used >= allowed,
       // The code moved past the story's plan (src/connectors/source-changes.mjs noteOutdated): the controller refuses
       // its Start and any edit of its files, and only a new idea carries its work on. Close and send as a new idea takes
       // what Close takes, and a story that never started, as Deny does (src/core/idea-intake.mjs sendStoryAsIdea).

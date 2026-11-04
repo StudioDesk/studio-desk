@@ -179,3 +179,16 @@ test("other work's line is the attempts it used, as attemptsUsed counts them", (
   expect(storyFacts(work, studio(attempts))).toEqual({ used: 1, allowed: 3 });
   expect(line(work, attempts)).toBe('1 of 3 attempts used');
 });
+
+test('a flow story on its second round reads the count the controller served, not its earlier rounds', () => {
+  const work = story({ kind: 'general', status: 'running', attemptCount: { used: 1, allowed: 3 } }),
+    attempts = [
+      build({ id: 'attempt-1', assignment: { kind: 'general' }, status: 'failed' }),
+      build({ id: 'attempt-2', assignment: { kind: 'general' }, status: 'accepted' }),
+      build({ id: 'attempt-3', assignment: { kind: 'general' }, status: 'running' }),
+    ];
+  expect(storyFacts(work, studio(attempts))).toEqual({ used: 1, allowed: 3 });
+  expect(line(work, attempts)).toBe('1 of 3 attempts used');
+  // Without a served count it is counted from the records, as before.
+  expect(line(story({ kind: 'general', status: 'running' }), attempts)).toBe('3 of 3 attempts used');
+});
