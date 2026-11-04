@@ -25,10 +25,20 @@ function repository(t) {
   plain(['add', 'a.txt']);
   plain(['commit', '-q', '-m', 'first']);
   const marker = name => path.join(markers, name).replaceAll('\\', '/');
+  // The hooks go in .git/hooks where a test may write there. The built-in test sandbox on macOS and Linux refuses every
+  // .git/hooks (found in the 1.2 release proof on Linux, November 4, 2026), so there they go in a configured hooks
+  // folder, which the controller's git ignores the same way (core.hooksPath=/dev/null).
+  let hooks = path.join(root, '.git', 'hooks');
+  try {
+    fs.writeFileSync(path.join(hooks, 'probe'), '');
+    fs.rmSync(path.join(hooks, 'probe'));
+  } catch {
+    hooks = path.join(directory, 'hooks');
+    fs.mkdirSync(hooks, { recursive: true });
+    plain(['config', 'core.hooksPath', hooks.replaceAll('\\', '/')]);
+  }
   for (const hook of ['pre-commit', 'commit-msg', 'post-commit', 'post-checkout'])
-    fs.writeFileSync(path.join(root, '.git', 'hooks', hook), `#!/bin/sh\necho ran > "${marker(hook)}"\n`, {
-      mode: 0o755,
-    });
+    fs.writeFileSync(path.join(hooks, hook), `#!/bin/sh\necho ran > "${marker(hook)}"\n`, { mode: 0o755 });
   plain(['config', 'core.fsmonitor', `sh -c 'echo ran > "${marker('fsmonitor')}"'`]);
   const ran = () => fs.readdirSync(markers).sort();
   const forget = () => {
