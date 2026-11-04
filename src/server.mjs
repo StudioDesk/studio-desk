@@ -67,6 +67,7 @@ import { testsSentence } from './connectors/source-checks.mjs';
 import { testRecordStream, testRecordSummary } from './connectors/test-records.mjs';
 import { chosenTestSandbox, testSandboxes } from './adapters/source-test-sandbox.mjs';
 import { builtInSandbox } from './adapters/built-in-sandbox.mjs';
+import { processEnded, processStartTimes } from './adapters/process.mjs';
 import { applyAgentPermissions, approveCommands, commandRule, taskAutoMode } from './core/agent-permissions.mjs';
 import { employeeTestsAllowed, runEmployeeTests, savedTestRun } from './connectors/employee-tests.mjs';
 import { attemptTrace } from './core/attempt-trace.mjs';
@@ -306,19 +307,26 @@ export function createStudio({
   if (!['session', 'open'].includes(access)) throw new Error('Access must be session or open.');
   const registries = runnerOptions.registries || createRegistries();
   const store = new Store(directory, bootstrapFactory(registries, bootstrap)),
-    owner = { id: randomUUID(), pid: process.pid };
+    // The owner is known by its ID and by when its process began, so a later program that the operating system has
+    // handed the old ID to never holds the data folder. The record stays exactly this object: closing deletes it by
+    // comparing the stored JSON with JSON.stringify(owner).
+    owner = {
+      id: randomUUID(),
+      pid: process.pid,
+      startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+    };
   try {
     store.tx(() => {
       const row = store.db.prepare('SELECT data FROM settings WHERE id=?').get('controller-owner');
       if (row) {
         const previous = JSON.parse(row.data);
-        let alive = true;
-        try {
-          process.kill(previous.pid, 0);
-        } catch (err) {
-          if (err.code === 'ESRCH') alive = false;
-        }
-        if (alive) fail('Another controller owns this data folder. Stop it before starting another instance.');
+        // This process's own start is the one it records, so a second studio in the same process is still refused
+        // without asking the operating system. An owner recorded before start times were (no startedAt) keeps the
+        // ID-only answer.
+        const ended = processEnded(previous.pid, previous.startedAt, {
+          readStartTime: pid => (pid === process.pid ? new Date(owner.startedAt) : processStartTimes.read(pid)),
+        });
+        if (!ended) fail('Another controller owns this data folder. Stop it before starting another instance.');
       }
       store.db
         .prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')
