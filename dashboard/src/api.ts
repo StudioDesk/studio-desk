@@ -127,9 +127,74 @@ export interface Task {
   [field: string]: unknown;
 }
 
+// One action the director may take on a task now, as the controller serves it with the task's read and its list of
+// calls (public/task-actions.js): the words on its button, which one stands out (primary, default or quiet), whether
+// it is a closing action shown behind More actions, the route it is sent to and the body fields that route takes, each
+// with the value the page sends from the records when it sends one.
+export interface TaskActionField {
+  name: string;
+  required: boolean;
+  kind: 'id' | 'hash' | 'text' | 'note' | 'reason' | 'boolean' | 'list' | 'number';
+  value?: unknown;
+}
+export interface TaskAction {
+  key: string;
+  label: string;
+  emphasis: 'primary' | 'default' | 'quiet';
+  closing: boolean;
+  method: 'POST' | 'PATCH';
+  path: string;
+  fields: TaskActionField[];
+}
+
 export interface TaskPage {
   task: Task;
   attempts: AttemptSummary[];
+  // The actions the director may take on the task now, as the controller lists them.
+  actions?: TaskAction[];
+}
+
+// What needs the director now in one project (GET /api/projects/<id>/calls, src/core/director-calls.mjs): a task's
+// call with its task's actions, a cleanup of a run's unstarted steps with its member task calls, or a CLI's usage hold
+// with no known reset.
+export interface DirectorTaskCall {
+  type: 'task';
+  taskId: string;
+  runId: string | null;
+  kind: string;
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  attemptId: string | null;
+  canClose: boolean;
+  actions: TaskAction[];
+}
+export interface DirectorCleanupCall {
+  type: 'cleanup';
+  runId: string;
+  taskIds: string[];
+  members: DirectorTaskCall[];
+}
+export interface DirectorHoldCall {
+  type: 'hold';
+  provider: string;
+  label: string;
+  taskIds: string[];
+  runId: null;
+  kind: 'subscription-hold';
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+}
+export type DirectorCall = DirectorTaskCall | DirectorCleanupCall | DirectorHoldCall;
+export interface DirectorCalls {
+  projectId: string;
+  items: DirectorCall[];
+  count: number;
+  version: number;
 }
 
 export interface Project {
@@ -892,6 +957,8 @@ export const tryUrl = (projectId: string) => projectPath(projectId, 'try');
 export const tryOutputUrl = (projectId: string) => projectPath(projectId, 'try/output');
 // The project's visual check view, and a story's pages to capture.
 export const visualUrl = (projectId: string) => projectPath(projectId, 'visual-check');
+// What needs the director now in the project, each task's call with its actions.
+export const callsUrl = (projectId: string) => projectPath(projectId, 'calls');
 export const storyPagesUrl = (projectId: string, taskId: string) =>
   `/api/tasks/${encodeURIComponent(taskId)}/pages?${project(projectId)}`;
 // The project's accepted files, what its work made, its library with an entry's readers and a revision's bytes, and

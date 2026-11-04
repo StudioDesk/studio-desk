@@ -8,6 +8,8 @@
 // offers no Allow and continue; and where the page offers what the controller would refuse, these leave it out: Start
 // on held work, Reconcile source integration while that integration runs, and Send back where the review's stage does
 // not return the story (after its interrupted integration was reconciled, for one). The page follows in its own story.
+// Accept over a failed check… and Resume dispatch are offered as the page offers them. Each action keeps its emphasis
+// (primary, default or quiet) and whether it is a closing action, which the page lists behind More actions.
 // Nothing here sends anything or reads the page. Loaded after runs.js, whose rules (globalThis.StudioRuns) it reads.
 (() => {
   const unsettledStates = ['interrupted', 'quarantined', 'uncertain'];
@@ -17,6 +19,11 @@
   const kindOf = attempt => attempt?.assignment?.kind;
   const active = task => task.status === 'running' || task.status === 'stopping';
   const artifact = (attempt, test) => attempt?.artifacts?.find(test);
+  // The checks a result's own report failed, each named once, as the controller's acceptAttempt finds them
+  // (task-decisions.tsx failedChecks).
+  const failedChecks = attempt => [
+    ...new Set((attempt?.result?.checks ?? []).filter(check => check.status === 'fail').map(check => check.name)),
+  ];
   // The attempt a task records under the name given, from this project's records (studio-runs.ts recordedAttempt).
   const recordedAttempt = (state, task, id = task.lastAttemptId) =>
     state.attempts.find(
@@ -373,7 +380,13 @@
         path: `/api/tasks/${id}`,
         fields: [project, field('hold', true, 'boolean', false)],
       });
-    // Resume dispatch is the studio's own switch (/api/control), not a task's; the page offers it beside these.
+    // Resume dispatch is the studio's own switch, not a task's: it turns dispatch back on for every project.
+    if (explanation.kind === 'dispatch-paused')
+      offer('dispatch', 'Resume dispatch', 'default', {
+        method: 'POST',
+        path: '/api/control',
+        fields: [field('paused', true, 'boolean', false)],
+      });
     if (explanation.kind === 'pipeline-paused')
       offer('pipeline', 'Resume pipeline', 'default', {
         method: 'POST',
@@ -392,8 +405,22 @@
             field('proposalHash', true, 'hash', plan.hash),
           ]),
         );
-      // A reason accepts it over a failed check, where the step's contract allows it.
-      else offer('accept', 'Accept result', 'primary', step('accept', [field('overReason', false, 'reason')]));
+      else {
+        // A result whose own checks failed is accepted over them with the director's reason, as the controller
+        // requires, unless its task type accepts failed checks plainly. A type whose step contract takes no acceptance
+        // over a failed check keeps the plain Accept (task-decisions.tsx). The type is the one the attempt ran as.
+        const type = state.taskKinds?.[kindOf(latest) ?? task.kind],
+          over = failedChecks(latest).length > 0 && !type?.acceptsFailedChecks && type?.acceptOver !== false;
+        if (over)
+          offer(
+            'accept',
+            'Accept over a failed check…',
+            'primary',
+            step('accept', [field('overReason', true, 'reason')]),
+          );
+        // A reason accepts it over a failed check, where the step's contract allows it.
+        else offer('accept', 'Accept result', 'primary', step('accept', [field('overReason', false, 'reason')]));
+      }
       if (task.kind !== 'unreal-integration')
         offer('revise', 'Request revision', 'default', step('revise', [field('direction', true, 'note')]));
     }
@@ -434,7 +461,7 @@
         'default',
         step('carry-skip', [field('line', true, 'text', carry.line), field('reason', true, 'reason')]),
       );
-    const backable = task.kind === 'studio-development:change' && !task.carryOf && journal?.state === 'integrated';
+    const backable = bringBackable(task, state);
     // A review that passed may be overruled; the director's note is needed only when the review noted nothing.
     const passNotes = review?.candidateReviewNotes?.length ?? 0;
     // Only where the controller's own check sends a passing review back (returnableAs: not, for example, once an
@@ -490,6 +517,8 @@
       before.push({
         key: 'answer',
         label: `Send to ${workerName(state, asking.workerId ?? task.workerId)}`,
+        emphasis: 'primary',
+        closing: false,
         ...step('answer', [
           field('attemptId', true, 'id', asking.id),
           field('option', false, 'number'),
@@ -501,6 +530,8 @@
       before.push({
         key: 'allow-commands',
         label: 'Allow commands',
+        emphasis: 'primary',
+        closing: false,
         ...step('allow-commands', [
           field('attemptId', true, 'id', explanation.attemptId),
           field('commands', true, 'list', explanation.commands ?? []),
@@ -516,17 +547,30 @@
             after.push({
               key: `bring-back-${target.line}`,
               label: `Bring back to ${target.line}`,
+              emphasis: 'default',
+              closing: false,
               ...step('bring-back', [field('line', true, 'text', target.line)]),
             }),
           );
-      else after.push({ key: 'bring-back', label: 'Bring back', ...step('bring-back', [field('line', true, 'text')]) });
+      else
+        after.push({
+          key: 'bring-back',
+          label: 'Bring back',
+          emphasis: 'default',
+          closing: false,
+          ...step('bring-back', [field('line', true, 'text')]),
+        });
     }
-    return [
-      ...before,
-      ...[...row, ...closing].map(({ key, label, method, path, fields }) => ({ key, label, method, path, fields })),
-      ...after,
-    ];
+    return [...before, ...row, ...closing, ...after];
   }
 
-  globalThis.StudioTaskActions = Object.freeze({ taskActions });
+  // Whether the task is a source story that landed, whose page offers Bring back to each older line it can go back to
+  // (the bring-back read, GET /api/tasks/<id>/bring-back, names them): a story, not a carry, whose accepted review's
+  // integration landed.
+  function bringBackable(task, state) {
+    const journal = decisionState(task, state).journal;
+    return task.kind === 'studio-development:change' && !task.carryOf && journal?.state === 'integrated';
+  }
+
+  globalThis.StudioTaskActions = Object.freeze({ taskActions, bringBackable });
 })();

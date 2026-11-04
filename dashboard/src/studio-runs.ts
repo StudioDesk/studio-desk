@@ -4,7 +4,7 @@
 import '../../public/runs.js';
 // The story page's task actions as shared rules the controller can run too (public/task-actions.js), after runs.js.
 import '../../public/task-actions.js';
-import type { AttemptSummary, Live, RunRecord, Shell, Task } from './api';
+import type { AttemptSummary, Live, RunRecord, Shell, Task, TaskAction } from './api';
 
 export type StudioState = Shell & Live;
 
@@ -104,27 +104,17 @@ interface StudioRunsModule {
   needsYouItems(state: StudioState, runs: RunStory[]): HomeItem[];
 }
 
-// One action the story page offers on a task (public/task-actions.js): the words on its button, the route it is sent
-// to and the body fields that route takes, each with the value the page sends from the records when it sends one.
-export interface TaskActionField {
-  name: string;
-  required: boolean;
-  kind: 'id' | 'hash' | 'text' | 'note' | 'reason' | 'boolean' | 'list' | 'number';
-  value?: unknown;
-}
-export interface TaskAction {
-  key: string;
-  label: string;
-  method: 'POST' | 'PATCH';
-  path: string;
-  fields: TaskActionField[];
-}
+// One action the story page offers on a task (public/task-actions.js): the words on its button, its emphasis, whether
+// it is a closing action behind More actions, the route it is sent to and the body fields that route takes (api.ts).
+export type { TaskAction, TaskActionField } from './api';
 // What the page reads besides the records: the controller's answer to a landed story's bring-back read.
 export interface TaskActionReads {
   bringBack?: { lines: ({ line: string; through: string[] } | { line: string; reason: string })[] };
 }
 export interface StudioTaskActionsModule {
   taskActions(task: Task, state: StudioState, reads?: TaskActionReads): TaskAction[];
+  // Whether the task is a source story that landed, whose actions name the lines its bring-back read reaches.
+  bringBackable(task: Task, state: StudioState): boolean;
 }
 
 // A CLI's usage hold (public/runs.js holdItems): one item for the CLI, with the work waiting on it. It needs the
@@ -149,6 +139,12 @@ export const taskActions: StudioTaskActionsModule['taskActions'] = (task, state,
     task,
     state,
     reads,
+  );
+// Whether the task is a source story that landed, whose actions name the lines it can be brought back to.
+export const bringBackable: StudioTaskActionsModule['bringBackable'] = (task, state) =>
+  (globalThis as unknown as { StudioTaskActions: StudioTaskActionsModule }).StudioTaskActions.bringBackable(
+    task,
+    state,
   );
 
 export const statusLabels: Record<string, string> = {

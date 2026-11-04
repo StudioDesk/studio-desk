@@ -306,6 +306,7 @@ const dashboardRequests = [
       'library',
       'snapshots',
       'releases',
+      'calls',
       'runs/R',
       'runs/R/inputs/I',
       'runs/R/bring-back',

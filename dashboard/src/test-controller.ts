@@ -6,6 +6,9 @@ import type {
   ActivityPage,
   AttemptSummary,
   CommandRecords,
+  DirectorCall,
+  DirectorCalls,
+  DirectorTaskCall,
   FinishedPage,
   FirstRunTemplates,
   IdeaName,
@@ -33,7 +36,18 @@ import type {
   VisualView,
 } from './api';
 import type { BringBackTargets } from './bring-back';
-import { settled } from './studio-runs';
+import {
+  bringBackable,
+  isCleanup,
+  isHold,
+  needsYouItems,
+  runStories,
+  settled,
+  taskActions,
+  type NeedsItem,
+  type RunStory,
+  type StudioState,
+} from './studio-runs';
 
 export class FakeSource {
   static all: FakeSource[] = [];
@@ -242,6 +256,75 @@ const respond = (body: unknown, ok = true, status = ok ? 200 : 400) => ({
   arrayBuffer: async () => new TextEncoder().encode(typeof body === 'string' ? body : JSON.stringify(body)).buffer,
 });
 
+// The records the pages hold for the stand-in's project: its shell and its live records.
+const studioOf = (controller: Controller): StudioState => ({
+  ...controller.shell,
+  tasks: controller.tasks,
+  attempts: controller.attempts,
+  runs: controller.runs,
+});
+
+// The actions a task's read answers, as the controller lists them (src/core/task-actions.mjs taskActionsFor): the
+// shared rules over the project's records, with the task's bring-back read for a source story that landed only.
+export function actionsOf(controller: Controller, task: Task) {
+  const state = studioOf(controller);
+  return taskActions(
+    task,
+    state,
+    bringBackable(task, state) ? { bringBack: controller.bringBack[task.id] ?? { lines: [] } } : {},
+  );
+}
+
+// The project's list of calls, as the controller answers it (src/core/director-calls.mjs directorCalls): the shared
+// needsYouItems kept to the director's, each task's call with the actions its task read answers.
+export function callsOf(controller: Controller, projectId: string): DirectorCalls {
+  const state = studioOf(controller),
+    actions = (taskId: string) => {
+      const task = controller.tasks.find(item => item.id === taskId);
+      return task ? actionsOf(controller, task) : [];
+    },
+    taskCall = (item: NeedsItem & { run?: RunStory }): DirectorTaskCall => ({
+      type: 'task',
+      taskId: item.taskId,
+      runId: item.run?.id ?? null,
+      kind: item.kind,
+      reason: item.reason,
+      next: item.next,
+      action: item.action ?? null,
+      details: item.details || [],
+      attemptId: item.attemptId ?? null,
+      canClose: !!item.canClose,
+      actions: actions(item.taskId),
+    }),
+    items = needsYouItems(state, runStories(state))
+      .filter(item => item.requiresDirector)
+      .map((item): DirectorCall => {
+        if (isHold(item))
+          return {
+            type: 'hold',
+            provider: item.provider,
+            label: item.label,
+            taskIds: item.taskIds || [],
+            runId: null,
+            kind: item.kind,
+            reason: item.reason,
+            next: item.next,
+            action: item.action ?? null,
+            details: [],
+            actions: [],
+          };
+        if (isCleanup(item))
+          return {
+            type: 'cleanup',
+            runId: item.run.id,
+            taskIds: item.taskIds,
+            members: item.members.map(member => taskCall({ ...member, run: item.run })),
+          };
+        return taskCall(item);
+      });
+  return { projectId, items, count: items.length, version: FakeSource.hello?.version ?? 1 };
+}
+
 // Installs the stand-in as fetch. Every route answers from the controller's current records, so a test changes
 // a record and then emits the change that names it.
 export function fakeController(projectId = 'project-x'): Controller {
@@ -327,6 +410,8 @@ export function fakeController(projectId = 'project-x'): Controller {
       }
       const path = url.split('?')[0]!;
       if (path === '/api/projects') return respond({ projects: controller.shell.projects });
+      // What needs the director now, as the controller lists it (src/core/director-calls.mjs).
+      if (path === `/api/projects/${projectId}/calls`) return respond(callsOf(controller, projectId));
       if (path === '/api/templates')
         return controller.templates
           ? respond(controller.templates)
@@ -441,7 +526,11 @@ export function fakeController(projectId = 'project-x'): Controller {
       if (task) {
         const record = controller.tasks.find(item => item.id === decodeURIComponent(task));
         return record
-          ? respond({ task: record, attempts: controller.attempts.filter(attempt => attempt.taskId === record.id) })
+          ? respond({
+              task: record,
+              attempts: controller.attempts.filter(attempt => attempt.taskId === record.id),
+              actions: actionsOf(controller, record),
+            })
           : respond({ error: 'Task not found.' }, false);
       }
       const artifact = path.match(/^\/api\/attempts\/([^/]+)\/artifact$/)?.[1];

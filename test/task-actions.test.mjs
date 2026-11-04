@@ -1,6 +1,7 @@
 // Reading one task answers the actions the director may take on it now (src/core/task-actions.mjs running the shared
-// rules, public/task-actions.js): each with its label, method, path and fields, the ones the shared rules give for the
-// records the dashboard holds. The controller accepts a listed action sent with its required fields, refuses one the
+// rules, public/task-actions.js): each with its label, emphasis, whether it is a closing action, method, path and fields,
+// the ones the shared rules give for the records the dashboard holds, and for a story that landed, one Bring back to
+// each older line its bring-back read reaches. The controller accepts a listed action sent with its required fields, refuses one the
 // list leaves out, and reading runs none of them. The list leaves out what the controller would refuse: Start on held
 // work or on a story whose plan is out of date, reconciling an integration while it runs, and Send back once a story's
 // interrupted merge was reconciled.
@@ -13,6 +14,7 @@ import { approveWork } from '../src/core/proposals.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { setup } from './studio-setup.mjs';
 import { setup as sourceSetup } from './source-story-setup.mjs';
+import { waitFor } from './wait-for.mjs';
 import { noteOutdated, sourceIntegrationResources } from '../src/connectors/source-changes.mjs';
 import '../public/runs.js';
 import '../public/task-actions.js';
@@ -70,19 +72,26 @@ const read = async (c, id) => {
   return page;
 };
 
-// The project's records as the story page holds them: its shell with the live set, and the task's own page.
+// The project's records as the story page holds them: its shell with the live set, and the task's own page; and for a
+// story that landed, its bring-back read, whose lines the page offers.
+const get = async (c, route) =>
+  (await fetch(`${c.origin}${route}`, { headers: { 'x-studio-key': c.app.directorKey } })).json();
 const dashboardActions = async (c, page) => {
-  const get = async route =>
-    (
-      await fetch(`${c.origin}/api/projects/${projectId}/${route}`, { headers: { 'x-studio-key': c.app.directorKey } })
-    ).json();
-  const state = { ...(await get('shell')), ...(await get('live')) },
-    ids = new Set(page.attempts.map(attempt => attempt.id));
-  return globalThis.StudioTaskActions.taskActions(page.task, {
-    ...state,
-    tasks: [...state.tasks.filter(task => task.id !== page.task.id), page.task],
-    attempts: [...state.attempts.filter(attempt => !ids.has(attempt.id)), ...page.attempts],
-  });
+  const shared = {
+      ...(await get(c, `/api/projects/${projectId}/shell`)),
+      ...(await get(c, `/api/projects/${projectId}/live`)),
+    },
+    ids = new Set(page.attempts.map(attempt => attempt.id)),
+    state = {
+      ...shared,
+      tasks: [...shared.tasks.filter(task => task.id !== page.task.id), page.task],
+      attempts: [...shared.attempts.filter(attempt => !ids.has(attempt.id)), ...page.attempts],
+    },
+    rules = globalThis.StudioTaskActions,
+    reads = rules.bringBackable(page.task, state)
+      ? { bringBack: await get(c, `/api/tasks/${encodeURIComponent(page.task.id)}/bring-back?projectId=${projectId}`) }
+      : {};
+  return rules.taskActions(page.task, state, reads);
 };
 
 // Reads the task and checks its actions: each with a label, method, path and fields, the expected labels in order, and
@@ -94,6 +103,8 @@ const actionsOf = async (c, id, labels) => {
   assert.ok(Number.isInteger(page.version), 'The page says the change sequence it reflects.');
   for (const action of page.actions) {
     assert.equal(typeof action.label, 'string');
+    assert.ok(['primary', 'default', 'quiet'].includes(action.emphasis), `${action.label}: ${action.emphasis}`);
+    assert.equal(typeof action.closing, 'boolean', action.label);
     assert.ok(['POST', 'PATCH'].includes(action.method), action.method);
     assert.match(action.path, /^\/api\//);
     assert.ok(Array.isArray(action.fields), action.label);
@@ -420,6 +431,60 @@ test('a running integration lists no Reconcile source integration, and a reconci
   );
   assert.equal((await send(c, page, 'Integrate again')).status, 200);
   assert.equal((await c.settled(review)).state, 'integrated');
+});
+
+// A story that landed names each older line its bring-back read reaches as its own action, in that read's order, and
+// each is accepted sent with its line; a story that has not landed lists none, and its read is the one it was.
+test('a story that landed lists one Bring back to each line its bring-back read reaches, each accepted', async t => {
+  const c = await sourceSetup(t),
+    store = c.app.store;
+  for (const branch of ['release/1.0', 'release/1.1']) {
+    git(c.root, ['branch', branch]);
+    const added = await c.request(`/api/projects/${projectId}/lines`, { projectId, branch });
+    assert.equal(added.status, 201, JSON.stringify(added.data));
+  }
+  await c.start();
+  const review = await c.review(await c.wait(c.taskId));
+  await c.accept(review.taskId);
+  // Before it lands: no bring-back action, and the read is what the shared rules give with no bring-back read.
+  const waiting = await actionsOf(c, c.taskId, ['Integrate', 'Send back to Eli', 'Close without integrating']);
+  assert.equal(
+    waiting.actions.some(action => action.path.endsWith('/bring-back')),
+    false,
+  );
+  assert.equal((await c.integration(review)).status, 200);
+  assert.equal((await c.settled(review)).state, 'integrated');
+
+  const back = await get(c, `/api/tasks/${c.taskId}/bring-back?projectId=${projectId}`);
+  assert.deepEqual(back, {
+    lines: [
+      { line: 'release/1.1', through: ['release/1.1'] },
+      { line: 'release/1.0', through: ['release/1.1', 'release/1.0'] },
+    ],
+  });
+  const page = await actionsOf(c, c.taskId, ['Bring back to release/1.1', 'Bring back to release/1.0']);
+  assert.deepEqual(
+    page.actions.map(action => [action.key, action.emphasis, action.closing, action.path, action.fields.at(-1)]),
+    back.lines.map(({ line }) => [
+      `bring-back-${line}`,
+      'default',
+      false,
+      `/api/tasks/${c.taskId}/bring-back`,
+      { name: 'line', required: true, kind: 'text', value: line },
+    ]),
+  );
+  const brought = await send(c, page, 'Bring back to release/1.0');
+  assert.equal(brought.status, 202, JSON.stringify(brought.data));
+  assert.deepEqual(brought.data.lines, ['release/1.1', 'release/1.0']);
+  // Once both lines have it, the read reaches none of them, and the story lists no Bring back.
+  await waitFor(
+    () =>
+      store.attempt(review.id).sourceCarries?.every(carry => carry.state === 'carried') &&
+      !c.app.runner.sourceIntegrationRun,
+    'both carries to land',
+    { detail: () => JSON.stringify(store.attempt(review.id).sourceCarries) },
+  );
+  await actionsOf(c, c.taskId, []);
 });
 
 // The sweep: every action listed on each sample story, sent on a fresh copy of that sample, is accepted. Each sample

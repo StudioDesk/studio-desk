@@ -4,6 +4,7 @@
 // writes anything, so listing the actions runs none of them.
 import '../../public/runs.js';
 import '../../public/task-actions.js';
+import { bringBackTargets } from '../connectors/source-carries.mjs';
 import { liveRecords } from './project-records.mjs';
 
 // The project's records with the task's own page in place of the live set's copy, which is the newest (the story
@@ -17,14 +18,19 @@ function withPage(state, page) {
   };
 }
 
-// The actions for one task of a project, each with its label, method, path and fields (public/task-actions.js).
+// The actions for one task of a project, each with its label, emphasis, whether it is a closing action, method, path
+// and fields (public/task-actions.js).
 // `page` is the task's read, { task, attempts }; `shared` is what the project's shell answers beside its records (the
 // server's common fields: task types, workflows, adapters, autonomy and the runtime, whose integrationRun names the
 // integration the controller is running now, so its reconciling is left out). The state is the one the story
 // page holds: the shell (GET /api/projects/<id>/shell) with the live set (GET /api/projects/<id>/live) and the page.
-export function taskActionsFor(store, projectId, page, shared) {
-  const state = withPage({ ...store.shell(projectId), ...shared, ...liveRecords(store, projectId) }, page);
-  return globalThis.StudioTaskActions.taskActions(page.task, state);
+// For a source story that landed, the shared rules name each older line it can go back to from the task's bring-back
+// targets (`record`'s, the answer GET /api/tasks/<id>/bring-back gives); no other task reads them, nor git.
+export function taskActionsFor(store, projectId, page, shared, record = page.task) {
+  const state = withPage({ ...store.shell(projectId), ...shared, ...liveRecords(store, projectId) }, page),
+    rules = globalThis.StudioTaskActions,
+    reads = rules.bringBackable(page.task, state) ? { bringBack: bringBackTargets(store, record) } : {};
+  return rules.taskActions(page.task, state, reads);
 }
 
 // One task's read with the actions the director may take on it now: what GET /api/tasks/:id answers. `taskPage` reads
@@ -33,5 +39,5 @@ export function taskActionsFor(store, projectId, page, shared) {
 // in the two never differ.
 export function taskRead(store, projectId, record, { taskPage, shared }) {
   const page = taskPage(projectId, record);
-  return { ...page, actions: taskActionsFor(store, projectId, page, shared) };
+  return { ...page, actions: taskActionsFor(store, projectId, page, shared, record) };
 }
