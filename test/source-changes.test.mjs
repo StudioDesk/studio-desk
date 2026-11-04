@@ -4035,9 +4035,11 @@ test("a long edit leaves the candidate's tests their own time, which still bound
   const passed = await c.wait(c.taskId);
   assert.equal(passed.status, 'review', JSON.stringify(passed.error));
   assert.equal(passed.result.checks.find(check => check.name === 'Candidate Node test suite').status, 'pass');
-  // The candidate's own limit still stops tests that run too long.
-  const second = await setup(t, 'slow');
-  second.app.runner.candidateTimeoutMs = 300;
+  // The candidate's own limit still stops tests that run too long. The limit also covers the package install before
+  // the tests, so it leaves the install room on a busy computer and the tests never end (November 4, 2026: a 300 ms
+  // limit ran out during the install under load, in three verifies since November 2).
+  const second = await setup(t, 'hang');
+  second.app.runner.candidateTimeoutMs = 6000;
   await second.start();
   const stopped = await second.wait(second.taskId, 'failed');
   assert.equal(stopped.error, 'Assignment time limit reached.');
