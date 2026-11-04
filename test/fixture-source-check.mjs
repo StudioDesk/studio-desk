@@ -8,6 +8,23 @@ if (mode === 'slower') await new Promise(resolve => setTimeout(resolve, 4000));
 if (mode === 'outlast') await new Promise(resolve => setTimeout(resolve, 9000));
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'malformed') console.log('No test totals');
+// The given number of passing tests (the next argument); 'count 0' reports a run of no tests.
+else if (mode === 'count') {
+  const count = Number(process.argv[3]);
+  console.log(
+    [
+      'TAP version 13',
+      ...Array.from({ length: count }, (_, index) => `ok ${index + 1} - counted fixture test ${index + 1}`),
+      `1..${count}`,
+      `# tests ${count}`,
+      `# pass ${count}`,
+      '# fail 0',
+      '# cancelled 0',
+      '# skipped 0',
+      '# todo 0',
+    ].join('\n'),
+  );
+}
 // One failure first, with its location and a block error, then more passing output (over 200 KB) than an
 // employee's test run keeps of it, then consistent totals.
 else if (mode === 'early-failure') {

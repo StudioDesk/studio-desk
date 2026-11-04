@@ -11,7 +11,7 @@ import { hash } from '../core/contracts.mjs';
 import { runGit, runGitAsync } from '../git.mjs';
 import { releaseTestTurn, testTurnResource } from '../core/test-turn.mjs';
 import { sourcePlan, testOutput, testPhaseEvidence } from './source-checks.mjs';
-import { installsPackages, studioDeskProfile } from './source-profile.mjs';
+import { installsPackages, isTestFile, studioDeskProfile } from './source-profile.mjs';
 import { installStep, lastLine } from './package-installs.mjs';
 import { buildCommand, buildPassed, buildTail, buildText, buildTimeoutMs, changedByBuild } from './source-build.mjs';
 
@@ -470,6 +470,26 @@ export function statusPaths(root, files = []) {
     .map(entry => entry.slice(3));
 }
 
+const counted = (count, noun) => `${count.toLocaleString('en-US')} ${noun}${count === 1 ? '' : 's'}`;
+// Why a passing test run on the merged source counted too few tests, in plain words, or null. A run that reports no
+// tests fails when the merged source holds test files; a repository with none yet still merges. A story's merge also
+// fails below the floor its journal recorded (testFloor): the count the newest integrated story on the line passed
+// with, lowered to the change's own measured count. Carries and releases record no floor.
+export function tooFewTests(totals, plan, profile, journal) {
+  if (totals.tests === 0) {
+    const files = plan.files.filter(item => isTestFile(item.path, profile)).length;
+    if (files)
+      return `The test run on the merged change reported no tests, though its source has ${counted(files, 'test file')}.`;
+  }
+  const floor = journal.testFloor;
+  if (!floor || !(totals.tests < floor.tests)) return null;
+  const line = `${journal.repository.branch} passed with when ${floor.taskId} merged onto it`;
+  return `The test run on the merged change reported ${counted(totals.tests, 'test')}, fewer than the ${floor.tests.toLocaleString('en-US')} ${
+    floor.tests < floor.lineTests
+      ? `its own test run reported (${floor.lineTests.toLocaleString('en-US')} ${line})`
+      : `that ${line}`
+  }.`;
+}
 // Builds the integration in its worktree, checked out at the tip it will fast-forward from:
 // merges the candidate commit onto it (three-way), formats only the changed files that remain
 // and runs the full suite on the result. Nothing outside the worktree changes.
@@ -651,18 +671,23 @@ export async function verifyIntegration(runtime, journal, directory, configurati
           phaseEvidence: testPhaseEvidence(tested.stdout),
         });
       const { totals, tapDurationMs, failedTests } = testPhaseEvidence(tested.stdout);
-      const passed =
-        !!totals &&
-        tested.exitCode === 0 &&
-        !tested.signal &&
-        !tested.timedOut &&
-        totals.fail === 0 &&
-        totals.cancelled === 0 &&
-        totals.skipped === 0 &&
-        totals.todo === 0 &&
-        totals.pass === totals.tests;
+      const ran =
+          !!totals &&
+          tested.exitCode === 0 &&
+          !tested.signal &&
+          !tested.timedOut &&
+          totals.fail === 0 &&
+          totals.cancelled === 0 &&
+          totals.skipped === 0 &&
+          totals.todo === 0 &&
+          totals.pass === totals.tests,
+        // A run that passed can still have counted too few tests: none from a source that holds test files, or fewer
+        // than the line last passed with (journal.testFloor, recorded for a story's merge).
+        short = ran ? tooFewTests(totals, plan, profile, journal) : null,
+        passed = ran && !short;
       return {
         passed,
+        ...(short ? { error: short } : {}),
         phaseId: 'integration.verification',
         failedTests,
         checks: [
@@ -672,7 +697,7 @@ export async function verifyIntegration(runtime, journal, directory, configurati
             status: passed ? 'pass' : 'fail',
             evidence: tested.timedOut
               ? 'Verification time limit reached.'
-              : `Exit ${tested.exitCode}; ${JSON.stringify(totals)}; ran ${runtime.sourceCheckCommand ? 'as a protocol fixture' : sandboxLabel(configuration)}.`,
+              : `Exit ${tested.exitCode}; ${JSON.stringify(totals)}; ran ${runtime.sourceCheckCommand ? 'as a protocol fixture' : sandboxLabel(configuration)}.${short ? ` ${short}` : ''}`,
           },
         ],
         formatter: runtime.sourceFormatCommand ? 'formatter fixture' : formatter?.package || 'none',

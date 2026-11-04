@@ -2112,6 +2112,7 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
     changes: manifest.changes,
     repository,
     worktree: path.join(sourceWorktreeRoot(runtime), 'i-' + worktreeName(review.id)),
+    ...testFloorOf(store, root, repository.branch, report.totals?.tests),
     startedAt: new Date().toISOString(),
     approvedBy: approval,
     ...(override
@@ -2153,6 +2154,36 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
     });
   runtime.sourceIntegrationRun = { id: journal.id, promise };
   return structuredClone(journal);
+}
+// The fewest tests a story's merge may report (testFloor): the count the newest integrated story on the same repository
+// and branch passed with, named by that story's task ID, lowered to the change's own measured count, since a reviewed
+// change may remove tests on purpose. With no integrated story on the line there is no floor.
+function testFloorOf(store, root, branch, candidateTests) {
+  let newest = null;
+  for (const { sourceIntegration: journal } of store.integrationJournals('integrated'))
+    if (
+      journal.root === root &&
+      journal.repository?.branch === branch &&
+      Number.isInteger(journal.verification?.totals?.tests) &&
+      (!newest || String(journal.finishedAt) >= String(newest.finishedAt))
+    )
+      newest = journal;
+  if (!newest) return {};
+  let taskId = newest.reviewTaskId;
+  try {
+    taskId = store.attempt(newest.candidateAttemptId).taskId || taskId;
+  } catch {}
+  const lineTests = newest.verification.totals.tests,
+    measured = Number.isInteger(candidateTests) ? candidateTests : null;
+  return {
+    testFloor: {
+      tests: measured === null ? lineTests : Math.min(lineTests, measured),
+      lineTests,
+      candidateTests: measured,
+      taskId,
+      integrationId: newest.id,
+    },
+  };
 }
 function settle(store, review, journal, state, fields = {}) {
   Object.assign(journal, fields, { state, finishedAt: new Date().toISOString() });
