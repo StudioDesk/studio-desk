@@ -1,7 +1,9 @@
 // Reading one task answers the actions the director may take on it now (src/core/task-actions.mjs running the shared
 // rules, public/task-actions.js): each with its label, method, path and fields, the ones the shared rules give for the
 // records the dashboard holds. The controller accepts a listed action sent with its required fields, refuses one the
-// list leaves out, and reading runs none of them.
+// list leaves out, and reading runs none of them. The list leaves out what the controller would refuse: Start on held
+// work or on a story whose plan is out of date, reconciling an integration while it runs, and Send back once a story's
+// interrupted merge was reconciled.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,6 +13,7 @@ import { approveWork } from '../src/core/proposals.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { setup } from './studio-setup.mjs';
 import { setup as sourceSetup } from './source-story-setup.mjs';
+import { noteOutdated, sourceIntegrationResources } from '../src/connectors/source-changes.mjs';
 import '../public/runs.js';
 import '../public/task-actions.js';
 
@@ -307,4 +310,114 @@ test('a blocked editor whose file request names a file outside the measured list
   store.putTask(story);
   page = await actionsOf(c, id, ['Start assignment', 'Close']);
   await refused(c, page, 'Allow and continue', 'edit-scope');
+});
+
+test('held work lists Release hold and no Start assignment, which the controller refuses', async t => {
+  mockDelay(t, 20);
+  const c = await setup(t);
+
+  // A held ready task, once the scheduler has recorded why it waits: Start is refused and leaves its record as it
+  // was; Release hold is accepted, and Start is listed again and accepted.
+  const held = await create(c);
+  assert.equal((await c.request(`/api/tasks/${held}`, { projectId, hold: true }, 'PATCH')).status, 200);
+  // The full state read refreshes readiness, which records the hold as the reason the task waits.
+  await c.state();
+  assert.equal(c.app.store.task(held).status, 'blocked');
+  assert.equal(c.app.store.task(held).reason, 'Assignment is deliberately on hold.');
+  let page = await actionsOf(c, held, ['Release hold', 'Close this step']);
+  await refused(c, page, 'Start assignment', 'start');
+  assert.equal((await send(c, page, 'Release hold')).status, 200);
+  assert.equal(c.app.store.task(held).hold, false);
+  page = await actionsOf(c, held, ['Start assignment', 'Close this step']);
+  const started = await send(c, page, 'Start assignment');
+  assert.ok(started.status >= 200 && started.status < 300, JSON.stringify(started.data));
+  assert.equal(c.app.store.attempts(held).length, 1);
+
+  // Its closing action is accepted too, on another held task.
+  const closing = await create(c);
+  assert.equal((await c.request(`/api/tasks/${closing}`, { projectId, hold: true }, 'PATCH')).status, 200);
+  page = await actionsOf(c, closing, ['Release hold', 'Close this step']);
+  assert.equal((await send(c, page, 'Close this step')).status, 200);
+  assert.equal(c.app.store.task(closing).status, 'denied');
+});
+
+test('a story whose plan the source moved past lists no Start assignment', async t => {
+  const c = await sourceSetup(t);
+  const store = c.app.store,
+    story = store.task(c.taskId);
+  // The note a refused Start records when the source moved past the story's plan.
+  assert.ok(
+    noteOutdated(story, Object.assign(new Error('Moved on.'), { outdated: { files: ['src/core/workflows.mjs'] } })),
+  );
+  store.putTask(story);
+  // Close and send as a new idea is offered in its place.
+  const page = await actionsOf(c, c.taskId, ['Close and send as a new idea', 'Withdraw approval and deny']);
+  assert.equal(
+    page.actions.some(action => action.path.endsWith('/start')),
+    false,
+  );
+  assert.equal((await send(c, page, 'Withdraw approval and deny')).status, 200);
+  assert.equal(store.task(c.taskId).status, 'denied');
+});
+
+test('a running integration lists no Reconcile source integration, and a reconciled one no Send back', async t => {
+  const c = await sourceSetup(t);
+  const store = c.app.store;
+  await c.start();
+  const review = await c.review(await c.wait(c.taskId));
+  await c.accept(review.taskId);
+  const head = git(c.root, ['rev-parse', 'HEAD']);
+  assert.equal((await c.integration(review)).status, 200);
+  const integrated = await c.settled(review);
+  assert.equal(integrated.state, 'integrated', JSON.stringify(integrated));
+
+  // The integration as it stood before its fast-forward: its journal committing, its resources held, the story
+  // waiting for it, and the development copy where it was.
+  git(c.root, ['reset', '--quiet', '--hard', head]);
+  const attempt = store.attempt(review.id),
+    { finishedAt, ...journal } = integrated,
+    story = store.task(c.taskId);
+  attempt.sourceIntegration = {
+    ...journal,
+    state: 'committing',
+    repository: { branch: integrated.repository.branch, head },
+  };
+  Object.assign(story.sourceStage, {
+    phase: 'integration',
+    current: 'waiting-for-integration',
+    integration: { attemptId: review.id, id: journal.id, state: 'committing' },
+  });
+  store.tx(() => {
+    store.claim(sourceIntegrationResources, journal.id);
+    store.updateAttempt(attempt);
+    store.putTask(story);
+  });
+
+  // While the controller's own integration run is that journal, reconciling it is left out and refused.
+  c.app.runner.sourceIntegrationRun = { id: journal.id, promise: Promise.resolve() };
+  try {
+    const running = await actionsOf(c, c.taskId, []);
+    await refused(c, running, 'Reconcile source integration', 'restore-source');
+  } finally {
+    c.app.runner.sourceIntegrationRun = null;
+  }
+
+  // The same journal with no live run lists it, and reconciling is accepted: nothing landed, so it is abandoned.
+  let page = await actionsOf(c, c.taskId, ['Reconcile source integration']);
+  const reconciled = await send(c, page, 'Reconcile source integration');
+  assert.equal(reconciled.status, 200, JSON.stringify(reconciled.data));
+  assert.equal(reconciled.data.state, 'abandoned');
+  assert.equal(store.task(c.taskId).sourceStage.phase, 'integration');
+  assert.equal(store.task(c.taskId).sourceStage.current, 'waiting-for-integration');
+
+  // Its interrupted merge reconciled, the story is not sent back, which the controller refuses; integrating again is
+  // accepted and lands.
+  page = await actionsOf(c, c.taskId, ['Integrate again', 'Close without integrating']);
+  await refused(c, page, 'Send back', 'send-back');
+  assert.equal(
+    page.actions.some(action => action.label.startsWith('Send back')),
+    false,
+  );
+  assert.equal((await send(c, page, 'Integrate again')).status, 200);
+  assert.equal((await c.settled(review)).state, 'integrated');
 });

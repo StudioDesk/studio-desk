@@ -514,6 +514,9 @@ export function createStudio({
         origin: origin(),
         engineConnected: false,
         integrationGateway: runner.gateway.status(),
+        // The journal ID of the integration the controller is running now (a source integration, carry or
+        // release), or null: a task's actions leave out reconciling the integration that is still running.
+        integrationRun: runner.sourceIntegrationRun?.id ?? null,
       },
     };
   };

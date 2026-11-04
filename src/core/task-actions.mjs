@@ -19,7 +19,8 @@ function withPage(state, page) {
 
 // The actions for one task of a project, each with its label, method, path and fields (public/task-actions.js).
 // `page` is the task's read, { task, attempts }; `shared` is what the project's shell answers beside its records (the
-// server's common fields: task types, workflows, adapters, autonomy and the runtime). The state is the one the story
+// server's common fields: task types, workflows, adapters, autonomy and the runtime, whose integrationRun names the
+// integration the controller is running now, so its reconciling is left out). The state is the one the story
 // page holds: the shell (GET /api/projects/<id>/shell) with the live set (GET /api/projects/<id>/live) and the page.
 export function taskActionsFor(store, projectId, page, shared) {
   const state = withPage({ ...store.shell(projectId), ...shared, ...liveRecords(store, projectId) }, page);

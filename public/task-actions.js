@@ -5,7 +5,9 @@
 // commands), written once more so the controller can run them too; the page keeps its own until it reads these. Where
 // they differ from the page, they say so: a story whose plan the code moved past (sourceStage.outdated) offers Close and
 // send as a new idea in place of Start assignment and Allow and continue, and a file request that carries a problem
-// offers no Allow and continue; the page follows in its own story.
+// offers no Allow and continue; and where the page offers what the controller would refuse, these leave it out: Start
+// on held work, Reconcile source integration while that integration runs, and Send back where the review's stage does
+// not return the story (after its interrupted integration was reconciled, for one). The page follows in its own story.
 // Nothing here sends anything or reads the page. Loaded after runs.js, whose rules (globalThis.StudioRuns) it reads.
 (() => {
   const unsettledStates = ['interrupted', 'quarantined', 'uncertain'];
@@ -68,17 +70,40 @@
     (task.sourceStage?.phase === 'integration' && task.sourceStage.current === 'failed') ||
     !!(task.sourceStage?.reason || task.reason) ||
     /could not request integration|approve it yourself/i.test(String(task.autonomyNote ?? ''));
-  // A source story sent back over its accepted review (decisions.ts reviewReturnable).
-  const reviewReturnable = task => {
-    const stage = task.sourceStage;
-    return (
-      task.status === 'done' &&
-      stage?.current === 'failed' &&
-      task.acceptedAttemptId === stage.review?.attemptId &&
-      (stage.review?.verdict === 'needs-work' ||
-        (stage.review?.verdict === 'pass' && stage.phase === 'candidate-review'))
-    );
+  // Which way the controller lets the director send a source story back over its accepted review, as its workflow
+  // stage's returnable (src/connectors/source-changes.mjs sourceStoryReturnable, which sendBackWork asks) decides:
+  // 'findings' for a review that asked for changes, 'checks' for a passing review whose own checks failed, 'passed'
+  // for a passing review whose integration is neither approved nor under way (the story still waits for it outside
+  // the integration phase, or its integration stopped), and null otherwise. A passing review's integration journal
+  // (`journal`, the review attempt's) must be absent, rejected or abandoned. A passing story whose interrupted
+  // integration was reconciled waits for integration in the integration phase, which none of these is, so it is not
+  // sent back.
+  const returnableAs = (task, journal) => {
+    const stage = task.sourceStage,
+      review = stage?.review;
+    if (
+      task.kind !== 'studio-development:change' ||
+      task.status !== 'done' ||
+      !review ||
+      task.acceptedAttemptId !== review.attemptId
+    )
+      return null;
+    if (review.verdict === 'pass') {
+      if (journal && !['rejected', 'abandoned'].includes(journal.state ?? '')) return null;
+      if (stage.current === 'failed' && stage.phase === 'candidate-review') return 'checks';
+      const open = stage.current === 'waiting-for-integration' && stage.phase !== 'integration',
+        stopped = stage.current === 'failed' && stage.phase === 'integration';
+      return open || stopped ? 'passed' : null;
+    }
+    // A review that asked for changes goes back once any merge recorded over it is settled as stopped: from a failed
+    // stage, or from waiting for integration once that merge was reconciled as stopped before it landed.
+    if (review.verdict !== 'needs-work') return null;
+    if (journal && !['rejected', 'abandoned'].includes(journal.state ?? '')) return null;
+    return stage.current === 'failed' || (journal && stage.current === 'waiting-for-integration') ? 'findings' : null;
   };
+  // A source story sent back over its accepted review with the review's findings or failed checks (decisions.ts
+  // reviewReturnable), where the controller's own check allows it.
+  const reviewReturnable = (task, journal) => ['findings', 'checks'].includes(returnableAs(task, journal) ?? '');
   // The paths a story may change: the director's latest edit, or its brief's path lines (decisions.ts storyPaths).
   const storyPaths = task => {
     const edit = (task.scopeEdits ?? []).at(-1);
@@ -130,7 +155,8 @@
     };
   };
 
-  // The page's conditions (decisions.ts decisionState), unchanged.
+  // The page's conditions (decisions.ts decisionState), apart from `returnable`, which follows the controller's own
+  // check (returnableAs above) rather than the page's.
   function decisionState(task, state) {
     const attempts = state.attempts.filter(attempt => attempt.taskId === task.id),
       live = active(task),
@@ -176,7 +202,7 @@
           : (!journal || ['rejected', 'abandoned'].includes(journal.state ?? '')) &&
             review.candidateReviewVerdict === 'pass');
     const stage = task.sourceStage,
-      returnable = reviewReturnable(task),
+      returnable = reviewReturnable(task, journal),
       landed = journal?.verification?.landedSince,
       mergeable =
         journal?.state === 'rejected' &&
@@ -262,7 +288,8 @@
         approval?.status === 'approved' &&
         !attempts.length &&
         !['running', 'stopping', 'review', 'done', 'denied', 'backlog'].includes(task.status),
-      sendable = outdated && !closed && task.status !== 'denied' && (closable || neverStarted);
+      sendable = outdated && !closed && task.status !== 'denied' && (closable || neverStarted),
+      integrationRun = state.runtime?.integrationRun ?? null;
     const step = (route, fields = [], method = 'POST') => ({
       method,
       path: `/api/tasks/${id}/${route}`,
@@ -303,10 +330,14 @@
         'primary',
         step('send-as-idea', [field('idea', false, 'text')]),
       );
+    // Start is left out while the task is held (the scheduler refuses held work; Release hold below is offered
+    // instead), and while a story records that the source moved past its plan (outdated above: Close and send as a new
+    // idea is offered instead).
     if (
       !live &&
       !closed &&
       !unsettled &&
+      !task.hold &&
       !outdated &&
       explanation.kind !== 'fixed-limit' &&
       ['ready', 'blocked', 'failed', 'cancelled'].includes(task.status)
@@ -349,7 +380,9 @@
         offer('revise', 'Request revision', 'default', step('revise', [field('direction', true, 'note')]));
     }
     if (unsettled) offer('reconcile', 'Reconcile interrupted attempt', 'primary', step('reconcile'));
-    if (journal?.state && busyJournal.includes(journal.state))
+    // An uncertain integration is reconciled once the controller's own integration run is no longer it
+    // (runtime.integrationRun, the journal ID of the integration running now): reconciling refuses a running one.
+    if (journal?.state && busyJournal.includes(journal.state) && !(journal.id && journal.id === integrationRun))
       offer('restore', 'Reconcile source integration', 'default', step('restore-source'));
     if (integrable && review && reviewItem)
       offer(
@@ -386,7 +419,9 @@
     const backable = task.kind === 'studio-development:change' && !task.carryOf && journal?.state === 'integrated';
     // A review that passed may be overruled; the director's note is needed only when the review noted nothing.
     const passNotes = review?.candidateReviewNotes?.length ?? 0;
-    if (integrable && stage?.review?.verdict === 'pass')
+    // Only where the controller's own check sends a passing review back (returnableAs: not, for example, once an
+    // interrupted integration was reconciled and the story waits in the integration phase).
+    if (integrable && stage?.review?.verdict === 'pass' && returnableAs(task, journal) === 'passed')
       offer(
         'send-back-passed',
         `Send back to ${editor}`,
