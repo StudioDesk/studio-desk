@@ -184,11 +184,25 @@ async function takeVerificationTurn(runtime, journal) {
   const turn = {
       held: false,
       waiting: null,
-      // Gives the turn back once, when the run ends or the controller stops.
+      // Records the process of the step running under the held turn (run()'s child: the install, the build or the
+      // tests) as journal.testProcess { pid, startedAt }, its ID with an ISO time taken right after the spawn returned,
+      // so a later process handed the same ID is not taken for it (adapters/process.mjs). It is kept where the journal
+      // is kept, so a controller that stops at once leaves it for its restart (connectors/source-changes.mjs,
+      // interruptedSourceIntegrations), which gives the turn back once that process is gone.
+      recordProcess(pid) {
+        if (!turn.held || !pid) return;
+        journal.testProcess = { pid, startedAt: new Date().toISOString() };
+        recordOnJournal(store, journal, 'testProcess');
+      },
+      // Gives the turn back once, when the run ends or the controller stops, clearing the recorded process first.
       release() {
         if (runtime.integrationTurn === turn) runtime.integrationTurn = null;
         if (!turn.held) return;
         turn.held = false;
+        if (journal.testProcess) {
+          delete journal.testProcess;
+          recordOnJournal(store, journal, 'testProcess');
+        }
         releaseTestTurn(store, journal.id);
       },
     },
@@ -249,8 +263,10 @@ async function takeVerificationTurn(runtime, journal) {
 }
 // Keeps a journal's wait for the test turn where the journal is kept, found by its identity as store.resourceConflict
 // reads it: a release's on its milestone, an integration's or a carry's on its review. A journal kept nowhere (a
-// test's own) waits in memory only, as does one whose records closed with the controller.
-function recordTestTurn(store, journal) {
+// test's own) waits in memory only, as does one whose records closed with the controller. The process running under
+// the turn (testProcess) is kept the same way.
+const recordTestTurn = (store, journal) => recordOnJournal(store, journal, 'testTurn');
+function recordOnJournal(store, journal, key) {
   try {
     const release = /^source-release:(.+):(milestone-[\w-]+)$/.exec(journal.id);
     let kept, save;
@@ -263,9 +279,9 @@ function recordTestTurn(store, journal) {
       kept = [review.sourceIntegration, ...(review.sourceCarries || [])].find(item => item?.id === journal.id);
       save = () => store.updateAttempt(review);
     }
-    if (kept?.id !== journal.id || (!journal.testTurn && !kept.testTurn)) return;
-    if (journal.testTurn) kept.testTurn = { ...journal.testTurn };
-    else delete kept.testTurn;
+    if (kept?.id !== journal.id || (!journal[key] && !kept[key])) return;
+    if (journal[key]) kept[key] = { ...journal[key] };
+    else delete kept[key];
     save();
   } catch {}
 }
@@ -322,6 +338,8 @@ function run(runtime, executable, args, { cwd, environment, timeoutMs, phase, re
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     runtime.integrationProcess = child;
+    // A step that runs while the verification holds the test turn is recorded on its journal (takeVerificationTurn).
+    runtime.integrationTurn?.recordProcess(child.pid);
     const stdout = testOutput(logLimit, record);
     let stderr = '',
       timedOut = false,

@@ -22,6 +22,8 @@ import { sourceResources, sourceRoot, studioDeskSourceResources } from './source
 import { sourceDiffFormat, sourceDiffLimit, verifySourceDiff } from './source-diff.mjs';
 import { codexSandboxRecord, sandboxRecord, testSandboxOf } from '../adapters/source-test-sandbox.mjs';
 import { builtInSandboxRunner } from '../adapters/built-in-sandbox.mjs';
+import { live } from '../adapters/process.mjs';
+import { testTurnResource } from '../core/test-turn.mjs';
 import {
   commitIntegration,
   committedIntegration,
@@ -2345,6 +2347,17 @@ function commitMessage(store, review, candidate, journal) {
 // When the controller starts, no integration of its own is running yet, so each such journal becomes uncertain and
 // waits for Reconcile source integration, keeping the state it had reached (`interrupted`): reconciling one cut off
 // in verification, which never writes the development copy, asks nothing about local edits.
+//
+// The computer's one test turn is the exception, as it is for an interrupted attempt (core/orchestrator.mjs): every
+// other full suite waits for it, so a journal that holds it gives back that one lease when the process of the step it
+// recorded running under the turn (testProcess, source-integration.mjs) is confirmed gone, by the process identity
+// every caller shares (live, adapters/process.mjs: its ID with when it started, so a later process handed the ID is
+// not taken for it). The journal stays needs-reconciliation with its other leases. One whose recorded process may
+// still run, or that recorded none (a journal from before it recorded one), keeps the turn until it is reconciled.
+const turnFreedOnRestart =
+  "The test turn was freed: the integration's test run that held it had ended when the controller started again. Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";
+const testRunEnded = journal =>
+  !!journal.testProcess?.pid && !live({ pid: journal.testProcess.pid, pidStartedAt: journal.testProcess.startedAt });
 export function interruptedSourceIntegrations(runtime) {
   const store = runtime.store;
   for (const review of store.allAttempts()) {
@@ -2360,6 +2373,14 @@ export function interruptedSourceIntegrations(runtime) {
       review.id,
       `Source integration stopped part-way when the controller stopped (during ${journal.interrupted}); reservations retained. Use Reconcile source integration.`,
     );
+    if (
+      store.leases().some(lease => lease.resource === testTurnResource && lease.attemptId === journal.id) &&
+      testRunEnded(journal)
+    )
+      store.tx(() => {
+        store.releaseResource(testTurnResource, journal.id);
+        store.event('test_turn', review.taskId, review.id, turnFreedOnRestart);
+      });
   }
   // Carries and releases cut off the same way (1.1 steps 4 and 5) are reconciled at once from git history.
   interruptedCarries(runtime);
