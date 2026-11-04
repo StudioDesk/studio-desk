@@ -16,5 +16,12 @@ export default defineConfig({
   build: { outDir: '../dist', emptyOutDir: true, assetsInlineLimit: 0 },
   // Four simulated pages at a time: Vitest's default of one per CPU thread but one (31 on the director's PC) took
   // about 4.9 GB, and four took 1.5 GB and finished sooner (40 s against 31 s, October 28).
-  test: { environment: 'jsdom', include: ['src/**/*.test.{ts,tsx}'], maxWorkers: 4 },
+  // Each test file first loads every page the dashboard loads on demand (src/test-setup.ts), so a test's wait for a page
+  // never includes preparing its code on a busy computer (November 4, 2026).
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.{ts,tsx}'],
+    maxWorkers: 4,
+    setupFiles: ['./src/test-setup.ts'],
+  },
 });

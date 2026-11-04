@@ -36,6 +36,23 @@ const TaskView = lazyPage(() => import('./task-page'), 'TaskView'),
   ArtifactsPage = lazyPage(() => import('./artifacts-page'), 'ArtifactsPage'),
   ActivityLogPage = lazyPage(() => import('./activity-log-page'), 'ActivityLogPage'),
   PlatformPage = lazyPage(() => import('./platform-page'), 'PlatformPage');
+// Every page above, so the tests' setup can load them all before a test file runs (test-setup.ts).
+export const onDemandPages = [
+  TaskView,
+  RecordPage,
+  RunsPage,
+  SettingsPage,
+  PreviewsPage,
+  TeamsPage,
+  TeamPage,
+  AgentsPage,
+  InstructionsPage,
+  ToldPage,
+  ReleasesPage,
+  ArtifactsPage,
+  ActivityLogPage,
+  PlatformPage,
+];
 // No projects yet loads only when no project exists.
 const FirstRun = lazy(() => import('./first-run').then(module => ({ default: module.FirstRun })));
 
