@@ -17,6 +17,7 @@ import {
   staleLaunchPage,
 } from './director-access.mjs';
 import { previousStop, stopRecorder } from './stop-record.mjs';
+import { takeDataFolderLock } from './data-folder-lock.mjs';
 import { Runner, artifactPath, acceptedReference, validateAcceptedReferences } from './runner.mjs';
 import { hash, complexityPolicy, validateComplexity } from './core/contracts.mjs';
 import {
@@ -67,7 +68,6 @@ import { testsSentence } from './connectors/source-checks.mjs';
 import { testRecordStream, testRecordSummary } from './connectors/test-records.mjs';
 import { chosenTestSandbox, testSandboxes } from './adapters/source-test-sandbox.mjs';
 import { builtInSandbox } from './adapters/built-in-sandbox.mjs';
-import { processEnded, processStartTimes } from './adapters/process.mjs';
 import { applyAgentPermissions, approveCommands, commandRule, taskAutoMode } from './core/agent-permissions.mjs';
 import { employeeTestsAllowed, runEmployeeTests, savedTestRun } from './connectors/employee-tests.mjs';
 import { attemptTrace } from './core/attempt-trace.mjs';
@@ -312,34 +312,34 @@ export function createStudio({
 } = {}) {
   if (!['session', 'open'].includes(access)) throw new Error('Access must be session or open.');
   const registries = runnerOptions.registries || createRegistries();
-  const store = new Store(directory, bootstrapFactory(registries, bootstrap)),
-    // The owner is known by its ID and by when its process began, so a later program that the operating system has
-    // handed the old ID to never holds the data folder. The record stays exactly this object: closing deletes it by
-    // comparing the stored JSON with JSON.stringify(owner).
-    owner = {
-      id: randomUUID(),
-      pid: process.pid,
-      startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
-    };
+  // The data folder is claimed by a lock the operating system holds while this controller runs and releases however
+  // it ends (src/data-folder-lock.mjs), taken before the studio's records are opened, so a refused start neither opens
+  // nor changes them. Every start that fails after taking it releases it, and so does close.
+  fs.mkdirSync(path.resolve(directory), { recursive: true });
+  const releaseLock = takeDataFolderLock(directory);
+  let store;
+  try {
+    store = new Store(directory, bootstrapFactory(registries, bootstrap));
+  } catch (err) {
+    releaseLock();
+    throw err;
+  }
+  // The owner record says which start holds the folder; the lock, not its process ID or start time, decides. The
+  // record stays exactly this object: closing deletes it by comparing the stored JSON with JSON.stringify(owner).
+  const owner = {
+    id: randomUUID(),
+    pid: process.pid,
+    startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+  };
   try {
     store.tx(() => {
-      const row = store.db.prepare('SELECT data FROM settings WHERE id=?').get('controller-owner');
-      if (row) {
-        const previous = JSON.parse(row.data);
-        // This process's own start is the one it records, so a second studio in the same process is still refused
-        // without asking the operating system. An owner recorded before start times were (no startedAt) keeps the
-        // ID-only answer.
-        const ended = processEnded(previous.pid, previous.startedAt, {
-          readStartTime: pid => (pid === process.pid ? new Date(owner.startedAt) : processStartTimes.read(pid)),
-        });
-        if (!ended) fail('Another controller owns this data folder. Stop it before starting another instance.');
-      }
       store.db
         .prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')
         .run('controller-owner', JSON.stringify(owner));
     });
   } catch (err) {
     store.close();
+    releaseLock();
     throw err;
   }
   packageBoundary(store.directory);
@@ -380,6 +380,7 @@ export function createStudio({
   } catch (error) {
     store.db.prepare('DELETE FROM settings WHERE id=? AND data=?').run('controller-owner', JSON.stringify(owner));
     store.close();
+    releaseLock();
     throw error;
   }
   // Each start has its own ID, so a cache tag from before a restart never matches (MP-026).
@@ -2946,8 +2947,12 @@ export function createStudio({
             resolve();
           });
         });
-        store.db.prepare('DELETE FROM settings WHERE id=? AND data=?').run('controller-owner', JSON.stringify(owner));
-        store.close();
+        try {
+          store.db.prepare('DELETE FROM settings WHERE id=? AND data=?').run('controller-owner', JSON.stringify(owner));
+          store.close();
+        } finally {
+          releaseLock();
+        }
       })();
       return closePromise;
     },

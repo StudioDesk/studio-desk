@@ -12,7 +12,6 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { previousStop, stopRecordName, stopRecorder, uptimeText } from '../src/stop-record.mjs';
 import { exitLine } from '../scripts/supervisor.mjs';
-import { startTimeSlackMs } from '../src/adapters/process.mjs';
 
 const folder = t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'stop-record-'));
@@ -118,7 +117,6 @@ function controller(directory, t) {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  const spawnedAt = Date.now();
   t.after(() => child.exitCode === null && child.kill('SIGKILL'));
   let output = '';
   const exited = new Promise(resolve => child.on('exit', resolve));
@@ -135,7 +133,7 @@ function controller(directory, t) {
     child.stderr.on('data', read);
     child.on('exit', code => reject(new Error(`The controller exited (${code}): ${output.slice(-500)}`)));
   });
-  return { child, spawnedAt, started, exited, output: () => output };
+  return { child, started, exited, output: () => output };
 }
 
 test('the next start reports a controller ended from outside, and on macOS and Linux one asked to stop', async t => {
@@ -143,11 +141,9 @@ test('the next start reports a controller ended from outside, and on macOS and L
   const first = controller(directory, t);
   await first.started;
   assert.doesNotMatch(first.output(), /previous controller/, 'a first start has nothing to report');
-  // Ended from outside, as Task Manager or taskkill would: nothing in the process sees it. It is ended only once the
-  // start time slack has passed since it began, so a program the operating system hands its ID to straight away
-  // (Windows does under load) began measurably later than the recorded owner, and the next start is not refused.
-  const slackPassed = first.spawnedAt + startTimeSlackMs + 1000;
-  await new Promise(resolve => setTimeout(resolve, Math.max(0, slackPassed - Date.now())));
+  // Ended from outside, as Task Manager or taskkill would: nothing in the process sees it. The operating system
+  // releases its lock on the data folder as it ends, so the next start is not refused, whatever program the system
+  // hands its process ID to.
   first.child.kill('SIGKILL');
   await first.exited;
   const second = controller(directory, t);
