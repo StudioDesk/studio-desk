@@ -81,63 +81,83 @@ export function runNative(
     }
     if (report && !job && code === jobStartFailed && !entry.cancelled)
       entry.spawnError ??= 'The CLI could not be started in its job (src/adapters/windows-job.ps1). See recorded logs.';
-    if (live(a)) {
-      clearTimeout(entry.timer);
-      const { status, finishedAt, requeue } = a;
-      // The attempt, its task and the event are saved in one step; a failure leaves both as they were. The task is
-      // written to the store directly, as before (not through the runner's stage view mapping).
-      try {
-        this.store.tx(() => {
-          const t = this.store.task(a.taskId);
-          a.status = 'quarantined';
-          a.finishedAt = new Date().toISOString();
-          // As at a restart: queued work leaves the queue until Reconcile puts it back (Runner.holdQueue).
-          this.holdQueue(a, t);
-          this.store.updateAttempt(a);
-          t.status = 'blocked';
-          t.reason = 'CLI exited but its process group is still live. Reservations retained until reconciliation.';
-          this.store.putTask(t);
-          this.store.event('quarantined', a.taskId, a.id, t.reason);
-        });
-      } catch (failure) {
-        a.status = status;
-        if (finishedAt === undefined) delete a.finishedAt;
-        else a.finishedAt = finishedAt;
-        if (requeue === undefined) delete a.requeue;
-        else a.requeue = requeue;
-        throw failure;
+    // On macOS and Linux the CLI's whole process group was signalled with it, and its other members may still be ending
+    // when the main process closes. Under load that took long enough for a stopped attempt to be quarantined as if
+    // something of it still ran (found in the 1.2 release proof on Linux, November 4, 2026). So a group still live at
+    // the close is looked at again for a moment first. Nothing is released while it waits, and a group that keeps
+    // running is still quarantined.
+    const settle = () => {
+      if (entry.abandoned) return;
+      if (live(a)) {
+        clearTimeout(entry.timer);
+        const { status, finishedAt, requeue } = a;
+        // The attempt, its task and the event are saved in one step; a failure leaves both as they were. The task is
+        // written to the store directly, as before (not through the runner's stage view mapping).
+        try {
+          this.store.tx(() => {
+            const t = this.store.task(a.taskId);
+            a.status = 'quarantined';
+            a.finishedAt = new Date().toISOString();
+            // As at a restart: queued work leaves the queue until Reconcile puts it back (Runner.holdQueue).
+            this.holdQueue(a, t);
+            this.store.updateAttempt(a);
+            t.status = 'blocked';
+            t.reason = 'CLI exited but its process group is still live. Reservations retained until reconciliation.';
+            this.store.putTask(t);
+            this.store.event('quarantined', a.taskId, a.id, t.reason);
+          });
+        } catch (failure) {
+          a.status = status;
+          if (finishedAt === undefined) delete a.finishedAt;
+          else a.finishedAt = finishedAt;
+          if (requeue === undefined) delete a.requeue;
+          else a.requeue = requeue;
+          throw failure;
+        }
+        this.active.delete(a.id);
+        return;
       }
-      this.active.delete(a.id);
-      return;
-    }
-    let result = null,
-      error = entry.spawnError || entry.nativeError,
-      // A failure the CLI reported: one it wrote (nativeFailure), or a failing exit with no other error.
-      reported = !!error && error === entry.reportedFailure;
-    if (!entry.cancelled && !error && (code === 0 || resultOnFailure)) {
-      try {
-        result = readResult(code, signal);
-      } catch (err) {
-        error = `CLI result rejected: ${err.message}`;
+      let result = null,
+        error = entry.spawnError || entry.nativeError,
+        // A failure the CLI reported: one it wrote (nativeFailure), or a failing exit with no other error.
+        reported = !!error && error === entry.reportedFailure;
+      if (!entry.cancelled && !error && (code === 0 || resultOnFailure)) {
+        try {
+          result = readResult(code, signal);
+        } catch (err) {
+          error = `CLI result rejected: ${err.message}`;
+        }
+      } else if (!entry.cancelled && !error) {
+        error = `CLI exited with code ${code}. See recorded logs.`;
+        reported = true;
       }
-    } else if (!entry.cancelled && !error) {
-      error = `CLI exited with code ${code}. See recorded logs.`;
-      reported = true;
-    }
-    // A limit reported as reached makes that failure the usage limit, whichever the CLI reported first,
-    // unless the attempt reported a sign-in, login or permission failure (nativeFailure).
-    if (reported && !entry.quota && limitHolds(entry)) this.nativeFailure(entry, error);
-    // Continue only after the process/group is confirmed stopped. Keep the
-    // attempt's original time budget and resource reservations between phases.
-    entry.buffers = {};
-    if (onComplete && !entry.cancelled && !error) {
-      try {
-        onComplete(result, code, signal);
-      } catch (err) {
-        this.finish(entry, null, err.message);
-      }
-    } else this.finish(entry, result, error);
+      // A limit reported as reached makes that failure the usage limit, whichever the CLI reported first,
+      // unless the attempt reported a sign-in, login or permission failure (nativeFailure).
+      if (reported && !entry.quota && limitHolds(entry)) this.nativeFailure(entry, error);
+      // Continue only after the process/group is confirmed stopped. Keep the
+      // attempt's original time budget and resource reservations between phases.
+      entry.buffers = {};
+      if (onComplete && !entry.cancelled && !error) {
+        try {
+          onComplete(result, code, signal);
+        } catch (err) {
+          this.finish(entry, null, err.message);
+        }
+      } else this.finish(entry, result, error);
+    };
+    if (process.platform !== 'win32' && live(a)) waitForGroup(() => live(a), entry, settle);
+    else settle();
   });
+}
+
+// How long a stopped CLI's process group may take to empty after its main process closes, and how often it is looked
+// at in the meantime. `isLive` answers whether the group still runs; `then` decides once it has emptied, the wait has
+// run out, or shutdown let go of the attempt.
+export const groupSettleMs = 3000;
+export const groupSettleStepMs = 100;
+export function waitForGroup(isLive, entry, then, until = Date.now() + groupSettleMs) {
+  if (entry.abandoned || !isLive() || Date.now() >= until) return then();
+  setTimeout(() => waitForGroup(isLive, entry, then, until), groupSettleStepMs);
 }
 // How much of an attempt's output becomes activity rows, how much its activity file keeps, and the
 // longest single line held in memory. Volume never stops the work; the time limit bounds it. A Claude
