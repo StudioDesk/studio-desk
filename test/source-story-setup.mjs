@@ -117,8 +117,9 @@ export async function setup(
     const result = await c.request(`/api/tasks/${id}/accept`);
     assert.equal(result.status, 200, JSON.stringify(result.data));
   };
-  const store = c.app.store,
-    plan = sourcePlan(root);
+  // The helpers read the store through this name, which c.reopen points at the reopened controller's store.
+  let store = c.app.store;
+  const plan = sourcePlan(root);
   // Seed exact accepted reports to exercise provenance with no model request.
   // These records are protocol fixtures in a disposable database only.
   const checked = {
@@ -450,6 +451,13 @@ export async function setup(
     );
     assert.equal((await c.request(`/api/tasks/${id}/approve-work`)).status, 200);
     return id;
+  };
+  // Opens the controller again on the same records and repository once the caller has closed it, as a restart does;
+  // the helpers above then work on the reopened store. (The lifecycle harness restarts code stories with it.)
+  c.reopen = async () => {
+    c.app = createStudio(options);
+    store = c.app.store;
+    if (!backendOnly) await c.connect();
   };
   return c;
 }
