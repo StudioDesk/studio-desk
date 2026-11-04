@@ -11,6 +11,7 @@ import { hash } from './contracts.mjs';
 import { artifactPath } from './artifacts.mjs';
 import { recordProject } from './projects.mjs';
 import { continuationChanges } from './attempt-continuation.mjs';
+import { causeText } from './attempt-cause.mjs';
 
 export const historyLimits = Object.freeze({
   tasks: 10, // retryOf links followed
@@ -306,6 +307,8 @@ function renderEntry(facts, edits, span) {
       '',
       ...Object.entries(h).map(([key, value]) => `- ${key}: ${value ?? 'unrecorded'}`),
       `- stop: ${stopReason(a) || 'none (finished normally)'}`,
+      // Why it ended and whether that used up an attempt, for an attempt that recorded it (core/attempt-cause.mjs).
+      ...(a.endCause ? [`- ended by: ${causeText(a)}`] : []),
       `- error: ${a.error ? line(a.error) : 'none recorded'}`,
       `- work checkpoint: ${facts.work ? facts.work.state : 'not applicable to this kind of work'}`,
     ];
@@ -415,6 +418,7 @@ function projectionItem(facts, edits) {
       item = {
         ...header(facts),
         stop: stopReason(a),
+        ...(a.endCause ? { endedBy: causeText(a) } : {}),
         ...(a.continueFrom ? { continuation: excerpt(continuation(a), span / 4) } : {}),
         error: a.error ? excerpt(a.error, span / 4) : null,
         outcome: a.result?.outcome || null,
@@ -575,6 +579,7 @@ function assemble(store, task, { attemptId = null, now = new Date().toISOString(
       projection.push({
         ...header(item),
         stop: stopReason(item.attempt),
+        ...(item.attempt.endCause ? { endedBy: causeText(item.attempt) } : {}),
         ...(item.attempt.continueFrom ? { continuation: line(continuation(item.attempt)) } : {}),
         summarized: true,
       });

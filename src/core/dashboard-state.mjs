@@ -104,6 +104,8 @@ export function dashboardAttempt(data, timing, openPhase = null) {
     'workReviewNotes',
   ]);
   summary.artifacts = references(data.artifacts);
+  // Why it ended (core/attempt-cause.mjs): the work, the environment, a usage limit or a question.
+  if (data.endCause) summary.endCause = fields(data.endCause, ['cause', 'detail']);
   if (data.assignment) {
     summary.assignment = fields(data.assignment, ['kind', 'stage']);
     if (data.assignment.stageState) summary.assignment.stageState = fields(data.assignment.stageState, ['current']);

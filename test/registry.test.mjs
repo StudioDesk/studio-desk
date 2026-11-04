@@ -716,3 +716,32 @@ test('an attempt stopped by a usage limit does not count toward an attempt limit
   store.task = id => ({ id, kind: 'unreal-integration' });
   assert.deepEqual(workflows.stageAttempts(store, { id: 'T-1', kind: 'unreal-integration' }), [stopped, failed]);
 });
+
+test('only an attempt the work itself ended counts toward an attempt limit, except a fixed one', () => {
+  const { workflows } = createRegistries(),
+    held = { id: 'attempt-held', status: 'blocked', subscriptionHold: 'codex', endCause: { cause: 'usage-limit' } },
+    asked = { id: 'attempt-asked', status: 'blocked', question: { ask: 'Which?' }, endCause: { cause: 'question' } },
+    stopped = {
+      id: 'attempt-stopped',
+      status: 'cancelled',
+      endCause: { cause: 'environment', detail: 'controller-stop' },
+    },
+    sandbox = { id: 'attempt-sandbox', status: 'failed', endCause: { cause: 'environment', detail: 'sandbox' } },
+    directorStop = { id: 'attempt-director-stop', status: 'cancelled', endCause: { cause: 'work' } },
+    failed = { id: 'attempt-failed', status: 'failed', endCause: { cause: 'work' } },
+    all = [held, asked, stopped, sandbox, directorStop, failed],
+    store = { task: id => ({ id, kind: 'layout' }), attempts: () => all };
+  assert.deepEqual(workflows.stageAttempts(store, { id: 'T-1', kind: 'layout' }), [directorStop, failed]);
+  store.task = id => ({ id, kind: 'unreal-integration' });
+  assert.deepEqual(workflows.stageAttempts(store, { id: 'T-1', kind: 'unreal-integration' }), all);
+});
+
+test('a task kind cannot declare the controller-owned endCause as one of its attempt fields', () => {
+  const { workflows } = createRegistries();
+  assert.throws(
+    () => workflows.register(testPack([{ ...reportTask, kind: 'test:cause-field', attemptFields: ['endCause'] }])),
+    /controller-owned attempt fields/,
+  );
+  // The same kind without it registers.
+  createRegistries().workflows.register(testPack([{ ...reportTask, kind: 'test:cause-field' }]));
+});

@@ -9,6 +9,7 @@ import { collectionFormat } from './transforms.mjs';
 import { TIERS } from './execution.mjs';
 import { validateStageTemplate, templateStages } from './stage-template.mjs';
 import { MAX_RESULT_ARTIFACTS } from './contracts.mjs';
+import { causeCounts } from './attempt-cause.mjs';
 
 const identifier = value => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(value);
 const strings = value => Array.isArray(value) && value.every(identifier);
@@ -51,6 +52,7 @@ const controllerFields = new Set([
   'revisionRequestedBy',
   'failedTests',
   'reconciledAt',
+  'endCause',
   'integration',
   '__proto__',
   'constructor',
@@ -103,12 +105,14 @@ export class OrganizationPresetRegistry {
   'teamId',
 ].forEach(field => controllerFields.add(field));
 
-// Whether an attempt counts toward its stage's attempt limit (WorkflowRegistry.stageAttempts): not one a usage limit
-// stopped, nor one interrupted by the controller's stop and then reconciled, nor one that stopped to ask the director
-// a question (1.2 step 2), since asking is not a failure and an agent near the limit should ask rather than guess.
-// public/runs.js and the dashboard's story page apply the same rule.
-export const countsTowardLimit = attempt =>
-  !attempt.subscriptionHold && !(attempt.status === 'interrupted' && attempt.reconciledAt) && !attempt.question?.ask;
+// Whether an attempt counts toward its stage's attempt limit (WorkflowRegistry.stageAttempts): only when the work itself
+// ended it (its endCause, core/attempt-cause.mjs), not the studio's environment (the controller stopping, at shutdown or
+// found interrupted at restart, or a test sandbox that could not start), a usage limit, or a question to the director
+// (1.2 step 2), since asking is not a failure and an agent near the limit should ask rather than guess. An attempt
+// recorded before endCause counts as the old rules counted it: not one a usage limit stopped, nor one interrupted by the
+// controller's stop and then reconciled, nor one that asked. public/runs.js and the dashboard's story page still apply
+// those old rules themselves.
+export const countsTowardLimit = causeCounts;
 
 // A task definition's stages run one task record through several execution views.
 // Each view runs as its own attempt with its own kind, employee, inputs and limits;
@@ -338,10 +342,10 @@ export class WorkflowRegistry {
     }
     return stored.kind !== task.kind && this.stagesOf(stored) ? stored : null;
   }
-  // Attempts that count toward the current stage's attempt limit. An attempt a provider's
-  // usage limit stopped, or one the controller's own stop interrupted and the director then
-  // reconciled, says nothing about the work, so it stays on record but doesn't count, except
-  // under a fixed limit, which is a safety rule (the recovery drill, v1.0 criterion 3).
+  // Attempts that count toward the current stage's attempt limit. An attempt the work itself did not end (a usage
+  // limit, a question, the controller's own stop or a test sandbox that could not start: countsTowardLimit) says
+  // nothing about the work, so it stays on record but doesn't count, except under a fixed limit, which is a safety
+  // rule (the recovery drill, v1.0 criterion 3).
   // A flow's task (1.2) counts only the attempts of its current round: a loop runs the same task again as its next
   // round, and its earlier rounds' attempts stay on record without using the new round's limit. An attempt records its
   // round (flowRound), as its assignment does. Tasks without flowReference count as before.

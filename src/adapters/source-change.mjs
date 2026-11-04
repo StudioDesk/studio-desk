@@ -49,6 +49,7 @@ import {
   changedByBuild,
 } from '../connectors/source-build.mjs';
 import { continuationFile, prepareSourceContinuation } from '../core/attempt-continuation.mjs';
+import { sandboxCause, sandboxNeverStarted } from '../core/attempt-cause.mjs';
 import { closeEmployeeTests, employeeTestsCommand, openEmployeeTests } from '../connectors/employee-tests.mjs';
 import { releaseTestTurn, releaseTurn, takeTestTurn, takeTurn, visualTurnResource } from '../core/test-turn.mjs';
 import { notRunRecord, visualPlan } from '../connectors/visual-check.mjs';
@@ -562,6 +563,9 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         return a.testEvidence;
       });
       const checkStarted = new Date().toISOString();
+      // A test run whose process could not start at all (the job wrapper could not start it, or it never spawned) ended
+      // with its sandbox, not the change (core/attempt-cause.mjs); Runner.finish records that.
+      entry.startFailureCause = sandboxCause();
       runtime.runNative(
         entry,
         command.executable,
@@ -569,6 +573,7 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         '',
         (code, checkSignal) => {
           // The test run has ended; a stop or a failed start releases the turn with the attempt's other leases.
+          delete entry.startFailureCause;
           releaseTestTurn(runtime.store, a.id);
           verifyCopy(a.sourceCandidate, candidate);
           if (Buffer.byteLength(stdout + stderr) > 192 * 1024)
@@ -583,6 +588,17 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
             signal: checkSignal,
             fixture: !!runtime.sourceCheckCommand,
           };
+          // A run whose sandbox could not start reported no tests: the studio's environment ended it, not the change,
+          // so it is not a failing candidate and does not use up one of the story's attempts.
+          if (sandboxNeverStarted({ exitCode: code, stdout, stderr })) {
+            runtime.store.finishPhase(testPhase, 'failed', testPhaseEvidence(stdout));
+            fs.writeFileSync(path.join(entry.output, 'test-output.txt'), stdout);
+            fs.writeFileSync(path.join(entry.output, 'test-errors.txt'), stderr);
+            entry.endCause = sandboxCause();
+            throw new Error(
+              `The candidate's test sandbox could not start (exit ${code ?? checkSignal}), so no tests ran. This is the studio's environment, not the change; the attempt does not count toward the attempt limit. See test-errors.txt.`,
+            );
+          }
           const report = checkReport(a.sourceCandidate, a.checkExecution, stdout, stderr, built),
             { totals } = report,
             testsPassed =

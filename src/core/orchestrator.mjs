@@ -25,6 +25,7 @@ import { applyTransform } from './transforms.mjs';
 import { captureContinuation, continuationFile } from './attempt-continuation.mjs';
 import { buildAttemptHistory, stageAttemptHistory } from './attempt-history.mjs';
 import { questionFile, questionReason, readQuestion } from './questions.mjs';
+import { controllerStopCause, finishedCause } from './attempt-cause.mjs';
 import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
 import { endTryRuns, recoverTryRuns } from '../connectors/try-copy.mjs';
 import { attemptResource } from './store.mjs';
@@ -163,6 +164,9 @@ export class Runner {
         // Queued work leaves the queue until it is reconciled; the attempt records that it was queued, so Reconcile
         // puts it back (holdQueue, restoreQueue).
         this.holdQueue(a, t);
+        // The controller's stop ended it, not its work, so it does not count toward the attempt limit; it still waits
+        // to be reconciled before its story starts again, and keeps its reservations until then.
+        a.endCause = controllerStopCause();
         store.updateAttempt(a);
         t.status = 'blocked';
         t.reason = 'Controller restarted. Reconcile the previous attempt before retrying.';
@@ -1383,6 +1387,16 @@ export class Runner {
       a.subscriptionHold = entry.quota;
       if (entry.quotaReset) a.subscriptionReset = entry.quotaReset;
     }
+    // Why it ended (core/attempt-cause.mjs): only the work's own endings count toward the attempt limit. An attempt the
+    // controller's shutdown cancelled ended with the controller; an adapter may name an environment cause it observed
+    // (entry.endCause), or one for a process of its that could not start at all (entry.startFailureCause).
+    a.endCause = finishedCause({
+      attempt: a,
+      cancelled: a.status === 'cancelled',
+      timedOut: !!entry.timedOut,
+      shutdown: !!entry.shutdownStop,
+      observed: entry.endCause ?? (error && error === entry.spawnError ? entry.startFailureCause : null),
+    });
     task.status = a.status;
     task.reason =
       a.error ||
@@ -1573,7 +1587,12 @@ export class Runner {
     clearTimeout(this.quotaTimer);
     this.quotaTimer = null;
     const entries = [...this.active.values()];
-    for (const entry of entries) this.stop(entry.attempt.id);
+    // An attempt this stop cancels ended with the controller, not with its work; one already stopping (the director's
+    // Stop, a time limit) keeps its own cause.
+    for (const entry of entries) {
+      if (!entry.cancelled && !entry.timedOut) entry.shutdownStop = true;
+      this.stop(entry.attempt.id);
+    }
     this.integration.stop(this);
     endTryRuns(this);
     for (const adapter of this.adapters.list()) adapter.shutdown?.(this);
