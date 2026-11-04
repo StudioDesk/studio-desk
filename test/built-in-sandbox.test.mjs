@@ -35,6 +35,9 @@ import {
   readBuiltInSandboxStatus,
   takeBuiltInSandboxSession,
 } from '../src/adapters/built-in-sandbox.mjs';
+import { checkSeconds } from '../src/packs/studio-development/index.mjs';
+import { repositoryTestSeconds } from '../src/connectors/source-projects.mjs';
+import { testTimeoutMs } from '../src/connectors/source-integration.mjs';
 
 test("the computer's built-in sandbox sessions are taken in turn, an ended holder's slot freed, and a waiter told once", async t => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-sessions-'));
@@ -150,7 +153,13 @@ test('a run that finds every session held by runs still going stops after its wa
   assert.equal(reads, 2, 'each holder asked once');
   assert.deepEqual(waits, [2]);
   assert.deepEqual(slotFiles(), before);
-  assert.equal(builtInSandboxSessionWaitMs, 10 * 60 * 1000);
+  // A run that waits out the bound still has half its own time limit left to say why, for every sandboxed run: an
+  // idea's checks, a repository's tests, and candidate tests and integration (their tests' share of the limit).
+  const shortestMs = Math.min(checkSeconds * 1000, repositoryTestSeconds * 1000, testTimeoutMs);
+  assert.ok(
+    builtInSandboxSessionWaitMs * 2 <= shortestMs,
+    `${builtInSandboxSessionWaitMs} ms against ${shortestMs} ms`,
+  );
 });
 
 test("before a Windows run the director's key and launch link above the copy are denied to the sandbox group, or the run stops", t => {

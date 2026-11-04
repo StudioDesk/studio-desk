@@ -474,9 +474,11 @@ export const builtInSandboxSessionsAtOnce = 4;
 // computer uses, so the controller and npm run verify share them.
 export const builtInSandboxSessionFolder = files => path.join(path.dirname(files.sharedSrtWin), 'sessions');
 
-// How long a run waits for a session before it stops with a plain reason: ten minutes, well under the shortest time limit
-// a candidate's tests run with, so a run that cannot get one says why rather than being stopped at its limit.
-export const builtInSandboxSessionWaitMs = 10 * 60 * 1000;
+// How long a run waits for a session before it stops with a plain reason: five minutes, half the shortest time limit a
+// sandboxed run has (an idea's checks and a repository's tests, 600 s each), so a run that cannot get one says why
+// rather than being stopped at its limit. It was ten minutes until the checks' limit was raised to 600 s (November 4,
+// 2026), when a check that waited the whole bound reached its own limit at the same moment.
+export const builtInSandboxSessionWaitMs = 5 * 60 * 1000;
 const waitedFor = ms => {
   const [count, unit] = ms >= 60000 ? [Math.round(ms / 60000), 'minute'] : [Number((ms / 1000).toFixed(1)), 'second'];
   return `${count} ${unit}${count === 1 ? '' : 's'}`;

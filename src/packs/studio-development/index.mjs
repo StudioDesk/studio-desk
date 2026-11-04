@@ -842,7 +842,7 @@ export const studioDevelopmentPack = {
 // on half the computer's threads, about 300 s when quiet and past the old 420 s under load, so checks failed at
 // random. They get the most a workflow step may run (600 s; an idea's two steps fit its 1800 s budget with the
 // breakdown's two 600 s attempts). One ceiling for every kind of step is the graph engine's step contract work.
-const checkSeconds = 600;
+export const checkSeconds = 600;
 
 export function intakeSteps(org, adapters) {
   for (const kind of ['checks', 'breakdown', 'change', 'change-review'].map(name => `studio-development:${name}`))
