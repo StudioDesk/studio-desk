@@ -102,7 +102,11 @@ function outputLines(output) {
 // One line per error in the "Unhandled Errors" section Vitest prints when an error fails the run outside any test:
 // `<file> > <last test to run>: <error start>`, leaving out what Vitest does not know. Each error follows a banner
 // naming its type (`⎯⎯ Unhandled Rejection ⎯⎯`); the section ends with a bare divider. Vitest names files relative
-// to its root (testsRoot, the dashboard folder); they are named here relative to base with forward slashes.
+// to its root (testsRoot, the dashboard folder); they are named here relative to base with forward slashes. An error
+// with a cause ends with `(caused by <its start>)`: Vitest prints the cause below the error as `Caused by: …`, and for
+// an error of its own, such as a test worker that stopped ("[vitest-pool]: Worker forks emitted error."), the cause is
+// the only line that says why (how the worker exited, and in which test file). One such crash failed a merge on
+// November 4, 2026 with only its first line recorded, so it could not be told apart from any other.
 function unhandledErrors(output, base, testsRoot = path.join(base, 'dashboard')) {
   const banner = /^⎯+\s+(.+?)\s+⎯+$/;
   const errors = [];
@@ -131,7 +135,10 @@ function unhandledErrors(output, base, testsRoot = path.join(base, 'dashboard'))
     const file =
       error.file && path.relative(base, path.resolve(testsRoot, error.file.replace(/\\/g, '/'))).replace(/\\/g, '/');
     const where = [file, error.test].filter(Boolean).join(' > ');
-    const start = errorStart(error.lines.join('\n')) || 'an unhandled error with no message';
+    const cause = error.lines.find(line => /^Caused by:\s*\S/.test(line)),
+      start =
+        (errorStart(error.lines.join('\n')) || 'an unhandled error with no message') +
+        (cause ? ` (caused by ${errorStart(cause.replace(/^Caused by:\s*/, ''))})` : '');
     return where ? `${where}: ${start}` : start;
   });
 }
@@ -436,6 +443,50 @@ test('each unhandled error in a dashboard test run is named on its own line, wit
   assert.deepEqual(unhandledErrors(unhandledSection(unhandled({ start: 'Error: socket hang up' })).join('\n'), root), [
     'Error: socket hang up',
   ]);
+});
+
+test("an unhandled error's cause is named after it, so a stopped test worker says how it stopped", () => {
+  // As Vitest 5 prints a worker that exited in the middle of a file: the pool's error, where it happened, then its
+  // cause as an error of its own, with a stack.
+  const stopped =
+    'Error: Worker exited unexpectedly with exit code 3221225477 during running state while running test file C:/studio/dashboard/src/today-page.test.tsx';
+  const output = [
+    ...unhandledSection(
+      unhandled({
+        type: 'Unhandled Error',
+        start: 'Error: [vitest-pool]: Worker forks emitted error.',
+        more: [' ❯ EventEmitter.onTaskError node_modules/vitest/dist/chunks/index.js:11532:20'],
+        file: 'src/today-page.test.tsx',
+      }).concat([
+        `Caused by: ${stopped}`,
+        ' ❯ ChildProcess.emitUnexpectedExit node_modules/vitest/dist/chunks/index.js:11005:17',
+      ]),
+    ),
+    ...summaryLines,
+  ].join('\n');
+  const [line, ...rest] = unhandledErrors(output, root);
+  assert.deepEqual(rest, []);
+  assert.ok(
+    line.startsWith(
+      'dashboard/src/today-page.test.tsx: Error: [vitest-pool]: Worker forks emitted error. (caused by Error: Worker exited unexpectedly with exit code 3221225477 during running state',
+    ),
+    line,
+  );
+  // The whole cause, up to the test file the worker was running, and none of the stack below it.
+  assert.ok(line.endsWith('while running test file C:/studio/dashboard/src/today-page.test.tsx)'), line);
+  assert.doesNotMatch(line, /❯|emitUnexpectedExit/);
+  // A longer cause is cut as the error's own start is.
+  const long = unhandledErrors(
+    unhandledSection(unhandled({ start: 'Error: outer', more: [`Caused by: Error: ${'x'.repeat(300)}`] })).join('\n'),
+    root,
+  )[0];
+  assert.match(long, /^Error: outer \(caused by Error: x+…\)$/);
+  assert.equal(long.length, 'Error: outer (caused by '.length + 160 + 1);
+  // An error without a cause reads as before.
+  assert.doesNotMatch(
+    unhandledErrors(unhandledSection(unhandled({ start: 'Error: socket hang up' })).join('\n'), root)[0],
+    /caused by/,
+  );
 });
 
 test('a dashboard test run names its failed tests first, then its unhandled errors, at most 10 lines', () => {
