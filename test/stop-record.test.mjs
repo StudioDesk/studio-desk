@@ -1,7 +1,8 @@
 // Every stop says why (C-41, src/stop-record.mjs): each start records itself in the data folder and each stop it sees
 // completes the record; the next start reports it, a record with no stop meaning the process was ended from outside.
 // The supervisor says every exit of the controller in its window, and a forced end on Windows never reaches a process
-// that has already exited, whose ID may belong to another process by then.
+// that has already exited, whose ID may belong to another process by then. On Windows a Ctrl+C reaches the controller
+// itself, so the supervisor waits for it to close and ends it only after a bound.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,9 +10,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { previousStop, stopRecordName, stopRecorder, uptimeText } from '../src/stop-record.mjs';
-import { exitLine } from '../scripts/supervisor.mjs';
+import { exitLine, stopController } from '../scripts/supervisor.mjs';
 
 const folder = t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'stop-record-'));
@@ -167,4 +168,84 @@ test('the next start reports a controller ended from outside, and on macOS and L
   );
   third.child.kill('SIGKILL');
   await third.exited;
+});
+
+// A stand-in controller: a small Node process running the given script, whose ends the test can watch, and whose
+// kill calls are counted, so the test sees whether the supervisor ended it or it closed by itself.
+function standIn(t, script, args = []) {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script, ...args], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  const plainKill = child.kill.bind(child),
+    kills = [];
+  child.kill = signal => (kills.push({ signal, at: Date.now() }), plainKill(signal));
+  t.after(() => child.exitCode === null && child.signalCode === null && plainKill('SIGKILL'));
+  const startedAt = new Date(),
+    exited = new Promise(resolve =>
+      child.on('exit', (code, signal) =>
+        resolve({ code, signal, at: Date.now(), line: exitLine(code, signal, startedAt) }),
+      ),
+    );
+  return { child, kills, exited };
+}
+
+test('on Windows the supervisor waits for a controller that records its stop and closes by itself', async t => {
+  const directory = folder(t),
+    said = [];
+  // As if it had received the window's Ctrl+C itself: it records why it stopped and exits shortly after.
+  const { child, kills, exited } = standIn(
+    t,
+    `const { stopRecorder } = await import(process.argv[1]);
+    const run = stopRecorder(process.argv[2]);
+    setTimeout(() => { run.stop('it was asked to stop (SIGINT)'); process.exit(0); }, 300);`,
+    [pathToFileURL(fileURLToPath(new URL('../src/stop-record.mjs', import.meta.url))).href, directory],
+  );
+  const options = { platform: 'win32', boundMs: 5000, log: line => said.push(line) };
+  assert.equal(stopController(child, 'SIGINT', options), 'waiting');
+  assert.equal(stopController(child, 'SIGINT', options), 'already waiting', 'a repeated Ctrl+C starts no second wait');
+  const end = await exited;
+  assert.deepEqual(kills, [], 'the supervisor did not end the controller');
+  assert.equal(end.code, 0);
+  assert.equal(end.signal, null);
+  assert.match(end.line, /the controller exited normally \(exit code 0\) at/);
+  const stop = previousStop(directory);
+  assert.equal(stop.recorded, true);
+  assert.match(stop.text, /: it was asked to stop \(SIGINT\)\.$/);
+  assert.deepEqual(said, ['Studio desk: waiting up to 5 s for the controller to record its stop and close.']);
+  assert.equal(stopController(child, 'SIGINT', options), 'exited');
+  assert.equal(said.length, 1, 'nothing more is said for a controller that has exited');
+});
+
+test('on Windows the supervisor ends a controller that does not close within the bound, and not before', async t => {
+  const said = [],
+    boundMs = 600;
+  const { child, kills, exited } = standIn(t, 'setInterval(() => {}, 1000);');
+  const askedAt = Date.now();
+  const options = { platform: 'win32', boundMs, log: line => said.push(line) };
+  assert.equal(stopController(child, 'SIGINT', options), 'waiting');
+  await new Promise(resolve => setTimeout(resolve, boundMs / 2));
+  assert.equal(stopController(child, 'SIGINT', options), 'already waiting');
+  assert.deepEqual(kills, [], 'not ended before the bound');
+  assert.equal(child.exitCode, null);
+  await exited;
+  assert.equal(kills.length, 1, 'ended once, by one wait');
+  assert.equal(kills[0].signal, undefined, 'ended with the default way to end a process');
+  assert.ok(kills[0].at - askedAt >= boundMs - 20, `ended after the bound (${kills[0].at - askedAt} ms)`);
+  assert.deepEqual(said, [
+    'Studio desk: waiting up to 0.6 s for the controller to record its stop and close.',
+    'Studio desk: the controller did not close within 0.6 s; ending it.',
+  ]);
+});
+
+test('on macOS and Linux the supervisor forwards the signal to the controller at once', () => {
+  for (const platform of ['linux', 'darwin'])
+    for (const signal of ['SIGINT', 'SIGTERM']) {
+      const kills = [],
+        said = [];
+      const child = { exitCode: null, signalCode: null, kill: sent => kills.push(sent) };
+      assert.equal(stopController(child, signal, { platform, boundMs: 10, log: line => said.push(line) }), 'forwarded');
+      assert.deepEqual(kills, [signal]);
+      assert.deepEqual(said, []);
+    }
 });
