@@ -59,7 +59,18 @@ const settledCarry = (c, review, index) =>
     `carry ${index} of ${review.id} to settle`,
     { detail: () => JSON.stringify(carriesOf(c, review)) },
   );
-const read = async (c, route) => (await fetch(`${c.origin}${route}?projectId=${project}`)).json();
+// A read that fails names its route and its network cause: the test runner prints only "fetch failed", which twice on
+// November 4, 2026 could not say whether the connection was refused, reset or timed out.
+const read = async (c, route) => {
+  let response;
+  try {
+    response = await fetch(`${c.origin}${route}?projectId=${project}`);
+  } catch (error) {
+    const cause = error.cause?.code ?? error.cause?.message ?? 'no cause given';
+    throw new Error(`Reading ${route}: ${error.message} (${cause})`, { cause: error });
+  }
+  return response.json();
+};
 const message = (c, ref) => git(c.root, ['log', '-1', '--format=%B', ref]);
 const show = (c, ref, file = target) => git(c.root, ['show', `${ref}:${file}`]);
 
