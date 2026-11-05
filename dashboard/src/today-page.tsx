@@ -32,12 +32,14 @@ import {
   integrationAction,
   isCleanup,
   isHold,
+  isResume,
   liveSummary,
   runStories,
   type CleanupItem,
   type HoldItem,
   type HomeItem,
   type NeedsItem,
+  type ResumeItem,
   type RunStory,
   type StudioState,
 } from './studio-runs';
@@ -903,6 +905,42 @@ function HoldCall({ projectId, state, item }: { projectId: string; state: Studio
   );
 }
 
+// The project held after a restart: one card to resume it, with the stories that wait only for that.
+function ResumeCall({ projectId, state, item }: { projectId: string; state: StudioState; item: ResumeItem }) {
+  const { act, busy } = useAct(projectId);
+  return (
+    <Decision
+      projectId={projectId}
+      busy={busy}
+      chip={chip('wait', 'Held after restart')}
+      time=""
+      title="This project is held after a restart"
+      actions={[
+        {
+          label: 'Resume this project',
+          emphasis: 'primary',
+          onClick: () => act('/api/pipeline', { action: 'resume' }, () => 'Project resumed.'),
+        },
+      ]}
+    >
+      <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
+        {item.reason} {item.next}
+      </p>
+      {item.taskIds.length > 0 && (
+        <ul className="sd-fold__list" style={{ margin: 0 }} aria-label="Waiting for the resume">
+          {item.taskIds.map(id => (
+            <li key={id}>
+              <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: id }}>
+                {state.tasks.find(task => task.id === id)?.title ?? id}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Decision>
+  );
+}
+
 // Unstarted steps that wait on stopped work: close them, or recover what they wait on.
 function CleanupCall({ projectId, state, item }: { projectId: string; state: StudioState; item: CleanupItem }) {
   const { act, busy } = useAct(projectId),
@@ -955,6 +993,7 @@ function CleanupCall({ projectId, state, item }: { projectId: string; state: Stu
 function Call(props: CallProps & { item: HomeItem }) {
   const { item, state, projectId } = props;
   if (isHold(item)) return <HoldCall projectId={projectId} state={state} item={item} />;
+  if (isResume(item)) return <ResumeCall projectId={projectId} state={state} item={item} />;
   if (isCleanup(item)) return <CleanupCall projectId={projectId} state={state} item={item} />;
   const task = state.tasks.find(record => record.id === item.taskId);
   if (!task) return null;
@@ -1365,7 +1404,7 @@ function Moving({
   calls: HomeItem[];
 }) {
   const added = policyAddedToday(useLibraryIndex(projectId).data),
-    listed = new Set(calls.flatMap(call => (isHold(call) || isCleanup(call) ? call.taskIds : []))),
+    listed = new Set(calls.flatMap(call => (isHold(call) || isResume(call) || isCleanup(call) ? call.taskIds : []))),
     answers = state.tasks.flatMap(task => {
       const answer = changeableAnswer(task),
         asking =
@@ -1375,7 +1414,7 @@ function Moving({
     answered = new Set(answers.map(({ task }) => task.id)),
     waits = items.filter(
       (item): item is NeedsItem & { run?: RunStory } =>
-        !isHold(item) && !isCleanup(item) && !listed.has(item.taskId) && !answered.has(item.taskId),
+        !isHold(item) && !isResume(item) && !isCleanup(item) && !listed.has(item.taskId) && !answered.has(item.taskId),
     ),
     count = answers.length + waits.length + added.length;
   if (!count) return null;

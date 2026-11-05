@@ -659,6 +659,27 @@ test('callLine puts a hold and stopped work only the director can clear in their
   ]);
 });
 
+test('callLine puts a project held after a restart as its resume, with the stories that wait only for it', () => {
+  // A restart holds Project Y's queue: its two queued stories wait only for the resume, so the project's one resume is
+  // its only call, linking Today at Your calls.
+  const restarted: Partial<Shell> = {
+      pipelineEnabled: false,
+      project: { id: 'project-y', name: 'Project Y', dispatchPaused: true, restartPaused: true },
+    },
+    [, live] = held();
+  expect(linesOf(live, restarted)).toEqual([['Resume this project', '2 stories wait on it', '#calls']]);
+  expect(linesOf({ tasks: live.tasks.slice(0, 1) }, restarted)).toEqual([
+    ['Resume this project', '1 story waits on it', '#calls'],
+  ]);
+  // With no queued story it says only what to do.
+  expect(linesOf({}, restarted)).toEqual([['Resume this project', null, '#calls']]);
+  // Its key is the project's resume, as Today's calls name it.
+  const state: StudioState = { ...projectY(), ...restarted, ...live },
+    summary = liveSummary(state),
+    resume = summary.items.find(item => item.requiresDirector);
+  expect(resume && callLine(resume, state, summary.stories).key).toBe('resume:project-y');
+});
+
 test('callLine links a call with neither an idea nor a known step to Today at Your calls', () => {
   const state: StudioState = { ...projectY(), ...twoCalls() };
   expect(callLine(gone, state, liveSummary(state).stories)).toEqual({

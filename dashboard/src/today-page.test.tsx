@@ -915,6 +915,53 @@ test('a usage hold with a known reset clears itself and stays off the calls', as
   await waitFor(() => expect(within(region).getByText(/Nothing is waiting on you\./)).toBeTruthy());
 });
 
+test('a project held after a restart is one call to resume it, with the stories waiting only for it', async () => {
+  const user = userEvent.setup();
+  // The controller restarted with work queued: it holds the project until the director resumes it.
+  controller.shell = {
+    ...controller.shell,
+    pipelineEnabled: false,
+    project: { ...controller.shell.project, dispatchPaused: true, restartPaused: true },
+  };
+  controller.tasks = [
+    taskFixture('T-1', { title: 'First queued story', status: 'ready', queued: true }),
+    taskFixture('T-2', { title: 'Second queued story', status: 'ready', queued: true }),
+  ];
+  controller.command = url => {
+    if (url === '/api/pipeline')
+      controller.shell = {
+        ...controller.shell,
+        pipelineEnabled: true,
+        project: { ...controller.shell.project, dispatchPaused: false, restartPaused: false },
+      };
+    return {};
+  };
+  open();
+  const region = await calls(),
+    title = await within(region).findByRole('heading', { name: 'This project is held after a restart' }),
+    card = within(title.closest('article')!);
+  // One card, counted once; the queued stories are listed on it, not as calls or waits of their own.
+  expect(within(region).getAllByRole('heading', { level: 3 })).toHaveLength(1);
+  expect(within(region).getByText('1 waiting on you')).toBeTruthy();
+  expect(card.getByText('Held after restart')).toBeTruthy();
+  expect(card.getByText(/The controller restarted, so this project's work is held/)).toBeTruthy();
+  expect(card.getByRole('link', { name: 'First queued story' }).getAttribute('href')).toBe('/p/project-x/tasks/T-1');
+  expect(card.getByRole('link', { name: 'Second queued story' }).getAttribute('href')).toBe('/p/project-x/tasks/T-2');
+  expect(screen.queryByText('Moving on their own, nothing to do')).toBeNull();
+
+  await user.click(card.getByRole('button', { name: 'Resume this project' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/pipeline', method: 'POST', body: { projectId: 'project-x', action: 'resume' } },
+    ]),
+  );
+  expect(await screen.findByText('Project resumed.')).toBeTruthy();
+  // The list read again holds no resume, and the card is gone.
+  await waitFor(() =>
+    expect(within(region).queryByRole('heading', { name: 'This project is held after a restart' })).toBeNull(),
+  );
+});
+
 // A command's answer carries the records it changed (records.ts RecordSync.answer), so Today shows the effect with
 // the command's toast, before the stream's change event for it, which changes nothing more.
 const proposed = () => [

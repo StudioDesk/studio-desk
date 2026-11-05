@@ -61,7 +61,13 @@ const taskItems = items =>
   items.flatMap(item => (item.type === 'cleanup' ? item.members : item.type === 'task' ? [item] : []));
 const names = items =>
   items.flatMap(item =>
-    item.type === 'hold' ? [`hold:${item.provider}`] : item.type === 'cleanup' ? item.taskIds : [item.taskId],
+    item.type === 'hold'
+      ? [`hold:${item.provider}`]
+      : item.type === 'resume'
+        ? [`resume:${item.projectId}`]
+        : item.type === 'cleanup'
+          ? item.taskIds
+          : [item.taskId],
   );
 
 // The project's records as the dashboard holds them (its shell and every page of its live set), and the calls the
@@ -93,9 +99,11 @@ const dashboardItems = async c => {
     .map(item =>
       item.kind === 'subscription-hold'
         ? { ...item, type: 'hold' }
-        : item.members
-          ? { ...item, type: 'cleanup' }
-          : { ...item, type: 'task' },
+        : item.kind === 'project-resume'
+          ? { ...item, type: 'resume' }
+          : item.members
+            ? { ...item, type: 'cleanup' }
+            : { ...item, type: 'task' },
     );
 };
 
@@ -251,6 +259,132 @@ test('the list names reconciled work waiting for Start and a waiting question, a
   assert.equal(kindOf(held), 'subscription-wait');
   assert.equal(shared.find(item => item.taskId === queued).requiresDirector, false);
   assert.equal(store.attempts(queued).length, 0, 'Reading started nothing.');
+});
+
+// Stories queued as the director's Start or the house rules leave them, with the queue switched on, recorded without
+// asking dispatch to start them: only the Runner's own schedule starts queued work.
+const queuedStories = async (c, count) => {
+  const { store } = c.app,
+    ids = [];
+  for (let n = 0; n < count; n++) ids.push(await create(c, { title: `Queued layout ${n + 1}` }));
+  store.tx(() => {
+    for (const id of ids) store.putTask({ ...store.task(id), status: 'ready', queued: true, reason: '' });
+    store.setOrganization({ ...store.organization(), pipelineEnabled: true });
+  });
+  return ids;
+};
+const resumeReason =
+  "The controller restarted, so this project's work is held until you have looked at what the restart interrupted.";
+
+test('after a restart, the list holds one call to resume the project with the stories that wait only for it, gone once resumed', async t => {
+  mockDelay(t, 60000);
+  const c = await setup(t),
+    { store } = c.app;
+  store.setOrganization({ ...store.organization(), maxParallel: 8 });
+  // Work a restart cut off, and stories queued behind it.
+  const cut = await create(c, { title: 'Cut-off layout' });
+  recordAttempt(c, cut, { id: 'attempt-restart-cut', status: 'running' }, { status: 'running' });
+  const queued = await queuedStories(c, 2);
+  new Runner(store);
+  assert.equal(store.attempt('attempt-restart-cut').status, 'interrupted');
+  assert.equal(store.project(projectId).restartPaused, true);
+
+  const list = await calls(c),
+    resumes = list.items.filter(item => item.type === 'resume');
+  assert.equal(resumes.length, 1, JSON.stringify(list.items));
+  const [resume] = resumes;
+  assert.deepEqual(resume, {
+    type: 'resume',
+    projectId,
+    taskIds: queued,
+    runId: null,
+    kind: 'project-resume',
+    reason: resumeReason,
+    next: 'Resume the project when you are ready; queued stories, carries and releases then go on by themselves.',
+    action: 'Resume this project',
+    details: [],
+    actions: [
+      {
+        key: 'resume',
+        label: 'Resume this project',
+        emphasis: 'primary',
+        closing: false,
+        method: 'POST',
+        path: '/api/pipeline',
+        fields: [
+          { name: 'projectId', required: true, kind: 'id', value: projectId },
+          { name: 'action', required: true, kind: 'text', value: 'resume' },
+        ],
+      },
+    ],
+  });
+  // The cut-off work is still a call of its own; the queued stories are not, and no call says the pipeline is paused.
+  const on = names(list.items);
+  assert.ok(on.includes(cut), JSON.stringify(list.items));
+  for (const id of queued) assert.equal(on.includes(id), false, `${id} is listed only under the resume call.`);
+  assert.equal(
+    taskItems(list.items).some(item => item.kind === 'pipeline-paused'),
+    false,
+  );
+  // Each queued story says it waits only for the resume, and its own page keeps Resume pipeline.
+  const shared = await agrees(c, list);
+  for (const id of queued) {
+    const wait = shared.find(item => item.type === 'task' && item.taskId === id);
+    assert.equal(wait.reason, 'Waits only for this project to be resumed.');
+    assert.equal(wait.requiresDirector, false);
+    const page = await get(c, `/api/tasks/${encodeURIComponent(id)}?projectId=${projectId}`);
+    assert.ok(
+      page.actions.some(action => action.label === 'Resume pipeline' && action.path === '/api/pipeline'),
+      JSON.stringify(page.actions),
+    );
+  }
+
+  // Once the controller has weighed the queue, the stories record that they wait for the project to resume: still
+  // only the resume call's.
+  c.app.runner.refreshReadiness();
+  assert.match(store.task(queued[0]).reason, /^Waiting for the project to resume/);
+  const weighed = await calls(c);
+  assert.deepEqual(
+    weighed.items.filter(item => item.type === 'resume').map(item => item.taskIds),
+    [queued],
+  );
+  await agrees(c, weighed);
+
+  // The director resumes the project: the call is gone.
+  const resumed = await c.request('/api/pipeline', { projectId, action: 'resume' });
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.data));
+  assert.equal(store.project(projectId).restartPaused, undefined);
+  const after = await calls(c);
+  assert.equal(
+    after.items.some(item => item.type === 'resume'),
+    false,
+    JSON.stringify(after.items),
+  );
+});
+
+test('a project the director paused by hand has no resume call', async t => {
+  mockDelay(t, 60000);
+  const c = await setup(t),
+    { store } = c.app;
+  const queued = await queuedStories(c, 1);
+  const paused = await c.request('/api/pipeline', { projectId, action: 'pause' });
+  assert.equal(paused.status, 200, JSON.stringify(paused.data));
+  // A restart leaves a project the director paused as theirs.
+  new Runner(store);
+  assert.equal(store.project(projectId).dispatchPaused, true);
+  assert.equal(store.project(projectId).restartPaused, undefined);
+  const list = await calls(c);
+  assert.equal(
+    list.items.some(item => item.type === 'resume'),
+    false,
+    JSON.stringify(list.items),
+  );
+  const shared = await agrees(c, list);
+  assert.equal(
+    shared.some(item => item.type === 'resume'),
+    false,
+  );
+  assert.notEqual(shared.find(item => item.taskId === queued[0])?.reason, 'Waits only for this project to be resumed.');
 });
 
 test('the list names a story blocked on a file request and leaves out an integrated story', async t => {

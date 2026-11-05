@@ -213,12 +213,25 @@ export interface CleanupItem {
   taskIds: string[];
   requiresDirector: boolean;
 }
-export type HomeItem = (NeedsItem & { run?: RunStory }) | CleanupItem | HoldItem;
+// The project's resume while a restart holds its queue (public/runs.js resumeItems): one item for the project, with the
+// queued work that waits only for it.
+export interface ResumeItem {
+  kind: 'project-resume';
+  projectId: string;
+  taskIds: string[];
+  reason: string;
+  next: string;
+  action: string | null;
+  requiresDirector: boolean;
+}
+export type HomeItem = (NeedsItem & { run?: RunStory }) | CleanupItem | HoldItem | ResumeItem;
 export const isCleanup = (item: HomeItem): item is CleanupItem => 'members' in item;
 export const isHold = (item: HomeItem): item is HoldItem => 'kind' in item && item.kind === 'subscription-hold';
+export const isResume = (item: HomeItem): item is ResumeItem => 'kind' in item && item.kind === 'project-resume';
 
 // What Home lists (public/runs.js needsYouItems): each run's items, its unstarted steps waiting on stopped work as
-// one cleanup, then work outside any run, then each CLI's usage hold with no known reset, once. The controller's list
+// one cleanup, then work outside any run, then each CLI's usage hold with no known reset, once, then the project's
+// resume while a restart holds it. The controller's list
 // of what needs the director now (GET /api/projects/:id/calls) runs the same rule.
 export const needsYouItems = (state: StudioState, runs: RunStory[]): HomeItem[] => rules.needsYouItems(state, runs);
 

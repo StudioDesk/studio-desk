@@ -155,8 +155,8 @@ export interface TaskPage {
 }
 
 // What needs the director now in one project (GET /api/projects/<id>/calls, src/core/director-calls.mjs): a task's
-// call with its task's actions, a cleanup of a run's unstarted steps with its member task calls, or a CLI's usage hold
-// with no known reset.
+// call with its task's actions, a cleanup of a run's unstarted steps with its member task calls, a CLI's usage hold
+// with no known reset, or the project's resume while a restart holds it.
 export interface DirectorTaskCall {
   type: 'task';
   taskId: string;
@@ -189,7 +189,21 @@ export interface DirectorHoldCall {
   details: string[];
   actions: TaskAction[];
 }
-export type DirectorCall = DirectorTaskCall | DirectorCleanupCall | DirectorHoldCall;
+// The project's resume while a restart holds its queue, with the queued work that waits only for it. Its one action
+// is the resume step (POST /api/pipeline).
+export interface DirectorResumeCall {
+  type: 'resume';
+  projectId: string;
+  taskIds: string[];
+  runId: null;
+  kind: 'project-resume';
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+}
+export type DirectorCall = DirectorTaskCall | DirectorCleanupCall | DirectorHoldCall | DirectorResumeCall;
 export interface DirectorCalls {
   projectId: string;
   items: DirectorCall[];
@@ -204,6 +218,8 @@ export interface Project {
   direction?: string;
   legacy?: boolean;
   dispatchPaused?: boolean;
+  // The pause a restart made (the Runner's constructor), which the director's Resume or Pause replaces.
+  restartPaused?: boolean;
   revision?: number;
   createdAt?: string;
   updatedAt?: string;

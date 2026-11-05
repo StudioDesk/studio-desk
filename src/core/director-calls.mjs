@@ -55,7 +55,23 @@ export function sharedCalls(state) {
 
 // The list for one project: { projectId, items, count, version }. `taskPage` and `shared` are what the task read
 // takes (core/task-actions.mjs taskRead); `registries` as the live read takes them. Each item is plain: a task's
-// call, a cleanup of a run's unstarted steps with its member task calls, or a CLI's usage hold with no known reset.
+// call, a cleanup of a run's unstarted steps with its member task calls, a CLI's usage hold with no known reset, or the
+// project's resume while a restart holds it, with the queued work waiting only for that.
+// The resume call's one action: the project's resume step (POST /api/pipeline), in the shape task actions take
+// (public/task-actions.js).
+export const resumeAction = projectId => ({
+  key: 'resume',
+  label: 'Resume this project',
+  emphasis: 'primary',
+  closing: false,
+  method: 'POST',
+  path: '/api/pipeline',
+  fields: [
+    { name: 'projectId', required: true, kind: 'id', value: projectId },
+    { name: 'action', required: true, kind: 'text', value: 'resume' },
+  ],
+});
+
 export function directorCalls(store, projectId, { taskPage, shared, registries = null }) {
   const version = store.version,
     state = callsState(store, projectId, shared, registries),
@@ -97,6 +113,19 @@ export function directorCalls(store, projectId, { taskPage, shared, registries =
             action: item.action ?? null,
             details: [],
             actions: [],
+          };
+        if (item.kind === 'project-resume')
+          return {
+            type: 'resume',
+            projectId,
+            taskIds: item.taskIds || [],
+            runId: null,
+            kind: item.kind,
+            reason: item.reason,
+            next: item.next,
+            action: item.action ?? null,
+            details: [],
+            actions: [resumeAction(projectId)],
           };
         if (item.members)
           return {

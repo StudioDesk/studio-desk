@@ -40,6 +40,7 @@ import {
   bringBackable,
   isCleanup,
   isHold,
+  isResume,
   needsYouItems,
   runStories,
   settled,
@@ -312,6 +313,33 @@ export function callsOf(controller: Controller, projectId: string): DirectorCall
             action: item.action ?? null,
             details: [],
             actions: [],
+          };
+        if (isResume(item))
+          return {
+            type: 'resume',
+            projectId,
+            taskIds: item.taskIds || [],
+            runId: null,
+            kind: item.kind,
+            reason: item.reason,
+            next: item.next,
+            action: item.action ?? null,
+            details: [],
+            // The project's resume step, as the controller offers it (src/core/director-calls.mjs resumeAction).
+            actions: [
+              {
+                key: 'resume',
+                label: 'Resume this project',
+                emphasis: 'primary',
+                closing: false,
+                method: 'POST',
+                path: '/api/pipeline',
+                fields: [
+                  { name: 'projectId', required: true, kind: 'id', value: projectId },
+                  { name: 'action', required: true, kind: 'text', value: 'resume' },
+                ],
+              },
+            ],
           };
         if (isCleanup(item))
           return {

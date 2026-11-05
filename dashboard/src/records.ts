@@ -35,7 +35,15 @@ import {
   type TestRecordRun,
 } from './api';
 import { useStreamReady } from './stream-context';
-import { explain, settled, type HomeItem, type NeedsItem, type RunStory, type StudioState } from './studio-runs';
+import {
+  explain,
+  isResume,
+  settled,
+  type HomeItem,
+  type NeedsItem,
+  type RunStory,
+  type StudioState,
+} from './studio-runs';
 
 // Query names start with the project, so a reload refreshes only that project's records.
 export const queryKeys = {
@@ -392,15 +400,19 @@ export function useCalls(projectId: string) {
   });
 }
 
-// A call's name on a page, served or worked out from the records: its task, its idea's cleanup or its CLI's hold.
+// A call's name on a page, served or worked out from the records: its task, its idea's cleanup, its CLI's hold or its
+// project's resume.
 export function callKey(call: DirectorCall | HomeItem) {
   if ('type' in call)
     return call.type === 'hold'
       ? `hold:${call.provider}`
-      : call.type === 'cleanup'
-        ? `cleanup:${call.runId}`
-        : call.taskId;
+      : call.type === 'resume'
+        ? `resume:${call.projectId}`
+        : call.type === 'cleanup'
+          ? `cleanup:${call.runId}`
+          : call.taskId;
   if ('members' in call) return `cleanup:${call.run.id}`;
+  if (isResume(call)) return `resume:${call.projectId}`;
   return 'provider' in call ? `hold:${call.provider}` : call.taskId;
 }
 
@@ -429,7 +441,8 @@ function needsItem(call: DirectorTaskCall, state: StudioState, stories: RunStory
 }
 
 // The served calls, in the served order, as the items the pages draw: each task's call joined with the task, attempts
-// and idea the records hold, a cleanup with its members and its idea, and a hold with its CLI. A cleanup whose idea
+// and idea the records hold, a cleanup with its members and its idea, a hold with its CLI, and a project's resume with
+// the work waiting only for it. A cleanup whose idea
 // the records do not hold has nothing to draw it by and is left out.
 export function servedItems(calls: DirectorCall[], state: StudioState, stories: RunStory[]): HomeItem[] {
   return calls.flatMap((call): HomeItem[] => {
@@ -441,6 +454,18 @@ export function servedItems(calls: DirectorCall[], state: StudioState, stories: 
           label: call.label,
           resetAt: null,
           resetTime: null,
+          taskIds: call.taskIds,
+          reason: call.reason,
+          next: call.next,
+          action: call.action,
+          requiresDirector: true,
+        },
+      ];
+    if (call.type === 'resume')
+      return [
+        {
+          kind: 'project-resume',
+          projectId: call.projectId,
           taskIds: call.taskIds,
           reason: call.reason,
           next: call.next,

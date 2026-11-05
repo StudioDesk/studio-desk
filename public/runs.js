@@ -1338,6 +1338,24 @@
             'Start assignment',
           );
     }
+    // A restart holds the project's queue until the director resumes it (the Runner's constructor marks the project
+    // restartPaused). Queued work whose own prerequisites are met waits only for that, before any slot, resource or
+    // integration it would wait for next, as the controller orders it (refreshReadiness). The project's one resume
+    // call lists it (resumeItems), so it is no call of its own; its page keeps Resume pipeline (the kind). A project
+    // the director paused keeps its words below.
+    if (
+      task.queued &&
+      state.project?.restartPaused &&
+      state.pipelineEnabled === false &&
+      (task.status === 'ready' || task.controllerWait) &&
+      (!blocker || /^Waiting for the project to resume/i.test(blocker)) &&
+      !((exhausted || limitNote) && !task.directorStart)
+    )
+      return result(
+        'pipeline-paused',
+        'Waits only for this project to be resumed.',
+        'It starts by itself once you resume the project, here or from Your calls.',
+      );
     // The work's own resources: an agent at work elsewhere is no reason to wait, since it runs several attempts at
     // once (MP-033).
     const resources = new Set([...(view.resources || []), ...(state.taskKinds?.[view.kind]?.requiredResources || [])]),
@@ -1519,6 +1537,30 @@
       };
     });
   }
+  // One item for the project while a restart holds its queue (state.project.restartPaused), with the queued work that
+  // waits only for the director to resume it (taskExplanation's restart wait). A project the director paused has none:
+  // its queued work keeps its own calls.
+  function resumeItems(state, explain = taskExplanation) {
+    if (!state.project?.restartPaused) return [];
+    const taskIds = (state.tasks || [])
+      .filter(task => {
+        const explanation = explain(task, state);
+        return explanation.kind === 'pipeline-paused' && !explanation.requiresDirector;
+      })
+      .map(task => task.id);
+    return [
+      {
+        kind: 'project-resume',
+        projectId: state.project.id,
+        taskIds,
+        reason:
+          "The controller restarted, so this project's work is held until you have looked at what the restart interrupted.",
+        next: 'Resume the project when you are ready; queued stories, carries and releases then go on by themselves.',
+        action: 'Resume this project',
+        requiresDirector: true,
+      },
+    ];
+  }
   // The attempt a task records under the name given, from this project's summaries.
   const recordedAttempt = (state, task, id = task.lastAttemptId) =>
     (state.attempts || []).find(
@@ -1573,7 +1615,8 @@
   }
   // What Today lists as the project's calls, from the run stories given (each told by buildRunStories): each run's
   // items, its unstarted steps waiting on stopped work as one cleanup, then work outside any run, then each CLI's
-  // usage hold with no known reset, once. Items whose requiresDirector is false only wait; the controller's list of
+  // usage hold with no known reset, once, then the project's resume while a restart holds it, with the work waiting
+  // only for that. Items whose requiresDirector is false only wait; the controller's list of
   // what needs the director now (src/core/director-calls.mjs) keeps the others.
   function needsYouItems(state, runs) {
     const runOf = runMembership(state.tasks || []),
@@ -1595,6 +1638,7 @@
     const standalone = (state.tasks || []).filter(task => !runOf.has(task.id) && !seen.has(task.id));
     items.push(...needsYou(state, standalone, directorExplanation));
     items.push(...holdItems(state, directorExplanation).filter(hold => hold.requiresDirector));
+    items.push(...resumeItems(state, directorExplanation));
     return items;
   }
   // Every commit a run's integrations made, in the order they finished.
@@ -1835,6 +1879,7 @@
     taskExplanation,
     needsYou,
     holdItems,
+    resumeItems,
     integrationAction,
     directorExplanation,
     needsYouItems,
