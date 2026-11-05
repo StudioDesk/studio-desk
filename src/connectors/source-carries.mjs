@@ -139,6 +139,7 @@ const turn = (store, story, line) => {
 export function approveCarry(store, story, line, by = { type: 'director' }) {
   return store.tx(() => {
     const { review, carry } = turn(store, story, line);
+    reopenIfClosed(store, review, carry, { note: false });
     if (!['waiting', 'rejected', 'needs-reconciliation'].includes(carry.state))
       throw new Error(
         `The carry to ${carry.line} is ${carry.state === 'merging' ? `a story of its own, ${carry.storyId}` : carry.state}.`,
@@ -152,7 +153,12 @@ export function approveCarry(store, story, line, by = { type: 'director' }) {
         throw new Error(`Restore or commit ${edited.join(', ')} in the project's folder, then carry the fix again.`);
     }
     if (carry.state !== 'waiting')
-      carry.previous = { state: carry.state, error: carry.error, finishedAt: carry.finishedAt };
+      carry.previous = {
+        state: carry.state,
+        error: carry.error,
+        finishedAt: carry.finishedAt,
+        ...(carry.previous ? { previous: carry.previous } : {}),
+      };
     Object.assign(carry, { state: 'waiting', approvedBy: by, approvedAt: new Date().toISOString() });
     delete carry.error;
     store.updateAttempt(review);
@@ -165,6 +171,7 @@ export function skipCarry(store, story, line, reason, by = { type: 'director' })
     throw new Error('Say why the fix is not needed there, in at most 2000 characters.');
   return store.tx(() => {
     const { review, carry } = turn(store, story, line);
+    reopenIfClosed(store, review, carry, { note: false });
     if (!['waiting', 'rejected'].includes(carry.state))
       throw new Error(
         `The carry to ${carry.line} is ${carry.state === 'merging' ? `a story of its own, ${carry.storyId}; close it first` : carry.state}.`,
@@ -184,6 +191,79 @@ export function skipCarry(store, story, line, reason, by = { type: 'director' })
       recordProject(story),
     );
     return structuredClone(carry);
+  });
+}
+
+// A carry story the director closed or denied finishes nothing, so its carry, still merging with that story, would
+// wait for it forever and the carries after it with it. The carry is rejected instead, naming the closed story and its
+// reason, with the story kept under previous, so the original story offers Carry to <line> again and Not needed on
+// <line> (public/task-actions.js), and leaves the note a rejected carry leaves (Autonomy.carrySettled), unless the
+// director is acting on it now (note: false). The caller saves the review. Returns whether it was reopened.
+const closedStory = (store, carry) => {
+  if (carry?.state !== 'merging' || !carry.storyId) return null;
+  try {
+    const story = store.task(carry.storyId);
+    return story.status === 'denied' ? story : null;
+  } catch {
+    return null;
+  }
+};
+function reopenIfClosed(store, review, carry, { note = true } = {}) {
+  const story = closedStory(store, carry);
+  if (!story) return false;
+  const reason = (story.closed?.reason || story.reason || '').trim() || 'no reason was given.',
+    originalId = story.carryOf?.storyId || review.taskId,
+    projectId = recordProject(review);
+  Object.assign(carry, {
+    state: 'rejected',
+    error: `${carry.back ? 'Its story bringing the fix back' : 'Its carry story'}, ${story.id}, was closed: ${reason}`,
+    previous: {
+      state: 'merging',
+      storyId: carry.storyId,
+      error: carry.error,
+      finishedAt: carry.finishedAt,
+      ...(carry.previous ? { previous: carry.previous } : {}),
+    },
+    finishedAt: new Date().toISOString(),
+  });
+  delete carry.storyId;
+  store.event(
+    'carry_story_closed',
+    originalId,
+    review.id,
+    carry.back
+      ? `The story ${story.id} bringing the fix back to ${carry.line} was closed: bring the fix back again or mark it Not needed on ${carry.line}.`
+      : `The carry story ${story.id} to ${carry.line} was closed: carry the fix again or mark it Not needed on ${carry.line}.`,
+    projectId,
+  );
+  if (note) {
+    let original;
+    try {
+      original = store.task(originalId);
+    } catch {
+      original = null;
+    }
+    if (original) {
+      original.autonomyNote = `Carrying the fix to ${carry.line} did not complete. ${carry.error}`;
+      store.putTask(original);
+    }
+  }
+  return true;
+}
+// Called once a carry story (task.carryOf) is closed or denied and saved: its carry is reopened as above.
+export function carryStoryClosed(store, task) {
+  if (!task?.carryOf) return false;
+  return store.tx(() => {
+    let review;
+    try {
+      review = store.attempt(task.carryOf.reviewAttemptId);
+    } catch {
+      return false;
+    }
+    const carry = review.sourceCarries?.find(item => item.id === task.carryOf.carryId);
+    if (carry?.storyId !== task.id || !reopenIfClosed(store, review, carry)) return false;
+    store.updateAttempt(review);
+    return true;
   });
 }
 
@@ -722,6 +802,7 @@ export function keepStoppedTurn(
 // approval, holding its project until the director resumes it; one that was moving the line is carried if the line
 // reached its commit, waits again when the line is not checked out (its move is one compare-and-swap), and otherwise
 // needs the director. The test turn one held is kept while the test run it started may still go on (keepStoppedTurn).
+// A carry left merging with a carry story that was closed or denied is reopened (reopenIfClosed).
 export function interruptedCarries(runtime) {
   const store = runtime.store;
   for (const review of store.allAttempts()) {
@@ -739,6 +820,11 @@ export function interruptedCarries(runtime) {
             return journal && { journal, save: () => store.updateAttempt(now) };
           },
         });
+      // One whose carry story was closed or denied before closing reopened it (carryStoryClosed) is reopened now.
+      if (reopenIfClosed(store, review, carry)) {
+        changed = true;
+        continue;
+      }
       if (!['verifying', 'committing'].includes(carry.state)) {
         // One that kept the turn through an earlier start.
         if (carry.testProcess && holdsTestTurn(store, carry.id)) {

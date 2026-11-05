@@ -8,6 +8,7 @@ import { projectOrganization, projectCatalog, assertProjectKind } from './projec
 import { unmetConsumes, portMessage } from './formats.mjs';
 import { staffNodes } from './staffing.mjs';
 import { expandRun, runIdOf } from './graph.mjs';
+import { carryStoryClosed } from '../connectors/source-carries.mjs';
 
 function readProposal(store, registries, source, attempt, proposalKey) {
   const definition = registries.workflows.get(source.kind);
@@ -357,6 +358,8 @@ export function denyWork(store, task, reason = '') {
   if (typeof reason !== 'string' || reason.length > 2000) throw new Error('Denial reason must be bounded text.');
   store.tx(() => store.putTask(denied(task, allowed, reason)));
   store.event('work_denied', task.id, null, task.reason);
+  // A carry story set aside frees its carry for the director's next choice.
+  if (task.carryOf) carryStoryClosed(store, task);
   return { ok: true };
 }
 // The task set aside with its reason, as Deny records it; nothing is written here.
@@ -463,6 +466,7 @@ export function closeStartedWork(store, registries, task, reason = '', { sentAsI
     store.putTask(task);
   });
   store.event('work_closed', task.id, pending?.id || null, `Director closed this work: ${text}`);
+  if (task.carryOf) carryStoryClosed(store, task);
   return { ok: true };
 }
 // Why closeStartedWork would refuse this task now, as the error it would throw, or null when it may be closed. Nothing
