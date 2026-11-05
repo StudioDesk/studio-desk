@@ -19,6 +19,7 @@ import {
   verifyIntegration,
 } from './source-integration.mjs';
 import { testsSentence } from './source-checks.mjs';
+import { holdInterrupted } from './source-carries.mjs';
 import { createSourceWorktree, removeSourceWorktree, sourceWorktreeRoot } from './source-worktrees.mjs';
 import { lineReached, lineRepository, moveLine, projectLine } from './source-lines.mjs';
 import { compareVersions, makeMilestone, parseVersion, projectMilestones, releaseTags } from './source-milestones.mjs';
@@ -558,8 +559,9 @@ export function shipAgain(store, projectId, milestoneId) {
   return shipRelease(store, projectId, milestoneId);
 }
 
-// Releases the controller's stop cut off: one in verification waits to run again; one moving its line is tagged if the
-// line reached its commit, waits again when the line is not checked out, and otherwise needs the director.
+// Releases the controller's stop cut off: one in verification waits to run again, holding its project until the
+// director resumes it (holdInterrupted); one moving its line is tagged if the line reached its commit, waits again when
+// the line is not checked out, and otherwise needs the director.
 export function interruptedReleases(runtime) {
   const store = runtime.store,
     shipped = [];
@@ -592,10 +594,11 @@ export function interruptedReleases(runtime) {
         release.state === 'released'
           ? `Reconciled: the release of ${milestone.version} had reached ${release.repository.branch}; tagged ${release.tag}.`
           : release.state === 'ready'
-            ? `The release of ${milestone.version} was stopped when the controller stopped (during ${was}); release it again.`
+            ? `The release of ${milestone.version} was stopped when the controller stopped (during ${was}); it runs again on its own when the project is resumed.`
             : `The release of ${milestone.version} stopped part-way when the controller stopped; inspect the project's folder, then release it again.`,
         project.id,
       );
+      if (release.state === 'ready') holdInterrupted(runtime, project.id, 'release');
     }
     if (changed) store.putSetting(key(project.id), milestones);
     // A release the stop cut off after its line reached it ships now, as it would have.

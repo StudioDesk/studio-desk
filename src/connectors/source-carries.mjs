@@ -640,9 +640,31 @@ function conflictedCarry(runtime, story, review, journal, close) {
   return result;
 }
 
+// A carry or release the controller's stop put back to wait holds its project's queue, as the restart holds a
+// project's queued work (Runner): the project is paused with the restart's mark, so the work waits for the director's
+// Resume and then runs again on its own, once. A pause the director chose stays theirs and is not marked. The project
+// is remembered on the runtime, so a planned restart does not lift this hold (Autonomy.resumePlan).
+export function holdInterrupted(runtime, projectId, what) {
+  const store = runtime.store,
+    project = store.project(projectId);
+  (runtime.interruptedHolds ||= new Set()).add(projectId);
+  if (project.dispatchPaused) return;
+  project.dispatchPaused = true;
+  project.restartPaused = true;
+  store.putProject(project);
+  store.event(
+    'pipeline_paused',
+    null,
+    null,
+    `Controller restarted while a ${what} was running. The project is held; the ${what} runs again on its own when you resume it.`,
+    projectId,
+  );
+}
+
 // Carries the controller's stop cut off: verification never writes the line, so the carry waits again with its
-// approval; one that was moving the line is carried if the line reached its commit, waits again when the line is not
-// checked out (its move is one compare-and-swap), and otherwise needs the director.
+// approval, holding its project until the director resumes it; one that was moving the line is carried if the line
+// reached its commit, waits again when the line is not checked out (its move is one compare-and-swap), and otherwise
+// needs the director.
 export function interruptedCarries(runtime) {
   const store = runtime.store;
   for (const review of store.allAttempts()) {
@@ -667,9 +689,11 @@ export function interruptedCarries(runtime) {
         carry.state === 'carried'
           ? `Reconciled: the carry to ${carry.line} had reached it as commit ${carry.commit.slice(0, 7)}.`
           : carry.state === 'waiting'
-            ? `The carry to ${carry.line} was stopped when the controller stopped (during ${was}); it waits to run again.`
+            ? `The carry to ${carry.line} was stopped when the controller stopped (during ${was}); it runs again on its own when the project is resumed.`
             : `The carry to ${carry.line} stopped part-way when the controller stopped; inspect the project's folder, then carry the fix again.`,
+        recordProject(review),
       );
+      if (carry.state === 'waiting') holdInterrupted(runtime, recordProject(review), 'carry');
     }
     if (changed) store.updateAttempt(review);
   }

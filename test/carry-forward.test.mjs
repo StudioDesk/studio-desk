@@ -11,6 +11,7 @@ import { setup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { interruptedCarries } from '../src/connectors/source-carries.mjs';
+import { sourceResources } from '../src/connectors/source-projects.mjs';
 import { autonomyPolicy, saveAutonomyPolicy } from '../src/core/autonomy.mjs';
 
 const project = 'project-legacy',
@@ -175,45 +176,154 @@ test('a carry that conflicts becomes a carry story on its line, merged there for
   assert.match(final, /Bounded fixture improvement\./);
 });
 
-test("a carry the controller's stop cut off waits to run again, or is carried when its line reached its commit", t => {
-  const store = {
-    events: [],
-    attempts: [
-      {
-        id: 'review-a',
-        taskId: 'T-a',
-        sourceCarries: [
-          {
-            id: 'source-carry:review-a:0',
-            line: 'main',
-            state: 'committing',
-            commit: 'abc1234',
-            root: '/r',
-            repository: { branch: 'main', live: false },
-          },
-          {
-            id: 'source-carry:review-a:1',
-            line: 'next',
-            state: 'verifying',
-            root: '/r',
-            approvedBy: { type: 'director' },
-          },
-        ],
-      },
+// Events of a kind, read from the records themselves (the store's list keeps only the latest ones).
+const count = (store, kind) => store.db.prepare('SELECT COUNT(*) AS n FROM events WHERE kind=?').get(kind).n;
+const tick = () => new Promise(resolve => setImmediate(resolve));
+// A fix integrated on release/1.0 whose carry to main the director approved while the project was paused.
+async function pausedCarry(t) {
+  const c = await lined(t, ['release/1.0']),
+    review = await reviewedFix(c, 'release/1.0');
+  await c.accept(review.taskId);
+  assert.equal((await c.integration(review)).status, 200);
+  await c.settled(review, ['integrated']);
+  const pipeline = action => c.request('/api/pipeline', { projectId: project, action });
+  assert.equal((await pipeline('pause')).status, 200);
+  const approved = await c.request(`/api/tasks/${c.taskId}/carry`, { projectId: project, line: 'main' });
+  assert.equal(approved.status, 202, JSON.stringify(approved.data));
+  return { c, review, pipeline, mainTip: git(c.root, ['rev-parse', 'main']) };
+}
+// While the project is held, its carry stays waiting with its approval across tries and the settling of other work,
+// and never starts.
+async function stillWaits(c, review, mainTip) {
+  for (let i = 0; i < 2; i++) {
+    c.app.runner.autonomy.tryCarries();
+    c.app.runner.autonomy.settled(review.taskId);
+    await tick();
+  }
+  const carry = carriesOf(c, review)[0];
+  assert.deepEqual([carry.state, carry.approvedBy?.type], ['waiting', 'director'], JSON.stringify(carry));
+  assert.equal(count(c.app.store, 'carry_verifying'), 0);
+  assert.ok(!c.app.runner.sourceIntegrationRun);
+  assert.equal(git(c.root, ['rev-parse', 'main']), mainTip, 'main is unchanged.');
+}
+// After the Resume it runs once and lands once: main moves to one new commit.
+async function landsOnce(c, review, mainTip) {
+  const carry = await carried(c, review, 0);
+  assert.equal(carry.state, 'carried', JSON.stringify(carry));
+  c.app.runner.autonomy.tryCarries();
+  await tick();
+  assert.equal(count(c.app.store, 'carry_verifying'), 1);
+  assert.equal(count(c.app.store, 'carry_done'), 1);
+  assert.equal(git(c.root, ['rev-parse', 'main']), carry.commit);
+  assert.equal(git(c.root, ['rev-parse', 'main~1']), mainTip);
+  assert.equal(c.app.store.leases().length, 0);
+}
+
+test("a paused project's approved carry waits for the director's Resume, which starts it once", async t => {
+  const { c, review, pipeline, mainTip } = await pausedCarry(t);
+  await stillWaits(c, review, mainTip);
+  assert.equal((await pipeline('resume')).status, 200);
+  await landsOnce(c, review, mainTip);
+});
+
+test("a carry the controller's stop cut off while it was tested holds its project through the restart, and runs once after Resume", async t => {
+  const { c, review, pipeline, mainTip } = await pausedCarry(t);
+  let store = c.app.store;
+  // The stop came while the carry was being tested, as runCarry records one, in a project that was running; a planned
+  // restart had been asked for that project.
+  const attempt = store.attempt(review.id),
+    journal = attempt.sourceCarries[0];
+  Object.assign(journal, { state: 'verifying', startedAt: new Date().toISOString() });
+  store.tx(() => {
+    store.claim(sourceResources(store, store.task(c.taskId)), journal.id);
+    store.updateAttempt(attempt);
+  });
+  const running = store.project(project);
+  running.dispatchPaused = false;
+  store.putProject(running);
+  store.putSetting('planned-restart', {
+    reason: 'Load the integrated source.',
+    resumeProjects: [project],
+    requestedAt: new Date().toISOString(),
+  });
+  await c.app.close();
+  await c.reopen();
+  store = c.app.store;
+  assert.ok(!store.tasks().some(task => task.queued), 'The project has no queued work to hold.');
+  const held = store.project(project);
+  assert.deepEqual(
+    [held.dispatchPaused, held.restartPaused],
+    [true, true],
+    'The restart holds the project, and its planned resume does not lift that hold.',
+  );
+  const paused = store.db
+    .prepare("SELECT seq, message FROM events WHERE kind='pipeline_paused' AND message LIKE 'Controller restarted%'")
+    .all();
+  assert.deepEqual(
+    paused.map(event => [event.message, store.setting('event-project:' + event.seq)]),
+    [
+      [
+        'Controller restarted while a carry was running. The project is held; the carry runs again on its own when you resume it.',
+        project,
+      ],
     ],
+  );
+  const interrupted = store.db.prepare("SELECT message FROM events WHERE kind='carry_interrupted'").all();
+  assert.deepEqual(
+    interrupted.map(event => event.message),
+    [
+      'The carry to main was stopped when the controller stopped (during verifying); it runs again on its own when the project is resumed.',
+    ],
+  );
+  assert.doesNotMatch(interrupted[0].message, /carry the fix again/);
+  assert.equal(store.leases().length, 0, 'Its resources are released at restart, as before.');
+  await stillWaits(c, review, mainTip);
+  assert.equal((await pipeline('resume')).status, 200);
+  await landsOnce(c, review, mainTip);
+});
+
+test("a carry the controller's stop cut off waits for the project's Resume, or is carried when its line reached its commit", t => {
+  const stand = (dispatchPaused, carries) => ({
+    events: [],
+    projects: { p: { id: 'p', dispatchPaused } },
+    attempts: [{ id: 'review-a', taskId: 'T-a', projectId: 'p', sourceCarries: carries }],
     allAttempts() {
       return this.attempts;
+    },
+    project(id) {
+      return structuredClone(this.projects[id]);
+    },
+    putProject(record) {
+      this.projects[record.id] = record;
     },
     release() {},
     updateAttempt(attempt) {
       this.updated = attempt;
     },
-    event(kind, taskId, attemptId, text) {
-      this.events.push(text);
+    event(kind, taskId, attemptId, text, projectId) {
+      this.events.push({ kind, text, projectId });
     },
-  };
+  });
+  const store = stand(false, [
+    {
+      id: 'source-carry:review-a:0',
+      line: 'main',
+      state: 'committing',
+      commit: 'abc1234',
+      root: '/r',
+      repository: { branch: 'main', live: false },
+    },
+    {
+      id: 'source-carry:review-a:1',
+      line: 'next',
+      state: 'verifying',
+      root: '/r',
+      approvedBy: { type: 'director' },
+    },
+  ]);
   // A line that is not checked out moves in one compare-and-swap: not reached, it simply waits again.
-  interruptedCarries({ store });
+  const runtime = { store };
+  interruptedCarries(runtime);
   assert.deepEqual(
     store.updated.sourceCarries.map(item => [item.state, item.interrupted, item.approvedBy?.type]),
     [
@@ -221,5 +331,28 @@ test("a carry the controller's stop cut off waits to run again, or is carried wh
       ['waiting', 'verifying', 'director'],
     ],
   );
-  assert.match(store.events[1], /The carry to next was stopped when the controller stopped \(during verifying\)/);
+  // The project is held once, with the restart's mark, and remembered so a planned restart does not lift it.
+  assert.deepEqual(store.projects.p, { id: 'p', dispatchPaused: true, restartPaused: true });
+  assert.deepEqual([...runtime.interruptedHolds], ['p']);
+  assert.deepEqual(
+    store.events.map(event => [event.kind, event.projectId]),
+    [
+      ['carry_interrupted', 'p'],
+      ['pipeline_paused', 'p'],
+      ['carry_interrupted', 'p'],
+    ],
+  );
+  assert.equal(
+    store.events[2].text,
+    'The carry to next was stopped when the controller stopped (during verifying); it runs again on its own when the project is resumed.',
+  );
+  for (const event of store.events) assert.doesNotMatch(event.text, /carry the fix again|release it again/);
+  // A project the director paused keeps their pause, unmarked, and no pause is recorded for it.
+  const theirs = stand(true, [{ id: 'source-carry:review-a:0', line: 'main', state: 'verifying', root: '/r' }]);
+  interruptedCarries({ store: theirs });
+  assert.deepEqual(theirs.projects.p, { id: 'p', dispatchPaused: true });
+  assert.deepEqual(
+    theirs.events.map(event => event.kind),
+    ['carry_interrupted'],
+  );
 });

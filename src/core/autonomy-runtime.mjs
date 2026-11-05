@@ -522,7 +522,9 @@ export class Autonomy {
   // Carries waiting their turn (1.1 step 4): the policy approves a carry when it integrates after a passing review,
   // as it would the integration, and an approved carry runs once no integration or carry runs, none is waiting and
   // the project's source is free. One at a time, oldest story first. A fix the director brings back is approved with
-  // the action, and a carry of a brought-back idea waits for the story before it on its line.
+  // the action, and a carry of a brought-back idea waits for the story before it on its line. A paused project's carries
+  // wait for its Resume, as its queued work does, whether the director or a restart paused it; the policy approves none
+  // meanwhile.
   tryCarries() {
     if (
       this.runner.closing ||
@@ -533,6 +535,7 @@ export class Autonomy {
       return;
     for (const story of this.store.tasks()) {
       if (story.kind !== 'studio-development:change' || story.status !== 'done' || !story.sourceStage?.review) continue;
+      if (this.store.project(recordProject(story)).dispatchPaused) continue;
       let review;
       try {
         review = this.store.attempt(story.sourceStage.review.attemptId);
@@ -570,7 +573,7 @@ export class Autonomy {
   }
 
   // Releases whose notes the director accepted (1.1 step 5) run once no integration, carry or release runs or waits
-  // and their project's source is free, one at a time.
+  // and their project's source is free, one at a time. A paused project's releases wait for its Resume.
   tryReleases() {
     if (
       this.runner.closing ||
@@ -579,7 +582,8 @@ export class Autonomy {
       this.store.setting(INTEGRATION)
     )
       return;
-    for (const project of this.store.projects())
+    for (const project of this.store.projects()) {
+      if (project.dispatchPaused) continue;
       for (const milestone of projectMilestones(this.store, project.id)) {
         if (milestone.state !== 'open' || milestone.release?.state !== 'ready') continue;
         try {
@@ -595,6 +599,7 @@ export class Autonomy {
           );
         }
       }
+    }
   }
   releaseSettled(projectId, milestone, result) {
     if (this.runner.closing) return;
@@ -650,7 +655,8 @@ export class Autonomy {
 
   // A planned restart resumes the projects it paused and may start the next cycle.
   // A manual restart after "restart required" completes the same plan.
-  // Any interrupted attempt means the restart was not clean, so nothing resumes.
+  // Any interrupted attempt means the restart was not clean, so nothing resumes; a carry or release the stop cut off
+  // makes it not clean for its own project, which stays held (holdInterrupted, src/connectors/source-carries.mjs).
   resumeAfterPlannedRestart() {
     const marker = this.store.setting(RESTART);
     if (!marker) return;
@@ -664,11 +670,12 @@ export class Autonomy {
     this.resumePlan(marker, `Planned restart complete: ${marker.reason}`);
   }
   // Only the pause the controller made for itself at restart is lifted. A pause the director chose,
-  // or one recorded before restart pauses were marked, holds until they resume the project.
+  // or one recorded before restart pauses were marked, holds until they resume the project, as does the hold of a
+  // project whose carry or release the stop cut off (runner.interruptedHolds, until the director resumes it).
   resumePlan(plan, message) {
     for (const projectId of plan.resumeProjects || []) {
       const project = this.store.project(projectId);
-      if (!project.restartPaused) continue;
+      if (!project.restartPaused || this.runner.interruptedHolds?.has(projectId)) continue;
       project.dispatchPaused = false;
       delete project.restartPaused;
       this.store.putProject(project);
@@ -682,6 +689,9 @@ export class Autonomy {
       if (this.runner.closing || !this.store.db.isOpen) return;
       for (const projectId of plan.cycleProjects || []) this.startCycle(projectId);
       this.runner.schedule();
+      // A carry or release that waited for the resumed project runs now, once.
+      this.tryCarries();
+      this.tryReleases();
     });
   }
 

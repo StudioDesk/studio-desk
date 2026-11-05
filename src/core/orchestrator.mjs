@@ -122,6 +122,9 @@ export class Runner {
     this.closing = false;
     this.scheduled = null;
     this.quotaTimer = null;
+    // Projects held because the stop cut off a carry or release (holdInterrupted, src/connectors/source-carries.mjs):
+    // a planned restart does not lift their hold, the director's Resume does.
+    this.interruptedHolds = new Set();
     const org = store.organization();
     if (org.pipelineEnabled) {
       org.pipelineEnabled = false;
@@ -274,6 +277,7 @@ export class Runner {
     const project = this.store.project(projectId);
     project.dispatchPaused = false;
     delete project.restartPaused;
+    this.interruptedHolds?.delete(projectId);
     this.store.putProject(project);
     const org = this.store.organization();
     org.pipelineEnabled = true;
@@ -330,6 +334,7 @@ export class Runner {
       project.dispatchPaused = action === 'pause';
       // The director's pause or resume replaces a pause the controller made at restart.
       delete project.restartPaused;
+      this.interruptedHolds?.delete(projectId);
       store.putProject(project);
       org.pipelineEnabled = store
         .tasks()
@@ -349,7 +354,12 @@ export class Runner {
       // Resuming also asks for the integration of a story whose review passed and that waits, as a settled
       // integration would: after a restart nothing else may come to ask for it (November 2, 2026, the live proof of
       // 1.1, where a story accepted before the restart waited for the director).
-      if (action === 'resume') this.autonomy.integrateWaiting();
+      // A carry or release that waited for the resume, one the restart cut off among them, runs once on its own.
+      if (action === 'resume') {
+        this.autonomy.integrateWaiting();
+        this.autonomy.tryCarries();
+        this.autonomy.tryReleases();
+      }
     } else if (action === 'remove') {
       if (!Array.isArray(taskIds) || taskIds.length !== 1)
         throw new Error('Choose one assignment to remove from the queue.');

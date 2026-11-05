@@ -11,6 +11,7 @@ import { waitFor } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { projectMilestones } from '../src/connectors/source-milestones.mjs';
 import { interruptedReleases } from '../src/connectors/source-releases.mjs';
+import { sourceResources } from '../src/connectors/source-projects.mjs';
 import { saveProjectOrganization } from '../src/core/project-organization.mjs';
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
 
@@ -224,8 +225,130 @@ test('the first release of a new major moves the older major to a line of its ow
   );
 });
 
-test("a release the controller's stop cut off waits to run again", () => {
-  const milestones = [
+// Events of a kind, read from the records themselves (the store's list keeps only the latest ones).
+const count = (store, kind) => store.db.prepare('SELECT COUNT(*) AS n FROM events WHERE kind=?').get(kind).n;
+const tick = () => new Promise(resolve => setImmediate(resolve));
+// 1.0.1, with a fix integrated on release/1.0, whose notes the director accepted while the project was paused.
+async function pausedRelease(t) {
+  const c = await released(t),
+    store = c.app.store,
+    fix = await make(c, '1.0.1');
+  c.taskId = await c.propose('fix', { branch: 'release/1.0' });
+  assert.equal((await move(c, c.taskId, fix.id)).status, 200);
+  await c.start();
+  const review = await c.review(await c.wait(c.taskId));
+  await c.accept(review.taskId);
+  assert.equal((await c.integration(review)).status, 200);
+  const integration = await c.settled(review, ['integrated']);
+  const started = await c.request(`/api/projects/${project}/milestones/${fix.id}/release`, { projectId: project });
+  assert.equal(started.status, 201, JSON.stringify(started.data));
+  const notes = started.data.task;
+  await c.wait(notes.id);
+  const chosen = store.organization();
+  chosen.testSandbox = 'none';
+  store.setOrganization(chosen);
+  const pipeline = action => c.request('/api/pipeline', { projectId: project, action });
+  assert.equal((await pipeline('pause')).status, 200);
+  await c.accept(notes.id);
+  assert.equal(milestone(c, fix.id).release.state, 'ready');
+  return { c, fix, notes, pipeline, line: integration.commit };
+}
+// While the project is held, its release stays ready across tries and the settling of other work, and never starts.
+async function stillReady(c, fix, notes, line) {
+  for (let i = 0; i < 2; i++) {
+    c.app.runner.autonomy.tryReleases();
+    c.app.runner.autonomy.settled(notes.id);
+    await tick();
+  }
+  assert.equal(milestone(c, fix.id).release.state, 'ready', JSON.stringify(milestone(c, fix.id).release));
+  assert.equal(count(c.app.store, 'release_verifying'), 0);
+  assert.ok(!c.app.runner.sourceIntegrationRun);
+  assert.equal(git(c.root, ['rev-parse', 'refs/heads/release/1.0']), line, 'release/1.0 is unchanged.');
+  assert.equal(git(c.root, ['tag', '--list', 'v1.0.1']), '', 'Nothing is tagged.');
+}
+// After the Resume it runs once: release/1.0 gets its one commit, tagged once.
+async function releasedOnce(c, fix, line) {
+  await waitFor(
+    () =>
+      ['released', 'rejected', 'needs-reconciliation'].includes(milestone(c, fix.id).release?.state) &&
+      !c.app.runner.sourceIntegrationRun,
+    'the release to settle',
+    { detail: () => JSON.stringify(milestone(c, fix.id).release) },
+  );
+  const done = milestone(c, fix.id);
+  assert.equal(done.release.state, 'released', JSON.stringify(done.release));
+  c.app.runner.autonomy.tryReleases();
+  await tick();
+  assert.equal(count(c.app.store, 'release_verifying'), 1);
+  assert.equal(count(c.app.store, 'release_done'), 1);
+  const tip = git(c.root, ['rev-parse', 'refs/heads/release/1.0']);
+  assert.equal(tip, done.release.commit);
+  assert.equal(git(c.root, ['rev-list', '--count', `${line}..${tip}`]), '1');
+  assert.equal(git(c.root, ['tag', '--list', 'v1.0.1']), 'v1.0.1');
+  assert.equal(git(c.root, ['rev-parse', 'v1.0.1^{commit}']), tip);
+  assert.equal(c.app.store.leases().length, 0);
+}
+
+test("a paused project's ready release waits for the director's Resume, which starts it once", async t => {
+  const { c, fix, notes, pipeline, line } = await pausedRelease(t);
+  await stillReady(c, fix, notes, line);
+  assert.equal((await pipeline('resume')).status, 200);
+  await releasedOnce(c, fix, line);
+});
+
+test("a release the controller's stop cut off while it was tested holds its project through the restart, and runs once after Resume", async t => {
+  const { c, fix, notes, pipeline, line } = await pausedRelease(t);
+  let store = c.app.store;
+  // The stop came while the release was being tested, as runRelease records one, in a project that was running.
+  const milestones = projectMilestones(store, project),
+    release = milestones.find(item => item.id === fix.id).release;
+  Object.assign(release, {
+    id: `source-release:${project}:${fix.id}`,
+    state: 'verifying',
+    startedAt: new Date().toISOString(),
+  });
+  store.tx(() => {
+    store.claim(sourceResources(store, store.task(notes.id)), release.id);
+    store.putSetting(`milestones:${project}`, milestones);
+  });
+  const running = store.project(project);
+  running.dispatchPaused = false;
+  store.putProject(running);
+  await c.app.close();
+  await c.reopen();
+  store = c.app.store;
+  assert.ok(!store.tasks().some(task => task.queued), 'The project has no queued work to hold.');
+  const held = store.project(project);
+  assert.deepEqual([held.dispatchPaused, held.restartPaused], [true, true]);
+  const paused = store.db
+    .prepare("SELECT seq, message FROM events WHERE kind='pipeline_paused' AND message LIKE 'Controller restarted%'")
+    .all();
+  assert.deepEqual(
+    paused.map(event => [event.message, store.setting('event-project:' + event.seq)]),
+    [
+      [
+        'Controller restarted while a release was running. The project is held; the release runs again on its own when you resume it.',
+        project,
+      ],
+    ],
+  );
+  const interrupted = store.db.prepare("SELECT message FROM events WHERE kind='release_interrupted'").all();
+  assert.deepEqual(
+    interrupted.map(event => event.message),
+    [
+      'The release of 1.0.1 was stopped when the controller stopped (during verifying); it runs again on its own when the project is resumed.',
+    ],
+  );
+  assert.doesNotMatch(interrupted[0].message, /release it again/);
+  assert.equal(store.leases().length, 0, 'Its resources are released at restart, as before.');
+  await stillReady(c, fix, notes, line);
+  assert.equal((await pipeline('resume')).status, 200);
+  await releasedOnce(c, fix, line);
+});
+
+test("a release the controller's stop cut off waits for the project's Resume", () => {
+  const stand = dispatchPaused => {
+    const milestones = [
       {
         id: 'milestone-a',
         version: '1.0.1',
@@ -237,22 +360,55 @@ test("a release the controller's stop cut off waits to run again", () => {
           repository: { branch: 'release/1.0' },
         },
       },
-    ],
-    events = [],
-    store = {
-      projects: () => [{ id: 'p' }],
+    ];
+    return {
+      events: [],
+      records: { p: { id: 'p', dispatchPaused } },
+      projects() {
+        return Object.values(this.records).map(record => structuredClone(record));
+      },
+      project(id) {
+        return structuredClone(this.records[id]);
+      },
+      putProject(record) {
+        this.records[record.id] = record;
+      },
       setting: () => milestones,
       putSetting(key, value) {
         this.saved = [key, value];
       },
       release() {},
-      event: (kind, taskId, attemptId, text) => events.push(text),
+      event(kind, taskId, attemptId, text, projectId) {
+        this.events.push({ kind, text, projectId });
+      },
     };
-  interruptedReleases({ store });
+  };
+  const store = stand(false),
+    runtime = { store };
+  interruptedReleases(runtime);
   assert.deepEqual(store.saved[0], 'milestones:p');
   assert.deepEqual([store.saved[1][0].release.state, store.saved[1][0].release.interrupted], ['ready', 'verifying']);
-  assert.match(
-    events[0],
-    /The release of 1\.0\.1 was stopped when the controller stopped \(during verifying\); release it again\./,
+  assert.deepEqual(
+    store.events.map(event => [event.kind, event.projectId]),
+    [
+      ['release_interrupted', 'p'],
+      ['pipeline_paused', 'p'],
+    ],
+  );
+  assert.equal(
+    store.events[0].text,
+    'The release of 1.0.1 was stopped when the controller stopped (during verifying); it runs again on its own when the project is resumed.',
+  );
+  assert.doesNotMatch(store.events[0].text, /release it again|carry the fix again/);
+  // The project is held with the restart's mark, and remembered so a planned restart does not lift it.
+  assert.deepEqual(store.records.p, { id: 'p', dispatchPaused: true, restartPaused: true });
+  assert.deepEqual([...runtime.interruptedHolds], ['p']);
+  // A project the director paused keeps their pause, unmarked, and no pause is recorded for it.
+  const theirs = stand(true);
+  interruptedReleases({ store: theirs });
+  assert.deepEqual(theirs.records.p, { id: 'p', dispatchPaused: true });
+  assert.deepEqual(
+    theirs.events.map(event => event.kind),
+    ['release_interrupted'],
   );
 });
