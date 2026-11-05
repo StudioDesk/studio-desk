@@ -24,6 +24,8 @@ const RESTART = 'planned-restart';
 const RESTART_WINDOW_MS = 10 * 60 * 1000;
 const bounded = (text, max = 24000) => (text.length > max ? text.slice(0, max - 1) + '…' : text);
 const stays = pending => (pending.paused === false ? '' : '; dispatch stays paused');
+// How often a test turn a stopped carry or release kept (runner.keptTurns) is checked again while one is kept.
+export const keptTurnChecks = { everyMs: 30 * 1000 };
 
 export class Autonomy {
   // options.integrate(runtime, task, attemptId, reviewHash) performs a reviewed integration.
@@ -33,7 +35,10 @@ export class Autonomy {
     this.store = runner.store;
     this.integrate = options.integrate;
     this.restart = options.restart;
+    this.keptTurnTimer = null;
     this.resumeAfterPlannedRestart();
+    // A test turn the restart's recovery kept for a carry or release is checked again on a timer until it is free.
+    this.freeEndedTurns();
     // An integration that was waiting when the controller stopped starts once the controller is running, unless
     // it closed first.
     setImmediate(() => {
@@ -526,13 +531,9 @@ export class Autonomy {
   // wait for its Resume, as its queued work does, whether the director or a restart paused it; the policy approves none
   // meanwhile.
   tryCarries() {
-    if (
-      this.runner.closing ||
-      !this.store.db.isOpen ||
-      this.runner.sourceIntegrationRun ||
-      this.store.setting(INTEGRATION)
-    )
-      return;
+    if (this.runner.closing || !this.store.db.isOpen) return;
+    this.freeEndedTurns();
+    if (this.runner.sourceIntegrationRun || this.store.setting(INTEGRATION)) return;
     for (const story of this.store.tasks()) {
       if (story.kind !== 'studio-development:change' || story.status !== 'done' || !story.sourceStage?.review) continue;
       if (this.store.project(recordProject(story)).dispatchPaused) continue;
@@ -575,13 +576,9 @@ export class Autonomy {
   // Releases whose notes the director accepted (1.1 step 5) run once no integration, carry or release runs or waits
   // and their project's source is free, one at a time. A paused project's releases wait for its Resume.
   tryReleases() {
-    if (
-      this.runner.closing ||
-      !this.store.db.isOpen ||
-      this.runner.sourceIntegrationRun ||
-      this.store.setting(INTEGRATION)
-    )
-      return;
+    if (this.runner.closing || !this.store.db.isOpen) return;
+    this.freeEndedTurns();
+    if (this.runner.sourceIntegrationRun || this.store.setting(INTEGRATION)) return;
     for (const project of this.store.projects()) {
       if (project.dispatchPaused) continue;
       for (const milestone of projectMilestones(this.store, project.id)) {
@@ -611,6 +608,39 @@ export class Autonomy {
     this.tryIntegration();
     this.tryCarries();
     this.tryReleases();
+  }
+
+  // The test turns stopped carries and releases kept while the test run each started may still go on
+  // (runner.keptTurns, keepStoppedTurn in src/connectors/source-carries.mjs): each whose run has ended is given back,
+  // with its own event. Checked whenever carries and releases are tried, and on a timer that runs only while a turn is
+  // kept; it does not keep the controller's process alive and stops once the controller closes. Returns whether one was
+  // given back. A carry or release whose turn is kept is busy meanwhile (runCarry, runRelease), with no note for the
+  // director: it waits for its own run to end.
+  freeEndedTurns() {
+    const kept = this.runner.keptTurns,
+      open = !this.runner.closing && this.store.db.isOpen;
+    let freed = false;
+    if (open && kept?.size)
+      for (const [id, check] of [...kept])
+        if (check()) {
+          kept.delete(id);
+          freed = true;
+        }
+    if (open && kept?.size) {
+      if (!this.keptTurnTimer) {
+        this.keptTurnTimer = setInterval(() => {
+          if (this.freeEndedTurns()) {
+            this.tryCarries();
+            this.tryReleases();
+          }
+        }, keptTurnChecks.everyMs);
+        this.keptTurnTimer.unref();
+      }
+    } else {
+      clearInterval(this.keptTurnTimer);
+      this.keptTurnTimer = null;
+    }
+    return freed;
   }
 
   // A story whose integration stopped on a conflict, or failed its tests merged onto work that landed since it was

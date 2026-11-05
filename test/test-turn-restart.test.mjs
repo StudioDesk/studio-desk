@@ -6,7 +6,9 @@
 // as started an hour before it did, as a later process that now has a recorded ID reads); the agent's own run uses the
 // protocol fixtures. An attempt whose own process ran in a job of its own (processJob, src/adapters/process-job.mjs) is
 // over once the controller that held the job's only handle has stopped, so after a restart its recorded ID, which may be
-// another program's by then, is not checked; its agent's run of the whole suite, outside that job, still is.
+// another program's by then, is not checked; its agent's run of the whole suite, outside that job, still is. A carry or
+// release the stop cut off while it was tested keeps the turn only while the test run it recorded under it may still
+// go on (a real sleeping process stands for that run), and gives it back once that run has ended.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -20,6 +22,9 @@ import { testTurnResource } from '../src/core/test-turn.mjs';
 import { attemptResource } from '../src/core/store.mjs';
 import { recordedProcessesEnded } from '../src/core/orchestrator.mjs';
 import { live, processStartTimes } from '../src/adapters/process.mjs';
+import { git } from '../src/connectors/source-integration.mjs';
+import { sourceResources } from '../src/connectors/source-projects.mjs';
+import { keptTurnChecks } from '../src/core/autonomy-runtime.mjs';
 
 const tests = fileURLToPath(new URL('./fixture-source-check.mjs', import.meta.url)),
   claudeFixture = fileURLToPath(new URL('./fixture-claude.mjs', import.meta.url)),
@@ -523,4 +528,240 @@ test("a jobbed attempt's freed turn says its agent's run of the whole suite was 
   assert.equal(holder(store), null, 'The turn is free.');
   assert.equal(turnEvents(store, 'attempt-held').length, 1);
   assert.match(turnFreedMessage(store), freedWithJobAndSuite);
+});
+
+// Carries and releases the stop cut off while they were tested (1.1 steps 4 and 5, keepStoppedTurn in
+// src/connectors/source-carries.mjs): their other leases are released as before, and the test turn is kept while the
+// test run each recorded under it (testProcess) may still go on, then given back once that run has ended.
+const legacy = 'project-legacy',
+  tick = () => new Promise(resolve => setImmediate(resolve)),
+  count = (store, kind) => store.db.prepare('SELECT COUNT(*) AS n FROM events WHERE kind=?').get(kind).n,
+  // A carry's or release's test_turn events, read from the records themselves.
+  turnMessages = (store, taskId) =>
+    store.db
+      .prepare("SELECT message FROM events WHERE kind='test_turn' AND task_id=? ORDER BY seq")
+      .all(taskId)
+      .map(event => event.message),
+  freedCarry =
+    /^The test turn was freed: the carry's test run that held it has ended\. Only the run's own process was checked; processes it started are not tracked yet and may outlive it\.$/,
+  freedCarryOnRestart =
+    /^The test turn was freed: the carry's test run that held it had ended when the controller started again\. Only the run's own process was checked; processes it started are not tracked yet and may outlive it\.$/,
+  freedCarryWithoutRun =
+    /^The test turn was freed: the carry had started no test run under it when the controller stopped, so nothing it started still runs\.$/,
+  freedRelease =
+    /^The test turn was freed: the release's test run that held it has ended\. Only the run's own process was checked; processes it started are not tracked yet and may outlive it\.$/;
+
+// A fix integrated on release/1.0 whose carry to main the director approved, recorded as the stop found it: being
+// tested in a project that was running, holding its project's source and the test turn, with the test process it
+// recorded under the turn (testProcess), if any.
+async function stoppedCarry(t, testProcess) {
+  const c = await setup(t);
+  git(c.root, ['branch', 'release/1.0']);
+  const added = await c.request(`/api/projects/${legacy}/lines`, { projectId: legacy, branch: 'release/1.0' });
+  assert.equal(added.status, 201, JSON.stringify(added.data));
+  c.taskId = await c.propose('fix', { branch: 'release/1.0' });
+  await c.start();
+  const review = await c.review(await c.wait(c.taskId));
+  await c.accept(review.taskId);
+  assert.equal((await c.integration(review)).status, 200);
+  await c.settled(review, ['integrated']);
+  const pipeline = action => c.request('/api/pipeline', { projectId: legacy, action });
+  assert.equal((await pipeline('pause')).status, 200);
+  const approved = await c.request(`/api/tasks/${c.taskId}/carry`, { projectId: legacy, line: 'main' });
+  assert.equal(approved.status, 202, JSON.stringify(approved.data));
+  const carryId = stopWhileTesting(c, review, testProcess);
+  return { c, review, carryId, pipeline, mainTip: git(c.root, ['rev-parse', 'main']) };
+}
+function stopWhileTesting(c, review, testProcess) {
+  const store = c.app.store,
+    attempt = store.attempt(review.id),
+    journal = attempt.sourceCarries[0];
+  Object.assign(journal, { state: 'verifying', startedAt: new Date().toISOString() });
+  if (testProcess) journal.testProcess = testProcess;
+  store.tx(() => {
+    store.claim([...sourceResources(store, store.task(c.taskId)), testTurnResource], journal.id);
+    store.updateAttempt(attempt);
+  });
+  const running = store.project(legacy);
+  running.dispatchPaused = false;
+  store.putProject(running);
+  return journal.id;
+}
+const carryOf = (store, review) => store.attempt(review.id).sourceCarries[0];
+// Another full suite, an idea's checks, whose test run ends once its gate file exists.
+function waitingChecks(c, id) {
+  const runner = c.app.runner,
+    gate = path.join(c.directory, `${id}-gate`),
+    original = runner.sourceCheckCommand;
+  runner.sourceCheckCommand = gated(gate);
+  const attemptId = runner.start(addChecks(c.app.store, id)).attemptId;
+  return {
+    attemptId,
+    finish: async () => {
+      fs.writeFileSync(gate, '');
+      const done = await c.wait(id);
+      runner.sourceCheckCommand = original;
+      return done;
+    },
+  };
+}
+
+test('a carry stopped while it was tested keeps the test turn while its test run goes on, and gives it back at the next try once the run has ended', async t => {
+  const run = liveProcess(t, { leader: true });
+  const { c, review, carryId } = await stoppedCarry(t, { pid: run.pid, startedAt: run.startedAt });
+  await c.app.close();
+  await c.reopen();
+  const { store, runner } = c.app;
+  assert.equal(carryOf(store, review).state, 'waiting');
+  assert.equal(holder(store), carryId, 'The turn stays held while its run may still go on.');
+  assert.deepEqual(leasesOf(store, carryId), [testTurnResource], 'Its other leases are released, as before.');
+  assert.deepEqual(turnMessages(store, review.taskId), []);
+  // Another suite waits for the turn and does not get it, however often carries and releases are tried.
+  const checks = waitingChecks(c, 'T-check');
+  await waitFor(() => store.attempt(checks.attemptId).testTurn, 'the checks to wait for the turn');
+  assert.equal(store.attempt(checks.attemptId).testTurn.holder, carryId);
+  for (let i = 0; i < 2; i++) {
+    runner.autonomy.tryCarries();
+    runner.autonomy.tryReleases();
+    await tick();
+  }
+  assert.equal(holder(store), carryId);
+  assert.equal(runner.keptTurns.size, 1);
+  // Once the run has ended, the next try gives the turn back, once, and the waiting suite takes it.
+  await run.stop();
+  runner.autonomy.tryCarries();
+  assert.notEqual(holder(store), carryId);
+  assert.equal(carryOf(store, review).testProcess, undefined, 'Its recorded process is cleared.');
+  const messages = turnMessages(store, review.taskId);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], freedCarry);
+  await waitFor(() => holder(store) === checks.attemptId, 'the checks to take the turn');
+  assert.equal((await checks.finish()).result.checks[0].status, 'pass');
+  runner.autonomy.tryCarries();
+  assert.equal(turnMessages(store, review.taskId).length, 1, 'It is given back once.');
+  assert.equal(runner.keptTurns.size, 0);
+  assert.equal(runner.autonomy.keptTurnTimer, null, 'No timer runs while no turn is kept.');
+  // The carry still waits for the project's Resume.
+  assert.deepEqual([carryOf(store, review).state, store.project(legacy).dispatchPaused], ['waiting', true]);
+  assert.equal(count(store, 'carry_verifying'), 0);
+});
+
+test("a carry whose recorded test run had ended, or that recorded none, gives the turn back during the restart's recovery", async t => {
+  const { c, review, carryId } = await stoppedCarry(t, exited());
+  await c.app.close();
+  await c.reopen();
+  let store = c.app.store;
+  assert.equal(holder(store), null, 'The turn is free.');
+  assert.deepEqual(leasesOf(store, carryId), []);
+  assert.equal(carryOf(store, review).testProcess, undefined);
+  assert.equal(carryOf(store, review).state, 'waiting');
+  let messages = turnMessages(store, review.taskId);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], freedCarryOnRestart);
+  assert.equal(c.app.runner.keptTurns?.size ?? 0, 0);
+  assert.equal(c.app.runner.autonomy.keptTurnTimer, null);
+  // Stopped again while it held the turn before any test run had started under it.
+  stopWhileTesting(c, review, null);
+  await c.app.close();
+  await c.reopen();
+  store = c.app.store;
+  assert.equal(holder(store), null);
+  assert.deepEqual(leasesOf(store, carryId), []);
+  messages = turnMessages(store, review.taskId);
+  assert.equal(messages.length, 2);
+  assert.match(messages[1], freedCarryWithoutRun);
+});
+
+test('a held carry does not start while its own old turn is kept; the timer gives the turn back once its run has ended, and the resumed carry lands once', async t => {
+  const every = keptTurnChecks.everyMs;
+  keptTurnChecks.everyMs = 50;
+  t.after(() => {
+    keptTurnChecks.everyMs = every;
+  });
+  const run = liveProcess(t, { leader: true });
+  const { c, review, carryId, pipeline, mainTip } = await stoppedCarry(t, { pid: run.pid, startedAt: run.startedAt });
+  await c.app.close();
+  await c.reopen();
+  const { store, runner } = c.app;
+  assert.ok(runner.autonomy.keptTurnTimer, 'A timer runs while the turn is kept.');
+  // Resumed while its turn is kept: the carry is busy, waiting for its own old run, with no note for the director.
+  assert.equal((await pipeline('resume')).status, 200);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(holder(store), carryId);
+  assert.equal(carryOf(store, review).state, 'waiting');
+  assert.equal(count(store, 'carry_verifying'), 0);
+  assert.ok(!runner.sourceIntegrationRun);
+  assert.equal(store.task(c.taskId).autonomyNote, undefined);
+  assert.equal(count(store, 'autonomy_attention'), 0);
+  assert.equal(git(c.root, ['rev-parse', 'main']), mainTip);
+  // Once the run has ended, the timer gives the turn back and the carry starts, once, and lands.
+  await run.stop();
+  const carry = await waitFor(
+    () =>
+      ['carried', 'rejected', 'needs-reconciliation'].includes(carryOf(store, review).state) &&
+      !runner.sourceIntegrationRun &&
+      carryOf(store, review),
+    'the carry to settle',
+    { detail: () => JSON.stringify(carryOf(store, review)) },
+  );
+  assert.equal(carry.state, 'carried', JSON.stringify(carry));
+  const messages = turnMessages(store, review.taskId);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], freedCarry);
+  assert.equal(count(store, 'carry_verifying'), 1);
+  assert.equal(git(c.root, ['rev-parse', 'main']), carry.commit);
+  assert.equal(git(c.root, ['rev-parse', 'main~1']), mainTip);
+  assert.equal(store.leases().length, 0);
+  assert.equal(runner.autonomy.keptTurnTimer, null, 'The timer stops once no turn is kept.');
+});
+
+test('a release stopped while it was tested keeps the test turn while its test run goes on, and gives it back at the next try once the run has ended', async t => {
+  const c = await restartStudio(t),
+    run = liveProcess(t, { leader: true }),
+    id = `source-release:${legacy}:milestone-held`;
+  // A release recorded as the stop found it: being tested, holding its project's source and the test turn.
+  c.app.store.tx(() => {
+    c.app.store.putSetting(`milestones:${legacy}`, [
+      {
+        id: 'milestone-held',
+        version: '1.0.1',
+        state: 'open',
+        release: {
+          id,
+          state: 'verifying',
+          reviewTaskId: 'T-notes',
+          root: c.root,
+          repository: { branch: 'main' },
+          testProcess: { pid: run.pid, startedAt: run.startedAt },
+          startedAt: new Date().toISOString(),
+        },
+      },
+    ]);
+    c.app.store.claim([project, testTurnResource], id);
+  });
+  const { store, runner } = await restart(c);
+  const release = () => store.setting(`milestones:${legacy}`)[0].release;
+  assert.equal(release().state, 'ready');
+  assert.equal(holder(store), id, 'The turn stays held while its run may still go on.');
+  assert.deepEqual(leasesOf(store, id), [testTurnResource], 'Its other leases are released, as before.');
+  assert.deepEqual(turnMessages(store, 'T-notes'), []);
+  const checks = waitingChecks(c, 'T-check');
+  await waitFor(() => store.attempt(checks.attemptId).testTurn, 'the checks to wait for the turn');
+  assert.equal(store.attempt(checks.attemptId).testTurn.holder, id);
+  for (let i = 0; i < 2; i++) {
+    runner.autonomy.tryReleases();
+    await tick();
+  }
+  assert.equal(holder(store), id);
+  await run.stop();
+  runner.autonomy.tryReleases();
+  assert.notEqual(holder(store), id);
+  assert.equal(release().testProcess, undefined, 'Its recorded process is cleared.');
+  assert.equal(release().state, 'ready', 'It still waits for the Resume.');
+  const messages = turnMessages(store, 'T-notes');
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], freedRelease);
+  await waitFor(() => holder(store) === checks.attemptId, 'the checks to take the turn');
+  assert.equal((await checks.finish()).result.checks[0].status, 'pass');
+  assert.equal(turnMessages(store, 'T-notes').length, 1);
 });

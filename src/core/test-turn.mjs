@@ -8,8 +8,21 @@
 // store as every other reservation is, so a restart keeps it held until an interrupted holder is reconciled. Waiters
 // queue in memory, first come, first served, one queue for each turn, and are tried again whenever leases change;
 // there is no polling. A waiting attempt's record says what it waits for (`testTurn`, whichever turn it is).
+import { live } from '../adapters/process.mjs';
+
 export const testTurnResource = 'computer:test-suite',
   visualTurnResource = 'computer:visual-check';
+
+// Whether the test run a journal recorded under the test turn (journal.testProcess { pid, startedAt }, the install,
+// build or test step of a verification, connectors/source-integration.mjs) is confirmed gone, by the process identity
+// every caller shares (live, adapters/process.mjs: its ID with when it started, so a later process handed the ID is not
+// taken for it). False when it recorded none. An integration (connectors/source-changes.mjs) and a carry or release
+// (connectors/source-carries.mjs) the controller's stop cut off give the turn back with it.
+export const testRunEnded = journal =>
+  !!journal.testProcess?.pid && !live({ pid: journal.testProcess.pid, pidStartedAt: journal.testProcess.startedAt });
+// Whether an owner holds the test turn. A store without leases (a stand-in) holds none.
+export const holdsTestTurn = (store, owner) =>
+  (store.leases?.() || []).some(lease => lease.resource === testTurnResource && lease.attemptId === owner);
 
 // Each store's waiters for each turn: one store per controller, shared by every project.
 const queues = new WeakMap();

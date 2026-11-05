@@ -19,7 +19,8 @@ import {
   verifyIntegration,
 } from './source-integration.mjs';
 import { testsSentence } from './source-checks.mjs';
-import { holdInterrupted } from './source-carries.mjs';
+import { holdInterrupted, keepStoppedTurn } from './source-carries.mjs';
+import { holdsTestTurn } from '../core/test-turn.mjs';
 import { createSourceWorktree, removeSourceWorktree, sourceWorktreeRoot } from './source-worktrees.mjs';
 import { lineReached, lineRepository, moveLine, projectLine } from './source-lines.mjs';
 import { compareVersions, makeMilestone, parseVersion, projectMilestones, releaseTags } from './source-milestones.mjs';
@@ -287,7 +288,8 @@ function writeRelease(worktree, version, notes) {
 }
 
 // The release, once its notes are accepted: verified as an integration is, then the line moved and tagged. Busy while an
-// integration or carry runs or the project's source is held; the caller tries again when they settle.
+// integration or carry runs, the project's source is held or the release still holds a lease of its own (the test turn
+// its stopped run kept, keepStoppedTurn in source-carries.mjs); the caller tries again when they settle.
 export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}) {
   const store = runtime.store,
     { milestone, save } = milestoneOf(store, projectId, milestoneId),
@@ -297,8 +299,12 @@ export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}
   const notesTask = store.task(release.notesTaskId);
   if (notesTask.status !== 'done' || !notesTask.acceptedAttemptId)
     throw new Error(`Accept the ${milestone.version} release notes (${notesTask.id}) first.`);
-  const resources = sourceResources(store, notesTask);
-  if (runtime.sourceIntegrationRun || store.leases().some(lease => resources.includes(lease.resource)))
+  const resources = sourceResources(store, notesTask),
+    id = `source-release:${projectId}:${milestone.id}`;
+  if (
+    runtime.sourceIntegrationRun ||
+    store.leases().some(lease => resources.includes(lease.resource) || lease.attemptId === id)
+  )
     throw Object.assign(new Error('The project’s source is busy; the release starts when it is free.'), { busy: true });
   const root = projectSource(store, projectId, runtime).root,
     line = lineOf(store, projectId, milestone),
@@ -307,8 +313,7 @@ export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}
     throw new Error(`${repository.branch} is the branch this controller runs from; release it by hand.`);
   if (tagExists(root, release.tag)) throw new Error(`The repository already has a tag named ${release.tag}.`);
   // The release's tests run where the next story's candidate tests would.
-  const id = `source-release:${projectId}:${milestone.id}`,
-    testSandbox = chosenTestSandbox(store.organization());
+  const testSandbox = chosenTestSandbox(store.organization());
   Object.assign(release, {
     id,
     state: 'verifying',
@@ -561,7 +566,8 @@ export function shipAgain(store, projectId, milestoneId) {
 
 // Releases the controller's stop cut off: one in verification waits to run again, holding its project until the
 // director resumes it (holdInterrupted); one moving its line is tagged if the line reached its commit, waits again when
-// the line is not checked out, and otherwise needs the director.
+// the line is not checked out, and otherwise needs the director. The test turn one held is kept while the test run it
+// started may still go on (keepStoppedTurn, source-carries.mjs).
 export function interruptedReleases(runtime) {
   const store = runtime.store,
     shipped = [];
@@ -570,9 +576,28 @@ export function interruptedReleases(runtime) {
     let changed = false;
     for (const milestone of milestones) {
       const release = milestone.release;
-      if (!release || !['verifying', 'committing'].includes(release.state)) continue;
+      if (!release) continue;
+      const turn = running =>
+        keepStoppedTurn(runtime, release, {
+          what: 'release',
+          event: [release.reviewTaskId, null],
+          projectId: project.id,
+          running,
+          locate: () => {
+            const now = projectMilestones(store, project.id),
+              journal = now.find(item => item.id === milestone.id)?.release;
+            return journal?.id === release.id ? { journal, save: () => store.putSetting(key(project.id), now) } : null;
+          },
+        });
+      if (!['verifying', 'committing'].includes(release.state)) {
+        // One that kept the turn through an earlier start.
+        if (release.testProcess && holdsTestTurn(store, release.id)) {
+          changed = true;
+          turn(false);
+        }
+        continue;
+      }
       changed = true;
-      store.release(release.id);
       const was = release.state;
       if (was === 'committing' && release.commit && lineReached(release.root, release)) {
         if (!tagExists(release.root, release.tag))
@@ -598,6 +623,7 @@ export function interruptedReleases(runtime) {
             : `The release of ${milestone.version} stopped part-way when the controller stopped; inspect the project's folder, then release it again.`,
         project.id,
       );
+      turn(true);
       if (release.state === 'ready') holdInterrupted(runtime, project.id, 'release');
     }
     if (changed) store.putSetting(key(project.id), milestones);
