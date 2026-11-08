@@ -81,9 +81,12 @@ test('a read cut off after its headers names its route and network cause', async
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
   const origin = `http://127.0.0.1:${server.address().port}`;
+  // The reply's headers arrive, so fetch resolves and the body read fails: undici says "terminated" there, and
+  // "fetch failed" only when fetch itself rejects. The socket's own code is the cause the runner never printed.
   await assert.rejects(read({ origin }, '/api/cut'), error => {
-    assert.match(error.message, /^Reading \/api\/cut: \S.* \(\S.*\)$/);
-    assert.ok(error.cause, 'The original error stays attached as the cause.');
+    assert.equal(error.message, 'Reading /api/cut: terminated (UND_ERR_SOCKET)');
+    assert.equal(error.cause?.message, 'terminated', 'The original rejection, from the body read, stays attached.');
+    assert.equal(error.cause?.cause?.code, 'UND_ERR_SOCKET');
     return true;
   });
 });
