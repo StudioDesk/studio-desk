@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
@@ -60,17 +61,32 @@ const settledCarry = (c, review, index) =>
     { detail: () => JSON.stringify(carriesOf(c, review)) },
   );
 // A read that fails names its route and its network cause: the test runner prints only "fetch failed", which twice on
-// November 4, 2026 could not say whether the connection was refused, reset or timed out.
+// November 4, 2026 could not say whether the connection was refused, reset or timed out. The body is read inside the
+// same guard, since a connection cut after the headers fails there ("terminated"), not in fetch.
 const read = async (c, route) => {
-  let response;
   try {
-    response = await fetch(`${c.origin}${route}?projectId=${project}`);
+    const response = await fetch(`${c.origin}${route}?projectId=${project}`);
+    return await response.json();
   } catch (error) {
     const cause = error.cause?.code ?? error.cause?.message ?? 'no cause given';
     throw new Error(`Reading ${route}: ${error.message} (${cause})`, { cause: error });
   }
-  return response.json();
 };
+test('a read cut off after its headers names its route and network cause', async t => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json', 'content-length': '100' });
+    res.write('{"lines":');
+    setImmediate(() => res.socket.destroy());
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  await assert.rejects(read({ origin }, '/api/cut'), error => {
+    assert.match(error.message, /^Reading \/api\/cut: \S.* \(\S.*\)$/);
+    assert.ok(error.cause, 'The original error stays attached as the cause.');
+    return true;
+  });
+});
 const message = (c, ref) => git(c.root, ['log', '-1', '--format=%B', ref]);
 const show = (c, ref, file = target) => git(c.root, ['show', `${ref}:${file}`]);
 
