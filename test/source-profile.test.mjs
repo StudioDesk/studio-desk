@@ -216,8 +216,16 @@ test("Studio desk's second revision adds the new dashboard and TypeScript and pr
     // Outside the profile's folders or types.
     ['data/[slug]/page.mjs', false],
     ['src/app/[slug]/page.exe', false],
+    // The Windows job wrapper is PowerShell (November 8, 2026); other script types stay out.
+    ['src/adapters/windows-job.ps1', true],
+    ['src/adapters/windows-job.psm1', false],
+    ['scripts/setup.bat', false],
   ])
     assert.equal(storyPathAllowed(file, studioDeskProfile), allowed, file);
+  // The first revision, which earlier records were measured with, still refuses it.
+  assert.equal(storyPathAllowed('src/adapters/windows-job.ps1', studioDeskProfileRevision1), false);
+  // Integration passes over a changed file the formatter has no parser for instead of failing the merge.
+  assert.deepEqual(studioDeskProfile.formatter, { package: 'prettier@3.3.3', args: ['--write', '--ignore-unknown'] });
   assert.throws(
     () => validateStoryPaths({ files: [], newFiles: ['dashboard/eslint.config.js'] }, []),
     /never in a dot-folder or as AGENTS.md, CLAUDE.md, package.json, package-lock.json, npm-shrinkwrap.json, Prettier configuration, ESLint configuration, Vite configuration, Vitest configuration or TypeScript configuration/,

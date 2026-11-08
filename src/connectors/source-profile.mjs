@@ -63,7 +63,13 @@ export const studioDeskProfile = Object.freeze({
     'start-studio.cmd',
     'start-studio.sh',
   ]),
-  extensions: Object.freeze([...studioDeskProfileRevision1.extensions, 'ts', 'tsx']),
+  // PowerShell since November 8, 2026: the Windows job wrapper (src/adapters/windows-job.ps1) is source like any
+  // module, and two of 1.2's fixes need it changed, so a plan may list it (the director's choice). Plans and checks
+  // recorded before keep the profile they were measured with.
+  extensions: Object.freeze([...studioDeskProfileRevision1.extensions, 'ts', 'tsx', 'ps1']),
+  // Integration formats every changed file; a type the formatter has no parser for (the wrapper) is passed over
+  // rather than failing the merge.
+  formatter: Object.freeze({ package: 'prettier@3.3.3', args: Object.freeze(['--write', '--ignore-unknown']) }),
   protectedNames: Object.freeze([
     'AGENTS.md',
     'CLAUDE.md',
