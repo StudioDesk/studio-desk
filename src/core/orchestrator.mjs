@@ -26,7 +26,7 @@ import { captureContinuation, continuationFile } from './attempt-continuation.mj
 import { buildAttemptHistory, stageAttemptHistory } from './attempt-history.mjs';
 import { questionFile, questionReason, readQuestion } from './questions.mjs';
 import { controllerStopCause, finishedCause } from './attempt-cause.mjs';
-import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
+import { measureAgain, measuredMs, measuredStarts, measuringPass } from '../connectors/source-changes.mjs';
 import { endTryRuns, recoverTryRuns } from '../connectors/try-copy.mjs';
 import { attemptResource } from './store.mjs';
 import { testTurnResource } from './test-turn.mjs';
@@ -380,18 +380,77 @@ export class Runner {
     return { ok: true };
   }
   schedule() {
+    // A pass asked for while the sources are measured for the next one runs once that one has.
+    if (this.measuringSources && !this.closing) this.dispatchAgain = true;
     if (this.closing || this.scheduled || this.dispatching || !this.store.organization().pipelineEnabled) return;
     this.scheduled = setImmediate(() => {
       this.scheduled = null;
       this.dispatchQueued();
     });
   }
+  // A dispatch pass first measures, in a process of its own, the sources its waiting source stories' checks read
+  // (measureSources), so the controller keeps answering while their whole source is hashed; the pass then runs on those
+  // measurements. A pass with nothing to measure runs at once, as before. Returns the measured pass while it waits.
   dispatchQueued() {
     if (this.closing || this.dispatching || !this.store.organization().pipelineEnabled) return;
+    let measuring = null;
+    try {
+      measuring = this.measureSources();
+    } catch {} // The pass measures on the thread, as before.
+    if (!measuring) return this.dispatchPass();
+    this.dispatching = this.measuringSources = true;
+    this.dispatchAgain = false;
+    const starts = measuredStarts();
+    return measuring
+      .catch(() => null) // A measuring process that failed as a whole leaves the pass to measure as before.
+      .then(measured => {
+        this.dispatching = this.measuringSources = false;
+        if (this.closing || !this.store.organization().pipelineEnabled) return;
+        // A start since the measuring began, or a line that moved meanwhile (an integration), may have made it stale:
+        // the next pass measures again.
+        if (measured?.stale || measuredStarts() !== starts) return this.schedule();
+        this.dispatchPass(measured);
+        if (this.dispatchAgain) this.schedule();
+      });
+  }
+  // What the work this pass checks with its sources measured reads (refreshEach's waiting work that has a slot and its
+  // resources), measured by the adapters that measure sources, combined; null when no adapter measures any.
+  measureSources() {
+    const store = this.store;
+    if (store.liveAttempts().length >= store.organization().maxParallel) return null;
+    const leases = store.leases(),
+      byAdapter = new Map();
+    for (const t of store.tasksWithStatus('ready', 'blocked').filter(t => t.status === 'ready' || t.controllerWait)) {
+      let view, adapter;
+      try {
+        view = this.workflows.stageView(t);
+        const { resources } = this.workflows.requirements(view, { store });
+        if (leases.some(l => resources.includes(l.resource)) || projectOrganization(store, recordProject(t)).paused)
+          continue;
+        adapter = this.adapterFor(t);
+      } catch {
+        continue;
+      }
+      if (typeof adapter?.measureSources !== 'function') continue;
+      if (!byAdapter.has(adapter)) byAdapter.set(adapter, []);
+      byAdapter.get(adapter).push(view);
+    }
+    const measuring = [...byAdapter].map(([adapter, tasks]) => adapter.measureSources(this, tasks)).filter(Boolean);
+    if (!measuring.length) return null;
+    return Promise.all(measuring).then(seeds => ({
+      stale: seeds.some(seed => seed.stale),
+      lines: seeds.flatMap(seed => seed.lines),
+      ms: Math.max(...seeds.map(seed => seed.ms || 0)),
+    }));
+  }
+  dispatchPass(measured = null) {
     this.dispatching = true;
     const began = performance.now();
+    let again = false;
     try {
-      // The pass measures each live source once for all its checks, and again after each start (measuringPass).
+      // The pass measures each live source once for all its checks, and again after each start (measuringPass). A pass
+      // whose sources were measured in their own process starts at most one task: the start makes the measurements
+      // stale, so the next pass measures again there rather than here.
       measuringPass(() => {
         this.refreshReadiness();
         for (const task of this.store
@@ -402,6 +461,10 @@ export class Runner {
           if (this.store.task(task.id).status !== 'ready') continue;
           try {
             this.start(task.id, { director: !!this.store.task(task.id).directorStart });
+            if (measured) {
+              again = true;
+              break;
+            }
           } catch (error) {
             const current = this.store.task(task.id);
             if (!current.controllerWait || current.status === 'ready') {
@@ -422,12 +485,13 @@ export class Runner {
           this.store.setOrganization(org);
           this.store.event('pipeline_finished', null, null, 'The selected pipeline has no queued work remaining.');
         }
-      });
+      }, measured);
     } finally {
       this.dispatching = false;
       // Each pass's time, for the controller's own measures (C-18).
       this.loadMeasures?.pass(performance.now() - began);
     }
+    if (again) this.schedule();
   }
   // The tier a task requests: its own, else its task type's default.
   tierOf(task) {
@@ -837,7 +901,8 @@ export class Runner {
     let scopeStarted = performance.now(),
       refusal = null;
     const reason = this.blockReason(task, true, { refused: error => (refusal = error) });
-    let scopeMs = performance.now() - scopeStarted;
+    // A dispatch pass whose sources were measured in their own process adds that measuring time, from its start.
+    let scopeMs = performance.now() - scopeStarted + measuredMs();
     if (reason) {
       task.status = 'blocked';
       task.reason = reason;

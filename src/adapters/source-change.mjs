@@ -18,6 +18,7 @@ import {
 } from '../connectors/source-checks.mjs';
 import {
   checkScopeRequest,
+  measureStorySources,
   scopeDocument,
   scopeRequest,
   stagedChanges,
@@ -34,6 +35,7 @@ import {
   worktreeName,
 } from '../connectors/source-worktrees.mjs';
 import { runSourceSetup } from '../connectors/source-setup.mjs';
+import { measureSources } from '../connectors/source-measure.mjs';
 import { candidateTestCommand, chosenTestSandbox, sandboxLabel, sandboxRecord } from './source-test-sandbox.mjs';
 import { builtInSandboxCommand, builtInSandboxReady, noBuiltInSandbox } from './built-in-sandbox.mjs';
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
@@ -94,7 +96,26 @@ export const sourceChangeAdapter = {
     runtime.packageInstallCommand = options.packageInstallCommand; // trusted model-free stand-in for npm ci, never exposed by HTTP
     runtime.sourceWorktreeRoot = options.sourceWorktreeRoot; // defaults to <data>/wt, a short path
     runtime.sourceSetupHold = options.sourceSetupHold; // trusted model-free test seam, never exposed by HTTP
+    runtime.sourceMeasureHold = options.sourceMeasureHold; // trusted model-free test seam, never exposed by HTTP
     runtime.builtInSandbox = options.builtInSandbox || noBuiltInSandbox; // the controller's start probes this computer
+  },
+  // The lines a dispatch pass's source stories would measure, measured in a process of its own
+  // (src/connectors/source-measure.mjs) before the pass, so its checks hash nothing on the controller's thread. Resolves
+  // what the pass is seeded with (measuringPass), or is null when none of these stories reads a line.
+  measureSources(runtime, tasks) {
+    const store = runtime.store,
+      measuring = measureStorySources(store, tasks, task => sourceRoot(store, task, runtime), {
+        hold: runtime.sourceMeasureHold || null,
+      });
+    if (!measuring) return null;
+    const began = performance.now();
+    return measureSources(measuring.request, runtime).then(measured =>
+      measuring.seed(measured, performance.now() - began),
+    );
+  },
+  // The controller's close ends a measuring process that still runs.
+  shutdown(runtime) {
+    runtime.sourceMeasuring?.kill();
   },
   status: () => ({ available: true, label: 'Isolated source edit by the employee’s model; measured candidate tests' }),
   blockReason(runtime, verifyAuth, task, worker) {

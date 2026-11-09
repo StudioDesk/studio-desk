@@ -40,6 +40,10 @@ import {
   lineFiles,
   lineReached,
   lineRepository,
+  lineTip,
+  knownMeasurements,
+  measuredError,
+  measuredLine,
   measureLine,
   moveLine,
   projectLine,
@@ -60,23 +64,131 @@ const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // Where a release line that is not checked out is measured, in a worktree removed at once (src/connectors/source-lines.mjs).
 const measureParent = store => path.join(store.directory, 'wt');
 // The measurements of the open measuring pass, by root, line and profile, or null outside one.
-let pass = null;
+let pass = null,
+  // How long the measuring process took for the open pass's measurements, until a start ends their reuse.
+  passMeasuredMs = 0,
+  // How many starts have ended a pass's reuse, so measurements made before one are known to be stale.
+  starts = 0;
 // Runs fn as one measuring pass (a scheduler pass, a readiness refresh, or a director's start): every story checked in
 // it reuses the first measurement of the same root, line and profile, which of the same files are committed, ignored or
 // deleted, and the commit a story would start from, instead of reading and hashing the whole live source and asking git
-// again for each check. A pass opened inside one joins it. Outside a pass every check measures.
-export function measuringPass(fn) {
+// again for each check. A pass opened inside one joins it. Outside a pass every check measures. A dispatch pass starts
+// with the measurements its measuring process made (`measured`, from measureStorySources), so its checks measure
+// nothing on the controller's thread; a measurement that failed there fails each check with its message.
+export function measuringPass(fn, measured = null) {
   if (pass) return fn();
   pass = new Map();
+  passMeasuredMs = 0;
+  if (measured) seedPass(measured);
   try {
     return fn();
   } finally {
     pass = null;
+    passMeasuredMs = 0;
   }
 }
 // An attempt that claimed a line ends the reuse: the checks after it in the pass measure again.
 export function measureAgain() {
   pass?.clear();
+  passMeasuredMs = 0;
+  starts++;
+}
+// The measuring process's time for the open pass, which a start records in its scope's time (setup.scope).
+export const measuredMs = () => passMeasuredMs;
+// The starts so far, to compare before and after a measurement.
+export const measuredStarts = () => starts;
+function seedPass({ lines, ms = 0 }) {
+  passMeasuredMs = ms;
+  for (const { root, line, profile, parent, measurement } of lines) {
+    let measuredLineFiles;
+    try {
+      measuredLineFiles = passMeasurement(measuredLine(root, line, profile, parent, measurement));
+    } catch (error) {
+      measuredLineFiles = { error };
+    }
+    pass.set(JSON.stringify([root, line ?? null, profile]), measuredLineFiles);
+    pass.set(
+      JSON.stringify(['base', root, line ?? null, profile]),
+      measurement.base.error ? { error: measuredError(measurement.base.error) } : { base: measurement.base.value },
+    );
+  }
+}
+// The lines a source story's scope check reads (storySource), each with the new files whose ignore rules it asks,
+// found from the story's records alone, measuring nothing: its breakdown's checks (breakdownEvidence) and its own line,
+// or its review's checks. None for work that is not a source story, or one that waits for another story to finish
+// building on its line, so its check measures nothing (validateInputs); a story whose records do not say returns none,
+// and its check then measures on the thread as before.
+export function storyMeasureRequests(store, task, root) {
+  try {
+    if (task.kind !== 'studio-development:change' || task.approval?.status !== 'approved' || !task.proposalReference)
+      return [];
+    if (sourceStoriesInFlight(store, task).length >= storiesPerLine(store)) return [];
+    const projectId = recordProject(task),
+      { newFiles } = storyPaths(task, proposedPaths(store, task)),
+      at = (root, sourceCheck, profile, release) => ({
+        root,
+        line: projectLine(store, projectId, release ?? sourceCheck.base?.branch),
+        profile,
+        newFiles,
+      });
+    if (task.proposalReference.path === 'source-breakdown.json') {
+      const pinned = store.attempt(task.proposalReference.attemptId).sourceBreakdown,
+        checked = store.attempt(pinned.attemptId).sourceCheck;
+      return [at(checked.root, checked, profileOf(checked)), at(root, checked, profileOf(pinned), task.release?.line)];
+    }
+    const review = store.attempt(store.task(task.dependencies[0]).acceptedAttemptId),
+      checked = store.attempts(review.sourceReview.taskId).find(a => a.id === review.sourceReview.attemptId);
+    return [at(root, checked.sourceCheck, profileOf(checked.sourceCheck), task.release?.line)];
+  } catch {
+    return [];
+  }
+}
+// The request for the measuring process (src/connectors/source-measure.mjs) for the lines these stories' checks read,
+// and how to seed a pass with its answer (measuringPass), or null when none reads a line. rootOf gives a story's source
+// root, and `hold` is the trusted test seam that holds the process. The seed is `stale` when a line moved since the
+// process began measuring it (lineTip), so the pass measures again rather than start a story from an older commit.
+export function measureStorySources(store, tasks, rootOf, { hold = null } = {}) {
+  const lines = new Map(),
+    parent = measureParent(store);
+  for (const task of tasks) {
+    let root;
+    try {
+      root = rootOf(task);
+    } catch {
+      continue;
+    }
+    for (const request of storyMeasureRequests(store, task, root)) {
+      const key = JSON.stringify([request.root, request.line ?? null, request.profile]);
+      if (!lines.has(key)) lines.set(key, { ...request, ignored: new Map() });
+      lines.get(key).ignored.set(JSON.stringify(request.newFiles), request.newFiles);
+    }
+  }
+  if (!lines.size) return null;
+  const measured = [...lines.values()];
+  return {
+    request: {
+      lines: measured.map(item => ({
+        root: item.root,
+        ...(item.line === undefined ? {} : { line: item.line }),
+        ...recordedProfile(item.profile),
+        ignored: [...item.ignored.values()],
+      })),
+      parent,
+      known: knownMeasurements(),
+      hold,
+    },
+    seed: (measurements, ms) => ({
+      stale: measured.some((item, i) => measurements[i]?.tip !== lineTip(item.root, item.line)),
+      lines: measured.map((item, i) => ({
+        root: item.root,
+        line: item.line,
+        profile: item.profile,
+        parent,
+        measurement: measurements[i],
+      })),
+      ms,
+    }),
+  };
 }
 // One measurement of a line for the rest of the pass, asking git once for each list of files whose commits, ignore
 // rules or deletions it checks.
@@ -118,7 +230,9 @@ function storySource(store, projectId, root, sourceCheck, profile, task) {
   if (!pass) return { line, ...measure() };
   const key = JSON.stringify([root, line ?? null, profile]);
   if (!pass.has(key)) pass.set(key, passMeasurement(measure()));
-  const { current, files } = pass.get(key);
+  const { current, files, error } = pass.get(key);
+  // A measurement that failed in the measuring process fails every check that reads it, as measuring here would.
+  if (error) throw Object.assign(new Error(error.message), error);
   return { line, current: structuredClone(current), files };
 }
 function closedFields(value, allowed, name) {
