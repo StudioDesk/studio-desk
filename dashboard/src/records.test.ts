@@ -8,6 +8,7 @@ import { render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import {
+  callsUrl,
   finishedUrl,
   getJSON,
   liveUrl,
@@ -17,6 +18,7 @@ import {
   type Change,
   type ChangeMessage,
   type CommandRecords,
+  type DirectorCalls,
   type FinishedPage,
   type Live,
   type ReleaseOverview,
@@ -42,7 +44,10 @@ beforeEach(() => {
   sync = new RecordSync(client, 'project-x');
 });
 afterEach(() => {
+  // Optional, so these tests also run against a sync that holds no pending read to stop.
+  (sync as { stop?: () => void }).stop?.();
   unsubscribe.splice(0).forEach(stop => stop());
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -132,6 +137,81 @@ test('a task change during a reload reads the set once more rather than patching
   await Promise.all([reload, sync.apply(changeTo('T-1', 3))]);
   expect(live().tasks.find(task => task.id === 'T-1')?.title).toBe('Renamed during the reload');
   expect(controller.reads().filter(url => url.endsWith('/live'))).toHaveLength(2);
+});
+
+// A page holding the project's list of calls; time is fake from then on, moving only when the test passes it.
+const callsRead = '/api/projects/project-x/calls';
+const callsReads = () => controller.reads().filter(url => url === callsRead).length;
+async function holdCalls() {
+  const calls = new QueryObserver(client, {
+    queryKey: queryKeys.calls('project-x'),
+    queryFn: () => getJSON<DirectorCalls>(callsUrl('project-x')),
+  });
+  unsubscribe.push(calls.subscribe(() => {}));
+  await vi.waitFor(() => expect(client.getQueryData(queryKeys.calls('project-x'))).toBeDefined());
+  controller.requests.length = 0;
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+}
+const pass = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+const phase = (seq: number): Change => ({ seq, type: 'event', kind: 'phase', taskId: 'T-1', attemptId: 'attempt-1' });
+const message = (seq: number, changes: Change[]): ChangeMessage => ({ version: seq, start: 's', changes });
+
+test('messages of phase events alone never read the list of calls again', async () => {
+  await holdCalls();
+  for (let seq = 2; seq < 7; seq++) {
+    await sync.apply(message(seq, [phase(seq), { ...phase(seq), kind: 'log' }]));
+    await pass(300);
+  }
+  await pass(5000);
+  expect(callsReads()).toBe(0);
+});
+
+test('a burst of task changes reads the list of calls once at once and once more when the gap ends, and no more', async () => {
+  await holdCalls();
+  await sync.apply(changeTo('T-1', 2));
+  expect(callsReads()).toBe(1);
+  for (let seq = 3; seq < 7; seq++) {
+    await pass(100);
+    await sync.apply(changeTo('T-1', seq));
+  }
+  expect(callsReads()).toBe(1);
+  // The gap after the first read ends: the changes after it are read once.
+  await pass(600);
+  expect(callsReads()).toBe(2);
+  await pass(5000);
+  expect(callsReads()).toBe(2);
+});
+
+test('a task change after a quiet second reads the list of calls at once', async () => {
+  await holdCalls();
+  await sync.apply(changeTo('T-1', 2));
+  await sync.apply(changeTo('T-1', 3));
+  expect(callsReads()).toBe(1);
+  await pass(1000);
+  expect(callsReads()).toBe(2);
+  // A quiet second after that read: the next change is read at once.
+  await pass(1000);
+  await sync.apply(changeTo('T-1', 4));
+  expect(callsReads()).toBe(3);
+  await pass(5000);
+  expect(callsReads()).toBe(3);
+});
+
+test("a message with an attempt's change beside a phase event reads the list of calls", async () => {
+  await holdCalls();
+  await sync.apply(message(2, [phase(2)]));
+  expect(callsReads()).toBe(0);
+  await sync.apply(message(3, [phase(3), { seq: 3, type: 'attempt', id: 'attempt-1', taskId: 'T-1' }]));
+  expect(callsReads()).toBe(1);
+});
+
+test('a stopped sync reads nothing more when the gap ends', async () => {
+  await holdCalls();
+  await sync.apply(changeTo('T-1', 2));
+  await sync.apply(changeTo('T-1', 3));
+  sync.stop();
+  await pass(5000);
+  expect(callsReads()).toBe(1);
 });
 
 // A page holding one task's own record.

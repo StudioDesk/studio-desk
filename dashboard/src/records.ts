@@ -72,6 +72,9 @@ export const queryKeys = {
 };
 
 const taskTypes = new Set(['task', 'attempt', 'event']);
+// The least time between two reads of the project's list of calls that its stream's changes start: the gap the rail
+// keeps between two reads of another project's list (rail-calls.ts railGap).
+export const callsGap = 1000;
 export type RunItem = FinishedPage['runs'][number];
 
 // The tasks the project's releases name: each milestone's stories, those moved in or out of it, and its release notes.
@@ -113,6 +116,9 @@ export class RecordSync {
   private counter = 0;
   private reloading: Promise<void> | null = null;
   private again = false;
+  // The list of calls' gap after its last read began, and whether a change that counts came during it.
+  private callsHeld: ReturnType<typeof setTimeout> | null = null;
+  private callsAgain = false;
 
   constructor(client: QueryClient, projectId: string, fetchJSON: typeof getJSON = getJSON) {
     this.client = client;
@@ -123,13 +129,37 @@ export class RecordSync {
   async apply(message: ChangeMessage) {
     if (message.reload) return void (await this.client.invalidateQueries({ queryKey: [this.projectId] }));
     const changes = message.changes ?? [];
-    // The controller's list of calls is read again with every change the stream reports: those that refresh the live
-    // set, and the settings and usage holds the shell holds. A read under way is dropped for one after the change. A
-    // command's answer leaves it to the page that sent the command and to the stream's message for the same change.
+    // The controller works the list of calls out from the shell, the live records (tasks, attempts, runs and ideas)
+    // and the settings, never from events, so a message of events alone (each phase or line a running attempt logs)
+    // leaves it. Any other change reads it again: the first at once, those within the gap after it as one more read
+    // when the gap ends, so the last change is always read. A command's answer leaves it to the page that sent the
+    // command and to the stream's message for the same change.
     await Promise.all([
-      changes.length ? this.client.invalidateQueries({ queryKey: queryKeys.calls(this.projectId) }) : null,
+      changes.some(change => change.type !== 'event') ? this.readCalls() : null,
       this.changed(changes),
     ]);
+  }
+
+  // Stops the read of the list of calls still waiting for its gap to end, for a project whose pages have closed.
+  stop() {
+    if (this.callsHeld !== null) clearTimeout(this.callsHeld);
+    this.callsHeld = null;
+    this.callsAgain = false;
+  }
+
+  // Reads the list of calls again now, or once its gap ends when a read began less than the gap ago.
+  private readCalls() {
+    if (this.callsHeld !== null) {
+      this.callsAgain = true;
+      return null;
+    }
+    this.callsHeld = setTimeout(() => {
+      this.callsHeld = null;
+      if (!this.callsAgain) return;
+      this.callsAgain = false;
+      void this.readCalls();
+    }, callsGap);
+    return this.client.invalidateQueries({ queryKey: queryKeys.calls(this.projectId) });
   }
 
   // A command's answer names what it changed as the stream's message for it will, with the page of each task it
@@ -391,7 +421,8 @@ export function useLive(projectId: string) {
 }
 
 // What needs the director now in the project, as the controller lists it (GET /api/projects/<id>/calls), in its
-// order. It is read again with every change the project's stream reports and every command's answer (RecordSync).
+// order. It is read again with the project's stream's changes other than events alone, at most once a second with the
+// last change always read, and with every command's answer (RecordSync).
 export function useCalls(projectId: string) {
   return useQuery({
     enabled: useStreamReady(),

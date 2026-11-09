@@ -112,12 +112,30 @@ test("the page loads its task with the project's shared records, and a change fe
   change(12, [{ seq: 12, type: 'task', id: 'T-1', projectId: 'project-x' }]);
   expect(await screen.findByRole('heading', { name: 'Show finished results inline' })).toBeTruthy();
   controller.attempts = [{ ...controller.attempts[0]!, status: 'succeeded', result: { summary: 'Halfway.' } }];
+  const last = controller.reads().length;
   change(13, [{ seq: 13, type: 'attempt', id: 'attempt-1', taskId: 'T-1', projectId: 'project-x' }]);
   expect(await screen.findByText('Halfway.')).toBeTruthy();
-  // A change to the shown attempt reads its full record again; one to the task alone does not. Each change reads the
-  // list of calls again.
+  // A change to the shown attempt reads its full record again; one to the task alone does not.
   const calls = '/api/projects/project-x/calls';
-  await waitFor(() => expect(controller.reads().slice(10).sort()).toEqual([detailUrl, calls, calls, taskUrl, taskUrl]));
+  await waitFor(() =>
+    expect(
+      controller
+        .reads()
+        .slice(10)
+        .filter(url => url !== calls)
+        .sort(),
+    ).toEqual([detailUrl, taskUrl, taskUrl]),
+  );
+  // The list of calls is read at most once a second, and the last change is always read: once, at once or when the
+  // second after the list's last read ends.
+  await waitFor(() => expect(controller.reads().slice(last)).toContain(calls), { timeout: 3000 });
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  expect(
+    controller
+      .reads()
+      .slice(last)
+      .filter(url => url === calls),
+  ).toEqual([calls]);
 });
 
 test('a brief written in Markdown reads as formatted text, not as its marks', async () => {
