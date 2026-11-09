@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { controllerGitArguments, runGit, runGitAsync } from '../src/git.mjs';
+import { controllerGitArguments, controllerGitOptions, runGit, runGitAsync } from '../src/git.mjs';
 import { commitIntegration, git } from '../src/connectors/source-integration.mjs';
 
 function repository(t) {
@@ -67,7 +67,17 @@ test("the controller's git runs none of a repository's hooks or its fsmonitor co
 });
 
 test("every call but Push adds the same options before git's own arguments", () => {
-  const options = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.longpaths=true'];
+  // --no-optional-locks: a read such as status never refreshes the index under index.lock (test/git-optional-locks).
+  const options = [
+    '--no-optional-locks',
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'core.longpaths=true',
+  ];
+  assert.deepEqual(controllerGitOptions, options);
   assert.deepEqual(controllerGitArguments(['status']), ['--literal-pathspecs', ...options, 'status']);
   // check-ignore refuses pathspec magic, --literal-pathspecs included.
   assert.deepEqual(controllerGitArguments(['check-ignore', '-z', '--stdin']), [
@@ -108,4 +118,15 @@ test("the controller's asynchronous git answers as its git does, runs no hooks, 
   assert.ok(
     Buffer.isBuffer(await runGitAsync(r.root, ['cat-file', '-p', 'HEAD:a.txt'], { encoding: null, literal: false })),
   );
+});
+
+// The director's confirmed Push runs as the director's own git (src/connectors/source-releases.mjs): its arguments are
+// git push's own, with none of the options the controller's calls add, so pre-push hooks and Git LFS uploads still run.
+test("the confirmed Push runs git with push's own arguments and none of the controller's options", () => {
+  const source = fs.readFileSync(new URL('../src/connectors/source-releases.mjs', import.meta.url), 'utf8'),
+    calls = [...source.matchAll(/spawn\(\s*'git',\s*\[([^\]]*)\]/g)].map(match => match[1].trim());
+  assert.deepEqual(calls, ["'push', '--porcelain', remote, ...refs"]);
+  for (const option of controllerGitOptions.filter(option => option !== '-c'))
+    assert.ok(!source.includes(option), `Push's file names no ${option}.`);
+  assert.doesNotMatch(source, /controllerGit(Options|Arguments)/);
 });

@@ -11,7 +11,11 @@ import { execFile, spawnSync } from 'node:child_process';
 
 // What every call but Push adds before its own arguments. Git for Windows stops at 260-character paths unless
 // core.longpaths is set, and candidate copies sit deep inside job folders; other platforms ignore the setting.
+// --no-optional-locks keeps a read such as status from refreshing the index under index.lock, which made a commit the
+// director (or a test) ran in the same folder at that moment fail while a dispatch pass measured it (November 9). A
+// command that writes still takes every lock it needs.
 export const controllerGitOptions = [
+  '--no-optional-locks',
   '-c',
   'core.hooksPath=/dev/null',
   '-c',
