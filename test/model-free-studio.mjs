@@ -28,6 +28,29 @@ if (process.env.STUDIO_MODEL_FREE_LEAF_FIXTURES === '1') {
 // install) refuses to add a project, and one with settings of its own (signing, hooks) changes what git does.
 // The built-in sandbox already gives its runs a neutral identity, which is kept.
 process.env.GIT_CONFIG_GLOBAL ||= fileURLToPath(new URL('./fixture-gitconfig', import.meta.url));
+// The tests' line endings, never the computer's: Git for Windows sets core.autocrlf=true in its system settings, which
+// the fixture's global settings leave in effect, so every copy git checked out came back with CRLF and differed from
+// the files the tests wrote. Pinned as git's own command settings (GIT_CONFIG_COUNT), which hold whichever global
+// settings are used, the built-in sandbox's included, and which every git the suite starts inherits. Entries already
+// there are kept. They outrank a repository's own settings too, so a test of a repository set to its own line endings
+// takes them out of the environment it gives git.
+export const pinnedGitSettings = [
+  ['core.autocrlf', 'false'],
+  ['core.eol', 'lf'],
+];
+export function pinGitSettings(environment, settings = pinnedGitSettings) {
+  const counted = Number.parseInt(environment.GIT_CONFIG_COUNT ?? '', 10);
+  let count = Number.isInteger(counted) && counted > 0 ? counted : 0;
+  for (const [key, value] of settings) {
+    let index = 0;
+    while (index < count && environment[`GIT_CONFIG_KEY_${index}`] !== key) index++;
+    if (index === count) environment[`GIT_CONFIG_KEY_${count++}`] = key;
+    environment[`GIT_CONFIG_VALUE_${index}`] = value;
+  }
+  environment.GIT_CONFIG_COUNT = String(count);
+  return environment;
+}
+pinGitSettings(process.env);
 
 // Protocol fixtures are single Node processes. Terminate their known leaf
 // directly so model-free tests can run inside a test sandbox, which need not offer taskkill (MXC had none).
