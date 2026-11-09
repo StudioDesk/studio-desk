@@ -6,6 +6,8 @@ import path from 'node:path';
 import { copySource, ensureSourceDirectories, sourcePlan } from './source-checks.mjs';
 import { git, repositoryState, stageFiles } from './source-integration.mjs';
 import { studioDeskProfile, snapshotPaths } from './source-profile.mjs';
+import { hash } from '../core/contracts.mjs';
+import { runGit } from '../git.mjs';
 
 // The commit a source story starts from. Integration still compares the live tree with the
 // candidate's base, so the snapshot paths must match that commit exactly: uncommitted,
@@ -94,6 +96,69 @@ export function createSourceWorktree(root, parent, name, commit, profile = studi
   ensureSourceDirectories(target, profile);
   // Its real spelling, which also expands a Windows short name (fs.realpathSync keeps those, and the given case).
   return fs.realpathSync.native(target);
+}
+
+// Gives a worktree of `commit` the bytes of the folder its snapshot measured (plan.root), file by file, where git
+// writes the same committed file differently. A repository that rewrites line endings (core.autocrlf=true, Git for
+// Windows' default) checks a text file out with CRLF, while the director's folder may hold it with LF (written by a
+// tool or an agent and committed, never checked out again): the same commit, other bytes, and the story's working copy
+// would not match its approved snapshot. A file is taken from the folder only when its bytes are the ones the snapshot
+// recorded and git stores them as exactly the commit's file (the same object once its own filters clean them), so the
+// working copy still holds the commit. Nothing is written to the folder or its settings. Returns the paths taken.
+export function matchMeasuredFolder(worktree, plan, commit) {
+  const folder = plan.root,
+    readFile = (root, file) => {
+      const target = path.join(root, file);
+      try {
+        return fs.lstatSync(target).isFile() ? fs.readFileSync(target) : null;
+      } catch {
+        return null;
+      }
+    },
+    differing = plan.files.filter(item => {
+      if (item.path.includes('\n')) return false;
+      const bytes = readFile(worktree, item.path);
+      return bytes && hash(bytes) !== item.hash;
+    });
+  if (!differing.length || !folder || path.resolve(folder) === path.resolve(worktree)) return [];
+  const measured = new Map();
+  for (const item of differing) {
+    const bytes = readFile(folder, item.path);
+    if (bytes && hash(bytes) === item.hash) measured.set(item.path, bytes);
+  }
+  if (!measured.size) return [];
+  const files = [...measured.keys()],
+    big = { maxBuffer: 64 * 1024 * 1024 };
+  let stored, committed;
+  try {
+    // The object each folder file would be stored as, with the repository's own filters, and the commit's objects.
+    stored = runGit(folder, ['hash-object', '--stdin-paths'], { input: files.join('\n') + '\n', ...big }).split('\n');
+    committed = new Map();
+    const tree = runGit(worktree, ['ls-tree', '-r', '-z', '--full-tree', commit], { raw: true, ...big });
+    for (const entry of tree.split('\0')) {
+      const match = /^\d+ blob ([0-9a-f]+)\t(.+)$/s.exec(entry);
+      if (match) committed.set(match[2], match[1]);
+    }
+  } catch {
+    return [];
+  }
+  const taken = [];
+  files.forEach((file, index) => {
+    const bytes = measured.get(file),
+      again = readFile(folder, file);
+    // Still the measured bytes after git read them, so the object git named is theirs.
+    if (!stored[index] || stored[index] !== committed.get(file) || !again || hash(again) !== hash(bytes)) return;
+    fs.writeFileSync(path.join(worktree, file), bytes);
+    taken.push(file);
+  });
+  // git takes a file of another size for an edited one without reading it, so the working copy's index learns the
+  // bytes: staged again, each is the object it already holds, and the copy reads as its commit. A repository that
+  // refuses line endings it would not write back (core.safecrlf) is not asked here, where they are the folder's own.
+  if (taken.length)
+    runGit(worktree, ['-c', 'core.safecrlf=false', 'add', '--pathspec-from-file=-', '--pathspec-file-nul'], {
+      input: taken.join('\0') + '\0',
+    });
+  return taken;
 }
 
 // New source paths that git ignores, which a candidate could not commit.

@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { copySource, verifyCopy } from './source-checks.mjs';
-import { createSourceWorktree, removeWorktrees } from './source-worktrees.mjs';
+import { createSourceWorktree, matchMeasuredFolder, removeWorktrees } from './source-worktrees.mjs';
 import { lastLine } from './package-installs.mjs';
 
 const self = fileURLToPath(import.meta.url),
@@ -127,10 +127,13 @@ export function prepareSource(request, report) {
     if (request.leftovers) removeWorktrees(request.leftovers);
     worktree = createSourceWorktree(request.repository, request.parent, request.name, request.commit, request.profile);
   });
-  // The base commit holds exactly the snapshot the story's scope approved.
+  // The base commit holds exactly the snapshot the story's scope approved. A file git checked out with other line
+  // endings than the measured folder holds it, the same committed file, takes the folder's bytes first
+  // (matchMeasuredFolder), so the working copy and its snapshot agree byte for byte whatever git's settings are.
   step('setup.snapshot', () => {
     holdWhile(request.hold);
     try {
+      matchMeasuredFolder(worktree, request.snapshot, request.commit);
       verifyCopy(request.snapshot, worktree);
     } catch {
       throw new Error(snapshotMismatch);

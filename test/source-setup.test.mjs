@@ -16,9 +16,11 @@ import { runSourceSetup, setupEndedMessage } from '../src/connectors/source-setu
 import {
   createSourceWorktree,
   leftoverWorktrees,
+  matchMeasuredFolder,
   removeSourceWorktree,
   removeWorktrees,
 } from '../src/connectors/source-worktrees.mjs';
+import { hash } from '../src/core/contracts.mjs';
 import { jobDirectory } from '../src/core/projects.mjs';
 
 const snapshotMismatch = 'The base commit does not match the approved source snapshot. Start a new attempt.',
@@ -360,4 +362,99 @@ test('a setup step’s own failure comes before the last error line, which comes
   done.end(0);
   assert.equal(done.nexts(), 1);
   assert.equal(done.finished.length, 3);
+});
+
+// The suite pins git's line endings in the environment (test/model-free-studio.mjs), which outranks a repository's own
+// settings; a test of a project set to its own line endings takes them out for its duration, as a director's git has
+// none of them.
+function repositoryLineEndings(t) {
+  const names = Object.keys(process.env).filter(name => /^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(name)),
+    saved = Object.fromEntries(names.map(name => [name, process.env[name]])),
+    count = Number.parseInt(saved.GIT_CONFIG_COUNT ?? '', 10) || 0,
+    kept = [];
+  for (let index = 0; index < count; index++) {
+    const key = saved[`GIT_CONFIG_KEY_${index}`];
+    if (key !== undefined && !['core.autocrlf', 'core.eol'].includes(key.toLowerCase()))
+      kept.push([key, saved[`GIT_CONFIG_VALUE_${index}`] ?? '']);
+  }
+  for (const name of names) delete process.env[name];
+  if (kept.length) {
+    kept.forEach(([key, value], index) => {
+      process.env[`GIT_CONFIG_KEY_${index}`] = key;
+      process.env[`GIT_CONFIG_VALUE_${index}`] = value;
+    });
+    process.env.GIT_CONFIG_COUNT = String(kept.length);
+  }
+  t.after(() => {
+    for (const name of Object.keys(process.env))
+      if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(name)) delete process.env[name];
+    Object.assign(process.env, saved);
+  });
+}
+
+// A story on a project whose repository rewrites line endings (core.autocrlf=true in its own settings, as Git for
+// Windows sets for every repository), set up end to end: its base verifies against the approved snapshot and the
+// story reaches review with its edit.
+async function lineEndingStory(t, workingCopy) {
+  repositoryLineEndings(t);
+  const c = await setup(t),
+    { store } = c.app,
+    file = path.join(c.root, 'src/core/workflows.mjs');
+  git(c.root, ['config', 'core.autocrlf', 'true']);
+  assert.equal(git(c.root, ['config', 'core.autocrlf']), 'true');
+  if (workingCopy === 'crlf') {
+    // A normal checkout with that setting: every text file is written again with CRLF.
+    for (const tracked of git(c.root, ['ls-files']).split('\n')) fs.rmSync(path.join(c.root, tracked));
+    git(c.root, ['checkout', '--', '.']);
+    assert.ok(fs.readFileSync(file, 'utf8').endsWith('\r\n'));
+  } else assert.ok(!fs.readFileSync(file, 'utf8').includes('\r'));
+  // Either way the folder holds exactly its commit, as git sees it.
+  assert.equal(git(c.root, ['status', '--porcelain']), '');
+  await c.start();
+  const a = await c.wait(c.taskId),
+    recorded = phases(store, a.id);
+  assert.notEqual(a.error, snapshotMismatch);
+  assert.equal(recorded.find(p => p.phaseId === 'setup.snapshot' && p.boundary === 'finish').outcome, 'succeeded');
+  assert.ok(a.artifacts.some(item => item.path === 'changes/src/core/workflows.mjs' && item.kind === 'source-file'));
+  // The editor read the file with the bytes the director's folder holds.
+  assert.deepEqual(
+    fs.readFileSync(path.join(jobDirectory(store, a), 'source/src/core/workflows.mjs')),
+    fs.readFileSync(file),
+  );
+  // The director's folder and its settings are as they were.
+  assert.equal(git(c.root, ['config', 'core.autocrlf']), 'true');
+  assert.equal(git(c.root, ['status', '--porcelain']), '');
+  assert.equal(fs.readFileSync(file, 'utf8').includes('\r\n'), workingCopy === 'crlf');
+}
+
+test('a story on a repository set to core.autocrlf=true, whose file was committed with LF and never checked out again, verifies its base', async t => {
+  await lineEndingStory(t, 'lf');
+});
+
+test('a story on a normal core.autocrlf=true checkout, whose files are CRLF, verifies its base', async t => {
+  await lineEndingStory(t, 'crlf');
+});
+
+test('a working copy takes a measured file only when git stores it as the commit holds it', async t => {
+  repositoryLineEndings(t);
+  const c = await setup(t, 'pass', undefined, {}, true),
+    parent = path.join(c.directory, 'wt'),
+    head = git(c.root, ['rev-parse', 'HEAD']),
+    measured = file => ({ path: file, hash: hash(fs.readFileSync(path.join(c.root, file))) });
+  git(c.root, ['config', 'core.autocrlf', 'true']);
+  // Committed with LF and never checked out again, and an edit not committed.
+  fs.writeFileSync(path.join(c.root, 'src/core/projects.mjs'), '// An edit the commit does not hold.\n');
+  const plan = { root: c.root, files: ['src/core/workflows.mjs', 'src/core/projects.mjs'].map(measured) },
+    worktree = createSourceWorktree(c.root, parent, 'm', head),
+    read = file => fs.readFileSync(path.join(worktree, file), 'utf8');
+  // git wrote both with CRLF; only the file the folder holds as committed takes the folder's bytes.
+  assert.equal(read('src/core/workflows.mjs'), '// Fixture source: src/core/workflows.mjs\r\n');
+  assert.deepEqual(matchMeasuredFolder(worktree, plan, head), ['src/core/workflows.mjs']);
+  assert.equal(read('src/core/workflows.mjs'), '// Fixture source: src/core/workflows.mjs\n');
+  assert.equal(read('src/core/projects.mjs'), '// Fixture source: src/core/projects.mjs\r\n');
+  // The working copy still holds its commit, and the folder was only read.
+  assert.equal(git(worktree, ['status', '--porcelain']), '');
+  assert.equal(git(c.root, ['status', '--porcelain']), 'M src/core/projects.mjs');
+  assert.deepEqual(matchMeasuredFolder(worktree, plan, head), []);
+  removeSourceWorktree(c.root, worktree);
 });
