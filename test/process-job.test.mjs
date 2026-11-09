@@ -11,6 +11,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   jobbedCommand,
+  processJobsMissing,
   processJobsWork,
   quoteWindowsArgument,
   readJobReport,
@@ -18,6 +19,7 @@ import {
   windowsJobScript,
   windowsPowerShell,
 } from '../src/adapters/process-job.mjs';
+import { checkProcessJobs, measureProcessJobs, runNative } from '../src/adapters/native-process.mjs';
 
 const tree = fileURLToPath(new URL('./fixture-process-tree.mjs', import.meta.url));
 
@@ -75,6 +77,73 @@ test("the wrapper's inputs travel in the environment, and its report is read onc
   assert.equal(readJobReport(report), null);
   assert.equal(readJobReport(path.join(directory, 'missing.json')), null);
   assert.equal(processJobsWork({ platform: 'linux' }), false);
+});
+
+// The warning that the wrapper cannot run is for a real failure only: a configuration that turned the wrapper off logs
+// nothing, and a check that ran on Windows and failed logs once. The check is handed its platform and a stand-in for
+// the wrapper, so this means the same on every computer.
+test('the job wrapper warning appears only when its check ran and failed', async t => {
+  const warning = /job wrapper/;
+  // Turned off by the configuration: starting an attempt asks nothing and logs no warning.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'process-job-warning-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const events = [],
+    store = { event: (...event) => events.push(event), updateAttempt() {} };
+  const off = { processJobs: false, store, parseOutput() {}, recordLine() {}, nativeFailure() {} };
+  const entry = { attempt: { taskId: 'T-1', id: 'attempt-1', provider: 'codex' }, output: directory, buffers: {} };
+  const finished = await new Promise(resolve => {
+    off.finish = (_, result, error) => resolve({ result, error });
+    runNative.call(off, entry, process.execPath, ['-e', ''], '', () => 'done', { environment: process.env });
+  });
+  assert.deepEqual(finished, { result: 'done', error: undefined });
+  assert.equal(entry.attempt.processJob, undefined);
+  assert.deepEqual(
+    events.filter(([, , , text]) => warning.test(text)),
+    [],
+    'a wrapper the configuration turned off is not reported as failing',
+  );
+  const refused = () => assert.fail('the check does not run when the configuration decided');
+  checkProcessJobs(off, entry.attempt, { platform: 'win32', run: refused });
+  assert.equal(off.processJobs, false);
+  assert.deepEqual(events, []);
+
+  // Asked of a Windows computer where the wrapper does not run: logged once, for the first attempt only.
+  const asked = [],
+    failing = { store };
+  const run = (...args) => (asked.push(args), { status: 1 });
+  checkProcessJobs(failing, { taskId: 'T-2', id: 'attempt-2' }, { platform: 'win32', run });
+  checkProcessJobs(failing, { taskId: 'T-3', id: 'attempt-3' }, { platform: 'win32', run });
+  assert.equal(asked.length, 1, 'asked of this computer once');
+  assert.equal(failing.processJobs, false);
+  assert.deepEqual(events, [['log', 'T-2', 'attempt-2', `controller: ${processJobsMissing}`]]);
+
+  // Where it runs, or where there is no wrapper to run (macOS and Linux), nothing is logged.
+  const working = { store };
+  checkProcessJobs(working, { taskId: 'T-4', id: 'attempt-4' }, { platform: 'win32', run: () => ({ status: 37 }) });
+  assert.equal(working.processJobs, true);
+  const elsewhere = { store };
+  checkProcessJobs(elsewhere, { taskId: 'T-5', id: 'attempt-5' }, { platform: 'linux', run: refused });
+  assert.equal(elsewhere.processJobs, false);
+  assert.equal(events.length, 1);
+
+  // Try it asked first, on a Windows computer where the wrapper does not run: Try it logs nothing and runs without it,
+  // and the first attempt after it still says the check failed, once.
+  const tried = { store },
+    triedAsked = [];
+  const fails = (...args) => (triedAsked.push(args), { status: 1 });
+  assert.equal(measureProcessJobs(tried, { platform: 'win32', run: fails }), false);
+  assert.equal(measureProcessJobs(tried, { platform: 'win32', run: fails }), false);
+  assert.equal(events.length, 1, 'Try it logs nothing itself');
+  checkProcessJobs(tried, { taskId: 'T-6', id: 'attempt-6' }, { platform: 'win32', run: refused });
+  checkProcessJobs(tried, { taskId: 'T-7', id: 'attempt-7' }, { platform: 'win32', run: refused });
+  assert.equal(triedAsked.length, 1, 'asked of this computer once, by Try it');
+  assert.deepEqual(events.slice(1), [['log', 'T-6', 'attempt-6', `controller: ${processJobsMissing}`]]);
+
+  // Try it on a runtime whose configuration turned the wrapper off asks nothing, and no attempt warns.
+  const triedOff = { processJobs: false, store };
+  assert.equal(measureProcessJobs(triedOff, { platform: 'win32', run: refused }), false);
+  checkProcessJobs(triedOff, { taskId: 'T-8', id: 'attempt-8' }, { platform: 'win32', run: refused });
+  assert.equal(events.length, 2);
 });
 
 test("the wrapper's test-only pause is set only by the option, never by a value the controller inherited", () => {

@@ -6,6 +6,26 @@ import { jobStartFailed, jobbedCommand, processJobsMissing, processJobsWork, rea
 import { usageReset, reportedReset } from '../core/usage-reset.mjs';
 import { flushSay } from '../core/attempt-trace.mjs';
 
+// Whether processes run in a job, asked of this computer once for the runtime, by whichever starts first: an agent's
+// attempt or Try it (connectors/try-copy.mjs). A value the configuration set (processJobs: false, as the tests do) is
+// kept and never asked. The runtime remembers when the check ran here on Windows and failed, so the first attempt can
+// say so however the value was found. `platform` and `run` are processJobsWork's.
+export function measureProcessJobs(runtime, { platform = process.platform, run } = {}) {
+  if (runtime.processJobs !== undefined) return runtime.processJobs;
+  runtime.processJobs = processJobsWork({ platform, run });
+  if (platform === 'win32' && !runtime.processJobs) runtime.processJobsFailed = true;
+  return runtime.processJobs;
+}
+
+// For an attempt: the log says the wrapper cannot run only when that check ran on this computer and failed, once per
+// runtime. A configuration that turned the wrapper off is not a failure and logs nothing.
+export function checkProcessJobs(runtime, attempt, options) {
+  measureProcessJobs(runtime, options);
+  if (!runtime.processJobsFailed || runtime.processJobsWarned) return;
+  runtime.processJobsWarned = true;
+  runtime.store.event('log', attempt.taskId, attempt.id, `controller: ${processJobsMissing}`);
+}
+
 export function runNative(
   entry,
   binary,
@@ -24,11 +44,7 @@ export function runNative(
   // On Windows the CLI runs in a job of its own, so whatever it starts ends with it: what its main process leaves
   // running is ended and counted when it exits, and the whole tree ends with the controller (C-07). Asked of this
   // computer once; where the wrapper cannot run, the CLI starts as before and the attempt's log says so.
-  if (this.processJobs === undefined) this.processJobs = processJobsWork();
-  if (process.platform === 'win32' && !this.processJobs && !this.processJobsWarned) {
-    this.processJobsWarned = true;
-    this.store.event('log', a.taskId, a.id, `controller: ${processJobsMissing}`);
-  }
+  checkProcessJobs(this, a);
   const report = this.processJobs
       ? path.join(entry.job || output, `process-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
       : '',
