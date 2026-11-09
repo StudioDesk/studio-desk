@@ -473,6 +473,8 @@ function tagRelease(store, projectId, milestoneId, release, close, discard = () 
   const { milestone } = milestoneOf(store, projectId, milestoneId);
   if (!tagExists(release.root, release.tag))
     git(release.root, ['tag', '-a', release.tag, '-m', `Release ${milestone.version}`, release.commit]);
+  const shipsTo = store.project(projectId).shipsTo;
+  if (shipsTo) release.shipped ??= pendingShipping(shipsTo);
   close('released');
   discard();
   store.event(
@@ -490,7 +492,38 @@ function tagRelease(store, projectId, milestoneId, release, close, discard = () 
 // moves to it, so it always equals the newest release. A fast-forward when it is behind the release; otherwise a merge
 // commit whose content is exactly the release's, so shipping never conflicts. A release older than one already shipped
 // is not shipped (an older line's patch), and main never goes back. What happened is recorded on the release as
-// `shipped`: the commit, a skip with its reason, or the error that stopped it, which Ship again retries.
+// `shipped`: pending intent, then the commit, a skip with its reason, or the error that Ship again retries.
+const pendingShipping = branch => ({ branch, pending: true, at: new Date().toISOString() });
+// When the project switched to version lines: the time of its version_lines event, the switch's only record.
+function versionLinesSince(store, projectId) {
+  return (
+    store.db
+      .prepare(
+        "SELECT e.time FROM events e JOIN settings s ON s.id = 'event-project:' || e.seq WHERE e.kind = 'version_lines' AND s.data = ? ORDER BY e.seq DESC LIMIT 1",
+      )
+      .get(JSON.stringify(projectId))?.time ?? null
+  );
+}
+// Before pending shipping was recorded, a release finished on a version line could be saved without any shipping
+// evidence. Releases finished before the switch to version lines (on main or on an older line, such as a patch on
+// release/1.0) are history, not unfinished shipping: the switch never moves main, so restart leaves them alone.
+function unfinishedShipping(store, project, milestone) {
+  const release = milestone.release,
+    shipped = release?.shipped;
+  if (
+    !project.shipsTo ||
+    milestone.state !== 'released' ||
+    release?.state !== 'released' ||
+    shipped?.commit ||
+    shipped?.skipped ||
+    shipped?.error
+  )
+    return false;
+  if (shipped) return shipped.pending === true;
+  if (!release.repository?.branch || release.repository.branch === project.shipsTo || !release.finishedAt) return false;
+  const since = versionLinesSince(store, project.id);
+  return Boolean(since && release.finishedAt >= since);
+}
 export function shipRelease(store, projectId, milestoneId) {
   const project = store.project(projectId),
     shipsTo = project.shipsTo;
@@ -500,26 +533,35 @@ export function shipRelease(store, projectId, milestoneId) {
   if (milestone.state !== 'released' || release?.state !== 'released')
     throw new Error(`Milestone ${milestone.version} has not been released yet.`);
   if (release.shipped?.commit || release.shipped?.skipped) return structuredClone(release.shipped);
+  // Durable intent precedes any git mutation, including an explicit retry of a recorded error. A stop never leaves
+  // that retry without evidence; restart either observes its result in git or records a displayable error.
+  if (!release.shipped?.pending) {
+    release.shipped = pendingShipping(shipsTo);
+    save();
+  }
   const root = release.root,
-    at = new Date().toISOString(),
-    version = parseVersion(milestone.version),
-    newer = releaseTags(root).find(tag => compareVersions(tag.version, version) > 0);
+    at = new Date().toISOString();
   const record = (shipped, message) => {
     release.shipped = shipped;
     save();
     store.event('release_shipped', release.reviewTaskId, null, message, projectId);
     return structuredClone(shipped);
   };
-  if (newer)
-    return record(
-      { branch: shipsTo, skipped: `${newer.name} is newer, and ${shipsTo} holds the newest release.`, at },
-      `${milestone.version} stays on ${release.repository.branch}: ${newer.name} is newer, so ${shipsTo} does not move.`,
-    );
   try {
+    const version = parseVersion(milestone.version),
+      newer = releaseTags(root).find(tag => compareVersions(tag.version, version) > 0);
+    if (newer)
+      return record(
+        { branch: shipsTo, skipped: `${newer.name} is newer, and ${shipsTo} holds the newest release.`, at },
+        `${milestone.version} stays on ${release.repository.branch}: ${newer.name} is newer, so ${shipsTo} does not move.`,
+      );
     const head = git(root, ['rev-parse', `refs/heads/${shipsTo}`]);
     let commit = release.commit;
     if (head === release.commit || landed(root, release.commit, `refs/heads/${shipsTo}`))
-      return record({ branch: shipsTo, commit: head, at }, `${shipsTo} already holds ${milestone.version}.`);
+      return record(
+        { branch: shipsTo, commit: head, at, merged: head !== release.commit },
+        `${shipsTo} already holds ${milestone.version}.`,
+      );
     if (!landed(root, head, release.commit)) {
       const tree = git(root, ['rev-parse', `${release.commit}^{tree}`]);
       commit = git(root, [
@@ -554,13 +596,20 @@ export function shipRelease(store, projectId, milestoneId) {
     );
   }
 }
-// Ship again, after shipping stopped with an error.
+// Ship again after an error, or finish a released version line whose shipping was interrupted.
 export function shipAgain(store, projectId, milestoneId) {
-  const { milestone, save } = milestoneOf(store, projectId, milestoneId);
-  if (!store.project(projectId).shipsTo) throw new Error('This project has no branch its releases ship to.');
-  if (!milestone.release?.shipped?.error) throw new Error(`${milestone.version} has nothing to ship again.`);
-  delete milestone.release.shipped;
-  save();
+  const { milestone } = milestoneOf(store, projectId, milestoneId),
+    project = store.project(projectId),
+    release = milestone.release;
+  if (!project.shipsTo) throw new Error('This project has no branch its releases ship to.');
+  if (milestone.state !== 'released' || release?.state !== 'released')
+    throw new Error(`Milestone ${milestone.version} has not been released yet.`);
+  if (
+    release.shipped?.commit ||
+    release.shipped?.skipped ||
+    (!release.shipped?.error && !unfinishedShipping(store, project, milestone))
+  )
+    throw new Error(`${milestone.version} has nothing to ship again.`);
   return shipRelease(store, projectId, milestoneId);
 }
 
@@ -595,6 +644,13 @@ export function interruptedReleases(runtime) {
           changed = true;
           turn(false);
         }
+        if (unfinishedShipping(store, project, milestone)) {
+          if (!release.shipped) {
+            release.shipped = pendingShipping(project.shipsTo);
+            changed = true;
+          }
+          shipped.push(milestone.id);
+        }
         continue;
       }
       changed = true;
@@ -602,6 +658,7 @@ export function interruptedReleases(runtime) {
       if (was === 'committing' && release.commit && lineReached(release.root, release)) {
         if (!tagExists(release.root, release.tag))
           git(release.root, ['tag', '-a', release.tag, '-m', `Release ${milestone.version}`, release.commit]);
+        if (project.shipsTo) release.shipped ??= pendingShipping(project.shipsTo);
         Object.assign(release, { state: 'released', finishedAt: new Date().toISOString() });
         milestone.state = 'released';
         shipped.push(milestone.id);
@@ -627,7 +684,7 @@ export function interruptedReleases(runtime) {
       if (release.state === 'ready') holdInterrupted(runtime, project.id, 'release');
     }
     if (changed) store.putSetting(key(project.id), milestones);
-    // A release the stop cut off after its line reached it ships now, as it would have.
+    // Finish released milestones whose shipping was interrupted, observing git before moving anything.
     for (const id of shipped.splice(0)) shipRelease(store, project.id, id);
   }
 }

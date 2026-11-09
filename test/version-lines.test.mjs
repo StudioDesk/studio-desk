@@ -19,7 +19,8 @@ import {
 } from '../src/connectors/source-milestones.mjs';
 import { projectLines } from '../src/connectors/source-lines.mjs';
 import { releaseOverview } from '../src/connectors/release-overview.mjs';
-import { shipAgain, shipRelease } from '../src/connectors/source-releases.mjs';
+import { interruptedReleases, shipAgain, shipRelease } from '../src/connectors/source-releases.mjs';
+import { Store } from '../src/store.mjs';
 import { saveProjectOrganization } from '../src/core/project-organization.mjs';
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
 
@@ -86,6 +87,7 @@ function releasedAt(c, milestoneId, branch, commit, tag) {
     tag,
     repository: { branch },
     reviewTaskId: null,
+    finishedAt: new Date().toISOString(),
   };
   c.app.store.putSetting('milestones:' + project, all);
 }
@@ -584,3 +586,302 @@ test('a ship that cannot move main says why, Ship again finishes it, and Push se
       .some(event => event.kind === 'release_pushed' && /release\/1\.1, main and v1\.1\.0/.test(event.message)),
   );
 });
+
+// Backend-only fixtures reopen SQLite directly, so the interruption is independent of HTTP or a live model.
+async function shippingFixture(t) {
+  const c = await released(t, true),
+    store = c.app.store,
+    next = makeMilestone(store, project, c.app.runner, { version: '1.1.0' });
+  useVersionLines(store, project, c.app.runner, { shipsTo: 'main' });
+  const commit = commitOn(c, 'release/1.1', 'one.txt', 'one\n');
+  releasedAt(c, next.id, 'release/1.1', commit, 'v1.1.0');
+  return { c, store, next, commit };
+}
+async function withReopened(store, check) {
+  const again = new Store(store.directory);
+  try {
+    await check(again);
+  } finally {
+    again.close();
+  }
+}
+const shippingMilestone = (store, id) => projectMilestones(store, project).find(item => item.id === id);
+// Stop after a durable milestone write, leaving precisely those bytes for the next process to read.
+function stopAfterMilestoneWrite(t, store) {
+  const put = store.putSetting.bind(store),
+    stop = new Error('Fixture stop after saving milestones');
+  const write = t.mock.method(store, 'putSetting', (key, value) => {
+    put(key, value);
+    if (key === `milestones:${project}`) throw stop;
+  });
+  return { stop, restore: () => write.mock.restore() };
+}
+
+test('recovery stopped after saving a committing release as released resumes shipping on the next restart', async t => {
+  const { c, store, next, commit } = await shippingFixture(t),
+    all = projectMilestones(store, project),
+    item = all.find(item => item.id === next.id);
+  item.state = 'open';
+  item.release.state = 'committing';
+  item.release.repository.live = false;
+  git(c.root, ['tag', '-d', 'v1.1.0']);
+  store.putSetting(`milestones:${project}`, all);
+  store.claim(['source:fixture'], item.release.id);
+  const cut = stopAfterMilestoneWrite(t, store);
+  assert.throws(
+    () => interruptedReleases({ store }),
+    error => error === cut.stop,
+  );
+  cut.restore();
+  const saved = shippingMilestone(store, next.id),
+    refs = git(c.root, ['show-ref']);
+  assert.equal(saved.release.state, 'released');
+  assert.equal(saved.release.shipped?.pending, true);
+  assert.notEqual(tip(c, 'main'), commit);
+  await withReopened(store, again => {
+    interruptedReleases({ store: again });
+    assert.equal(shippingMilestone(again, next.id).release.shipped?.commit, commit);
+    const shippedRefs = git(c.root, ['show-ref']);
+    interruptedReleases({ store: again });
+    assert.equal(git(c.root, ['show-ref']), shippedRefs);
+    assert.equal(
+      tip(c, 'v1.1.0'),
+      refs
+        .split('\n')
+        .find(line => line.endsWith('refs/tags/v1.1.0'))
+        .split(' ')[0],
+    );
+    assert.equal(again.leases().length, 0);
+    const done = shippingMilestone(again, next.id);
+    assert.deepEqual([done.id, done.line, done.release.tag], [saved.id, saved.line, saved.release.tag]);
+    assert.equal(done.release.pushed, undefined);
+  });
+});
+
+test('a director retry stopped at its first shipping write keeps recovery and another retry available', async t => {
+  const { c, store, next, commit } = await shippingFixture(t);
+  fs.writeFileSync(path.join(c.root, 'one.txt'), 'local obstruction\n');
+  const error = shipRelease(store, project, next.id);
+  assert.match(error.error, /one\.txt/);
+  const cut = stopAfterMilestoneWrite(t, store);
+  assert.throws(
+    () => shipAgain(store, project, next.id),
+    error => error === cut.stop,
+  );
+  cut.restore();
+  assert.equal(shippingMilestone(store, next.id).release.shipped?.pending, true);
+  await withReopened(store, again => {
+    interruptedReleases({ store: again });
+    assert.match(shippingMilestone(again, next.id).release.shipped?.error ?? '', /one\.txt/);
+    // An actionable error stays stable across restart, and the existing director route can retry it.
+    const failed = shippingMilestone(again, next.id).release.shipped;
+    interruptedReleases({ store: again });
+    assert.deepEqual(shippingMilestone(again, next.id).release.shipped, failed);
+    fs.rmSync(path.join(c.root, 'one.txt'));
+    assert.equal(shipAgain(again, project, next.id).commit, commit);
+    assert.equal(tip(c, 'main'), commit);
+    assert.equal(shippingMilestone(again, next.id).release.pushed, undefined);
+  });
+});
+
+test('released version lines without shipping evidence recover, while historical main releases remain unchanged', async t => {
+  const { c, store, next, commit } = await shippingFixture(t),
+    all = projectMilestones(store, project),
+    historical = {
+      ...next,
+      id: 'milestone-history',
+      version: '1.0.0',
+      line: null,
+      state: 'released',
+      release: {
+        state: 'released',
+        root: c.root,
+        repository: { branch: 'main' },
+        commit: tip(c, 'v1.0.0^{commit}'),
+        tag: 'v1.0.0',
+      },
+    };
+  all.unshift(historical);
+  store.putSetting(`milestones:${project}`, all);
+  const before = shippingMilestone(store, next.id),
+    paused = store.project(project).dispatchPaused;
+  fs.writeFileSync(path.join(c.root, 'one.txt'), 'local obstruction\n');
+  await withReopened(store, async again => {
+    interruptedReleases({ store: again });
+    const failed = shippingMilestone(again, next.id);
+    assert.equal(failed.state, 'released');
+    assert.equal(failed.release.state, 'released');
+    assert.match(failed.release.shipped.error, /one\.txt/);
+    assert.deepEqual(shippingMilestone(again, historical.id), historical);
+    assert.equal(again.project(project).dispatchPaused, paused, 'Shipping recovery does not resume or pause work.');
+    const view = await releaseOverview(again, project, c.app.runner);
+    assert.equal(view.milestones.find(item => item.id === next.id).release.shipped.error, failed.release.shipped.error);
+    assert.throws(() => shipAgain(again, project, historical.id), /nothing to ship again/);
+    fs.rmSync(path.join(c.root, 'one.txt'));
+    assert.equal(shipAgain(again, project, next.id).commit, commit);
+    const snapshot = projectMilestones(again, project),
+      refs = git(c.root, ['show-ref']),
+      events = again.events();
+    interruptedReleases({ store: again });
+    interruptedReleases({ store: again });
+    assert.deepEqual(projectMilestones(again, project), snapshot);
+    assert.equal(git(c.root, ['show-ref']), refs);
+    assert.deepEqual(again.events(), events);
+    const done = shippingMilestone(again, next.id);
+    assert.deepEqual([done.id, done.line, done.release.tag], [before.id, before.line, before.release.tag]);
+    assert.equal(done.release.pushed, undefined);
+  });
+});
+
+test('a release made on an older line before the switch is history: restart and Ship again leave main alone', async t => {
+  const c = await released(t, true),
+    store = c.app.store,
+    patch = makeMilestone(store, project, c.app.runner, { version: '1.0.1' });
+  assert.equal(patch.line, 'release/1.0');
+  const fix = commitOn(c, 'release/1.0', 'fix.txt', 'fix\n');
+  releasedAt(c, patch.id, 'release/1.0', fix, 'v1.0.1');
+  // Released before version lines existed, as a patch on release/1.0 was.
+  const all = projectMilestones(store, project);
+  all.find(item => item.id === patch.id).release.finishedAt = '2026-01-01T00:00:00.000Z';
+  store.putSetting(`milestones:${project}`, all);
+  // Work on main that no release holds yet.
+  fs.writeFileSync(path.join(c.root, 'unreleased.txt'), 'unreleased\n');
+  git(c.root, ['add', 'unreleased.txt']);
+  git(c.root, ['commit', '--quiet', '-m', 'Unreleased work on main']);
+  makeMilestone(store, project, c.app.runner, { version: '1.1.0' });
+  useVersionLines(store, project, c.app.runner, { shipsTo: 'main' });
+  const main = tip(c, 'main'),
+    refs = git(c.root, ['show-ref']),
+    copy = git(c.root, ['status', '--porcelain', '--branch']),
+    milestones = projectMilestones(store, project);
+  await withReopened(store, again => {
+    interruptedReleases({ store: again });
+    interruptedReleases({ store: again });
+    assert.equal(tip(c, 'main'), main, 'The switch and the restart after it never move main.');
+    assert.equal(git(c.root, ['show-ref']), refs);
+    assert.equal(git(c.root, ['status', '--porcelain', '--branch']), copy);
+    assert.equal(fs.readFileSync(path.join(c.root, 'unreleased.txt'), 'utf8'), 'unreleased\n');
+    assert.deepEqual(projectMilestones(again, project), milestones);
+    assert.equal(shippingMilestone(again, patch.id).release.shipped, undefined);
+    assert.ok(!again.events().some(event => event.kind === 'release_shipped'));
+    assert.throws(() => shipAgain(again, project, patch.id), /nothing to ship again/);
+    assert.equal(tip(c, 'main'), main);
+  });
+});
+
+test('the director ship route finishes absent or pending shipping and refuses missing, unreleased and finished milestones', async t => {
+  const c = await released(t),
+    store = c.app.store,
+    next = await make(c, '1.1.0');
+  assert.equal((await switchTo(c, 'main')).status, 200);
+  const ship = id => c.request(`/api/projects/${project}/milestones/${id}/ship`, { projectId: project });
+  assert.match((await ship('milestone-missing')).data.error, /Milestone not found/);
+  assert.match((await ship(next.id)).data.error, /has not been released yet/);
+  assert.throws(() => shipAgain(store, project, next.id), /has not been released yet/);
+  for (const [item, pending] of [
+    [next, false],
+    [await make(c, '1.2.0'), true],
+  ]) {
+    const branch = `release/${item.version.split('.').slice(0, 2).join('.')}`,
+      commit = commitOn(c, branch, 'one.txt', `${item.version}\n`);
+    releasedAt(c, item.id, branch, commit, `v${item.version}`);
+    if (pending) {
+      const all = projectMilestones(store, project);
+      all.find(other => other.id === item.id).release.shipped = { branch: 'main', pending: true };
+      store.putSetting(`milestones:${project}`, all);
+    }
+    const shipped = await ship(item.id);
+    assert.equal(shipped.status, 200, JSON.stringify(shipped.data));
+    assert.equal(shipped.data.shipped.branch, 'main');
+    assert.ok(shipped.data.shipped.commit);
+    const refs = git(c.root, ['show-ref']);
+    assert.match((await ship(item.id)).data.error, /nothing to ship again/);
+    assert.equal(git(c.root, ['show-ref']), refs);
+  }
+  const patch = await make(c, '1.1.1'),
+    commit = commitOn(c, 'release/1.1', 'fix.txt', 'fix\n');
+  releasedAt(c, patch.id, 'release/1.1', commit, 'v1.1.1');
+  const skipped = shipRelease(store, project, patch.id),
+    refs = git(c.root, ['show-ref']);
+  assert.match(skipped.skipped, /v1\.2\.0 is newer/);
+  assert.match((await ship(patch.id)).data.error, /nothing to ship again/);
+  interruptedReleases(c.app.runner);
+  interruptedReleases(c.app.runner);
+  assert.deepEqual(shippingMilestone(store, patch.id).release.shipped, skipped);
+  assert.equal(git(c.root, ['show-ref']), refs);
+  assert.ok(projectMilestones(store, project).every(item => !item.release?.pushed));
+});
+
+test('shipping recovery records a retryable error when the local repository cannot be read', async t => {
+  const { c, store, next, commit } = await shippingFixture(t),
+    all = projectMilestones(store, project),
+    main = tip(c, 'main');
+  all.find(item => item.id === next.id).release.root = path.join(c.directory, 'unavailable');
+  store.putSetting(`milestones:${project}`, all);
+  await withReopened(store, again => {
+    interruptedReleases({ store: again });
+    const failed = shippingMilestone(again, next.id).release.shipped;
+    assert.equal(failed.branch, 'main');
+    assert.ok(failed.error, JSON.stringify(failed));
+    assert.equal(failed.pending, undefined);
+    assert.equal(tip(c, 'main'), main);
+    interruptedReleases({ store: again });
+    assert.deepEqual(shippingMilestone(again, next.id).release.shipped, failed);
+    const restored = projectMilestones(again, project);
+    restored.find(item => item.id === next.id).release.root = c.root;
+    again.putSetting(`milestones:${project}`, restored);
+    assert.equal(shipAgain(again, project, next.id).commit, commit);
+  });
+});
+
+for (const merge of [false, true])
+  test(`shipping stopped after main ${merge ? 'merged' : 'fast-forwarded'} records git's result without moving or tagging again`, async t => {
+    const { c, store, next, commit } = await shippingFixture(t);
+    if (merge) {
+      fs.writeFileSync(path.join(c.root, 'director.txt'), 'main has diverged\n');
+      git(c.root, ['add', 'director.txt']);
+      git(c.root, ['commit', '--quiet', '-m', 'Local main work']);
+    }
+    const saved = shippingMilestone(store, next.id),
+      tags = git(c.root, ['show-ref', '--tags']),
+      put = store.putSetting.bind(store),
+      stop = new Error('Fixture stop before saving shipping success');
+    let stopped = false;
+    const write = t.mock.method(store, 'putSetting', (key, value) => {
+      if (
+        key === `milestones:${project}` &&
+        (stopped || value.find(item => item.id === next.id).release.shipped?.commit)
+      ) {
+        stopped = true;
+        throw stop;
+      }
+      put(key, value);
+    });
+    assert.throws(
+      () => shipRelease(store, project, next.id),
+      error => error === stop,
+    );
+    write.mock.restore();
+    const main = tip(c, 'main'),
+      refs = git(c.root, ['show-ref']);
+    assert.equal(shippingMilestone(store, next.id).release.shipped.pending, true);
+    assert.equal(git(c.root, ['diff', '--name-only', main, commit]), '', 'Shipped content equals the release.');
+    assert.equal(main === commit, !merge);
+    await withReopened(store, again => {
+      interruptedReleases({ store: again });
+      const done = shippingMilestone(again, next.id),
+        events = again.events();
+      assert.equal(done.release.shipped.commit, main);
+      assert.equal(done.release.shipped.merged, merge);
+      assert.deepEqual(
+        [done.id, done.line, done.release.tag, done.release.commit],
+        [saved.id, saved.line, saved.release.tag, saved.release.commit],
+      );
+      interruptedReleases({ store: again });
+      assert.deepEqual(shippingMilestone(again, next.id), done);
+      assert.deepEqual(again.events(), events);
+      assert.equal(git(c.root, ['show-ref']), refs, 'No additional merge or tag on either recovery.');
+      assert.equal(git(c.root, ['show-ref', '--tags']), tags);
+      assert.equal(done.release.pushed, undefined);
+    });
+  });

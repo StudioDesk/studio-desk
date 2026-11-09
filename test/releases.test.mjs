@@ -9,8 +9,9 @@ import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
-import { projectMilestones } from '../src/connectors/source-milestones.mjs';
-import { interruptedReleases } from '../src/connectors/source-releases.mjs';
+import { makeMilestone, projectMilestones, useVersionLines } from '../src/connectors/source-milestones.mjs';
+import { interruptedReleases, runRelease } from '../src/connectors/source-releases.mjs';
+import { Store } from '../src/store.mjs';
 import { sourceResources } from '../src/connectors/source-projects.mjs';
 import { saveProjectOrganization } from '../src/core/project-organization.mjs';
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
@@ -411,4 +412,78 @@ test("a release the controller's stop cut off waits for the project's Resume", (
     theirs.events.map(event => event.kind),
     ['release_interrupted'],
   );
+});
+
+test('a real release stopped after saving released recovers its unfinished shipping from the reopened store', async t => {
+  const c = await setup(t, 'pass', undefined, {}, true),
+    store = c.app.store,
+    runner = c.app.runner;
+  saveProjectOrganization(store, runner.registries, project, developmentOrganization(store.organization()));
+  for (const task of store.tasks().filter(task => task.status === 'ready'))
+    store.putTask({ ...task, status: 'cancelled', queued: false });
+  fs.writeFileSync(path.join(c.root, 'package.json'), '{"name":"fixture","version":"1.0.0"}\n');
+  git(c.root, ['commit', '--quiet', '-am', 'Version 1.0.0']);
+  git(c.root, ['tag', 'v1.0.0']);
+  const next = makeMilestone(store, project, runner, { version: '1.1.0' });
+  useVersionLines(store, project, runner, { shipsTo: 'main' });
+  // Accepted notes and measured verification are model-free fixtures; runRelease performs the real local release.
+  const notes = store.task('checked-task'),
+    attempt = store.attempt('checked-attempt');
+  store.putTask({ ...notes, status: 'done', acceptedAttemptId: attempt.id });
+  fs.writeFileSync(path.join(attempt.outputFolder, 'release-notes.md'), '## 1.1.0\n\n- Recover shipping.\n');
+  attempt.artifacts = [{ path: 'release-notes.md' }];
+  store.updateAttempt(attempt);
+  const milestones = projectMilestones(store, project);
+  milestones.find(item => item.id === next.id).release = {
+    state: 'ready',
+    notesTaskId: notes.id,
+    tag: 'v1.1.0',
+    line: 'release/1.1',
+  };
+  store.putSetting(`milestones:${project}`, milestones);
+  const org = store.organization();
+  org.testSandbox = 'none';
+  store.setOrganization(org);
+  const main = git(c.root, ['rev-parse', 'main']),
+    stop = new Error('Fixture stop immediately after the released transaction'),
+    tx = store.tx.bind(store),
+    put = store.putSetting.bind(store);
+  let stopped = false;
+  const writes = t.mock.method(store, 'putSetting', (...args) => {
+    if (stopped) throw stop; // No catch handler may write after this simulated process stop.
+    return put(...args);
+  });
+  const transactions = t.mock.method(store, 'tx', fn => {
+    const result = tx(fn);
+    if (milestone(c, next.id).release.state === 'released') {
+      stopped = true;
+      throw stop;
+    }
+    return result;
+  });
+  runRelease(runner, project, next.id);
+  await assert.rejects(runner.sourceIntegrationRun.promise, error => error === stop);
+  transactions.mock.restore();
+  writes.mock.restore();
+  const saved = milestone(c, next.id);
+  assert.equal(saved.state, 'released');
+  assert.equal(saved.release.state, 'released');
+  assert.equal(saved.release.shipped?.pending, true);
+  assert.equal(store.leases().length, 0);
+  assert.equal(git(c.root, ['rev-parse', 'main']), main);
+  const restarted = new Store(store.directory);
+  try {
+    interruptedReleases({ store: restarted });
+    const done = projectMilestones(restarted, project).find(item => item.id === next.id);
+    assert.equal(done.release.shipped?.commit, saved.release.commit, JSON.stringify(done.release));
+    const refs = git(c.root, ['show-ref']);
+    interruptedReleases({ store: restarted });
+    assert.equal(git(c.root, ['show-ref']), refs);
+    assert.equal(git(c.root, ['rev-parse', 'v1.1.0^{commit}']), saved.release.commit);
+    assert.equal(done.line, saved.line);
+    assert.equal(done.release.tag, saved.release.tag);
+    assert.equal(done.release.pushed, undefined);
+  } finally {
+    restarted.close();
+  }
 });
