@@ -86,16 +86,22 @@ async function setup(t, reviewAccept = 'director') {
     { expectedRevision: c.store.setting('project-organization:' + c.projectId).revision, ...organization() },
     'PATCH',
   );
+  const kinds = {
+    'general:work': { approve: 'auto', accept: 'auto' },
+    'general:review': { approve: 'auto', accept: reviewAccept },
+  };
   await c.ok(`/api/projects/${c.projectId}/autonomy`, {
     expectedRevision: 0,
     enabled: true,
     retries: 1,
-    kinds: {
-      'general:work': { approve: 'auto', accept: 'auto' },
-      'general:review': { approve: 'auto', accept: reviewAccept },
-    },
+    kinds,
     cycle: { enabled: false, workflowId: null, maxPerDay: 3 },
   });
+  // Whether a task waits in Review for the director: its current step's kind is one the policy leaves to the director.
+  // A step the policy accepts sits in Review only until the controller's policy runs (just after the attempt is saved),
+  // so the director accepting it as well races the policy.
+  c.waitsForDirector = task =>
+    task.status === 'review' && kinds[c.registries.workflows.stageView(task).kind]?.accept === 'director';
   c.flowEvents = groupId =>
     c.store
       .activity(c.projectId, { limit: 500 })
@@ -124,16 +130,21 @@ async function setup(t, reviewAccept = 'director') {
   c.groupState = (groupId, state) =>
     c.until(() => c.group(groupId).state === state && c.group(groupId), `group ${groupId} to be ${state}`);
   c.resume = () => c.ok('/api/pipeline', { action: 'resume' });
-  // Accepts every flow task that waits in Review (a work task's own stage review included) except the nodes held, until
-  // the check holds; the held reviews stay in Review for the scenario.
+  // Accepts each flow task that waits in Review for the director (a work task's own stage review included) except the
+  // nodes held, read again just before its accept; a step the policy accepts is left to the policy.
+  c.acceptWaiting = async (groupId, held = []) => {
+    for (const { id } of c.flowTasks(groupId)) {
+      const task = c.store.task(id);
+      if (c.waitsForDirector(task) && !held.includes(task.flowReference.node)) await c.ok(`/api/tasks/${id}/accept`);
+    }
+  };
+  // Accepts what waits for the director until the check holds; the held reviews stay in Review for the scenario.
   c.drive = async (groupId, check, label, held = []) => {
     const deadline = Date.now() + 60000;
     for (;;) {
       const done = check();
       if (done) return done;
-      for (const task of c.flowTasks(groupId))
-        if (task.status === 'review' && !held.includes(task.flowReference.node))
-          await c.ok(`/api/tasks/${task.id}/accept`);
+      await c.acceptWaiting(groupId, held);
       if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}.`);
       await pause(10);
     }
@@ -196,6 +207,52 @@ const reviewed = (reviews, loop = { limit: 2 }) =>
       { ...edge('gate', 'work', 'needs-work'), loop },
     ],
   );
+
+// The scenarios' failures on slow runners ("Only reviewed outputs can be accepted"): the controller saves a task and its
+// attempt in one transaction, then its policy accepts a step it owns once the attempt has settled. A scenario that read
+// such a step in Review and accepted it too lost to the policy whenever the policy ran between the read and the
+// request. Here the policy's run is held, and runs exactly in that window: before the scenario's next request.
+test('the scenarios accept only steps that wait for the director, never a step the policy is about to accept', async t => {
+  const c = await setup(t);
+  const autonomy = c.app.runner.autonomy,
+    settle = autonomy.settled.bind(autonomy),
+    held = [],
+    release = () => {
+      for (const taskId of held.splice(0)) settle(taskId);
+    };
+  t.mock.method(autonomy, 'settled', taskId => held.push(taskId));
+  c.start(
+    'story-policy',
+    flow([work('work', 'Draft the guide'), review('review', 'Review of the guide')], [edge('work', 'review')]),
+  );
+  const task = await c.until(() => {
+    const found = c.taskOf('story-policy', 'work');
+    return found?.status === 'review' && held.includes(found.id) && found;
+  }, 'the work step in Review with its policy acceptance held');
+  // The work step is one the policy accepts; it is in Review only until the policy runs.
+  assert.equal(c.registries.workflows.stageView(task).kind, 'general:work');
+  assert.equal(c.waitsForDirector(task), false);
+  const send = c.request;
+  c.request = async (...request) => {
+    release();
+    return send(...request);
+  };
+  await c.acceptWaiting('story-policy');
+  // The scenario sent nothing, so the policy's run is still held and the step still in Review.
+  assert.deepEqual(held, [task.id]);
+  assert.equal(c.store.task(task.id).status, 'review');
+  c.request = send;
+  release();
+  autonomy.settled.mock.mockImplementation(settle);
+  const workAttempt = c.store.attempts(task.id).find(attempt => attempt.assignment.kind === 'general:work');
+  assert.deepEqual([workAttempt.status, workAttempt.acceptedBy.type], ['accepted', 'policy']);
+  // The work's own independent review and the flow's review wait for the director, and the scenario accepts them.
+  const group = await c.done('story-policy');
+  assert.deepEqual(view(group), [
+    ['work', 1, 'accepted', []],
+    ['review', 1, 'accepted', []],
+  ]);
+});
 
 test('a straight flow restarted while its review is in Review decides its gate once after acceptance', async t => {
   const c = await setup(t);
