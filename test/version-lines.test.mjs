@@ -14,6 +14,7 @@ import {
   ideaRelease,
   makeMilestone,
   projectMilestones,
+  useVersionLines,
   versionLinesReadiness,
 } from '../src/connectors/source-milestones.mjs';
 import { projectLines } from '../src/connectors/source-lines.mjs';
@@ -88,6 +89,214 @@ function releasedAt(c, milestoneId, branch, commit, tag) {
   };
   c.app.store.putSetting('milestones:' + project, all);
 }
+
+test('a blocked first version branch leaves the prior mode intact and the switch retryable', async t => {
+  const c = await released(t, true),
+    store = c.app.store,
+    main = tip(c, 'refs/heads/main'),
+    minor = makeMilestone(store, project, c.app.runner, { version: '1.1.0' }),
+    before = { project: store.project(project), milestones: projectMilestones(store, project), events: store.events() };
+  assert.equal(minor.line, null);
+  git(c.root, ['branch', 'release']);
+  assert.throws(() => useVersionLines(store, project, c.app.runner, { shipsTo: 'main' }), /git branch failed/);
+  assert.deepEqual(
+    { project: store.project(project), milestones: projectMilestones(store, project), events: store.events() },
+    before,
+    'A branch preparation failure must publish no mode, line, milestone or event changes.',
+  );
+  assert.deepEqual(ideaRelease(store, project, c.app.runner, {}), {
+    line: undefined,
+    release: { milestoneId: minor.id, version: '1.1.0', by: { type: 'default' } },
+  });
+  await c.app.close();
+  await c.reopen();
+  assert.deepEqual(switchState(c), before, 'Reopening retains the complete prior mode.');
+  git(c.root, ['branch', '-d', 'release']);
+  const switched = useVersionLines(c.app.store, project, c.app.runner, { shipsTo: 'main' });
+  assert.deepEqual(
+    switched.lines.map(line => line.branch),
+    ['release/1.1'],
+  );
+  assert.equal(switched.milestones.find(item => item.id === minor.id).line, 'release/1.1');
+  assert.equal(tip(c, 'refs/heads/release/1.1'), main);
+  assert.equal(tip(c, 'refs/heads/main'), main);
+});
+
+const switchState = c => ({
+  project: c.app.store.project(project),
+  milestones: projectMilestones(c.app.store, project),
+  events: c.app.store.events(),
+});
+async function switchFixture(t) {
+  const c = await released(t, true);
+  // Deliberately make the future version first; publication must still order the lines and intake by version.
+  c.next = makeMilestone(c.app.store, project, c.app.runner, { version: '1.2.0' });
+  c.minor = makeMilestone(c.app.store, project, c.app.runner, { version: '1.1.0' });
+  c.patch = makeMilestone(c.app.store, project, c.app.runner, { version: '1.0.1' });
+  c.main = tip(c, 'refs/heads/main');
+  c.before = switchState(c);
+  return c;
+}
+function assertSwitched(c) {
+  const store = c.app.store;
+  assert.equal(store.project(project).shipsTo, 'main');
+  assert.deepEqual(
+    projectLines(store.project(project)).map(line => line.branch),
+    ['release/1.0', 'release/1.1', 'release/1.2'],
+  );
+  assert.deepEqual(
+    projectLines(store.project(project))[0],
+    c.before.project.lines[0],
+    'The maintained line is intact.',
+  );
+  assert.deepEqual(
+    projectMilestones(store, project),
+    c.before.milestones.map(item => ({
+      ...item,
+      line: item.id === c.minor.id ? 'release/1.1' : item.id === c.next.id ? 'release/1.2' : item.line,
+    })),
+  );
+  assert.deepEqual(ideaRelease(store, project, c.app.runner, {}), {
+    line: 'release/1.1',
+    release: { milestoneId: c.minor.id, version: '1.1.0', by: { type: 'default' } },
+  });
+  assert.equal(tip(c, 'refs/heads/main'), c.main, 'Switching never moves main.');
+  const added = store.events().filter(event => event.seq > (c.before.events.at(-1)?.seq ?? 0));
+  assert.deepEqual(
+    added.map(event => event.kind),
+    ['project_line', 'project_line', 'version_lines'],
+  );
+}
+
+for (const boundary of ['project', 'milestones'])
+  test(`a fault after saving ${boundary} rolls the whole switch back and permits a retry`, async t => {
+    const c = await switchFixture(t),
+      store = c.app.store,
+      stop = new Error('Injected publication fault');
+    const write = boundary === 'project' ? store.putProject : store.putSetting;
+    const fault = t.mock.method(store, boundary === 'project' ? 'putProject' : 'putSetting', function (...args) {
+      const result = write.apply(this, args);
+      if (boundary === 'project' || args[0] === 'milestones:' + project) throw stop;
+      return result;
+    });
+    assert.throws(
+      () => useVersionLines(store, project, c.app.runner, { shipsTo: 'main' }),
+      error => error === stop,
+    );
+    fault.mock.restore();
+    assert.deepEqual(switchState(c), c.before, 'No project, milestone or event from a failed transaction survives.');
+    await c.app.close();
+    await c.reopen();
+    assert.deepEqual(switchState(c), c.before);
+    const first = commitOn(c, 'release/1.1', 'one.txt', 'Work after the interrupted switch\n'),
+      second = commitOn(c, 'release/1.2', 'two.txt', 'Other work after the interrupted switch\n');
+    useVersionLines(c.app.store, project, c.app.runner, { shipsTo: 'main' });
+    assertSwitched(c);
+    assert.equal(tip(c, 'refs/heads/release/1.1'), first, 'Retry reuses the first prepared branch at its current tip.');
+    assert.equal(
+      tip(c, 'refs/heads/release/1.2'),
+      second,
+      'Retry reuses the second prepared branch at its current tip.',
+    );
+  });
+
+for (const [boundary, preparedCount] of [
+  ['before-first-branch', 0],
+  ['after-first-branch', 1],
+  ['after-second-branch', 2],
+  ['after-project', 2],
+  ['after-milestones', 2],
+  ['after-commit', 2],
+])
+  test(`a process stopped ${boundary} leaves a complete durable mode and preserves prepared tips on retry`, async t => {
+    const c = await switchFixture(t);
+    await c.app.close();
+    // Exit a disposable writer without closing the store or unwinding its transaction. This exercises SQLite's
+    // durable boundary, including a stop between the project and milestone writes, rather than only JS rollback.
+    const script = `
+      import childProcess from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { createStudio } from ${JSON.stringify(new URL('./model-free-studio.mjs', import.meta.url).href)};
+      import { useVersionLines } from ${JSON.stringify(new URL('../src/connectors/source-milestones.mjs', import.meta.url).href)};
+      const app = createStudio(${JSON.stringify({ directory: path.join(c.directory, 'records'), port: 0, runnerOptions: { sourceChangeRoot: c.root } })});
+      const store = app.store, boundary = ${JSON.stringify(boundary)}, stop = () => process.exit(73);
+      const spawn = childProcess.spawnSync;
+      let prepared = 0;
+      childProcess.spawnSync = (executable, args, options) => {
+        const preparing = executable === 'git' && args.includes('--no-track');
+        if (preparing && boundary === 'before-first-branch') stop();
+        const result = spawn(executable, args, options);
+        if (preparing && result.status === 0) {
+          prepared++;
+          if ((boundary === 'after-first-branch' && prepared === 1) ||
+              (boundary === 'after-second-branch' && prepared === 2)) stop();
+        }
+        return result;
+      };
+      syncBuiltinESMExports();
+      const putProject = store.putProject.bind(store), putSetting = store.putSetting.bind(store), tx = store.tx.bind(store);
+      store.putProject = (...args) => {
+        const result = putProject(...args);
+        if (boundary === 'after-project') stop();
+        return result;
+      };
+      store.putSetting = (...args) => {
+        const result = putSetting(...args);
+        if (boundary === 'after-milestones' && args[0] === ${JSON.stringify('milestones:' + project)}) stop();
+        return result;
+      };
+      store.tx = fn => {
+        const result = tx(fn);
+        if (boundary === 'after-commit') stop();
+        return result;
+      };
+      useVersionLines(store, ${JSON.stringify(project)}, app.runner, { shipsTo: 'main' });
+      throw new Error('The switch did not reach the requested stop boundary.');
+    `;
+    const stopped = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000,
+    });
+    // Reopen before asserting so fixture cleanup always owns an open app, even if the child refused to start.
+    await c.reopen();
+    assert.equal(stopped.status, 73, stopped.error?.message ?? stopped.stderr);
+    assert.equal(tip(c, 'refs/heads/main'), c.main);
+    if (boundary === 'after-commit') {
+      assertSwitched(c);
+      const complete = switchState(c);
+      assert.throws(
+        () => useVersionLines(c.app.store, project, c.app.runner, { shipsTo: 'main' }),
+        /already ships to main/,
+      );
+      assert.deepEqual(switchState(c), complete, 'Retrying a completed switch adds no duplicate records or events.');
+      return;
+    }
+    assert.deepEqual(switchState(c), c.before, 'A stop before commit must leave the complete prior mode.');
+    assert.deepEqual(ideaRelease(c.app.store, project, c.app.runner, {}), {
+      line: 'main',
+      release: { milestoneId: c.minor.id, version: '1.1.0', by: { type: 'default' } },
+    });
+    const branches = ['release/1.1', 'release/1.2'];
+    for (const branch of branches.slice(preparedCount))
+      assert.throws(() => tip(c, 'refs/heads/' + branch), /git rev-parse failed/);
+    const preserved = branches.slice(0, preparedCount).map(branch => {
+      assert.equal(tip(c, 'refs/heads/' + branch), c.main, 'Prepared branches start at the preceding line.');
+      return [branch, commitOn(c, branch, 'prepared.txt', `Work on ${branch} before retry\n`)];
+    });
+    useVersionLines(c.app.store, project, c.app.runner, { shipsTo: 'main' });
+    assertSwitched(c);
+    for (const [branch, commit] of preserved) assert.equal(tip(c, 'refs/heads/' + branch), commit);
+    if (preparedCount === 1)
+      assert.equal(
+        tip(c, 'refs/heads/release/1.2'),
+        preserved[0][1],
+        'The next branch starts at the reused first tip.',
+      );
+    await c.app.close();
+    await c.reopen();
+    assertSwitched(c);
+  });
 
 test('the overview keeps past releases on main and reads the shipping branch apart from version lines', async t => {
   const c = await released(t),

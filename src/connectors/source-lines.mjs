@@ -269,14 +269,11 @@ const sourceRoot = (store, projectId, runtime) => {
     throw new Error('Only a project on the source workflow keeps release lines.');
   return projectSource(store, projectId, runtime).root;
 };
-// Adds a line for an existing branch, or for a new branch made at `from` (a tag, branch or commit). The first line
-// added also records the branch the folder has checked out as the newest line; later lines go before the newest one,
-// release lines in version order and others in the order they were made.
-export function addProjectLine(store, projectId, runtime, { branch, from } = {}) {
-  const root = sourceRoot(store, projectId, runtime);
+// Prepares a branch and its ordered line records without publishing them. The caller can prepare several lines on
+// a draft project before saving the complete change in one transaction. Existing branches are never moved.
+export function prepareProjectLine(root, project, { branch, from } = {}) {
   branch = branchName(root, branch);
-  const project = store.project(projectId),
-    at = new Date().toISOString();
+  const at = new Date().toISOString();
   let lines = projectLines(project);
   if (project.shipsTo && branch === project.shipsTo)
     throw new Error(`Releases ship to ${branch}, so it is not a line work lands on.`);
@@ -324,21 +321,28 @@ export function addProjectLine(store, projectId, runtime, { branch, from } = {})
   const added = { branch, state: 'maintained', at, ...(from !== undefined ? { from } : {}) };
   // A project on version lines keeps every line in version order, so the newest version's line is the newest line;
   // a branch that is not a version's line goes before them.
-  project.lines = project.shipsTo
+  const prepared = project.shipsTo
     ? [...lines, added].sort((a, b) => {
         const left = series(a.branch),
           right = series(b.branch);
         return !left || !right ? (left ? 1 : 0) - (right ? 1 : 0) : left[0] - right[0] || left[1] - right[1];
       })
     : [...older.slice(0, at_), added, ...older.slice(at_), lines.at(-1)];
+  return {
+    lines: prepared,
+    message: `Line ${branch} added${from !== undefined ? ` from ${from}` : ''} at ${commit.slice(0, 7)}; ideas can now land on it.`,
+  };
+}
+// Adds a line for an existing branch, or for a new branch made at `from` (a tag, branch or commit). The first line
+// added also records the branch the folder has checked out as the newest line; later lines go before the newest one,
+// release lines in version order and others in the order they were made.
+export function addProjectLine(store, projectId, runtime, options = {}) {
+  const root = sourceRoot(store, projectId, runtime),
+    project = store.project(projectId),
+    prepared = prepareProjectLine(root, project, options);
+  project.lines = prepared.lines;
   store.putProject(project);
-  store.event(
-    'project_line',
-    null,
-    null,
-    `Line ${branch} added${from !== undefined ? ` from ${from}` : ''} at ${commit.slice(0, 7)}; ideas can now land on it.`,
-    projectId,
-  );
+  store.event('project_line', null, null, prepared.message, projectId);
   return project.lines;
 }
 // Retires a line, so no new idea lands on it, or keeps it again. Work already on it finishes. The newest line cannot

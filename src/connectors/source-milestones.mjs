@@ -10,7 +10,15 @@
 // with none takes ideas exactly as before.
 import { randomUUID } from 'node:crypto';
 import { git, gitAsync } from './source-integration.mjs';
-import { addProjectLine, branchCommit, checkedOut, ideaLine, projectLine, projectLines } from './source-lines.mjs';
+import {
+  addProjectLine,
+  branchCommit,
+  checkedOut,
+  ideaLine,
+  prepareProjectLine,
+  projectLine,
+  projectLines,
+} from './source-lines.mjs';
 import { projectSource } from './source-projects.mjs';
 import { projectCatalog } from '../core/project-organization.mjs';
 import { recordProject } from '../core/projects.mjs';
@@ -160,7 +168,9 @@ export function useVersionLines(store, projectId, runtime, { shipsTo } = {}) {
     );
   project.shipsTo = shipsTo;
   project.lines = projectLines(project).filter(line => line.branch !== shipsTo);
-  store.putProject(project);
+  // Prepare git first, keeping records in the prior mode until every branch is ready. If preparation stops, a retry
+  // reuses the branches already made, including any work since added to them, without resetting or deleting them.
+  const lineEvents = [];
   let from = shipsTo;
   for (const milestone of moving) {
     const version = parseVersion(milestone.version),
@@ -171,19 +181,27 @@ export function useVersionLines(store, projectId, runtime, { shipsTo } = {}) {
     } catch {
       exists = false;
     }
-    if (!projectLines(store.project(projectId)).some(line => line.branch === branch))
-      addProjectLine(store, projectId, runtime, exists ? { branch } : { branch, from });
+    if (!projectLines(project).some(line => line.branch === branch)) {
+      const prepared = prepareProjectLine(root, project, exists ? { branch } : { branch, from });
+      project.lines = prepared.lines;
+      lineEvents.push(prepared.message);
+    }
     milestone.line = branch;
     from = branch;
   }
-  save(store, projectId, all);
-  store.event(
-    'version_lines',
-    null,
-    null,
-    `Each version now has its own line, and releases ship to ${shipsTo}: ${moving.map(item => `${item.version} on ${item.line}`).join(', ')}.`,
-    projectId,
-  );
+  // The mode, all ordered lines, milestone assignments and their events become durable together.
+  store.tx(() => {
+    store.putProject(project);
+    save(store, projectId, all);
+    for (const message of lineEvents) store.event('project_line', null, null, message, projectId);
+    store.event(
+      'version_lines',
+      null,
+      null,
+      `Each version now has its own line, and releases ship to ${shipsTo}: ${moving.map(item => `${item.version} on ${item.line}`).join(', ')}.`,
+      projectId,
+    );
+  });
   return { shipsTo, lines: projectLines(store.project(projectId)), milestones: projectMilestones(store, projectId) };
 }
 
