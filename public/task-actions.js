@@ -102,8 +102,8 @@
   // the integration phase, or its integration stopped), and null otherwise. A passing review's integration journal
   // (`journal`, the review attempt's) must be absent, rejected or abandoned. A passing story whose interrupted
   // integration was reconciled waits for integration in the integration phase, which none of these is, so it is not
-  // sent back.
-  const returnableAs = (task, journal) => {
+  // sent back. `pending` is the integration request waiting for its turn (state.autonomy.pendingIntegration).
+  const returnableAs = (task, journal, pending) => {
     const stage = task.sourceStage,
       review = stage?.review;
     if (
@@ -124,11 +124,25 @@
     // stage, or from waiting for integration once that merge was reconciled as stopped before it landed.
     if (review.verdict !== 'needs-work') return null;
     if (journal && !['rejected', 'abandoned'].includes(journal.state ?? '')) return null;
-    return stage.current === 'failed' || (journal && stage.current === 'waiting-for-integration') ? 'findings' : null;
+    // Or from waiting for an integration nothing will run: moved there by a request that was refused, with no journal,
+    // no integration of this review on its stage and no request of its own waiting for its turn.
+    const stranded =
+      !journal &&
+      stage.phase === 'integration' &&
+      stage.current === 'waiting-for-integration' &&
+      stage.integration?.attemptId !== review.attemptId &&
+      pending?.taskId !== task.id;
+    return stage.current === 'failed' || (journal && stage.current === 'waiting-for-integration') || stranded
+      ? 'findings'
+      : null;
   };
   // A source story sent back over its accepted review with the review's findings or failed checks (decisions.ts
   // reviewReturnable), where the controller's own check allows it.
-  const reviewReturnable = (task, journal) => ['findings', 'checks'].includes(returnableAs(task, journal) ?? '');
+  const reviewReturnable = (task, journal, pending) =>
+    ['findings', 'checks'].includes(returnableAs(task, journal, pending) ?? '');
+  // Whether a review attempt recorded that the candidate it reviewed passed its own tests, which integrating it needs
+  // (the controller refuses otherwise, over the review or not).
+  const candidatePassed = attempt => attempt?.candidateReview?.passed === true;
   // The paths a story may change: the director's latest edit, or its brief's path lines (decisions.ts storyPaths).
   const storyPaths = task => {
     const edit = (task.scopeEdits ?? []).at(-1);
@@ -225,9 +239,11 @@
           ? rules().integrationReview(task, state.attempts, state.autonomy?.pendingIntegration, state.tasks)?.id ===
             review.id
           : (!journal || ['rejected', 'abandoned'].includes(journal.state ?? '')) &&
-            review.candidateReviewVerdict === 'pass');
+            review.candidateReviewVerdict === 'pass' &&
+            candidatePassed(review));
     const stage = task.sourceStage,
-      returnable = reviewReturnable(task, journal),
+      pending = state.autonomy?.pendingIntegration,
+      returnable = reviewReturnable(task, journal, pending),
       landed = journal?.verification?.landedSince,
       mergeable =
         journal?.state === 'rejected' &&
@@ -259,6 +275,7 @@
       integrable,
       stage,
       returnable,
+      pending,
       mergeable,
       plan,
       proposal,
@@ -296,6 +313,7 @@
         integrable,
         stage,
         returnable,
+        pending,
         mergeable,
         plan,
         proposal,
@@ -466,7 +484,7 @@
     const passNotes = review?.candidateReviewNotes?.length ?? 0;
     // Only where the controller's own check sends a passing review back (returnableAs: not, for example, once an
     // interrupted integration was reconciled and the story waits in the integration phase).
-    if (integrable && stage?.review?.verdict === 'pass' && returnableAs(task, journal) === 'passed')
+    if (integrable && stage?.review?.verdict === 'pass' && returnableAs(task, journal, pending) === 'passed')
       offer(
         'send-back-passed',
         `Send back to ${editor}`,
@@ -475,16 +493,18 @@
       );
     if (returnable && stage?.review) {
       offer('send-back', `Send back to ${editor}`, 'primary', step('send-back', [field('note', false, 'note')]));
-      offer(
-        'over',
-        'Integrate over the review',
-        'default',
-        step('integrate-source', [
-          field('attemptId', true, 'id', stage.review.attemptId),
-          field('reviewHash', true, 'hash', stage.review.hash),
-          field('overrideReason', true, 'reason'),
-        ]),
-      );
+      // Over the review only where the candidate's own tests passed: the controller refuses the rest.
+      if (candidatePassed(recordedAttempt(state, task, stage.review.attemptId)))
+        offer(
+          'over',
+          'Integrate over the review',
+          'default',
+          step('integrate-source', [
+            field('attemptId', true, 'id', stage.review.attemptId),
+            field('reviewHash', true, 'hash', stage.review.hash),
+            field('overrideReason', true, 'reason'),
+          ]),
+        );
     }
     if (proposal && current)
       offer(

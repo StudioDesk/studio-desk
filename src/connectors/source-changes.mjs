@@ -1824,7 +1824,16 @@ export function sourceStoryReturnable(store, task) {
   // A merge reconciled as stopped before it landed leaves the story waiting for integration; it may go back then too.
   const journal = attempt.sourceIntegration;
   if (journal && !['rejected', 'abandoned'].includes(journal.state)) return null;
-  if (stage.current !== 'failed' && !(journal && stage.current === 'waiting-for-integration')) return null;
+  // A story an integration request moved to wait for integration while nothing integrates it: no journal, no
+  // integration of this review on its stage and no request waiting for its turn (an Over refused after the request
+  // moved it, before refusals were checked first, left it so).
+  const stranded =
+    !journal &&
+    stage.phase === 'integration' &&
+    stage.current === 'waiting-for-integration' &&
+    stage.integration?.attemptId !== review.attemptId &&
+    store.setting('autonomy-integration')?.taskId !== task.id;
+  if (stage.current !== 'failed' && !(journal && stage.current === 'waiting-for-integration') && !stranded) return null;
   const { summary, findings } = report();
   return {
     findings: [
@@ -1965,7 +1974,17 @@ export function sourceIntegrationTarget(store, task, attemptId, reviewHash, { ov
   const review = store.attempt(ref.attemptId);
   if (!equal(review.candidateReview, acceptedCandidate(store, review.assignment)))
     throw new Error('Accepted candidate identity changed.');
+  // The candidate's own tests are checked here too, before an integration request records anything or moves the
+  // story: a refused Over once left a story that asked for changes waiting for an integration that never came, with
+  // only Close to press. integrateSource keeps the same check.
+  if (!candidateTestsPassed(store, store.attempt(review.candidateReview.attemptId)))
+    throw new Error('Integration requires all candidate tests to pass without skips.');
   return { ...task, kind: 'studio-development:change-review' };
+}
+// The candidate's measured tests passed without skips and none of its own checks failed, as integration requires.
+function candidateTestsPassed(store, candidate) {
+  const { report } = validateSourceChange(candidate, name => fs.readFileSync(artifactPath(store, candidate, name)));
+  return report.passed && !candidate.result.checks.some(check => check.status === 'fail');
 }
 // The story's current independent review when the autonomy policy may request its integration
 // (MP-023): accepted, passing with no blocking findings, and not yet tried. A review that requested

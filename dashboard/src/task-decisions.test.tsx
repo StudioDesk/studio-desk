@@ -638,7 +638,14 @@ test('while the review runs, the row says Integrate and Send back come when it i
 test('a story whose review asked for changes is sent back, or integrated over the review with a reason', async () => {
   const user = userEvent.setup();
   controller.attempts = [
-    { id: 'attempt-review', taskId: 'T-1', status: 'accepted', workerId: 'W-1', candidateReviewVerdict: 'needs-work' },
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      candidateReviewVerdict: 'needs-work',
+      candidateReview: { attemptId: 'attempt-edit', passed: true },
+    },
   ];
   open(
     taskFixture('T-1', {

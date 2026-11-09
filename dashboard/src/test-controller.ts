@@ -692,6 +692,32 @@ function passedStory(controller: Controller) {
     },
   });
 }
+// A story whose accepted review asked for changes, failed at that review; `passed` is whether the reviewed change
+// passed its own tests, as the review records it.
+function changesRequested(controller: Controller, passed: boolean) {
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      candidateReviewVerdict: 'needs-work',
+      candidateReview: { ...passedPin, passed },
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'done',
+    acceptedAttemptId: 'attempt-review',
+    lastAttemptId: 'attempt-review',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'candidate-review',
+      current: 'failed',
+      review: { attemptId: 'attempt-review', verdict: 'needs-work', hash: 'review-hash' },
+    },
+  });
+}
 // A story whose passing review's integration stopped, with what its verification recorded.
 function stoppedStory(
   controller: Controller,
@@ -871,28 +897,17 @@ export const decisionStates: Record<string, (controller: Controller) => Task> = 
       },
     };
   },
-  'a review that asked for changes': controller => {
-    controller.attempts = [
-      {
-        id: 'attempt-review',
-        taskId: 'T-1',
-        status: 'accepted',
-        workerId: 'W-1',
-        candidateReviewVerdict: 'needs-work',
-      },
-    ];
-    return taskFixture('T-1', {
-      kind: 'studio-development:change',
-      status: 'done',
-      acceptedAttemptId: 'attempt-review',
-      lastAttemptId: 'attempt-review',
-      sourceStage: {
-        version: 'source-story-stages-v1',
-        phase: 'candidate-review',
-        current: 'failed',
-        review: { attemptId: 'attempt-review', verdict: 'needs-work', hash: 'review-hash' },
-      },
-    });
+  'a review that asked for changes': controller => changesRequested(controller, true),
+  // The change's own tests failed: integrating over the review would be refused, so only Send back and Close.
+  'a review that asked for changes of a change whose tests failed': controller => changesRequested(controller, false),
+  // An integration over the review that was refused after it moved the story to wait for integration, with no
+  // journal and no request waiting: the story goes back with the review's findings.
+  'a review that asked for changes, left waiting by a refused integration': controller => {
+    const story = changesRequested(controller, false);
+    return {
+      ...story,
+      sourceStage: { ...story.sourceStage, phase: 'integration', current: 'waiting-for-integration' },
+    };
   },
   'a conflict': controller => stoppedStory(controller, { conflicts: ['src/core/store.mjs'] }),
   'landed since': controller => {

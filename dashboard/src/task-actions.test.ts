@@ -44,6 +44,13 @@ const expected: Record<string, string[]> = {
   'a passing review': ['Integrate', 'Send back to Eli', 'Close without integrating'],
   'a review in progress': ['Request cancellation'],
   'a review that asked for changes': ['Send back to Eli', 'Integrate over the review', 'Close without integrating'],
+  // The controller refuses to integrate a change whose own tests failed, over the review or not.
+  'a review that asked for changes of a change whose tests failed': ['Send back to Eli', 'Close without integrating'],
+  // A refused integration left it waiting with nothing to run: it goes back with the review's findings.
+  'a review that asked for changes, left waiting by a refused integration': [
+    'Send back to Eli',
+    'Close without integrating',
+  ],
   'a conflict': ['Merge onto the current source', 'Integrate again', 'Send back to Eli', 'Close without integrating'],
   'landed since': ['Merge onto the current source', 'Integrate again', 'Send back to Eli', 'Close without integrating'],
   'failed with nothing landed': ['Integrate again', 'Send back to Eli', 'Close without integrating'],
@@ -299,6 +306,27 @@ test('each action carries its emphasis and whether it is a closing action', () =
   expect(listed('a landed story with bring-back lines')).toEqual([
     ['Bring back to release/1.1', 'default', false],
     ['Bring back to release/1.0', 'default', false],
+  ]);
+});
+
+// A story whose integration over the review was approved and waits for its turn has the same stage as one a refused
+// integration left waiting, but it is not sent back: its request runs once the source is free.
+test('a review that asked for changes whose integration over it waits for its turn is not sent back', () => {
+  const controller = fakeController(),
+    story = decisionStates['a review that asked for changes, left waiting by a refused integration']!(controller);
+  controller.attempts[0]!.candidateReview = { passed: true };
+  controller.shell = {
+    ...controller.shell,
+    autonomy: { ...controller.shell.autonomy, pendingIntegration: { taskId: 'T-1' } },
+  };
+  controller.tasks = [story, ...controller.tasks.filter(item => item.id !== story.id)];
+  expect(taskActions(story, studioOf(controller), {}).map(action => action.label)).toEqual([]);
+  // Without the request, the same records go back with the findings, and may be integrated over the review.
+  controller.shell = { ...controller.shell, autonomy: { ...controller.shell.autonomy, pendingIntegration: null } };
+  expect(taskActions(story, studioOf(controller), {}).map(action => action.label)).toEqual([
+    'Send back to Eli',
+    'Integrate over the review',
+    'Close without integrating',
   ]);
 });
 
