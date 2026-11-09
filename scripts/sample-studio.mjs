@@ -158,9 +158,11 @@ export async function seedSampleStudio({ store, runner, registries, directory })
 }
 
 export async function startSampleStudio({ base = root, port = samplePort, build = true } = {}) {
-  const directory = sampleDirectory(base);
-  fs.rmSync(directory, { recursive: true, force: true });
-  fs.mkdirSync(directory, { recursive: true });
+  const given = sampleDirectory(base);
+  fs.rmSync(given, { recursive: true, force: true });
+  fs.mkdirSync(given, { recursive: true });
+  // By its real spelling, as the studio keeps its data folder, so the sample repository made inside it is inside it.
+  const directory = fs.realpathSync.native(given);
   if (build) buildDashboard(base);
   const registries = createRegistries(),
     studio = createStudio({

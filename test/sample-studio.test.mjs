@@ -26,7 +26,9 @@ test('the sample studio holds both projects at their fixed addresses, paused, wi
     await studio.close();
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
-  assert.equal(studio.directory, path.join(base, '.studio-sample'));
+  // By its real spelling, whichever one the temporary folder was reached by (a junction or symbolic link, a short name).
+  assert.equal(studio.directory, fs.realpathSync.native(path.join(base, '.studio-sample')));
+  assert.equal(studio.store.directory, studio.directory);
   assert.ok(!fs.existsSync(path.join(base, '.studio-sample', 'leftover.txt')));
   assert.ok(!fs.existsSync(path.join(base, 'data')), 'The sample never makes or uses the data folder.');
   const get = async url => (await fetch(studio.address + url)).json();

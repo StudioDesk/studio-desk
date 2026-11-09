@@ -56,7 +56,8 @@ export const sourceTestArgs = (tests, timeoutMs = sourceTestTimeoutMs) => [
 ];
 
 export function sourcePlan(root = studioSourceRoot, profile = studioDeskProfile) {
-  root = fs.realpathSync(root);
+  // One spelling for the measured folder: its real one, a Windows short name expanded too.
+  root = fs.realpathSync.native(root);
   const manifest = [],
     limits = measuringLimits(profile);
   let total = 0;

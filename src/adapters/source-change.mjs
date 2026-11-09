@@ -85,9 +85,10 @@ export const sourceChangeAdapter = {
   modelFor: (runtime, worker) => modelAdapter(runtime.adapters, worker),
   quotaKey: worker => worker.provider,
   initialize(runtime, options) {
-    runtime.sourceChangeRoot = fs.realpathSync(options.sourceChangeRoot || studioSourceRoot);
+    // Both by their real spelling, a Windows short name expanded too, as project repositories are kept.
+    runtime.sourceChangeRoot = fs.realpathSync.native(options.sourceChangeRoot || studioSourceRoot);
     // When the controller develops its own installed source, integrations need a restart.
-    runtime.selfHosted = runtime.sourceChangeRoot === fs.realpathSync(studioSourceRoot);
+    runtime.selfHosted = runtime.sourceChangeRoot === fs.realpathSync.native(studioSourceRoot);
     runtime.sourceChangeFixture = !!options.sourceChangeFixture;
     runtime.sourceFormatCommand = options.sourceFormatCommand; // trusted model-free test seam, never exposed by HTTP
     runtime.packageInstallCommand = options.packageInstallCommand; // trusted model-free stand-in for npm ci, never exposed by HTTP
@@ -179,11 +180,12 @@ function prepareSourceJob(runtime, entry, edit) {
   // measured), from the story's base commit (MP-016), and removed when the attempt finishes. Worktrees left by settled
   // attempts are listed before this one is recorded; its path and removal are recorded before the setup process
   // starts, so a stop or failure during setup still removes it.
+  fs.mkdirSync(sourceWorktreeRoot(runtime), { recursive: true });
+  // The worktrees' folder by its real spelling, so the candidate's recorded path is the one git and the setup use.
   const repository = scope.source.root,
-    parent = sourceWorktreeRoot(runtime),
+    parent = fs.realpathSync.native(sourceWorktreeRoot(runtime)),
     leftovers = leftoverWorktrees(runtime, parent);
-  fs.mkdirSync(parent, { recursive: true });
-  const candidate = path.join(fs.realpathSync(parent), worktreeName(a.id));
+  const candidate = path.join(parent, worktreeName(a.id));
   a.sourceWorktree = { path: candidate, baseCommit: scope.base.commit };
   runtime.store.updateAttempt(a);
   entry.cleanup.push(() => removeSourceWorktree(repository, candidate));

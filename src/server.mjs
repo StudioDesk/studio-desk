@@ -319,10 +319,14 @@ export function createStudio({
   // it ends (src/data-folder-lock.mjs), taken before the studio's records are opened, so a refused start neither opens
   // nor changes them. Every start that fails after taking it releases it, and so does close.
   fs.mkdirSync(path.resolve(directory), { recursive: true });
-  const releaseLock = takeDataFolderLock(directory);
+  // The folder is kept by one spelling, its real one, whichever spelling it was given by (a junction or symbolic link,
+  // macOS's /var for /private/var, a Windows short name such as RUNNER~1), so every folder made inside it compares
+  // with the project repositories, which are kept the same way (connectors/source-projects.mjs).
+  const dataFolder = fs.realpathSync.native(path.resolve(directory));
+  const releaseLock = takeDataFolderLock(dataFolder);
   let store;
   try {
-    store = new Store(directory, bootstrapFactory(registries, bootstrap));
+    store = new Store(dataFolder, bootstrapFactory(registries, bootstrap));
   } catch (err) {
     releaseLock();
     throw err;

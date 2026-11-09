@@ -80,7 +80,7 @@ export function snapshotCommit(root, parent, name, base, destination, profile = 
   try {
     const plan = sourcePlan(worktree, profile);
     copySource(plan, destination);
-    return { ...plan, root: fs.realpathSync(root), base };
+    return { ...plan, root: fs.realpathSync.native(root), base };
   } finally {
     removeSourceWorktree(root, worktree);
   }
@@ -92,7 +92,8 @@ export function createSourceWorktree(root, parent, name, commit, profile = studi
   fs.mkdirSync(parent, { recursive: true });
   git(root, ['worktree', 'add', '--detach', target, commit]);
   ensureSourceDirectories(target, profile);
-  return fs.realpathSync(target);
+  // Its real spelling, which also expands a Windows short name (fs.realpathSync keeps those, and the given case).
+  return fs.realpathSync.native(target);
 }
 
 // New source paths that git ignores, which a candidate could not commit.
@@ -141,7 +142,7 @@ export function worktreeRepository(worktree) {
   try {
     const line = fs.readFileSync(path.join(worktree, '.git'), 'utf8').trim(),
       match = /^gitdir: (.+)[\\/]\.git[\\/]worktrees[\\/][^\\/]+$/.exec(line);
-    return match ? fs.realpathSync(match[1]) : null;
+    return match ? fs.realpathSync.native(match[1]) : null;
   } catch {
     return null;
   }
