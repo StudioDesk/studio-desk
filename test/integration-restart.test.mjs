@@ -245,7 +245,7 @@ test("a verification records its test run's process on its journal while it hold
   assert.deepEqual(leasesOf(store, id), [...sourceIntegrationResources].sort());
 });
 
-test('a restart leaves the turn with an integration whose test run may still be going, and Reconcile frees it for the waiting suite', async t => {
+test('a restart leaves the turn with an integration whose test run may still be going, and Reconcile refuses until that run has ended, then frees it for the waiting suite', async t => {
   const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true);
   let { store, runner } = c.app;
   const review = await reviewed(c),
@@ -277,6 +277,15 @@ test('a restart leaves the turn with an integration whose test run may still be 
   const check = runner.start(addChecks(c, 'T-check-waits')).attemptId,
     waiting = await waitFor(() => store.attempt(check).testTurn, 'the checks to wait for the turn');
   assert.equal(waiting.holder, id);
+  // While the recorded run may still go on, Reconcile refuses and every lease stays with the journal.
+  assert.throws(
+    () => restoreSourceIntegration(runner, store.task(c.taskId)),
+    error => error.message.includes(`test run (process ${child.pid}) may still be running`),
+  );
+  assert.equal(store.attempt(review.id).sourceIntegration.state, 'needs-reconciliation');
+  assert.deepEqual(store.attempt(review.id).sourceIntegration.testProcess, testProcess);
+  assert.deepEqual(leasesOf(store, id), [...sourceIntegrationResources, testTurnResource].sort());
+  assert.equal(store.attempt(check).testTurn.holder, id, 'The checks still wait.');
   // The run ends, and Reconcile source integration settles the journal; the waiting suite then runs.
   fs.writeFileSync(gate, '');
   await exited;
@@ -286,5 +295,36 @@ test('a restart leaves the turn with an integration whose test run may still be 
   const done = await c.wait('T-check-waits');
   assert.equal(done.result.checks[0].status, 'pass');
   assert.equal(done.testTurn, undefined);
+  assert.equal(holder(store), null);
+});
+
+test("a restart keeps the turn of an integration whose stop found the test run's launcher gone before its close, and Reconcile frees it", async t => {
+  const c = await setup(t, 'pass', ['src/core/workflows.mjs'], {}, true);
+  let { store, runner } = c.app;
+  const review = await reviewed(c),
+    { settled } = integrate(c, review),
+    integrated = await settled;
+  assert.equal(integrated.state, 'integrated', JSON.stringify(integrated));
+  // The launcher the stop found already exited (its own process is gone), so a process it started may run on.
+  const launcher = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true }),
+    testProcess = { pid: launcher.pid, startedAt: new Date().toISOString(), helpersUnconfirmed: true };
+  await new Promise(resolve => launcher.once('exit', resolve));
+  const id = await cutOffInVerification(c, review, integrated, testProcess);
+  ({ store, runner } = c.app);
+  assert.equal(holder(store), id, 'The turn stays with the journal although its launcher is gone.');
+  assert.deepEqual(leasesOf(store, id), [...sourceIntegrationResources, testTurnResource].sort());
+  assert.deepEqual(turnEvents(store, review.id), [], 'No event says the turn was freed.');
+  // Another suite waits for it until the director reconciles the journal, which the gone launcher does not block.
+  const after = path.join(c.directory, 'checks-gate');
+  fs.writeFileSync(after, '');
+  runner.sourceCheckCommand = gated(after);
+  const check = runner.start(addChecks(c, 'T-check-after-helpers')).attemptId,
+    waiting = await waitFor(() => store.attempt(check).testTurn, 'the checks to wait for the turn');
+  assert.equal(waiting.holder, id);
+  const reconciled = restoreSourceIntegration(runner, store.task(c.taskId));
+  assert.equal(reconciled.state, 'abandoned', JSON.stringify(reconciled));
+  assert.deepEqual(leasesOf(store, id), []);
+  const done = await c.wait('T-check-after-helpers');
+  assert.equal(done.result.checks[0].status, 'pass');
   assert.equal(holder(store), null);
 });

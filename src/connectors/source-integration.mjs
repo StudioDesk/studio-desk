@@ -149,10 +149,16 @@ export function stopProcess(child) {
     } else process.kill(-child.pid, 'SIGKILL');
   } catch {}
 }
-export function stopIntegrationProcess(runtime) {
-  const child = runtime.integrationProcess,
-    turn = runtime.integrationTurn;
-  if (!child && !turn?.waiting) return;
+// The verification turn each running step was started under (run()), so a stop cancels that step's own verification
+// and no other: two projects may integrate at once, one holding the test turn while the other waits for it.
+const stepTurns = new WeakMap();
+// Ends a verification step's process, at its own time limit (run() names its child) or when the controller stops (the
+// latest step, runtime.integrationProcess) (RF-002). The step's verification is cancelled first, so whatever that
+// step's close later says (a successful install whose close was already on its way), no later step starts: run()
+// refuses to spawn and verifyHeld stops between its steps.
+export function stopIntegrationProcess(runtime, child = runtime.integrationProcess) {
+  const waiting = runtime.integrationTurn?.waiting;
+  if (!child && !waiting) return;
   // Shutdown is an observation, not confirmation of successful process completion.
   if (runtime.closing)
     for (const phase of runtime.integrationPhases || [])
@@ -162,13 +168,27 @@ export function stopIntegrationProcess(runtime) {
         completionConfirmed: false,
       });
   // A verification waiting for the computer's test turn has no process: it stops waiting and holds no turn.
-  if (!child) return turn.waiting();
-  // Same trusted test seam the orchestrator uses for single-process fixtures inside a sandbox.
-  if (runtime.fixtureProcessTermination) runtime.fixtureProcessTermination({ child }, true);
-  else stopProcess(child);
-  // A stopping controller gives back the turn its test run held while the records are open; the run may end after
-  // they close.
-  if (runtime.closing) turn?.release();
+  if (!child) return waiting();
+  const turn = stepTurns.get(child);
+  if (turn) {
+    turn.cancelled = true;
+    // A launcher that exited before its close came may have left a helper holding its output, and the restart checks
+    // only the launcher's own process (testRunEnded, core/test-turn.mjs).
+    if (child.exitCode !== null || child.signalCode !== null) turn.helpersUnconfirmed();
+  }
+  // Same trusted test seam the orchestrator uses for single-process fixtures inside a sandbox. A termination that
+  // fails is passed over as stopProcess passes it over: the step's close is what says its process is gone.
+  try {
+    if (runtime.fixtureProcessTermination) runtime.fixtureProcessTermination({ child }, true);
+    else stopProcess(child);
+  } catch {}
+  // The turn is not given back here. A stop that returned has not shown that the step's process is gone: on Windows
+  // a launcher that already exited is passed over (C-41) while a helper it started may run on, and taskkill may fail
+  // or time out. The verification gives the turn back, clearing journal.testProcess, once that step's close has been
+  // observed while the records are open (verifyMergedSource). A close the controller does not see leaves both for its
+  // restart (connectors/source-changes.mjs, interruptedSourceIntegrations), which frees the turn only when
+  // testRunEnded finds the recorded process's own ID, with its start time, no longer running; it checks no process
+  // that one started.
 }
 // The computer's turn for full test suites (core/test-turn.mjs), taken for the verification's install, build and test
 // run under the journal's identity, which holds the project's source too; each of those steps' time limits starts
@@ -184,6 +204,8 @@ async function takeVerificationTurn(runtime, journal) {
   const turn = {
       held: false,
       waiting: null,
+      // Set by stopIntegrationProcess before it ends the step's process: the verification starts no later step.
+      cancelled: false,
       // Records the process of the step running under the held turn (run()'s child: the install, the build or the
       // tests) as journal.testProcess { pid, startedAt }, its ID with an ISO time taken right after the spawn returned,
       // so a later process handed the same ID is not taken for it (adapters/process.mjs). It is kept where the journal
@@ -194,10 +216,19 @@ async function takeVerificationTurn(runtime, journal) {
         journal.testProcess = { pid, startedAt: new Date().toISOString() };
         recordOnJournal(store, journal, 'testProcess');
       },
-      // Gives the turn back once, when the run ends or the controller stops, clearing the recorded process first.
+      // Marks the recorded process as one whose launcher exited before its close came (stopIntegrationProcess):
+      // helpersUnconfirmed says a process it started may still run although the launcher's own ID is gone.
+      helpersUnconfirmed() {
+        if (!turn.held || !journal.testProcess || journal.testProcess.helpersUnconfirmed) return;
+        journal.testProcess.helpersUnconfirmed = true;
+        recordOnJournal(store, journal, 'testProcess');
+      },
+      // Gives the turn back once, when the run has ended (its step's close observed, or no step running), clearing the
+      // recorded process first. Records already closed with the controller are left as they are, the lease and the
+      // recorded process with them, for the restart to reconcile.
       release() {
         if (runtime.integrationTurn === turn) runtime.integrationTurn = null;
-        if (!turn.held) return;
+        if (!turn.held || store.db?.isOpen === false) return;
         turn.held = false;
         if (journal.testProcess) {
           delete journal.testProcess;
@@ -326,11 +357,23 @@ export function observeIntegrationPhase(runtime, journal, phaseId, operation) {
     return finish(null, error);
   }
 }
-// record names the file that keeps the whole of stdout as it arrives (testOutput).
-function run(runtime, executable, args, { cwd, environment, timeoutMs, phase, record = null }) {
+// A verification the controller's stop or its own stop cancelled (stopIntegrationProcess) ends with this, starting
+// nothing more.
+const verificationStopped = () =>
+  Object.assign(
+    new Error('The verification was stopped, so it started no further step. Integrate again to verify the change.'),
+    { stopped: true },
+  );
+// record names the file that keeps the whole of stdout as it arrives (testOutput). turn is the verification turn the
+// step runs under (verifyHeld's own, none for the formatter, which runs before it is taken): the step's process is
+// recorded on that turn's journal and a stop of the step cancels that verification. Nothing is started once the
+// controller is stopping or that verification is cancelled. runtime.integrationSpawn is a trusted model-free test seam
+// standing in for spawn, as fixtureProcessTermination stands in for ending a process; HTTP never sets it.
+function run(runtime, executable, args, { cwd, environment, timeoutMs, phase, record = null, turn = null }) {
+  if (runtime.closing || turn?.cancelled) return Promise.reject(verificationStopped());
   return new Promise((resolve, reject) => {
     const [file, argv] = command(executable, args),
-      child = spawn(file, argv, {
+      child = (runtime.integrationSpawn || spawn)(file, argv, {
         cwd,
         env: environment,
         windowsHide: true,
@@ -338,8 +381,11 @@ function run(runtime, executable, args, { cwd, environment, timeoutMs, phase, re
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     runtime.integrationProcess = child;
-    // A step that runs while the verification holds the test turn is recorded on its journal (takeVerificationTurn).
-    runtime.integrationTurn?.recordProcess(child.pid);
+    // A step that runs while its verification holds the test turn is recorded on its journal (takeVerificationTurn).
+    if (turn) {
+      stepTurns.set(child, turn);
+      turn.recordProcess(child.pid);
+    }
     const stdout = testOutput(logLimit, record);
     let stderr = '',
       timedOut = false,
@@ -360,7 +406,7 @@ function run(runtime, executable, args, { cwd, environment, timeoutMs, phase, re
     });
     const timer = setTimeout(() => {
       timedOut = true;
-      stopIntegrationProcess(runtime);
+      stopIntegrationProcess(runtime, child);
     }, timeoutMs);
     const done = () => {
       clearTimeout(timer);
@@ -602,169 +648,18 @@ export async function verifyIntegration(runtime, journal, directory, configurati
     if (outside.length) throw new Error(`The formatter changed ${outside.join(', ')}, outside the reviewed files.`);
     if (files.some(file => fs.existsSync(path.join(worktree, file)) !== kept.includes(file)))
       throw new Error('The merged source does not hold exactly the reviewed files.');
-    // The verification holds the computer's test turn from its install through its tests (C-10's interim, November
-    // 2026): the packages are installed for one lockfile at a time in the data folder, so another line's install never
-    // replaces them under a suite that is running. The turn is given back however the verification ends.
-    const verifyHeld = async phase => {
-      const plan = sourcePlan(worktree, profile);
-      // The merged source gets its installed packages first (MP-026), outside the test sandbox.
-      const install = installStep(runtime, worktree, installsPackages(profile));
-      if (install) {
-        const installed = await run(runtime, install.executable, install.args, {
-          cwd: worktree,
-          environment,
-          timeoutMs: installTimeoutMs,
-          phase,
-        });
-        fs.writeFileSync(path.join(directory, 'install-output.txt'), installed.stdout + installed.stderr);
-        keep('install', installed.stdout + installed.stderr);
-        if (installed.exitCode !== 0 || installed.timedOut)
-          throw Object.assign(
-            new Error(
-              installed.timedOut
-                ? 'Installing the packages ran out of time.'
-                : lastLine(installed.stderr) || 'Installing the packages failed.',
-            ),
-            {
-              verification: {
-                phaseId: 'integration.verification',
-                timedOut: installed.timedOut,
-                exitCode: installed.exitCode,
-                signal: installed.signal,
-                checks: [
-                  {
-                    name: 'Installed packages',
-                    status: 'fail',
-                    evidence: installed.timedOut ? 'Install time limit reached.' : `Exit ${installed.exitCode}.`,
-                  },
-                ],
-              },
-            },
-          );
-      }
-      // The project's build, when its settings name one, runs before the tests, wrapped as they are (1.1). A failing
-      // build stops the verification there; a build must leave the verified source as it was.
-      const build = buildCommand(profile);
-      let built = null;
-      if (build) {
-        const wrapped = candidateTestCommand(
-          { root: worktree, data: runtime.store.directory, command: build },
-          configuration,
-        );
-        let result;
-        try {
-          result = await run(runtime, wrapped.executable, wrapped.args, {
-            cwd: worktree,
-            environment,
-            timeoutMs: buildTimeoutMs,
-            phase,
-          });
-        } catch (error) {
-          throw new Error(
-            `The build command could not start: ${error.message}. npm, npx and node run with the controller's Node.js; another program must be on the PATH.`,
-          );
-        }
-        fs.writeFileSync(path.join(directory, 'build-output.txt'), result.stdout + result.stderr);
-        keep('build', result.stdout + result.stderr);
-        const passed = buildPassed(result);
-        built = {
-          name: 'Integration build',
-          status: passed ? 'pass' : 'fail',
-          evidence: `${buildText(profile)}, ${sandboxLabel(configuration)}: ${result.timedOut ? 'time limit reached' : `exit ${result.exitCode ?? result.signal}`}.${passed ? '' : `\n${buildTail(result.stdout + result.stderr)}`}`,
-        };
-        if (!passed)
-          throw Object.assign(
-            new Error(
-              result.timedOut
-                ? 'The build ran out of time.'
-                : `The build failed: ${lastLine(result.stderr) || lastLine(result.stdout) || 'exit ' + (result.exitCode ?? result.signal)}`,
-            ),
-            {
-              verification: {
-                phaseId: 'integration.verification',
-                timedOut: result.timedOut,
-                exitCode: result.exitCode,
-                signal: result.signal,
-                checks: [built],
-              },
-            },
-          );
-        if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash) throw new Error(changedByBuild);
-      }
-      const test =
-        runtime.sourceCheckCommand || candidateTestCommand({ ...plan, data: runtime.store.directory }, configuration);
-      // Same command-local test profile and copied-harness marker as candidate tests.
-      environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-      const tested = await run(runtime, test.executable, test.args, {
-        cwd: worktree,
-        environment,
-        timeoutMs: testTimeoutMs,
-        phase,
-        record: path.join(directory, 'test-output-full.txt'),
-      });
-      fs.writeFileSync(path.join(directory, 'test-output.txt'), tested.stdout);
-      fs.writeFileSync(path.join(directory, 'test-errors.txt'), tested.stderr);
-      keep('errors', tested.stderr);
-      if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash)
-        throw Object.assign(new Error('A test changed the verified source.'), {
-          phaseEvidence: testPhaseEvidence(tested.stdout),
-        });
-      const { totals, tapDurationMs, failedTests } = testPhaseEvidence(tested.stdout);
-      const ran =
-          !!totals &&
-          tested.exitCode === 0 &&
-          !tested.signal &&
-          !tested.timedOut &&
-          totals.fail === 0 &&
-          totals.cancelled === 0 &&
-          totals.skipped === 0 &&
-          totals.todo === 0 &&
-          totals.pass === totals.tests,
-        // A run that passed can still have counted too few tests: none from a source that holds test files, or fewer
-        // than the line last passed with (journal.testFloor, recorded for a story's merge).
-        short = ran ? tooFewTests(totals, plan, profile, journal) : null,
-        passed = ran && !short,
-        // A run with no complete totals says why when its error output does (carries and releases read it too).
-        reason = short || (totals ? null : noTotals(tested.stderr));
-      return {
-        passed,
-        ...(reason ? { error: reason } : {}),
-        phaseId: 'integration.verification',
-        failedTests,
-        checks: [
-          ...(built ? [built] : []),
-          {
-            name: 'Integration Node test suite',
-            status: passed ? 'pass' : 'fail',
-            evidence: tested.timedOut
-              ? 'Verification time limit reached.'
-              : `Exit ${tested.exitCode}; ${JSON.stringify(totals)}; ran ${runtime.sourceCheckCommand ? 'as a protocol fixture' : sandboxLabel(configuration)}.${short ? ` ${short}` : ''}`,
-          },
-        ],
-        formatter: runtime.sourceFormatCommand ? 'formatter fixture' : formatter?.package || 'none',
-        fixture: !!(runtime.sourceFormatCommand || runtime.sourceCheckCommand),
-        sourceHash: plan.sourceHash,
-        files: files.map(file => ({
-          path: file,
-          integratedHash: kept.includes(file) ? hash(fs.readFileSync(path.join(worktree, file))) : null,
-        })),
-        totals,
-        tapDurationMs,
-        exitCode: tested.exitCode,
-        signal: tested.signal,
-        timedOut: tested.timedOut,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        outputs,
-      };
-    };
-    return await observeIntegrationPhase(runtime, journal, 'integration.verification', async phase => {
-      const turn = await takeVerificationTurn(runtime, journal);
-      try {
-        return await verifyHeld(phase);
-      } finally {
-        turn.release();
-      }
+    return await verifyMergedSource(runtime, journal, {
+      worktree,
+      directory,
+      configuration,
+      profile,
+      environment,
+      files,
+      kept,
+      formatter,
+      startedAt,
+      keep,
+      outputs,
     });
   } catch (error) {
     return {
@@ -775,4 +670,194 @@ export async function verifyIntegration(runtime, journal, directory, configurati
       outputs,
     };
   }
+}
+
+// The verification holds the computer's test turn from its install through its tests (C-10's interim, November
+// 2026): the packages are installed for one lockfile at a time in the data folder, so another line's install never
+// replaces them under a suite that is running. The turn is given back once the verification has ended with no step of
+// its own running: after its last step's close was observed, or when a step could not start. A stop (the controller's,
+// or a step's time limit) cancels it first and no later step starts; it ends when the stopped step's close is
+// observed. Records that closed before that keep the turn and journal.testProcess for the restart to reconcile
+// (stopIntegrationProcess). context is what verifyIntegration prepared: { worktree, directory, configuration, profile,
+// environment, files, kept, formatter, startedAt, keep, outputs }, keep recording each step's printed tail in outputs.
+export function verifyMergedSource(runtime, journal, context) {
+  return observeIntegrationPhase(runtime, journal, 'integration.verification', async phase => {
+    const turn = await takeVerificationTurn(runtime, journal);
+    try {
+      return await verifyHeld(runtime, journal, turn, phase, context);
+    } finally {
+      turn.release();
+    }
+  });
+}
+async function verifyHeld(
+  runtime,
+  journal,
+  turn,
+  phase,
+  { worktree, directory, configuration, profile, environment, files, kept, formatter, startedAt, keep, outputs },
+) {
+  // A step whose close came after the verification was stopped ends it there, even one that succeeded; a step that
+  // reached its time limit says so itself.
+  const halt = result => {
+    if (!result.timedOut && (runtime.closing || turn.cancelled)) throw verificationStopped();
+  };
+  const plan = sourcePlan(worktree, profile);
+  // The merged source gets its installed packages first (MP-026), outside the test sandbox.
+  const install = installStep(runtime, worktree, installsPackages(profile));
+  if (install) {
+    const installed = await run(runtime, install.executable, install.args, {
+      cwd: worktree,
+      environment,
+      timeoutMs: installTimeoutMs,
+      phase,
+      turn,
+    });
+    fs.writeFileSync(path.join(directory, 'install-output.txt'), installed.stdout + installed.stderr);
+    keep('install', installed.stdout + installed.stderr);
+    halt(installed);
+    if (installed.exitCode !== 0 || installed.timedOut)
+      throw Object.assign(
+        new Error(
+          installed.timedOut
+            ? 'Installing the packages ran out of time.'
+            : lastLine(installed.stderr) || 'Installing the packages failed.',
+        ),
+        {
+          verification: {
+            phaseId: 'integration.verification',
+            timedOut: installed.timedOut,
+            exitCode: installed.exitCode,
+            signal: installed.signal,
+            checks: [
+              {
+                name: 'Installed packages',
+                status: 'fail',
+                evidence: installed.timedOut ? 'Install time limit reached.' : `Exit ${installed.exitCode}.`,
+              },
+            ],
+          },
+        },
+      );
+  }
+  // The project's build, when its settings name one, runs before the tests, wrapped as they are (1.1). A failing
+  // build stops the verification there; a build must leave the verified source as it was.
+  const build = buildCommand(profile);
+  let built = null;
+  if (build) {
+    const wrapped = candidateTestCommand(
+      { root: worktree, data: runtime.store.directory, command: build },
+      configuration,
+    );
+    let result;
+    try {
+      result = await run(runtime, wrapped.executable, wrapped.args, {
+        cwd: worktree,
+        environment,
+        timeoutMs: buildTimeoutMs,
+        phase,
+        turn,
+      });
+    } catch (error) {
+      if (error.stopped) throw error;
+      throw new Error(
+        `The build command could not start: ${error.message}. npm, npx and node run with the controller's Node.js; another program must be on the PATH.`,
+      );
+    }
+    fs.writeFileSync(path.join(directory, 'build-output.txt'), result.stdout + result.stderr);
+    keep('build', result.stdout + result.stderr);
+    halt(result);
+    const passed = buildPassed(result);
+    built = {
+      name: 'Integration build',
+      status: passed ? 'pass' : 'fail',
+      evidence: `${buildText(profile)}, ${sandboxLabel(configuration)}: ${result.timedOut ? 'time limit reached' : `exit ${result.exitCode ?? result.signal}`}.${passed ? '' : `\n${buildTail(result.stdout + result.stderr)}`}`,
+    };
+    if (!passed)
+      throw Object.assign(
+        new Error(
+          result.timedOut
+            ? 'The build ran out of time.'
+            : `The build failed: ${lastLine(result.stderr) || lastLine(result.stdout) || 'exit ' + (result.exitCode ?? result.signal)}`,
+        ),
+        {
+          verification: {
+            phaseId: 'integration.verification',
+            timedOut: result.timedOut,
+            exitCode: result.exitCode,
+            signal: result.signal,
+            checks: [built],
+          },
+        },
+      );
+    if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash) throw new Error(changedByBuild);
+  }
+  const test =
+    runtime.sourceCheckCommand || candidateTestCommand({ ...plan, data: runtime.store.directory }, configuration);
+  // Same command-local test profile and copied-harness marker as candidate tests.
+  environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
+  const tested = await run(runtime, test.executable, test.args, {
+    cwd: worktree,
+    environment,
+    timeoutMs: testTimeoutMs,
+    phase,
+    turn,
+    record: path.join(directory, 'test-output-full.txt'),
+  });
+  fs.writeFileSync(path.join(directory, 'test-output.txt'), tested.stdout);
+  fs.writeFileSync(path.join(directory, 'test-errors.txt'), tested.stderr);
+  keep('errors', tested.stderr);
+  halt(tested);
+  if (sourcePlan(worktree, profile).sourceHash !== plan.sourceHash)
+    throw Object.assign(new Error('A test changed the verified source.'), {
+      phaseEvidence: testPhaseEvidence(tested.stdout),
+    });
+  const { totals, tapDurationMs, failedTests } = testPhaseEvidence(tested.stdout);
+  const ran =
+      !!totals &&
+      tested.exitCode === 0 &&
+      !tested.signal &&
+      !tested.timedOut &&
+      totals.fail === 0 &&
+      totals.cancelled === 0 &&
+      totals.skipped === 0 &&
+      totals.todo === 0 &&
+      totals.pass === totals.tests,
+    // A run that passed can still have counted too few tests: none from a source that holds test files, or fewer
+    // than the line last passed with (journal.testFloor, recorded for a story's merge).
+    short = ran ? tooFewTests(totals, plan, profile, journal) : null,
+    passed = ran && !short,
+    // A run with no complete totals says why when its error output does (carries and releases read it too).
+    reason = short || (totals ? null : noTotals(tested.stderr));
+  return {
+    passed,
+    ...(reason ? { error: reason } : {}),
+    phaseId: 'integration.verification',
+    failedTests,
+    checks: [
+      ...(built ? [built] : []),
+      {
+        name: 'Integration Node test suite',
+        status: passed ? 'pass' : 'fail',
+        evidence: tested.timedOut
+          ? 'Verification time limit reached.'
+          : `Exit ${tested.exitCode}; ${JSON.stringify(totals)}; ran ${runtime.sourceCheckCommand ? 'as a protocol fixture' : sandboxLabel(configuration)}.${short ? ` ${short}` : ''}`,
+      },
+    ],
+    formatter: runtime.sourceFormatCommand ? 'formatter fixture' : formatter?.package || 'none',
+    fixture: !!(runtime.sourceFormatCommand || runtime.sourceCheckCommand),
+    sourceHash: plan.sourceHash,
+    files: files.map(file => ({
+      path: file,
+      integratedHash: kept.includes(file) ? hash(fs.readFileSync(path.join(worktree, file))) : null,
+    })),
+    totals,
+    tapDurationMs,
+    exitCode: tested.exitCode,
+    signal: tested.signal,
+    timedOut: tested.timedOut,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    outputs,
+  };
 }

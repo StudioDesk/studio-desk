@@ -2352,7 +2352,10 @@ function commitMessage(store, review, candidate, journal) {
 // recorded running under the turn (testProcess, source-integration.mjs) is confirmed gone, by the process identity
 // every caller shares (testRunEnded, core/test-turn.mjs: its ID with when it started, so a later process handed the ID
 // is not taken for it). The journal stays needs-reconciliation with its other leases. One whose recorded process may
-// still run, or that recorded none (a journal from before it recorded one), keeps the turn until it is reconciled.
+// still run, or that recorded none (a journal from before it recorded one), keeps the turn until it is reconciled. So
+// does one the stop marked helpersUnconfirmed (stopIntegrationProcess, source-integration.mjs: its launcher had exited
+// before its close came): only the launcher's own process can be checked, and a process it started may still run, so
+// the director reconciles it (restoreSourceIntegration, which frees the turn once that launcher is gone).
 const turnFreedOnRestart =
   "The test turn was freed: the integration's test run that held it had ended when the controller started again. Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";
 export function interruptedSourceIntegrations(runtime) {
@@ -2370,7 +2373,7 @@ export function interruptedSourceIntegrations(runtime) {
       review.id,
       `Source integration stopped part-way when the controller stopped (during ${journal.interrupted}); reservations retained. Use Reconcile source integration.`,
     );
-    if (holdsTestTurn(store, journal.id) && testRunEnded(journal))
+    if (holdsTestTurn(store, journal.id) && testRunEnded(journal) && !journal.testProcess.helpersUnconfirmed)
       store.tx(() => {
         store.releaseResource(testTurnResource, journal.id);
         store.event('test_turn', review.taskId, review.id, turnFreedOnRestart);
@@ -2456,6 +2459,14 @@ export function restoreSourceIntegration(runtime, task) {
     runtime.sourceIntegrationRun?.id === journal.id
   )
     throw new Error('Choose an uncertain source integration to reconcile.');
+  // Reconciling gives the test turn back with the journal's other leases (settle), so it waits while the test run the
+  // journal recorded under the turn may still go on (testRunEnded: its launcher's own process, by its ID with when it
+  // started), as Reconcile waits for an attempt's recorded processes (Runner.assertReconcilable). A helpersUnconfirmed
+  // mark alone does not stop it: that launcher is gone and the restart left the turn for the director to free.
+  if (holdsTestTurn(store, journal.id) && journal.testProcess?.pid && !testRunEnded(journal))
+    throw new Error(
+      `The integration's test run (process ${journal.testProcess.pid}) may still be running and holds the computer's test turn. Reconcile again once it has ended.`,
+    );
   if (journal.method === 'merge') return reconcileMerge(runtime, task, review, journal);
   if (runtime.active.size || !store.organization().paused)
     throw new Error('Pause dispatch and choose an uncertain source integration to restore.');
