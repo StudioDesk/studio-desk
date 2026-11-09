@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
-import { waitFor } from './wait-for.mjs';
+import { waitFor, waitLimit } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { carryWaits } from '../src/connectors/source-carries.mjs';
 import { approveWork } from '../src/core/proposals.mjs';
@@ -19,8 +19,9 @@ import { autonomyPolicy, saveAutonomyPolicy } from '../src/core/autonomy.mjs';
 const project = 'project-legacy',
   target = 'src/core/workflows.mjs';
 // A project with release lines, oldest first, the last the newest (main, which the folder has checked out).
-async function lined(t, releases) {
-  const c = await setup(t);
+// A slowed step runs the project's tests 1.5 seconds longer each time (test/fixture-source-check.mjs, 'slow').
+async function lined(t, releases, checkMode = 'pass') {
+  const c = await setup(t, checkMode);
   for (const branch of releases) await addLine(c, branch);
   return c;
 }
@@ -51,14 +52,15 @@ function commitOn(c, branch, text) {
   }
 }
 const carriesOf = (c, review) => c.app.store.attempt(review.id).sourceCarries;
-const settledCarry = (c, review, index) =>
+// A wait that covers several carries in a row (an idea's) is given their time as its limit.
+const settledCarry = (c, review, index, { limit = waitLimit } = {}) =>
   waitFor(
     () =>
       ['carried', 'rejected', 'merging', 'needs-reconciliation'].includes(carriesOf(c, review)?.[index]?.state) &&
       !c.app.runner.sourceIntegrationRun &&
       carriesOf(c, review)[index],
     `carry ${index} of ${review.id} to settle`,
-    { detail: () => JSON.stringify(carriesOf(c, review)) },
+    { limit, detail: () => JSON.stringify(carriesOf(c, review)) },
   );
 // A read that fails names its route and its network cause: the test runner prints only "fetch failed", which twice on
 // November 4, 2026 could not say whether the connection was refused, reset or timed out. The body is read inside the
@@ -261,70 +263,152 @@ test('a fix that conflicts on the older line is brought back by a story there, a
   assert.equal(git(c.root, ['rev-parse', 'HEAD']), integration.commit);
 });
 
-test('bringing back an idea brings its stories back in the order they landed; a story alone needs what it builds on', async t => {
-  const c = await lined(t, ['release/1.0']),
-    store = c.app.store,
-    { runner } = c.app;
-  saveAutonomyPolicy(store, runner.registries, project, {
-    expectedRevision: autonomyPolicy(store, project).revision,
-    enabled: true,
-    retries: 0,
-    kinds: {
-      'studio-development:change': { approve: 'director', accept: 'director', integrate: 'auto' },
-      'studio-development:change-review': { approve: 'auto', accept: 'auto' },
-    },
-    cycle: { enabled: false, workflowId: null, maxPerDay: 3 },
-  });
-  const { ids } = await c.breakdown(),
-    [first, second] = ids,
-    planning = store.task('breakdown-task');
-  planning.runReference = { runId: 'run-bring-back' };
-  store.putTask(planning);
-  for (const id of ids) {
-    approveWork(store, runner.registries, store.task(id));
-    runner.queueStart(id);
-  }
-  const reviews = [];
-  for (const id of ids) {
-    const edit = await c.wait(id);
-    c.measuredFixture(edit);
-    acceptAttempt(store, runner.registries, store.task(id));
-    runner.autonomy.accepted(id);
-    reviews.push(
-      await waitFor(() => {
-        const review = store.attempts(id).find(attempt => attempt.sourceIntegration?.state === 'integrated');
-        return !runner.sourceIntegrationRun && review;
-      }, `${id} to integrate`),
+// This test runs eight controller steps one after another: two edits, two reviews, two integrations and two carries.
+// Each is waited for by what it records, never by time, and each has a full wait of its own; the test's time bound is
+// the sum of those waits. It once had the suite's 120 seconds for all eight while one wait covered a review and its
+// integration, so on a busy computer (four of five candidates on November 6, 2026, while several suites ran) it ran out
+// of time, or its studio was closed under a request it was still making ("fetch failed"). Its project's tests are
+// slowed, so every step takes longer than it needs to and the test still passes; the test after it runs these waits on
+// a mocked clock with every step slowed far more, against the earlier budget too.
+// The test's waits in the order it makes them, each with the controller steps it covers (an edit is waited for by
+// c.wait, whose limit is one waitLimit).
+const ideaWaits = [
+  { label: 'the first story to be edited', steps: 1 },
+  { label: 'the first story to be reviewed and integrated', steps: 2 },
+  { label: 'the second story to be edited', steps: 1 },
+  { label: 'the second story to be reviewed and integrated', steps: 2 },
+  { label: 'both carries to settle', steps: 2 },
+];
+// A budget: each wait's limit, and the test's own bound.
+const ideaBudget = {
+  limits: ideaWaits.map(({ steps }) => steps * waitLimit),
+  timeout: ideaWaits.reduce((sum, { steps }) => sum + steps, 0) * waitLimit,
+};
+// The budget it had before: one wait per wait it makes, and the suite's 120 seconds (package.json) for the whole test.
+const earlierIdeaBudget = { limits: ideaWaits.map(() => waitLimit), timeout: 120000 };
+test(
+  'bringing back an idea brings its stories back in the order they landed; a story alone needs what it builds on',
+  { timeout: ideaBudget.timeout },
+  async t => {
+    const c = await lined(t, ['release/1.0'], 'slow'),
+      store = c.app.store,
+      { runner } = c.app;
+    saveAutonomyPolicy(store, runner.registries, project, {
+      expectedRevision: autonomyPolicy(store, project).revision,
+      enabled: true,
+      retries: 0,
+      kinds: {
+        'studio-development:change': { approve: 'director', accept: 'director', integrate: 'auto' },
+        'studio-development:change-review': { approve: 'auto', accept: 'auto' },
+      },
+      cycle: { enabled: false, workflowId: null, maxPerDay: 3 },
+    });
+    const { ids } = await c.breakdown(),
+      [first, second] = ids,
+      planning = store.task('breakdown-task');
+    planning.runReference = { runId: 'run-bring-back' };
+    store.putTask(planning);
+    for (const id of ids) {
+      approveWork(store, runner.registries, store.task(id));
+      runner.queueStart(id);
+    }
+    const reviews = [];
+    for (const id of ids) {
+      const edit = await c.wait(id);
+      c.measuredFixture(edit);
+      acceptAttempt(store, runner.registries, store.task(id));
+      runner.autonomy.accepted(id);
+      reviews.push(
+        await waitFor(
+          () => {
+            const review = store.attempts(id).find(attempt => attempt.sourceIntegration?.state === 'integrated');
+            return !runner.sourceIntegrationRun && review;
+          },
+          `${id} to be reviewed and integrated`,
+          { limit: ideaBudget.limits[2 * reviews.length + 1] },
+        ),
+      );
+    }
+    assert.equal(store.task(second).dependencies.includes(first), true);
+    const alone = await read(c, `/api/tasks/${second}/bring-back`);
+    assert.match(
+      alone.lines[0].reason,
+      new RegExp(`builds on ${first} \\(“Refine workflow fixture”\\), which release/1\\.0 does not have`),
     );
+    const idea = `/api/projects/${project}/runs/run-bring-back/bring-back`;
+    assert.deepEqual(await read(c, idea), { lines: [{ line: 'release/1.0', through: ['release/1.0'] }] });
+    const brought = await c.request(idea, { projectId: project, line: 'release/1.0' });
+    assert.equal(brought.status, 202, JSON.stringify(brought.data));
+    assert.deepEqual(brought.data.stories, [
+      { storyId: first, lines: ['release/1.0'] },
+      { storyId: second, lines: ['release/1.0'] },
+    ]);
+    assert.deepEqual(
+      carriesOf(c, reviews[1])[0].after,
+      [{ reviewAttemptId: reviews[0].id, carryId: carriesOf(c, reviews[0])[0].id, storyId: first }],
+      'Its carry waits for the story before it on the same line.',
+    );
+    await settledCarry(c, reviews[1], 0, { limit: ideaBudget.limits[4] });
+    assert.deepEqual(
+      reviews.map(review => carriesOf(c, review)[0].state),
+      ['carried', 'carried'],
+    );
+    assert.match(message(c, 'release/1.0~1'), /^Bring “Refine workflow fixture” back to release\/1\.0\n/);
+    assert.match(message(c, 'release/1.0'), /^Bring “Refine project fixture” back to release\/1\.0\n/);
+    assert.match(show(c, 'release/1.0', 'src/core/projects.mjs'), /Bounded fixture improvement\./);
+    assert.match((await read(c, idea)).lines[0].reason, /release\/1\.0 already has every story of this idea/);
+  },
+);
+
+// Makes the idea test's waits (ideaWaits) with a budget's limits on a mocked clock, against a controller whose steps
+// finish one after another, each step ms after the last (its edits may overlap in a real run; one after another is the
+// slowest), and says how it ended: 'passed', the wait that ran out, or that the test's own bound ran out first.
+async function ideaUnderSlowSteps(t, budget, step) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  try {
+    const start = Date.now(),
+      done = () => Math.floor((Date.now() - start) / step);
+    let outcome,
+      covered = 0;
+    (async () => {
+      for (const [index, { label, steps }] of ideaWaits.entries()) {
+        const needed = (covered += steps);
+        await waitFor(() => done() >= needed, label, { limit: budget.limits[index] });
+      }
+    })().then(
+      () => (outcome = 'passed'),
+      error => (outcome = error.message),
+    );
+    for (;;) {
+      await new Promise(resolve => setImmediate(resolve));
+      if (outcome !== undefined) return outcome;
+      if (Date.now() - start > budget.timeout) return `still waiting when the test's ${budget.timeout} ms ran out`;
+      t.mock.timers.tick(500);
+    }
+  } finally {
+    t.mock.timers.reset();
   }
-  assert.equal(store.task(second).dependencies.includes(first), true);
-  const alone = await read(c, `/api/tasks/${second}/bring-back`);
-  assert.match(
-    alone.lines[0].reason,
-    new RegExp(`builds on ${first} \\(“Refine workflow fixture”\\), which release/1\\.0 does not have`),
+}
+
+test("the idea test's waits outlast a slowed controller's steps, where its earlier budget ran out", async t => {
+  // Twenty seconds a step: every wait fits, but eight steps outlast the suite's 120 seconds for the whole test, which
+  // then ends and closes its studio under the request it is making ("fetch failed").
+  assert.equal(
+    await ideaUnderSlowSteps(t, earlierIdeaBudget, 20000),
+    "still waiting when the test's 120000 ms ran out",
   );
-  const idea = `/api/projects/${project}/runs/run-bring-back/bring-back`;
-  assert.deepEqual(await read(c, idea), { lines: [{ line: 'release/1.0', through: ['release/1.0'] }] });
-  const brought = await c.request(idea, { projectId: project, line: 'release/1.0' });
-  assert.equal(brought.status, 202, JSON.stringify(brought.data));
-  assert.deepEqual(brought.data.stories, [
-    { storyId: first, lines: ['release/1.0'] },
-    { storyId: second, lines: ['release/1.0'] },
-  ]);
-  assert.deepEqual(
-    carriesOf(c, reviews[1])[0].after,
-    [{ reviewAttemptId: reviews[0].id, carryId: carriesOf(c, reviews[0])[0].id, storyId: first }],
-    'Its carry waits for the story before it on the same line.',
+  // Forty seconds a step: one wait for a review and its integration runs out.
+  assert.equal(
+    await ideaUnderSlowSteps(t, earlierIdeaBudget, 40000),
+    'Timed out after 60000 ms waiting for the first story to be reviewed and integrated.',
   );
-  await settledCarry(c, reviews[1], 0);
-  assert.deepEqual(
-    reviews.map(review => carriesOf(c, review)[0].state),
-    ['carried', 'carried'],
+  // Every step may take up to one full wait.
+  for (const step of [20000, 40000, waitLimit - 500])
+    assert.equal(await ideaUnderSlowSteps(t, ideaBudget, step), 'passed', `${step} ms a step`);
+  assert.equal(
+    await ideaUnderSlowSteps(t, ideaBudget, waitLimit + 500),
+    'Timed out after 60000 ms waiting for the first story to be edited.',
   );
-  assert.match(message(c, 'release/1.0~1'), /^Bring “Refine workflow fixture” back to release\/1\.0\n/);
-  assert.match(message(c, 'release/1.0'), /^Bring “Refine project fixture” back to release\/1\.0\n/);
-  assert.match(show(c, 'release/1.0', 'src/core/projects.mjs'), /Bounded fixture improvement\./);
-  assert.match((await read(c, idea)).lines[0].reason, /release\/1\.0 already has every story of this idea/);
 });
 
 test("an idea's carry waits for the story before it on its line until that one is carried or not needed", () => {
