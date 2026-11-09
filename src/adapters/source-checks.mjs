@@ -84,11 +84,15 @@ export const sourceChecksAdapter = {
 
 function testSnapshot(runtime, entry, a, snapshot) {
   const sandboxed = a.configuration?.testSandbox === 'built-in',
-    command =
-      runtime.sourceCheckCommand ||
-      (sandboxed
-        ? builtInSandboxCommand({ root: snapshot, data: runtime.store.directory, command: a.sourceCheck.command })
-        : a.sourceCheck.command);
+    selectedCommand = runtime.sourceCheckCommand || (!sandboxed && a.sourceCheck.command);
+  const command = deadlineMs =>
+    selectedCommand ||
+    builtInSandboxCommand({
+      root: snapshot,
+      data: runtime.store.directory,
+      command: a.sourceCheck.command,
+      deadlineMs,
+    });
   const environment = subscriptionEnvironment();
   // Snapshot tests must not inherit live provider/engine overrides.
   for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
@@ -100,10 +104,15 @@ function testSnapshot(runtime, entry, a, snapshot) {
   // running (C-10's interim, November 2026).
   takeTestTurn(runtime, entry, {
     limitMs: a.assignment?.maxSeconds * 1000,
-    start: () =>
+    start: () => {
+      // The test turn restarts this allowance; installation consumes it too. An absolute deadline also charges
+      // process startup and the runner's own setup before session acquisition, without counting the turn's wait.
+      const deadlineMs =
+        a.assignment?.maxSeconds === undefined ? undefined : Date.now() + a.assignment.maxSeconds * 1000;
       runInstallStep(runtime, entry, snapshot, installsPackages(profileOf(a.sourceCheck)), environment, () =>
-        runTests(runtime, entry, a, command, snapshot, environment),
-      ),
+        runTests(runtime, entry, a, command(deadlineMs), snapshot, environment),
+      );
+    },
   });
 }
 

@@ -24,6 +24,7 @@ import {
   builtInSandboxRuntimeEnvironment,
   builtInSandboxSecrets,
   builtInSandboxSessionWaitMs,
+  builtInSandboxSessionWaitBudget,
   builtInSandboxSettings,
   builtInSandboxState,
   builtInSandboxVersion,
@@ -39,6 +40,7 @@ import {
 import { checkSeconds } from '../src/packs/studio-development/index.mjs';
 import { repositoryTestSeconds } from '../src/connectors/source-projects.mjs';
 import { testTimeoutMs } from '../src/connectors/source-integration.mjs';
+import { runBuiltInSandbox } from '../src/adapters/built-in-sandbox-run.mjs';
 
 const sessionFixture = fileURLToPath(new URL('./fixture-sandbox-session.mjs', import.meta.url));
 function sessionChild(t, folder, options = {}) {
@@ -619,13 +621,108 @@ test('a run that finds every session held by runs still going stops after its wa
   assert.ok(reads > 2, 'each holder revalidated across passes');
   assert.deepEqual(waits, [2]);
   assert.deepEqual(slotFiles(), before);
-  // A run that waits out the bound still has half its own time limit left to say why, for every sandboxed run: an
-  // idea's checks, a repository's tests, and candidate tests and integration (their tests' share of the limit).
-  const shortestMs = Math.min(checkSeconds * 1000, repositoryTestSeconds * 1000, testTimeoutMs);
-  assert.ok(
-    builtInSandboxSessionWaitMs * 2 <= shortestMs,
-    `${builtInSandboxSessionWaitMs} ms against ${shortestMs} ms`,
+});
+
+test('the standard workflow and repository retain 600-second budgets and candidate/integration tests cover the default wait', () => {
+  assert.equal(checkSeconds, 600);
+  assert.equal(repositoryTestSeconds, 600);
+  for (const limit of [checkSeconds * 1000, repositoryTestSeconds * 1000, testTimeoutMs])
+    assert.ok(builtInSandboxSessionWaitMs * 2 <= limit);
+  assert.equal(builtInSandboxSessionWaitBudget(undefined), builtInSandboxSessionWaitMs);
+});
+
+test('the runner exhausts occupied sessions and cleans up before its deadline, charging elapsed setup', async t => {
+  const folder = sessionFolder(t),
+    since = new Date().toISOString();
+  for (let slot = 0; slot < 4; slot++) writeSlot(folder, slot, process.pid, since);
+  const before = fs.readdirSync(folder).map(name => fs.readFileSync(path.join(folder, name), 'utf8')),
+    messages = [],
+    begun = Date.now(),
+    deadlineMs = begun + 2000;
+  let runDirectory,
+    acquisitionAt,
+    bound,
+    cleaned = false;
+  const code = await runBuiltInSandbox(['--root', folder, '--deadline-ms', String(deadlineMs), '--', 'node'], {
+    platform: 'win32',
+    // Model 1.5 seconds spent in setup without a slow test. The remaining real wait is about 250 ms.
+    now: () => Date.now() + 1500,
+    prepareWindows: (root, node, launcher, directory) => {
+      runDirectory = directory;
+    },
+    takeSession: (ignored, options) => {
+      acquisitionAt = Date.now() + 1500;
+      bound = options.waitBoundMs;
+      return takeBuiltInSandboxSession(folder, { ...options, alive: () => true, waitMs: 5 });
+    },
+    runSync: (program, args) => {
+      assert.deepEqual(args, ['acl', 'forget', folder]);
+      cleaned = true;
+    },
+    run: () => assert.fail('Busy sessions must not start the installed sandbox.'),
+    log: message => messages.push(message),
+  });
+  assert.equal(code, 1);
+  assert.ok(bound > 0 && bound <= (deadlineMs - acquisitionAt) / 2 + 1);
+  assert.ok(bound <= 250, 'setup consumed the enclosing allowance');
+  assert.ok(Date.now() + 1500 < deadlineMs, 'exhaustion and cleanup precede the enclosing deadline');
+  assert.ok(cleaned);
+  assert.equal(fs.existsSync(runDirectory), false);
+  assert.equal(messages.filter(message => message.startsWith('Waiting for')).length, 1);
+  assert.match(messages.at(-1), /All 4 .*sessions stayed in use by runs still going/);
+  assert.deepEqual(
+    fs.readdirSync(folder).map(name => fs.readFileSync(path.join(folder, name), 'utf8')),
+    before,
   );
+});
+
+test('an exhausted allowance never acquires a session or starts a runtime, and normal completion releases its session', async t => {
+  const root = sessionFolder(t);
+  for (const expired of [true, false]) {
+    let now = 1000,
+      directory,
+      released = false,
+      forgotten = false;
+    const messages = [],
+      code = await runBuiltInSandbox(
+        ['--root', root, '--deadline-ms', '1500', '--', 'node', '--deadline-ms', 'owned-by-command'],
+        {
+          platform: 'win32',
+          now: () => now,
+          prepareWindows: (root, node, launcher, runDirectory) => {
+            directory = runDirectory;
+            if (expired) now = 1500;
+          },
+          takeSession: async (folder, options) => {
+            assert.equal(expired, false);
+            assert.equal(options.waitBoundMs, 250);
+            return () => {
+              released = true;
+            };
+          },
+          run: (executable, args) => {
+            assert.equal(expired, false);
+            const instructions = fs.readdirSync(directory).find(name => name.startsWith('run-'));
+            assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, instructions), 'utf8')).args, [
+              '--deadline-ms',
+              'owned-by-command',
+            ]);
+            const child = new EventEmitter();
+            setImmediate(() => child.emit('close', 0));
+            return child;
+          },
+          runSync: () => {
+            forgotten = true;
+          },
+          log: message => messages.push(message),
+        },
+      );
+    assert.equal(code, expired ? 1 : 0);
+    assert.equal(released, !expired);
+    assert.ok(forgotten);
+    assert.equal(fs.existsSync(directory), false);
+    if (expired) assert.match(messages.at(-1), /allowance was exhausted/);
+  }
 });
 
 test("before a Windows run the director's key and launch link above the copy are denied to the sandbox group, or the run stops", t => {
@@ -842,6 +939,55 @@ test('the runner reads its arguments with or without the data folder, and refuse
   });
   assert.equal(refused.status, 2);
   assert.equal(refused.stderr.trim(), builtInSandboxRunUsage);
+});
+
+test('the optional deadline round trips and rejects malformed bounds without consuming command arguments', () => {
+  for (const data of [undefined, '/data']) {
+    const command = builtInSandboxCommand({ ...plan, data, deadlineMs: 1700000000000 }),
+      parsed = builtInSandboxRunArguments(command.args.slice(1));
+    assert.equal(parsed.deadlineMs, 1700000000000);
+    assert.deepEqual(parsed.args, plan.command.args);
+  }
+  for (const value of [
+    '',
+    '0',
+    '-1',
+    'NaN',
+    'Infinity',
+    '-Infinity',
+    '1.5',
+    '1e3',
+    ' 5 ',
+    'five',
+    '9007199254740992',
+    '--',
+  ])
+    assert.equal(builtInSandboxRunArguments(['--root', '/c', '--deadline-ms', value, '--', 'node']), null, value);
+  assert.equal(
+    builtInSandboxRunArguments(['--root', '/c', '--deadline-ms', '5', '--deadline-ms', '6', '--', 'node']),
+    null,
+  );
+  assert.deepEqual(builtInSandboxRunArguments(['--root', '/c', '--', 'node', '--deadline-ms', '-1']).args, [
+    '--deadline-ms',
+    '-1',
+  ]);
+});
+
+test('a legacy runner command without an allowance still uses the default session wait', async t => {
+  let consumed;
+  const code = await runBuiltInSandbox(['--root', sessionFolder(t), '--', 'node'], {
+    platform: 'win32',
+    prepareWindows: () => {},
+    runSync: () => {},
+    log: () => {},
+    takeSession: async (folder, options) => {
+      consumed = options.waitBoundMs;
+      throw new Error('Model-free acquisition boundary');
+    },
+    run: () => assert.fail('The installed sandbox must never start.'),
+  });
+  assert.equal(code, 1);
+  assert.equal(consumed, builtInSandboxSessionWaitMs);
 });
 
 test("on macOS and Linux the controller's named data folder and its secrets are denied wherever the copy is", t => {

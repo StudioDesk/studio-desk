@@ -606,11 +606,13 @@ export const builtInSandboxSessionsAtOnce = 4;
 // computer uses, so the controller and npm run verify share them.
 export const builtInSandboxSessionFolder = files => path.join(path.dirname(files.sharedSrtWin), 'sessions');
 
-// How long a run waits for a session before it stops with a plain reason: five minutes, half the shortest time limit a
-// sandboxed run has (an idea's checks and a repository's tests, 600 s each), so a run that cannot get one says why
-// rather than being stopped at its limit. It was ten minutes until the checks' limit was raised to 600 s (November 4,
-// 2026), when a check that waited the whole bound reached its own limit at the same moment.
+// The default wait cap. Checks also supply their deadline, so shorter runs and time spent installing packages
+// or preparing the sandbox leave at least half their remaining allowance to report session exhaustion.
 export const builtInSandboxSessionWaitMs = 5 * 60 * 1000;
+export const builtInSandboxSessionWaitBudget = (deadlineMs, now = Date.now()) =>
+  deadlineMs === undefined
+    ? builtInSandboxSessionWaitMs
+    : Math.max(0, Math.min(builtInSandboxSessionWaitMs, (deadlineMs - now) / 2));
 const waitedFor = ms => {
   const [count, unit] = ms >= 60000 ? [Math.round(ms / 60000), 'minute'] : [Number((ms / 1000).toFixed(1)), 'second'];
   return `${count} ${unit}${count === 1 ? '' : 's'}`;
@@ -731,6 +733,7 @@ export function builtInSandboxCommand(plan) {
       '--root',
       plan.root,
       ...(plan.data ? ['--data', plan.data] : []),
+      ...(plan.deadlineMs === undefined ? [] : ['--deadline-ms', String(plan.deadlineMs)]),
       '--',
       plan.command.executable,
       ...plan.command.args,
@@ -739,9 +742,9 @@ export function builtInSandboxCommand(plan) {
 }
 // The runner's arguments, after the program's own: --root <folder>, then --data <folder> unless the command was recorded
 // before the controller named its data folder (such commands keep running, hiding only a data folder above the copy),
-// then -- and the command. Null for any other list, which the runner refuses with its usage line.
+// then an optional absolute deadline (--deadline-ms <ms since 1970>), then -- and the command. Null for any other list.
 export const builtInSandboxRunUsage =
-  'Usage: node built-in-sandbox-run.mjs --root <folder> [--data <folder>] -- <executable> [args...]';
+  'Usage: node built-in-sandbox-run.mjs --root <folder> [--data <folder>] [--deadline-ms <positive integer>] -- <executable> [args...]';
 export function builtInSandboxRunArguments(argv) {
   if (argv[0] !== '--root' || !argv[1] || argv[1] === '--') return null;
   let next = 2,
@@ -751,6 +754,19 @@ export function builtInSandboxRunArguments(argv) {
     data = argv[next + 1];
     next += 2;
   }
+  let deadlineMs;
+  if (argv[next] === '--deadline-ms') {
+    const value = argv[next + 1];
+    if (!/^\d+$/.test(value || '') || !Number.isSafeInteger(Number(value)) || Number(value) <= 0) return null;
+    deadlineMs = Number(value);
+    next += 2;
+  }
   if (argv[next] !== '--' || argv.length < next + 2) return null;
-  return { root: argv[1], data, executable: argv[next + 1], args: argv.slice(next + 2) };
+  return {
+    root: argv[1],
+    data,
+    ...(deadlineMs === undefined ? {} : { deadlineMs }),
+    executable: argv[next + 1],
+    args: argv.slice(next + 2),
+  };
 }

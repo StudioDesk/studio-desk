@@ -11,7 +11,13 @@ import { sourceRepository } from './source-repository.mjs';
 import { waitForTask } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { worktreeName } from '../src/connectors/source-worktrees.mjs';
-import { sourcePlan, testTotals, validateCheckReport } from '../src/connectors/source-checks.mjs';
+import {
+  ensureSourceDirectories,
+  sourcePlan,
+  testTotals,
+  validateCheckReport,
+} from '../src/connectors/source-checks.mjs';
+import { studioDeskProfile } from '../src/connectors/source-profile.mjs';
 import { hash } from '../src/core/contracts.mjs';
 import { studioDevelopmentPack } from '../src/packs/studio-development/index.mjs';
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
@@ -21,9 +27,102 @@ import { codexAdapter } from '../src/adapters/codex.mjs';
 import { acceptedReference } from '../src/core/artifacts.mjs';
 import { newRun, setRunArchived, projectRuns } from '../src/core/graph.mjs';
 import { ideaInputLimits } from '../src/core/idea-inputs.mjs';
+import {
+  builtInSandboxRunArguments,
+  builtInSandboxRunner,
+  builtInSandboxSessionWaitMs,
+} from '../src/adapters/built-in-sandbox.mjs';
 
 const fixture = fileURLToPath(new URL('./fixture-source-check.mjs', import.meta.url));
 const cliFixture = fileURLToPath(new URL('./fixture-cli.mjs', import.meta.url));
+
+test('standalone checks carry their recorded route allowance through the adapter to the sandbox runner', async t => {
+  const c = await setup(t),
+    root = path.join(c.directory, 'small-source'),
+    runtime = c.app.runner,
+    selected = [],
+    native = runtime.runNative;
+  // Keep the five-second case independent of copying this whole repository or installed tools.
+  ensureSourceDirectories(root);
+  for (const file of new Set([...studioDeskProfile.files, ...studioDeskProfile.contextFiles])) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), file.endsWith('.json') ? '{}' : 'Fixture source\n');
+  }
+  fs.writeFileSync(path.join(root, 'test/quick.test.mjs'), "import test from 'node:test'; test('quick', () => {});\n");
+  git(root, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  git(root, ['config', 'user.name', 'Fixture director']);
+  git(root, ['config', 'user.email', 'fixture@example.invalid']);
+  git(root, ['config', 'commit.gpgsign', 'false']);
+  git(root, ['add', '-A']);
+  git(root, ['commit', '--quiet', '-m', 'Small checks fixture']);
+  runtime.sourceChangeRoot = root;
+  const { project } = await c.development();
+  runtime.sourceCheckCommand = undefined;
+  runtime.builtInSandbox = { status: () => ({ state: 'ready' }) };
+  t.mock.method(runtime, 'runNative', function (entry, executable, args, ...rest) {
+    if (args[0] === builtInSandboxRunner) {
+      selected.push({
+        command: { executable, args },
+        attempt: structuredClone(entry.attempt),
+        at: Date.now(),
+      });
+      // Stand in only at the process boundary, after the adapter selected the real wrapper.
+      return native.call(this, entry, process.execPath, [fixture, 'pass'], ...rest);
+    }
+    return native.call(this, entry, executable, args, ...rest);
+  });
+  for (const [limits, expected] of [
+    [{}, 120],
+    [{ maxSeconds: 5 }, 5],
+    [{ maxSeconds: 120 }, 120],
+    [{ maxSeconds: 600 }, 600],
+    [{ complexity: 2, maxSeconds: 5 }, 900],
+  ]) {
+    const created = await c.request('/api/tasks', {
+      projectId: project.id,
+      workerId: 'W-07',
+      kind: 'studio-development:checks',
+      title: 'Session wait budget',
+      brief: 'Measure a bounded model-free check.',
+      ...limits,
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const task = c.app.store.task(created.data.id);
+    assert.equal(task.maxSeconds, expected);
+    assert.equal((await c.request(`/api/tasks/${task.id}/start`, { projectId: project.id })).status, 202);
+    await c.wait(task.id);
+    const { command, attempt, at } = selected.at(-1),
+      parsed = builtInSandboxRunArguments(command.args.slice(1)),
+      effectiveMs = attempt.assignment.maxSeconds * 1000,
+      availableMs = parsed.deadlineMs === undefined ? effectiveMs : parsed.deadlineMs - at,
+      waitMs =
+        parsed.deadlineMs === undefined
+          ? builtInSandboxSessionWaitMs
+          : Math.min(builtInSandboxSessionWaitMs, availableMs / 2);
+    assert.equal(attempt.taskId, task.id);
+    assert.equal(attempt.assignment.maxSeconds, task.maxSeconds);
+    assert.ok(waitMs > 0);
+    assert.ok(waitMs <= effectiveMs / 2, `${waitMs} ms wait exceeds half the recorded ${effectiveMs} ms allowance`);
+    assert.ok(waitMs <= builtInSandboxSessionWaitMs);
+    assert.ok(availableMs <= effectiveMs, 'installation and startup do not renew the allowance');
+    const { runBuiltInSandbox } = await import('../src/adapters/built-in-sandbox-run.mjs');
+    let consumed;
+    const code = await runBuiltInSandbox(command.args.slice(1), {
+      platform: 'win32',
+      now: () => at,
+      prepareWindows: () => {},
+      runSync: () => {},
+      log: () => {},
+      takeSession: async (folder, options) => {
+        consumed = options.waitBoundMs;
+        throw new Error('Model-free acquisition boundary');
+      },
+      run: () => assert.fail('The installed sandbox must never start.'),
+    });
+    assert.equal(code, 1);
+    assert.equal(consumed, waitMs, 'the real runner passes this bound to session acquisition');
+  }
+});
 
 test('new Studio desk defaults add product-owner breakdown while configured projects retain their catalog and history', async t => {
   const c = await setup(t, 'pass', true),
