@@ -3,6 +3,7 @@
 // test/source-changes.test.mjs and test/story-edits.test.mjs.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -400,7 +401,7 @@ export async function setup(
         worktree = path.join(directory, `m-${name}`);
       git(root, ['worktree', 'add', '--quiet', '--detach', worktree, commit]);
       try {
-        measured = { ...sourcePlan(worktree, profile), root: fs.realpathSync(root), base: { commit, branch } };
+        measured = { ...sourcePlan(worktree, profile), root: realPath(root), base: { commit, branch } };
       } finally {
         git(root, ['worktree', 'remove', '--force', worktree]);
       }

@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -14,7 +15,7 @@ import { studioDeskProfile, studioDeskProfileRevision1 } from '../src/connectors
 import { git } from '../src/connectors/source-integration.mjs';
 
 function repository(t, files) {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-inspect-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-inspect-'))),
     root = path.join(directory, 'site');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   for (const [file, contents] of Object.entries(files)) {
@@ -182,7 +183,7 @@ test("a repository git refuses for another reason is refused in git's own words"
 
 // Studio desk's own profile id means its own checks, limits and package installs: another repository may not take it.
 test("a repository's profile may not use Studio desk's own profile name", t => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-reserved-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-reserved-'))),
     root = path.join(directory, 'studio-desk'),
     sentence = "studio-desk is Studio desk's own profile name; give this repository's profile another name.";
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

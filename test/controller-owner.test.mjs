@@ -7,6 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -158,7 +159,7 @@ test("the lock is a file of its own: the studio's database stays open to other r
     database = path.join(directory, 'studio.sqlite');
   assert.ok(fs.existsSync(lock), 'the lock file is in the data folder');
   assert.ok(fs.existsSync(database));
-  assert.notEqual(fs.realpathSync(lock), fs.realpathSync(database));
+  assert.notEqual(realPath(lock), realPath(database));
   // While the controller runs, another connection reads the studio's records, and the lock file refuses one.
   const reader = new DatabaseSync(database, { readOnly: true, timeout: 0 });
   try {

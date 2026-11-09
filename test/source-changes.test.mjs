@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2512,7 +2513,7 @@ test('a candidate is built, committed and tested in its own worktree from the st
   const a = await c.wait(c.taskId);
   assert.equal(a.sourceChange.base.commit, head);
   assert.equal(a.sourceWorktree.baseCommit, head);
-  assert.equal(path.dirname(a.sourceWorktree.path), fs.realpathSync(worktrees));
+  assert.equal(path.dirname(a.sourceWorktree.path), realPath(worktrees));
   assert.equal(path.basename(a.sourceWorktree.path), a.id.slice('attempt-'.length, 'attempt-'.length + 8));
   assert.equal(a.sourceCandidate.root, a.sourceWorktree.path, 'Candidate tests ran in the worktree.');
   // The candidate is one commit on the base, holding only the approved edit, kept by a ref.
@@ -3294,7 +3295,7 @@ test('repository checks still work when a sandbox denies the native path resolve
     fs.realpathSync.native = native;
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  const root = fs.realpathSync(directory);
+  const root = realPath(directory);
   git(root, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
   git(root, ['config', 'user.name', 'Fixture director']);
   git(root, ['config', 'user.email', 'fixture@example.invalid']);
@@ -3475,7 +3476,7 @@ test('candidate review errors name each problem so a retry can correct it', () =
 
 // Candidate copies run these tests deep inside job folders, past Windows' 260-character paths.
 test('integration commits work when the commit message path is longer than 260 characters', async t => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-git-long-')));
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-git-long-')));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   // Long enough past 260 characters wherever the temporary folder is: Linux's /tmp is short.
   const part = Math.max(100, Math.ceil((262 - path.join(directory, 'commit-message.txt').length) / 2)),

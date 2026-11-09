@@ -5,6 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { commitIntegration, git, stageFiles, statusPaths } from '../src/connectors/source-integration.mjs';
@@ -21,7 +22,7 @@ const baseline = ['src/s/page.mjs', 'src/[s]/page.mjs', 'src/(group)/page.mjs', 
 // Same init and config as test/source-repository.mjs; the commit message is written beside the
 // repository, not in it.
 const repository = t => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-lit-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-lit-'))),
     root = path.join(directory, 'r');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   for (const file of baseline) write(root, file, `// ${file}\n`);

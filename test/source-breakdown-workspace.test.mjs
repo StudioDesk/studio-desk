@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +23,7 @@ const codex = fileURLToPath(new URL('./fixture-cli.mjs', import.meta.url)),
     'import test from "node:test"; import assert from "node:assert/strict"; import { project } from "../src/core/projects.mjs"; test("pins project A", () => assert.equal(project, "A"));\n// source-test-context-marker\n';
 
 async function setup(t, { provider = 'codex', mode = '', execution, registries = createRegistries() } = {}) {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-bd-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-bd-'))),
     root = path.join(directory, 'r');
   ensureSourceDirectories(root);
   const files = {
@@ -81,7 +82,7 @@ async function setup(t, { provider = 'codex', mode = '', execution, registries =
   store.setOrganization(org);
   t.after(async () => {
     await c.app.close();
-    assert.ok(directory.startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+    assert.ok(directory.startsWith(realPath(os.tmpdir()) + path.sep));
     fs.rmSync(directory, { recursive: true, force: true });
   });
   const task = (id, kind, workerId, dependencies = []) => ({

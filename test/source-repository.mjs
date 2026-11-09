@@ -3,6 +3,7 @@
 // them here: they never add worktrees to the real repository, which candidate sandboxes cannot
 // write to anyway.
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { sourcePlan, studioSourceRoot } from '../src/connectors/source-checks.mjs';
@@ -26,5 +27,5 @@ export function sourceRepository() {
   git(root, ['add', '-A']);
   git(root, ['commit', '--quiet', '-m', 'Fixture source']);
   process.once('exit', () => fs.rmSync(directory, { recursive: true, force: true }));
-  return (repository = fs.realpathSync(root));
+  return (repository = realPath(root));
 }

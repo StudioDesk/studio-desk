@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 // Reuse the candidate-local temp policy: MXC's redirected OS temp denies Git writes.
@@ -17,12 +18,12 @@ import { git } from '../src/connectors/source-integration.mjs';
 import { createSourceWorktree, leftoverWorktrees, removeSourceWorktree } from '../src/connectors/source-worktrees.mjs';
 
 function setup(t) {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-snap-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-snap-'))),
     root = path.join(directory, 'r'),
     parent = path.join(directory, 'wt'),
     destination = path.join(directory, 'copy');
   t.after(() => {
-    assert.ok(path.resolve(directory).startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+    assert.ok(path.resolve(directory).startsWith(realPath(os.tmpdir()) + path.sep));
     fs.rmSync(directory, { recursive: true, force: true });
   });
   ensureSourceDirectories(root);
@@ -77,7 +78,7 @@ for (const advance of [false, true])
     fs.writeFileSync(path.join(c.root, 'src/untracked.mjs'), 'Untracked fixture\n');
     const plan = c.copy();
     assert.deepEqual(plan, c.plan);
-    assert.equal(plan.root, fs.realpathSync(c.root));
+    assert.equal(plan.root, realPath(c.root));
     assert.equal(plan.base.commit, c.report.source.commit);
     assert.equal(sourcePlan(c.destination).sourceHash, c.report.source.hash);
     assert.deepEqual(sourcePlan(c.destination).files, c.report.source.files);
@@ -233,7 +234,7 @@ test('a pre-existing worktree or destination remains owned by its original calle
 // An idea's checks and its planner make their snapshot in a process of their own (inSnapshotProcess), so a story's
 // setup can start while the snapshot's worktree exists: that worktree is the running attempt's, not a leftover.
 test("a snapshot's worktree is kept from the leftover sweep while its attempt's process makes it", t => {
-  const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-left-')));
+  const parent = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-left-')));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   for (const name of ['c-12345678', 'b-87654321', 'c-00000000']) fs.mkdirSync(path.join(parent, name));
   const runtime = {

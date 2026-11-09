@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -148,13 +149,13 @@ test("a suite runs about half of the computer's threads' worth of test files at 
 function measuredConsumer(t, mode, partial, budget, changeSelection = false) {
   let clock = 1000000;
   if (budget) t.mock.method(Date, 'now', () => clock);
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-check-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-check-'))),
     root = path.join(directory, 'r'),
     job = path.join(directory, 'job'),
     output = path.join(job, 'output');
   t.after(() => {
     phaseStore.close();
-    assert.ok(path.resolve(directory).startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+    assert.ok(path.resolve(directory).startsWith(realPath(os.tmpdir()) + path.sep));
     fs.rmSync(directory, { recursive: true, force: true });
   });
   ensureSourceDirectories(root);

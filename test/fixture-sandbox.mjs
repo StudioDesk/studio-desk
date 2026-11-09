@@ -1,5 +1,6 @@
 // Model-free sandbox protocol fixture; this does not verify native isolation.
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 const args = process.argv.slice(2),
@@ -8,7 +9,7 @@ const args = process.argv.slice(2),
 // the working folder is reported by its real path.
 const real = file => {
   try {
-    return fs.realpathSync(file);
+    return realPath(file);
   } catch {
     return null;
   }

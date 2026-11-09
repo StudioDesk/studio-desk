@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,10 +55,10 @@ const notesProfile = Object.freeze({
 });
 
 function repository(t) {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-profile-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-profile-'))),
     root = path.join(directory, 'r');
   t.after(() => {
-    assert.ok(path.resolve(directory).startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+    assert.ok(path.resolve(directory).startsWith(realPath(os.tmpdir()) + path.sep));
     fs.rmSync(directory, { recursive: true, force: true });
   });
   ensureSourceDirectories(root, notesProfile);
@@ -454,7 +455,7 @@ test('leftover worktrees are removed through the repository each belongs to', t 
     [second, 'left-b'],
   ])
     createSourceWorktree(root, parent, name, git(root, ['rev-parse', 'HEAD']), notesProfile);
-  assert.equal(worktreeRepository(path.join(parent, 'left-b')), fs.realpathSync(second.root));
+  assert.equal(worktreeRepository(path.join(parent, 'left-b')), realPath(second.root));
   assert.equal(worktreeRepository(first.root), null, 'A repository root is not a linked worktree.');
   cleanSourceWorktrees(
     {
@@ -524,11 +525,11 @@ test("a repository's listed top-level files are a story's to edit or delete, nev
 // file stopped at its merge with "Source snapshot exceeds its file limits", stories planned before the limit could
 // move included. Limits bound what measuring costs; they are not part of what a plan promised.
 test("a Studio desk record is measured with the larger of its own limits and today's, and keeps what it recorded", t => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-limits-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-limits-'))),
     root = path.join(directory, 'r'),
     destination = path.join(directory, 'copy');
   t.after(() => {
-    assert.ok(path.resolve(directory).startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+    assert.ok(path.resolve(directory).startsWith(realPath(os.tmpdir()) + path.sep));
     fs.rmSync(directory, { recursive: true, force: true });
   });
   for (const name of studioDeskProfile.files) {

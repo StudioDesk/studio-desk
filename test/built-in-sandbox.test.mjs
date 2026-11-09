@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -991,7 +992,7 @@ test('a legacy runner command without an allowance still uses the default sessio
 });
 
 test("on macOS and Linux the controller's named data folder and its secrets are denied wherever the copy is", t => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-named-data-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-named-data-'))),
     root = path.join(directory, 'source', '.studio-verify', 'wt', 'v-1'),
     data = path.join(directory, 'moved-data'),
     home = path.join(directory, 'home');
@@ -1194,7 +1195,7 @@ test('on Linux the setup installs through pkexec, and packages installed in a te
 });
 
 test('a run writes only the copy it tests, reads the packages above it, and reaches only this computer', t => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-built-in-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-built-in-'))),
     root = path.join(directory, 'data', 'wt', 'v-1');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.mkdirSync(root, { recursive: true });

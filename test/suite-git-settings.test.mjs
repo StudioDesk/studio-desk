@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { pinGitSettings } from './model-free-studio.mjs';
@@ -9,7 +10,7 @@ import { pinGitSettings } from './model-free-studio.mjs';
 // The git every test starts, with the suite's environment, on a computer whose system settings rewrite line endings
 // (Git for Windows ships core.autocrlf=true there).
 function setup(t) {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-eol-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-eol-'))),
     systemSettings = path.join(directory, 'system-gitconfig');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.writeFileSync(systemSettings, '[core]\n\tautocrlf = true\n');

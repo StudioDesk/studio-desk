@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
@@ -31,7 +32,7 @@ function holdFile(t) {
 
 // How many times the live source was measured on this thread: each measurement visits package.json once.
 function measurements(t, root) {
-  const marker = path.join(fs.realpathSync(root), 'package.json'),
+  const marker = path.join(realPath(root), 'package.json'),
     lstat = fs.lstatSync,
     counted = { count: 0 };
   t.mock.method(fs, 'lstatSync', (file, ...args) => {

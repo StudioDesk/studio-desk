@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import http from 'node:http';
 import { Readable, Writable } from 'node:stream';
 import os from 'node:os';
@@ -1040,7 +1041,7 @@ test('source checks measure the current commit in their own worktree while a sto
   // candidate's worktree (the sandboxed suite) this folder sits within that repository instead.
   const plain = path.join(c.directory, 'plain-source');
   fs.cpSync(root, plain, { recursive: true, filter: source => path.basename(source) !== '.git' });
-  c.app.runner.sourceChangeRoot = fs.realpathSync(plain);
+  c.app.runner.sourceChangeRoot = realPath(plain);
   const again = (
     await c.request('/api/tasks', {
       projectId: project.id,
@@ -1787,7 +1788,7 @@ function measuredIntakeSource(c, t) {
   git(root, ['config', 'commit.gpgsign', 'false']);
   git(root, ['add', '-A']);
   git(root, ['commit', '--quiet', '-m', 'Fixture source']);
-  c.app.runner.sourceChangeRoot = fs.realpathSync(root);
+  c.app.runner.sourceChangeRoot = realPath(root);
   c.app.runner.sourceCheckCommand = undefined;
   // A measured suite runs without a sandbox, as an idea's checks did before 1.0.1: the suite never runs the real
   // built-in sandbox, which the test studios only report as set up.

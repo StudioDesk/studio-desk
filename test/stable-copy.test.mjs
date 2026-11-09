@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { localConfiguration } from '../src/server.mjs';
@@ -10,7 +11,7 @@ import { setupStable, promote } from '../scripts/stable-copy.mjs';
 import './model-free-studio.mjs';
 
 const temporary = t => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-stable-')));
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-stable-')));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return directory;
 };
@@ -26,7 +27,11 @@ test('studio.local.json points a stable copy at shared records and a development
     dataDirectory: path.resolve(root, '../dev/data'),
     sourceRoot: path.resolve(root, '../dev'),
   });
-  assert.equal(localConfiguration(root, { STUDIO_SOURCE_ROOT: '/elsewhere' }).sourceRoot, path.resolve('/elsewhere'));
+  // A rooted path without a drive takes the install folder's drive on Windows, not the working folder's.
+  assert.equal(
+    localConfiguration(root, { STUDIO_SOURCE_ROOT: '/elsewhere' }).sourceRoot,
+    path.join(path.parse(root).root, 'elsewhere'),
+  );
   fs.writeFileSync(path.join(root, 'studio.local.json'), JSON.stringify({ port: 1 }));
   assert.throws(() => localConfiguration(root, {}), /only dataDirectory and sourceRoot/);
   fs.writeFileSync(path.join(root, 'studio.local.json'), '{');

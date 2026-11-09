@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStudio } from './model-free-studio.mjs';
@@ -301,7 +302,7 @@ test('a line that is not checked out is measured once per commit, in a worktree 
     parent = path.join(c.directory, 'measure');
   git(c.root, ['branch', 'release/1.0']);
   const first = measureLine(c.root, 'release/1.0', studioDeskProfile, parent);
-  assert.equal(first.root, fs.realpathSync(c.root));
+  assert.equal(first.root, realPath(c.root));
   assert.deepEqual(fs.readdirSync(parent), []);
   assert.equal(worktrees(c.root), 1);
   // The same commit is not checked out again; a new tip is.
