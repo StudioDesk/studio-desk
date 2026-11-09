@@ -115,7 +115,8 @@ test('local input storage rejects tampering, missing data and redirected directo
   stageIdeaInputs(app.store, run, files);
   app.store.putRun(run);
   const item = run.directorInputs[0],
-    root = path.join(directory, 'projects', run.projectId, 'idea-inputs'),
+    // The studio asks by its data folder's real spelling, which the redirect below must match.
+    root = path.join(app.store.directory, 'projects', run.projectId, 'idea-inputs'),
     folder = path.join(root, run.id),
     filename = path.join(folder, item.id + '.bin');
   assert.throws(() => stageIdeaInputs(app.store, run, files), /EEXIST/);

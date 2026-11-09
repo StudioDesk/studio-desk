@@ -362,7 +362,15 @@ test('missing, tampered, redirected and foreign uploads never reach a consumer',
     for (const problem of ['missing', 'tampered', 'symlink', 'outside', 'foreign']) {
       const c = await inputSetup(t, [wireInput('notes.txt', 'Original')], mode),
         item = c.run.directorInputs[0],
-        filename = path.join(c.directory, 'projects', item.projectId, 'idea-inputs', item.runId, item.id + '.bin');
+        // By the data folder's real spelling, the one the studio checks for a redirect.
+        filename = path.join(
+          c.app.store.directory,
+          'projects',
+          item.projectId,
+          'idea-inputs',
+          item.runId,
+          item.id + '.bin',
+        );
       let redirect;
       if (problem === 'missing') fs.unlinkSync(filename);
       if (problem === 'tampered') fs.writeFileSync(filename, 'Replaced');

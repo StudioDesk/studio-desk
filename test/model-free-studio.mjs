@@ -1,6 +1,7 @@
 import { createStudio as createController } from '../src/server.mjs';
 import { directorAccess } from '../src/director-access.mjs';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import v8 from 'node:v8';
@@ -23,6 +24,46 @@ if (process.env.STUDIO_MODEL_FREE_LEAF_FIXTURES === '1') {
   process.env.TEMP = fixtureTemporaryDirectory;
   process.env.TMP = fixtureTemporaryDirectory;
   process.env.TMPDIR = fixtureTemporaryDirectory;
+}
+// The suite with its temporary folder reached through a link (STUDIO_TEST_LINKED_TEMP=1, November 9, 2026), as a
+// computer whose temporary folder is a junction or a symbolic link (macOS's /var) reaches it: a fresh folder and a
+// link to it (a junction on Windows, a symbolic link elsewhere), made inside the temporary folder in use (the copy's
+// own with STUDIO_MODEL_FREE_LEAF_FIXTURES=1), with TEMP, TMP and TMPDIR pointed at the link before any fixture is
+// made. A program this one starts keeps the link it inherits; this process removes the link, then its folder, when it
+// exits. Where links cannot be made the setting stops the run rather than leave the suite on a plain folder.
+export const linkedTemporaryFolder = process.env.STUDIO_TEST_LINKED_TEMP === '1' ? linkTemporaryFolder() : null;
+function linkTemporaryFolder() {
+  const given = os.tmpdir(),
+    inherited = process.env.STUDIO_TEST_LINKED_TEMP_LINK;
+  if (inherited && path.resolve(inherited) === path.resolve(given) && fs.lstatSync(given).isSymbolicLink())
+    return { link: given, real: fs.realpathSync.native(given), made: false };
+  // Short names: fixtures nest job folders and git repositories under it (see above).
+  const holder = fs.mkdtempSync(path.join(given, 'sl-')),
+    real = path.join(holder, 'r'),
+    link = path.join(holder, 'l');
+  fs.mkdirSync(real);
+  try {
+    fs.symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    fs.rmSync(holder, { recursive: true, force: true });
+    throw new Error(`STUDIO_TEST_LINKED_TEMP=1 could not link a temporary folder here (${error.code}).`, {
+      cause: error,
+    });
+  }
+  process.env.TEMP = link;
+  process.env.TMP = link;
+  process.env.TMPDIR = link;
+  process.env.STUDIO_TEST_LINKED_TEMP_LINK = link;
+  // The link goes first, so removing its folder never follows it.
+  process.on('exit', () => {
+    try {
+      fs.unlinkSync(link);
+      fs.rmSync(holder, { recursive: true, force: true });
+    } catch {
+      // A file a test left open stays until the computer's own temporary-folder cleanup.
+    }
+  });
+  return { link, real: fs.realpathSync.native(real), made: true };
 }
 // The tests' git identity, never the computer's: one with no global user.name and email (a fresh Mac or Linux
 // install) refuses to add a project, and one with settings of its own (signing, hooks) changes what git does.
