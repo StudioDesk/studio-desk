@@ -1,5 +1,5 @@
 // Releasing a milestone and pushing it (1.1 step 5, Decision MP-028). Release is offered on a milestone whose ideas are
-// accepted; it offers to move ideas still open to the next milestone on its line, so nothing ships half-done. The
+// accepted; it offers to move ideas still open to the next release, so nothing ships half-done. The
 // project's planner (its breakdown owner) drafts the release notes from the milestone's integrated stories, in a task
 // the director accepts or sends back. Accepting it releases: the controller writes the version where the project keeps
 // one (package.json and its lockfile; otherwise the tag alone is the version) and the notes at the top of
@@ -70,22 +70,25 @@ const settledTask = task =>
   task.kind === 'studio-development:change' && task.status === 'done'
     ? integrated(task) || task.sourceStage?.current === 'closed'
     : ['done', 'denied', 'cancelled'].includes(task.status);
-// The next milestone on the same line, made when there is none: the next patch of a patch, the next minor otherwise.
+// Version-line minors and majors move on to the next open minor/major, on its own line. Patches and legacy releases
+// keep their same-line progression. Make the next patch or minor only when there is no open destination.
 function nextMilestone(store, projectId, runtime, milestone) {
   const version = parseVersion(milestone.version),
+    versionLine = store.project(projectId).shipsTo && version[2] === 0,
     later = projectMilestones(store, projectId)
-      .filter(item => item.state === 'open' && item.line === milestone.line && item.id !== milestone.id)
+      .filter(item => item.state === 'open' && item.id !== milestone.id)
+      .filter(item => (versionLine ? parseVersion(item.version)[2] === 0 : item.line === milestone.line))
       .filter(item => compareVersions(parseVersion(item.version), version) > 0)
       .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
   if (later) return later;
   const next =
-    version[2] > 0 || milestone.line !== null
+    !versionLine && (version[2] > 0 || milestone.line !== null)
       ? [version[0], version[1], version[2] + 1]
       : [version[0], version[1] + 1, 0];
   return makeMilestone(store, projectId, runtime, { version: next, by: { type: 'release', from: milestone.id } });
 }
 
-// Release on a milestone: refuses while its ideas are open unless moveOpen moves them to the next milestone on its line,
+// Release on a milestone: refuses while its ideas are open unless moveOpen moves them to the next release,
 // then asks the planner for the notes. Returns the notes task.
 export function startRelease(store, runtime, projectId, milestoneId, { moveOpen = false } = {}) {
   const { milestone } = milestoneOf(store, projectId, milestoneId),
@@ -113,14 +116,48 @@ export function startRelease(store, runtime, projectId, milestoneId, { moveOpen 
   if (!stories.length)
     throw new Error(`Nothing on ${milestone.version} has been integrated yet, so there is nothing to release.`);
   if (open.length) {
+    // A later version line changes future routing, never the branch of work already executing. As with moveStory,
+    // source work that has started stays on its branch; it must settle or close before this release can move it on.
+    if (store.project(projectId).shipsTo && parseVersion(milestone.version)[2] === 0) {
+      const started = open.filter(
+        task =>
+          ['working', 'review'].includes(task.status) ||
+          (task.kind === 'studio-development:change' &&
+            store
+              .attempts(task.id)
+              .some(attempt => (attempt.assignment?.kind || task.kind) === 'studio-development:change')),
+      );
+      if (started.length)
+        throw Object.assign(
+          new Error(
+            `Finish or close started work before moving it to another release line: ${started.map(task => task.id).join(', ')}. Its work stays on its branch.`,
+          ),
+          { status: 409, open: started.map(task => task.id) },
+        );
+    }
     const next = nextMilestone(store, projectId, runtime, milestone),
-      moved = { milestoneId: next.id, version: next.version };
-    for (const task of open)
-      if (task.release) store.putTask({ ...task, release: { ...task.release, ...moved } });
-      else {
-        const run = store.run(runIdOf(task));
-        if (run?.release?.milestoneId === milestoneId) store.putRun({ ...run, release: { ...run.release, ...moved } });
+      line = lineOf(store, projectId, next),
+      moved = { milestoneId: next.id, version: next.version, ...(line !== undefined ? { line } : {}) },
+      runs = new Set(open.filter(task => !task.release).map(runIdOf));
+    store.tx(() => {
+      for (const runId of runs) {
+        const run = store.run(runId);
+        if (run?.release?.milestoneId !== milestoneId) continue;
+        for (const task of tasks.filter(task => !task.release && runIdOf(task) === runId)) {
+          // A run can hold both finished and unfinished work. Pin its finished tasks to the original release before
+          // moving the run; source stories also need an explicit line override for their next source measurement.
+          if (settledTask(task))
+            store.putTask({
+              ...task,
+              release: { ...run.release, ...(run.line !== undefined ? { line: run.line } : {}) },
+            });
+          else if (task.kind === 'studio-development:change')
+            store.putTask({ ...task, release: { ...run.release, ...moved } });
+        }
+        store.putRun({ ...run, ...(line !== undefined ? { line } : {}), release: { ...run.release, ...moved } });
       }
+      for (const task of open) if (task.release) store.putTask({ ...task, release: { ...task.release, ...moved } });
+    });
     store.event(
       'release_moved',
       null,

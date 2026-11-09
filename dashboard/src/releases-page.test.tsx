@@ -285,6 +285,8 @@ test('Release offers to move the open work on, and Push asks before it sends any
   const patchLine = await screen.findByRole('region', { name: 'release/1.0' });
   await user.click(within(patchLine).getByRole('button', { name: 'Release 1.0.1…' }));
   const moving = screen.getByRole('checkbox');
+  expect(moving.closest('label')?.textContent).toContain('to the next release.');
+  expect(moving.closest('label')?.textContent).not.toContain('on this line');
   expect((moving as HTMLInputElement).checked).toBe(true);
   await user.click(screen.getByRole('button', { name: 'Draft the notes' }));
   await user.click(screen.getByRole('button', { name: 'Push…' }));
@@ -300,6 +302,34 @@ test('Release offers to move the open work on, and Push asks before it sends any
       url: '/api/projects/project-x/milestones/milestone-1.1.0/push',
       method: 'POST',
       body: { projectId: 'project-x', confirm: true },
+    },
+  ]);
+});
+
+test('Release on an unshipped version line offers the next release and preserves the unchecked request', async () => {
+  const user = userEvent.setup();
+  controller.releases!.shipsTo = { branch: 'main', head: 'a1', lastRelease: null, onRemote: null };
+  controller.releases!.lines = [
+    { ...controller.releases!.lines![0]!, branch: 'release/1.1', version: '1.1', released: false, lastRelease: null },
+  ];
+  controller.releases!.milestones = [
+    milestone('1.1.0', 'release/1.1', {
+      counts: { ideas: 2, waiting: 1, stories: 0, integrated: 0, started: 0 },
+    }),
+  ];
+  open('/p/project-x/releases');
+  await user.click(await screen.findByRole('button', { name: 'Release 1.1.0…' }));
+  const moving = screen.getByRole('checkbox');
+  expect((moving as HTMLInputElement).checked).toBe(true);
+  expect(moving.closest('label')?.textContent).toContain('to the next release.');
+  expect(moving.closest('label')?.textContent).not.toContain('on this line');
+  await user.click(moving);
+  await user.click(screen.getByRole('button', { name: 'Draft the notes' }));
+  expect(commands()).toEqual([
+    {
+      url: '/api/projects/project-x/milestones/milestone-1.1.0/release',
+      method: 'POST',
+      body: { projectId: 'project-x', moveOpen: false },
     },
   ]);
 });

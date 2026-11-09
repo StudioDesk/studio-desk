@@ -17,9 +17,9 @@ import {
   useVersionLines,
   versionLinesReadiness,
 } from '../src/connectors/source-milestones.mjs';
-import { projectLines } from '../src/connectors/source-lines.mjs';
+import { projectLines, storyLine } from '../src/connectors/source-lines.mjs';
 import { releaseOverview } from '../src/connectors/release-overview.mjs';
-import { interruptedReleases, shipAgain, shipRelease } from '../src/connectors/source-releases.mjs';
+import { interruptedReleases, shipAgain, shipRelease, startRelease } from '../src/connectors/source-releases.mjs';
 import { Store } from '../src/store.mjs';
 import { saveProjectOrganization } from '../src/core/project-organization.mjs';
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
@@ -50,6 +50,286 @@ const overview = async c => {
   return response.json();
 };
 const tip = (c, ref) => git(c.root, ['rev-parse', ref]);
+
+// Fixture integrations only: moving open work must start notes, without shipping or running a model.
+for (const [version, laterVersions, expected] of [
+  ['1.1.0', [], '1.2.0'],
+  ['1.1.0', ['1.10.0', '2.0.0', '1.2.0'], '1.2.0'],
+  ['2.0.0', [], '2.1.0'],
+  ['1.1.0', ['2.0.0'], '2.0.0'],
+]) {
+  test(`Release moves unfinished ${version} work to ${expected} (${laterVersions.length ? 'reuse' : 'create'}) before its first tag`, async t => {
+    const c = await released(t, true),
+      store = c.app.store,
+      runtime = c.app.runner;
+    store.setOrganization({ ...store.organization(), paused: true });
+    const current = makeMilestone(store, project, runtime, { version });
+    useVersionLines(store, project, runtime, { shipsTo: 'main' });
+    for (const next of laterVersions) makeMilestone(store, project, runtime, { version: next });
+    const line = `release/${version.split('.').slice(0, 2).join('.')}`,
+      release = { milestoneId: current.id, version, by: { type: 'director' } },
+      base = store.task(c.waiting);
+    store.putRun({ id: 'run-moving', projectId: project, line, release, brief: 'Unfinished fixture idea' });
+    store.putTask({
+      ...base,
+      id: 'T-integrated',
+      status: 'done',
+      workflowReference: undefined,
+      runReference: { runId: 'run-moving' },
+      release: undefined,
+      sourceStage: { current: 'integrated' },
+    });
+    store.putTask({ ...base, id: 'T-own', status: 'ready', release: { ...release, line } });
+    store.putTask({
+      ...base,
+      id: 'T-inherited',
+      status: 'ready',
+      workflowReference: undefined,
+      runReference: { runId: 'run-moving' },
+      release: undefined,
+    });
+    store.putTask({
+      ...base,
+      id: 'T-checks-next',
+      kind: 'studio-development:checks',
+      status: 'ready',
+      workflowReference: undefined,
+      runReference: { runId: 'run-moving' },
+      release: undefined,
+    });
+    // Nonempty accepted inputs and a prior check attempt remain pinned to their original bytes and branch. Only
+    // the next check's routing changes. A finished check in the same idea must keep its original membership too.
+    const checked = store.attempt('checked-attempt'),
+      acceptedInputs = [
+        {
+          taskId: checked.taskId,
+          attemptId: checked.id,
+          path: checked.artifacts[0].path,
+          hash: checked.artifacts[0].hash,
+        },
+      ];
+    for (const id of ['T-own', 'T-inherited', 'T-checks-next']) store.putTask({ ...store.task(id), acceptedInputs });
+    store.putTask({ ...store.task('T-checks-next'), lastAttemptId: 'attempt-checks-before-move' });
+    store.insertAttempt(
+      {
+        id: 'attempt-checks-before-move',
+        taskId: 'T-checks-next',
+        projectId: project,
+        status: 'failed',
+        assignment: { kind: 'studio-development:checks', acceptedInputs, release },
+        sourceCheck: { ...checked.sourceCheck, base: { ...checked.sourceCheck.base, branch: line } },
+      },
+      { text: 'Fixture check instructions', hash: 'fixture' },
+    );
+    store.putTask({
+      ...store.task('T-checks-next'),
+      id: 'T-checked',
+      status: 'done',
+      lastAttemptId: 'attempt-checked',
+      acceptedAttemptId: 'attempt-checked',
+    });
+    store.insertAttempt(
+      {
+        ...checked,
+        id: 'attempt-checked',
+        taskId: 'T-checked',
+        assignment: { ...checked.assignment, acceptedInputs, release },
+        sourceCheck: { ...checked.sourceCheck, base: { ...checked.sourceCheck.base, branch: line } },
+      },
+      { text: 'Fixture check instructions', hash: 'fixture' },
+    );
+    const attempts = store.tasks().flatMap(task => store.attempts(task.id)),
+      inputBytes = fs.readFileSync(path.join(checked.outputFolder, checked.artifacts[0].path)),
+      refs = git(c.root, ['show-ref']),
+      before = projectMilestones(store, project).length;
+    assert.throws(
+      () => startRelease(store, runtime, project, current.id),
+      error => error.status === 409 && error.open.includes('T-own'),
+    );
+    const notes = startRelease(store, runtime, project, current.id, { moveOpen: true });
+    const all = projectMilestones(store, project),
+      next = all.find(item => item.version === expected),
+      destination = `release/${expected.split('.').slice(0, 2).join('.')}`;
+    assert.equal(all.length, before + (laterVersions.length ? 0 : 1));
+    assert.equal(all.filter(item => item.version === expected).length, 1);
+    assert.equal(
+      all.some(item => item.version === version.replace(/0$/, '1')),
+      false,
+    );
+    assert.equal(next.line, destination);
+    assert.equal(store.task('T-own').release.milestoneId, next.id);
+    assert.equal(store.task('T-own').release.line, destination);
+    assert.equal(store.run('run-moving').release.milestoneId, next.id);
+    assert.equal(store.run('run-moving').line, destination);
+    assert.equal(storyLine(store, store.task('T-own')), destination);
+    assert.equal(storyLine(store, store.task('T-inherited')), destination);
+    const checks = runtime.workflows.get('studio-development:checks').prepareAttempt({
+      runtime,
+      store,
+      task: store.task('T-checks-next'),
+    });
+    assert.equal(checks.sourceCheck.base.branch, destination);
+    assert.equal(store.task('T-checks-next').lastAttemptId, 'attempt-checks-before-move');
+    assert.equal(store.task('T-checked').acceptedAttemptId, 'attempt-checked');
+    assert.equal(store.task('T-checked').release.milestoneId, current.id);
+    assert.equal(store.task('T-checked').release.line, line);
+    assert.equal(store.task('T-integrated').release.milestoneId, current.id);
+    assert.equal(storyLine(store, store.task('T-integrated')), line);
+    assert.match(notes.brief, /- T-integrated:/);
+    assert.doesNotMatch(notes.brief, /- T-own:|- T-inherited:/);
+    assert.deepEqual(all.find(item => item.id === current.id).release.stories, ['T-integrated']);
+    assert.equal(all.find(item => item.id === current.id).release.state, 'drafting');
+    assert.equal(all.find(item => item.id === current.id).state, 'open');
+    assert.deepEqual(
+      store.tasks().flatMap(task => store.attempts(task.id)),
+      attempts,
+      'Recorded attempts are immutable.',
+    );
+    for (const id of ['T-own', 'T-inherited', 'T-checks-next'])
+      assert.deepEqual(store.task(id).acceptedInputs, acceptedInputs);
+    assert.deepEqual(fs.readFileSync(path.join(checked.outputFolder, checked.artifacts[0].path)), inputBytes);
+    for (const ref of refs.split('\n')) assert.ok(git(c.root, ['show-ref']).split('\n').includes(ref));
+    assert.equal(git(c.root, ['tag', '--list']), 'v1.0.0', 'Notes acceptance and verification still gate tagging.');
+    assert.equal(git(c.root, ['symbolic-ref', '--short', 'HEAD']), 'main');
+  });
+}
+
+test('Release with no integrated story refuses before creating a later version line or moving work', async t => {
+  const c = await released(t, true),
+    store = c.app.store,
+    runtime = c.app.runner;
+  const current = makeMilestone(store, project, runtime, { version: '1.1.0' });
+  useVersionLines(store, project, runtime, { shipsTo: 'main' });
+  store.putTask({
+    ...store.task(c.waiting),
+    status: 'ready',
+    release: { milestoneId: current.id, version: current.version, line: 'release/1.1' },
+  });
+  const before = {
+    tasks: store.tasks(),
+    milestones: projectMilestones(store, project),
+    refs: git(c.root, ['show-ref']),
+  };
+  assert.throws(() => startRelease(store, runtime, project, current.id, { moveOpen: true }), /Nothing.*integrated/);
+  assert.deepEqual(
+    { tasks: store.tasks(), milestones: projectMilestones(store, project), refs: git(c.root, ['show-ref']) },
+    before,
+  );
+});
+
+for (const reuse of [false, true]) {
+  test(`a version-line patch moves open work to the next patch (${reuse ? 'reuse' : 'create'})`, async t => {
+    const c = await released(t, true),
+      store = c.app.store,
+      runtime = c.app.runner;
+    store.setOrganization({ ...store.organization(), paused: true });
+    const minor = makeMilestone(store, project, runtime, { version: '1.1.0' });
+    useVersionLines(store, project, runtime, { shipsTo: 'main' });
+    // A fixture tag supplies the already-released series; this test never executes a project release.
+    git(c.root, ['tag', 'v1.1.0', 'release/1.1']);
+    const current = makeMilestone(store, project, runtime, { version: '1.1.1' });
+    makeMilestone(store, project, runtime, { version: '1.2.0' });
+    if (reuse) makeMilestone(store, project, runtime, { version: '1.1.2' });
+    const release = { milestoneId: current.id, version: current.version, line: current.line },
+      base = store.task(c.waiting),
+      refs = git(c.root, ['show-ref']);
+    store.putTask({ ...base, id: 'T-integrated', status: 'done', release, sourceStage: { current: 'integrated' } });
+    store.putRun({ id: 'run-patch', projectId: project, line: current.line, release });
+    store.putTask({
+      ...base,
+      id: 'T-open',
+      status: 'ready',
+      release: undefined,
+      workflowReference: undefined,
+      runReference: { runId: 'run-patch' },
+    });
+    const before = projectMilestones(store, project).length,
+      notes = startRelease(store, runtime, project, current.id, { moveOpen: true }),
+      all = projectMilestones(store, project),
+      next = all.find(item => item.version === '1.1.2');
+    assert.equal(all.length, before + (reuse ? 0 : 1));
+    assert.equal(all.filter(item => item.version === '1.1.2').length, 1);
+    assert.equal(next.line, 'release/1.1');
+    assert.equal(store.task('T-open').release.milestoneId, next.id);
+    assert.equal(store.run('run-patch').release.milestoneId, next.id);
+    assert.equal(store.run('run-patch').line, 'release/1.1');
+    assert.equal(storyLine(store, store.task('T-open')), 'release/1.1');
+    assert.match(notes.brief, /- T-integrated:/);
+    assert.equal(all.find(item => item.id === current.id).release.state, 'drafting');
+    assert.equal(all.find(item => item.id === minor.id).release, undefined);
+    assert.equal(git(c.root, ['show-ref']), refs, 'Moving patch membership moves no branch or tag.');
+  });
+}
+
+test('Release refuses to reroute started source work or active intake across version lines', async t => {
+  const c = await released(t, true),
+    store = c.app.store,
+    runtime = c.app.runner;
+  const current = makeMilestone(store, project, runtime, { version: '1.1.0' });
+  useVersionLines(store, project, runtime, { shipsTo: 'main' });
+  const release = { milestoneId: current.id, version: current.version, line: 'release/1.1' },
+    base = store.task(c.waiting);
+  store.putTask({ ...base, id: 'T-integrated', status: 'done', release, sourceStage: { current: 'integrated' } });
+  store.putTask({ ...base, id: 'T-started', status: 'ready', release });
+  store.insertAttempt(
+    {
+      id: 'attempt-started',
+      taskId: 'T-started',
+      projectId: project,
+      status: 'failed',
+      assignment: { kind: 'studio-development:change' },
+      sourceChange: { base: { branch: 'release/1.1' } },
+    },
+    { text: 'Fixture', hash: 'fixture' },
+  );
+  const snapshot = () =>
+    JSON.stringify({
+      tasks: store.tasks(),
+      runs: store.runs(project),
+      attempts: store.tasks().flatMap(task => store.attempts(task.id)),
+      milestones: projectMilestones(store, project),
+      refs: git(c.root, ['show-ref']),
+    });
+  let before = snapshot();
+  assert.throws(
+    () => startRelease(store, runtime, project, current.id, { moveOpen: true }),
+    error => error.status === 409 && /started|branch/.test(error.message),
+  );
+  assert.equal(snapshot(), before);
+  store.putTask({ ...store.task('T-started'), status: 'cancelled' });
+  store.putRun({ id: 'run-active', projectId: project, line: 'release/1.1', release });
+  store.putTask({
+    ...base,
+    id: 'T-active',
+    kind: 'studio-development:checks',
+    status: 'working',
+    workflowReference: undefined,
+    runReference: { runId: 'run-active' },
+    release: undefined,
+    lastAttemptId: 'attempt-active',
+  });
+  store.insertAttempt(
+    {
+      id: 'attempt-active',
+      taskId: 'T-active',
+      projectId: project,
+      status: 'working',
+      assignment: { kind: 'studio-development:checks', release },
+      sourceCheck: { base: { branch: 'release/1.1' } },
+    },
+    { text: 'Fixture', hash: 'fixture' },
+  );
+  for (const status of ['working', 'review']) {
+    store.putTask({ ...store.task('T-active'), status });
+    before = snapshot();
+    assert.throws(
+      () => startRelease(store, runtime, project, current.id, { moveOpen: true }),
+      error => error.status === 409 && /active|started/.test(error.message),
+    );
+    assert.equal(snapshot(), before);
+  }
+  assert.equal(projectMilestones(store, project).length, 1, 'Refusals create no destination milestone or branch.');
+});
 // A commit on a branch that is not checked out, made with an index of its own, without touching the folder.
 function commitOn(c, branch, file, text) {
   const run = (args, { input, env } = {}) => {

@@ -12,6 +12,7 @@ import { createProject } from '../src/core/project-creation.mjs';
 import { startIdeaIntake } from '../src/core/idea-intake.mjs';
 import { addLibraryEntry } from '../src/core/library.mjs';
 import { inspectRepository, recordProjectSource } from '../src/connectors/source-projects.mjs';
+import { addWaitingIdea, makeMilestone, useVersionLines } from '../src/connectors/source-milestones.mjs';
 import { repositoryOrganization } from '../src/organizations/studio-development/project.mjs';
 import { projectTemplate, templateFiles } from '../src/templates/index.mjs';
 import { isEntryPoint } from '../src/core/entry-point.mjs';
@@ -136,6 +137,14 @@ export async function seedSampleStudio({ store, runner, registries, directory })
   const repository = sampleRepository(directory),
     inspected = inspectRepository(store, repository, runner, undefined, sampleProjects.code);
   recordProjectSource(store, sampleProjects.code, { root: repository, profile: inspected.profile }, runner);
+  // An unshipped version with unfinished work for the Release dialog's visual check. These are sample records only:
+  // no integrated story, notes acceptance or real release is fabricated. The two intake runs still wait at checks.
+  const milestone = makeMilestone(store, sampleProjects.code, runner, { version: '1.1.0' });
+  useVersionLines(store, sampleProjects.code, runner, { shipsTo: 'main' });
+  addWaitingIdea(store, sampleProjects.code, {
+    milestoneId: milestone.id,
+    idea: 'Keep completed items out of the way until they are needed again.',
+  });
   await createProject(
     store,
     registries,

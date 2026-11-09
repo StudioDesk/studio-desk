@@ -10,7 +10,7 @@ import { setup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { makeMilestone, projectMilestones, useVersionLines } from '../src/connectors/source-milestones.mjs';
-import { interruptedReleases, runRelease } from '../src/connectors/source-releases.mjs';
+import { interruptedReleases, runRelease, startRelease } from '../src/connectors/source-releases.mjs';
 import { Store } from '../src/store.mjs';
 import { sourceResources } from '../src/connectors/source-projects.mjs';
 import { saveProjectOrganization } from '../src/core/project-organization.mjs';
@@ -33,6 +33,36 @@ const make = async (c, version) => {
   return made.data.milestone;
 };
 const milestone = (c, id) => projectMilestones(c.app.store, project).find(item => item.id === id);
+
+for (const [version, nextVersion, reuse] of [
+  ['1.1.0', '1.2.0', false],
+  ['1.1.0', '1.2.0', true],
+  ['1.0.1', '1.0.2', false],
+  ['1.0.1', '1.0.2', true],
+]) {
+  test(`move-open preserves ${version} progression to ${nextVersion} (${reuse ? 'reuse' : 'create'})`, async t => {
+    const c = await setup(t, 'pass', undefined, {}, true),
+      store = c.app.store,
+      runtime = c.app.runner;
+    saveProjectOrganization(store, runtime.registries, project, developmentOrganization(store.organization()));
+    store.setOrganization({ ...store.organization(), paused: true });
+    git(c.root, ['tag', 'v1.0.0']);
+    const current = makeMilestone(store, project, runtime, { version });
+    if (reuse) makeMilestone(store, project, runtime, { version: nextVersion });
+    const base = store.task(c.taskId),
+      release = { milestoneId: current.id, version, line: current.line };
+    store.putTask({ ...base, id: 'T-open', status: 'ready', release });
+    assert.throws(() => startRelease(store, runtime, project, current.id, { moveOpen: true }), /Nothing.*integrated/);
+    assert.equal(store.task('T-open').release.milestoneId, current.id);
+    store.putTask({ ...base, id: 'T-done', status: 'done', release, sourceStage: { current: 'integrated' } });
+    const before = projectMilestones(store, project).length;
+    const notes = startRelease(store, runtime, project, current.id, { moveOpen: true });
+    assert.equal(store.task('T-open').release.version, nextVersion);
+    assert.equal(projectMilestones(store, project).length, before + (reuse ? 0 : 1));
+    assert.match(notes.brief, /- T-done:/);
+    assert.equal(milestone(c, current.id).release.state, 'drafting');
+  });
+}
 // Whether git can push to a repository in a folder here. Every such push runs git's receiving side through its shell,
 // which the Codex test sandbox does not let git start, so there Push refuses with git's own reason instead. The probe's
 // repository has a name as long as the test's remote.git: git's receiving side writes each object at a path that, at

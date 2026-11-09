@@ -49,7 +49,31 @@ test('the sample studio holds both projects at their fixed addresses, paused, wi
     const state = await get(`/api/state?mode=dashboard&projectId=${projectId}`);
     assert.equal(state.runs.length, 2, `${projectId} holds two ideas`);
     assert.equal(state.attempts.length, 0, `${projectId} started nothing`);
+    const shell = await get(`/api/projects/${projectId}/shell`);
+    assert.equal(shell.paused, true);
+    assert.ok(shell.employeeDirectory.every(worker => worker.provider === 'mock' && worker.cli === 'Simulator'));
+    for (const run of state.runs) {
+      const tasks = state.tasks.filter(task => (task.workflowReference?.runId ?? task.runReference?.runId) === run.id);
+      const first = tasks.filter(task => task.dependencies.length === 0);
+      assert.equal(first.length, 1, 'Each idea waits at its first step.');
+      assert.equal(first[0].kind, projectId === sampleProjects.code ? 'studio-development:checks' : 'general:plan');
+      assert.ok(
+        tasks.every(task => task.status === 'blocked'),
+        'The paused studio holds every step.',
+      );
+      assert.ok(tasks.every(task => !task.lastAttemptId && !task.acceptedAttemptId));
+    }
   }
+  const releases = await get(`/api/projects/${sampleProjects.code}/releases`),
+    milestone = releases.milestones.find(item => item.version === '1.1.0');
+  assert.equal(milestone.line, 'release/1.1');
+  assert.equal(milestone.state, 'open');
+  assert.equal(milestone.release, undefined);
+  assert.equal(milestone.ideas.length, 2, 'Both initial ideas belong to the open release.');
+  assert.equal(milestone.counts.waiting, 1, 'One waiting idea exposes the unfinished-work checkbox.');
+  assert.equal(milestone.counts.stories, 0, 'The sample invents no completed production work.');
+  const work = await get(`/api/projects/${sampleProjects.work}/releases`);
+  assert.equal(work.available, false);
 });
 
 test("the sample studio's folder is never the data folder, and Vite is found from the copy", () => {

@@ -1136,7 +1136,7 @@ function ReleaseDialog({
           <input type="checkbox" checked={moveOpen} onChange={() => setMoveOpen(!moveOpen)} />
           <span>
             Move the open work ({unfinished} unfinished stor{unfinished === 1 ? 'y' : 'ies'} or waiting idea
-            {unfinished === 1 ? '' : 's'}) to the next milestone on this line. A release ships nothing half-done.
+            {unfinished === 1 ? '' : 's'}) to the next release. A release ships nothing half-done.
           </span>
         </label>
       )}
