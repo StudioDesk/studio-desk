@@ -55,3 +55,13 @@ jobs:
 
       - name: Run the suite
         run: npm test
+
+      # The same suite with its temporary folder reached through a link (a junction on Windows, a symbolic link
+      # elsewhere), as on a computer whose temporary folder is reached that way (macOS's /var): the harness links a
+      # fresh folder and points TEMP, TMP and TMPDIR at the link (test/model-free-studio.mjs). It runs after a failed
+      # first run too, so one run of the workflow reports both.
+      - name: Run the suite with its temporary folder reached through a link
+        if: success() || failure()
+        run: npm test
+        env:
+          STUDIO_TEST_LINKED_TEMP: '1'
