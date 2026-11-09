@@ -43,8 +43,40 @@ const recorded = store =>
     tasks: store.tasks().map(task => [task, store.attempts(task.id)]),
     events: store.events(null),
   });
-// The list, read once with the director's key; reading it leaves every record as it was and starts nothing.
+// The scheduler at rest: no dispatch pass asked for or running, none measuring its sources in a process of its own,
+// and the store's version unchanged over a few polls. A dispatch pass records after its measuring process answers
+// (src/core/orchestrator.mjs dispatchQueued), so one still measuring when a read began could write while the read was
+// answered (on Linux the version moved from 114 to 116: the pass finding no queued work switched the queue off and
+// recorded pipeline_finished) and look like the read's own writes.
+const settled = async c => {
+  const { store, runner } = c.app;
+  let version = null,
+    quiet = 0;
+  await waitFor(
+    () => {
+      if (runner.scheduled || runner.dispatching || runner.measuringSources || store.version !== version) {
+        version = store.version;
+        quiet = 0;
+        return false;
+      }
+      return ++quiet >= 3;
+    },
+    'the scheduler to settle',
+    {
+      detail: () =>
+        JSON.stringify({
+          scheduled: !!runner.scheduled,
+          dispatching: !!runner.dispatching,
+          measuring: !!runner.measuringSources,
+          version: store.version,
+        }),
+    },
+  );
+};
+// The list, read once with the director's key once the scheduler is at rest; reading it leaves every record as it was
+// and starts nothing.
 const calls = async (c, project = projectId) => {
+  await settled(c);
   const { store } = c.app,
     before = recorded(store),
     live = store.liveAttempts().length,
