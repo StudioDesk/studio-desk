@@ -1485,6 +1485,12 @@ export class Runner {
   stop(id) {
     const entry = this.active.get(id);
     if (!entry) throw new Error('No live attempt to cancel.');
+    // The first cause of a stop is the attempt's cause. A time limit (each sets timedOut, then asks for the stop) that
+    // falls due while a Cancel (or another requested stop) is ending the process does not turn it into a time limit; a
+    // Cancel after a time limit leaves the time limit's cause.
+    const firstStop = !entry.stopCause;
+    if (firstStop) entry.stopCause = entry.timedOut ? 'time-limit' : 'requested';
+    else if (entry.stopCause !== 'time-limit') entry.timedOut = false;
     let stopContextRecorded = false;
     if (entry.timedOut && !entry.attempt.stopContext) {
       const a = entry.attempt,
@@ -1526,6 +1532,8 @@ export class Runner {
     if (entry.cancelled) return;
     if (entry.adapter.stop) {
       entry.adapter.stop(this, entry);
+      clearTimeout(entry.timer);
+      entry.timer = null;
       return;
     }
     const previous = entry.attempt.status;
@@ -1552,8 +1560,12 @@ export class Runner {
       entry.cancelled = false;
       entry.attempt.status = previous;
       if (stopContextRecorded) delete entry.attempt.stopContext;
+      if (firstStop) delete entry.stopCause;
       throw failure;
     }
+    // The stop is recorded, so the time limit has nothing left to stop.
+    clearTimeout(entry.timer);
+    entry.timer = null;
     if (!entry.child) {
       this.finish(entry, null);
       return;
