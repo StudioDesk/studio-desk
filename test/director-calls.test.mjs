@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { Runner } from '../src/runner.mjs';
 import { approveWork } from '../src/core/proposals.mjs';
 import { routes } from '../src/core/routes.mjs';
+import { directorCalls, directorCallsComputed, forgetDirectorCalls } from '../src/core/director-calls.mjs';
 import { setup } from './studio-setup.mjs';
 import { setup as sourceSetup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
@@ -43,15 +44,15 @@ const recorded = store =>
     events: store.events(null),
   });
 // The list, read once with the director's key; reading it leaves every record as it was and starts nothing.
-const calls = async c => {
+const calls = async (c, project = projectId) => {
   const { store } = c.app,
     before = recorded(store),
     live = store.liveAttempts().length,
-    answer = await get(c, `/api/projects/${projectId}/calls`);
+    answer = await get(c, `/api/projects/${project}/calls`);
   assert.equal(recorded(store), before, 'Reading the list changed no record.');
   assert.equal(store.liveAttempts().length, live, 'Reading the list started nothing.');
   assert.deepEqual(Object.keys(answer), ['projectId', 'items', 'count', 'version']);
-  assert.equal(answer.projectId, projectId);
+  assert.equal(answer.projectId, project);
   assert.equal(answer.count, answer.items.length);
   assert.equal(answer.version, store.version);
   return answer;
@@ -438,4 +439,174 @@ test('the list is a director read: refused without the session or key, and liste
   assert.deepEqual([matching[0].method, matching[0].access, matching[0].token], ['GET', 'director', 'none']);
   // With the director's key it answers, and its count is its number of items (calls checks both).
   await agrees(c, await calls(c));
+});
+
+// A question an agent stopped to ask the director, recorded on a task of a project as the controller leaves it.
+const question = {
+  schemaVersion: 'question-v1',
+  ask: 'Should the layout lead with the hub or the corridor?',
+  why: 'The brief names both.',
+  options: [{ label: 'Hub first' }, { label: 'Corridor first' }],
+  recommended: 0,
+  choice: 'director',
+  topics: [],
+};
+const asking = (c, id, attemptId, project = projectId, workerId = 'W-03') => {
+  const { store } = c.app;
+  store.tx(() => {
+    store.insertAttempt(
+      {
+        id: attemptId,
+        taskId: id,
+        projectId: project,
+        workerId,
+        provider: 'mock',
+        pid: null,
+        artifacts: [],
+        status: 'blocked',
+        result: { outcome: 'blocked', summary: 'Stopped to ask.' },
+        question,
+      },
+      { text: 'Model-free instructions.', hash: 'test' },
+    );
+    store.putTask({ ...store.task(id), lastAttemptId: attemptId, status: 'blocked' });
+  });
+  return id;
+};
+// The list read through the route, with how many times the controller worked a list out for that read.
+const counted = async (c, project = projectId) => {
+  const before = directorCallsComputed(),
+    list = await calls(c, project);
+  return { list, computed: directorCallsComputed() - before };
+};
+
+test('the list is worked out once for each change, and a change that alters the calls works it out again', async t => {
+  mockDelay(t, 60000);
+  const c = await setup(t),
+    { store } = c.app;
+  const first = asking(c, await create(c, { title: 'Asking layout 1' }), 'attempt-once-first');
+
+  // Two reads with no write between them: worked out once, the same answer.
+  const one = await counted(c),
+    two = await counted(c);
+  assert.equal(one.computed, 1, 'The first read works the list out.');
+  assert.equal(two.computed, 0, 'A read with no write since is answered the list already worked out.');
+  assert.deepEqual(two.list, one.list);
+  assert.ok(names(one.list.items).includes(first), JSON.stringify(one.list.items));
+  // The fixture's own calls, which stay on the list throughout.
+  const base = names(one.list.items).filter(name => name !== first);
+  await agrees(c, two.list);
+
+  // A story stops to ask the director: the next read works the list out again, at the new version, with the new call.
+  const version = store.version,
+    second = asking(c, await create(c, { title: 'Asking layout 2' }), 'attempt-once-second');
+  assert.ok(store.version > version);
+  const changed = await counted(c);
+  assert.equal(changed.computed, 1, 'A recorded change works the list out again.');
+  assert.equal(changed.list.version, store.version);
+  assert.deepEqual(names(changed.list.items), [...base, first, second]);
+  // It is the list a fresh computation at that version answers.
+  forgetDirectorCalls(store);
+  const fresh = await counted(c);
+  assert.equal(fresh.computed, 1);
+  assert.deepEqual(fresh.list, changed.list);
+  await agrees(c, changed.list);
+
+  // The director answers the first question, so its work starts again: that call is gone from the next read.
+  const answered = await c.request(`/api/tasks/${encodeURIComponent(first)}/answer`, {
+    projectId,
+    attemptId: 'attempt-once-first',
+    text: 'Hub first.',
+  });
+  assert.equal(answered.status, 202, JSON.stringify(answered.data));
+  await waitFor(() => store.task(first).status === 'running', 'the answered work to start');
+  const after = await counted(c);
+  assert.equal(after.computed, 1, 'An answered call works the list out again.');
+  assert.equal(after.list.version, store.version);
+  assert.deepEqual(names(after.list.items), [...base, second]);
+  forgetDirectorCalls(store);
+  assert.deepEqual((await counted(c)).list, after.list);
+});
+
+test('the list is worked out again when the common fields or the day change with no record written, and each caller has its own copy', async t => {
+  const c = await setup(t),
+    { store } = c.app;
+  const id = asking(c, await create(c), 'attempt-common');
+  // The common fields as the project's shell answers them beside its records, and a task read like the server's.
+  const shell = await get(c, `/api/projects/${projectId}/shell`),
+    taskPage = (project, record) => ({
+      task: record,
+      attempts: store.dashboardAttempts(project, record.id),
+      version: store.version,
+    }),
+    read = shared => {
+      const before = directorCallsComputed(),
+        answer = directorCalls(store, projectId, { taskPage, shared });
+      return { answer, computed: directorCallsComputed() - before };
+    },
+    version = store.version;
+
+  const plain = read(shell);
+  assert.equal(plain.computed, 1);
+  assert.ok(names(plain.answer.items).includes(id), JSON.stringify(plain.answer.items));
+  assert.equal(read(structuredClone(shell)).computed, 0, 'Equal common fields are the same input.');
+
+  // A usage hold with no known reset in the common fields, no record written: worked out again, with its call.
+  const held = read({ ...shell, quota: { codex: true }, quotaResets: {} });
+  assert.equal(held.computed, 1, 'Changed common fields work the list out again.');
+  assert.equal(store.version, version, 'No record was written.');
+  assert.ok(names(held.answer.items).includes('hold:codex'), JSON.stringify(held.answer.items));
+  assert.ok(names(held.answer.items).includes(id), JSON.stringify(held.answer.items));
+  assert.equal(held.answer.version, version);
+  // Back to the plain fields: worked out again, the list as it was.
+  const back = read(shell);
+  assert.equal(back.computed, 1);
+  assert.deepEqual(back.answer, plain.answer);
+
+  // A caller that changes its answer changes no other caller's.
+  back.answer.items[0].actions.length = 0;
+  back.answer.items.length = 0;
+  back.answer.count = 99;
+  const again = read(shell);
+  assert.equal(again.computed, 0);
+  assert.deepEqual(again.answer, plain.answer);
+
+  // A new day: the shared rules word a reset time by whether it is today, so the list is worked out again.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 2 * 24 * 3600 * 1000 });
+  t.after(() => t.mock.timers.reset());
+  assert.equal(read(shell).computed, 1, 'A new day works the list out again.');
+  assert.equal(read(shell).computed, 0);
+});
+
+test('two projects each get their own list', async t => {
+  const c = await setup(t),
+    { store } = c.app;
+  const mine = asking(c, await create(c), 'attempt-mine');
+  const other = await c.request('/api/projects', { name: 'Second fixture project' });
+  assert.equal(other.status, 201, JSON.stringify(other.data));
+  const otherId = other.data.id,
+    task = await c.request('/api/tasks', {
+      projectId: otherId,
+      title: 'Work in another project',
+      brief: 'Bounded model-free work.',
+      kind: 'general',
+      workerId: 'W-06',
+    });
+  assert.equal(task.status, 201, JSON.stringify(task.data));
+  const theirs = asking(c, task.data.id, 'attempt-theirs', otherId, 'W-06');
+
+  const a = await counted(c),
+    b = await counted(c, otherId);
+  assert.equal(a.computed, 1);
+  assert.equal(b.computed, 1, 'Another project has a list of its own.');
+  assert.ok(names(a.list.items).includes(mine), JSON.stringify(a.list.items));
+  assert.equal(names(a.list.items).includes(theirs), false);
+  assert.deepEqual(names(b.list.items), [theirs]);
+  // Each is kept for its project: reading either again works nothing out and answers its own list.
+  const a2 = await counted(c),
+    b2 = await counted(c, otherId);
+  assert.deepEqual([a2.computed, b2.computed], [0, 0]);
+  assert.deepEqual(a2.list, a.list);
+  assert.deepEqual(b2.list, b.list);
+  assert.equal(store.version, a.list.version);
 });

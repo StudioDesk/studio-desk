@@ -72,7 +72,28 @@ export const resumeAction = projectId => ({
   ],
 });
 
-export function directorCalls(store, projectId, { taskPage, shared, registries = null }) {
+// Whether a task's actions read git: the shared rules name the older lines a story whose review's change landed on a
+// line can be brought back to, which reads each line's history (connectors/source-carries.mjs bringBackTargets, which
+// reads nothing outside the records for any other task). Git is not among the records store.version covers.
+const readsGit = (store, record) => {
+  if (record.kind !== 'studio-development:change' || !record.sourceStage?.review?.attemptId) return false;
+  try {
+    const integration = store.attempt(record.sourceStage.review.attemptId).sourceIntegration;
+    return integration?.state === 'integrated' && !!integration.repository?.branch;
+  } catch {
+    return false;
+  }
+};
+
+// The list worked out afresh, every time: what directorCalls answers when nothing it keeps still holds.
+export function computeDirectorCalls(store, projectId, options) {
+  return workCalls(store, projectId, options).answer;
+}
+
+// The list with whether it may be kept: not when a listed task's actions read git (readsGit).
+function workCalls(store, projectId, { taskPage, shared, registries = null }) {
+  computations++;
+  let keepable = true;
   const version = store.version,
     state = callsState(store, projectId, shared, registries),
     actionsOf = taskId => {
@@ -82,6 +103,7 @@ export function directorCalls(store, projectId, { taskPage, shared, registries =
       } catch {
         return [];
       }
+      if (readsGit(store, record)) keepable = false;
       return taskRead(store, projectId, record, { taskPage, shared }).actions;
     },
     taskCall = item => ({
@@ -136,5 +158,45 @@ export function directorCalls(store, projectId, { taskPage, shared, registries =
           };
         return taskCall(item);
       });
-  return { projectId, items, count: items.length, version };
+  return { answer: { projectId, items, count: items.length, version }, keepable };
 }
+
+// The last list worked out for each project of each store (separate stores never share one), with what it was worked
+// out from: { key, taskPage, registries, answer }. Kept per store and dropped with it.
+const kept = new WeakMap();
+let computations = 0;
+
+// What the list is worked out from beyond the arguments that are compared as they are (taskPage and registries): the
+// store's version, which every write raises; the server's common fields, which carry the controller's in-memory state
+// (the runner's adapters, the integration running now, pending integration and restart) and today's cycle count; and
+// the local day and time zone, since the shared rules word a reset time with its date only when it is not today
+// (public/runs.js resetClock). The rules read no other clock: every other time they compare is a recorded one.
+const keyOf = (store, shared) => {
+  const now = new Date();
+  return JSON.stringify([store.version, now.toDateString(), now.getTimezoneOffset(), shared ?? null]);
+};
+
+// The list for one project, as computeDirectorCalls works it out (GET /api/projects/:id/calls). It is worked out once
+// for each change: while the project, the store's version, the common fields, the day, the task read and the
+// registries are those it was last worked out from, the same list is answered again, exactly what working it out now
+// would answer. A list whose actions read git is never kept. Each caller gets its own copy, so no caller can change
+// what another is answered.
+export function directorCalls(store, projectId, options) {
+  const { taskPage, shared, registries = null } = options,
+    key = keyOf(store, shared);
+  let projects = kept.get(store);
+  const held = projects?.get(projectId);
+  if (held && held.key === key && held.taskPage === taskPage && held.registries === registries)
+    return structuredClone(held.answer);
+  const { answer, keepable } = workCalls(store, projectId, options);
+  if (!projects) kept.set(store, (projects = new Map()));
+  // The key is read again after working the list out: a list worked out while the records moved is not kept.
+  if (keepable && keyOf(store, shared) === key) projects.set(projectId, { key, taskPage, registries, answer });
+  else projects.delete(projectId);
+  return structuredClone(answer);
+}
+
+// For tests: how many times a list has been worked out, and forgetting a store's kept lists so the next read works
+// each out afresh.
+export const directorCallsComputed = () => computations;
+export const forgetDirectorCalls = store => kept.delete(store);
