@@ -1230,16 +1230,10 @@ export class Runner {
   runMock(entry) {
     return runMock.call(this, entry);
   }
+  // A run set aside because its process group is still live finishes its attempt phase where it is quarantined
+  // (runNative's settle), at once or after the settling wait.
   runNative(...args) {
-    const result = runNative.call(this, ...args),
-      entry = args[0];
-    entry.child.once('close', () => {
-      if (entry.attempt.status === 'quarantined') {
-        const phase = entry.phases?.find(item => item.payload.phaseId === 'attempt');
-        if (phase) this.store.finishPhase(phase, 'interrupted', { timing: 'process-group-unconfirmed' });
-      }
-    });
-    return result;
+    return runNative.call(this, ...args);
   }
   parseOutput(...args) {
     return parseOutput.call(this, ...args);

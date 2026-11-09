@@ -114,6 +114,10 @@ export function runNative(
           else a.requeue = requeue;
           throw failure;
         }
+        // The attempt's work stopped being observed here, whether or not the group was waited for: its enclosing phase
+        // ends now, once (RF-015). Nested work may still be alive, so only that phase is finished.
+        const phase = entry.phases?.find(item => item.payload.phaseId === 'attempt');
+        if (phase) this.store.finishPhase(phase, 'interrupted', { timing: 'process-group-unconfirmed' });
         this.active.delete(a.id);
         return;
       }
