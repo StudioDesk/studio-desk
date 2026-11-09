@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isEntryPoint } from '../src/core/entry-point.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const inputs = ['dashboard/index.html', 'dashboard/src', 'vite.config.mjs', 'tsconfig.json', 'package-lock.json'];
@@ -85,5 +86,4 @@ export function buildDashboard({ base = root, force = false, log = console.log }
   return { built: true };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url))
-  process.exitCode = buildDashboard({ force: true }).built ? 0 : 1;
+if (isEntryPoint(import.meta)) process.exitCode = buildDashboard({ force: true }).built ? 0 : 1;

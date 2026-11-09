@@ -14,6 +14,7 @@ import { addLibraryEntry } from '../src/core/library.mjs';
 import { inspectRepository, recordProjectSource } from '../src/connectors/source-projects.mjs';
 import { repositoryOrganization } from '../src/organizations/studio-development/project.mjs';
 import { projectTemplate, templateFiles } from '../src/templates/index.mjs';
+import { isEntryPoint } from '../src/core/entry-point.mjs';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -175,7 +176,7 @@ export async function startSampleStudio({ base = root, port = samplePort, build 
   return { ...studio, address, directory };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta)) {
   const at = process.argv.indexOf('--port'),
     port = at > 0 ? Number(process.argv[at + 1]) : samplePort;
   const studio = await startSampleStudio({ port });

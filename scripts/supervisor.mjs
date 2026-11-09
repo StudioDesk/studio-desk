@@ -6,8 +6,8 @@
 // On Windows the controller shares this window and receives its Ctrl+C itself, while ending it from here would end it
 // outright, before it records why it stopped: so the supervisor waits for it to close and ends it only after a bound.
 import { spawn } from 'node:child_process';
-import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isEntryPoint } from '../src/core/entry-point.mjs';
 import { buildDashboard } from './build-dashboard.mjs';
 
 const RESTART_CODE = 75,
@@ -98,7 +98,7 @@ function launch() {
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta)) {
   for (const signal of ['SIGINT', 'SIGTERM'])
     process.on(signal, () => {
       if (!stopping) console.log(`Studio desk: the supervisor was asked to stop (${signal}); stopping the controller.`);

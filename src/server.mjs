@@ -4,6 +4,7 @@ import zlib from 'node:zlib';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isEntryPoint } from './core/entry-point.mjs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Store } from './store.mjs';
@@ -3003,7 +3004,7 @@ export function localConfiguration(installRoot = root, environment = process.env
     sourceRoot: resolve(environment.STUDIO_SOURCE_ROOT || local.sourceRoot),
   };
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta)) {
   // Under scripts/supervisor.mjs a planned restart exits with 75 and is relaunched.
   const supervised = process.env.STUDIO_SUPERVISED === '1',
     local = localConfiguration();

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { locateCodex, subscriptionEnvironment } from '../src/runner.mjs';
 import { denyCodexPaths } from '../src/adapters/agent-secrets.mjs';
+import { isEntryPoint } from '../src/core/entry-point.mjs';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const insideText = 'STUDIO_INSIDE_OK\n',
@@ -120,7 +121,7 @@ if (!inputReadable || !outsideWriteDenied || !inputWriteDenied) process.exitCode
   };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta)) {
   try {
     if (process.argv.length > 3) throw new Error('Usage: node scripts/check-codex-sandbox.mjs [elevated|mxc]');
     const result = checkCodexSandbox({ implementation: process.argv[2] });

@@ -785,9 +785,14 @@ test('supervisor relaunches the controller after a planned restart and exits wit
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-supervisor-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.mkdirSync(path.join(directory, 'scripts'));
-  fs.mkdirSync(path.join(directory, 'src'));
+  fs.mkdirSync(path.join(directory, 'src', 'core'), { recursive: true });
   for (const script of ['supervisor.mjs', 'build-dashboard.mjs'])
     fs.copyFileSync(new URL('../scripts/' + script, import.meta.url), path.join(directory, 'scripts', script));
+  // The supervisor knows it was started with the shared entry check, which it imports from src/core.
+  fs.copyFileSync(
+    new URL('../src/core/entry-point.mjs', import.meta.url),
+    path.join(directory, 'src', 'core', 'entry-point.mjs'),
+  );
   // Fake controller: a planned restart (75) on the first launch, a clean exit on the second.
   fs.writeFileSync(
     path.join(directory, 'src/server.mjs'),
