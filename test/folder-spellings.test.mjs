@@ -10,9 +10,13 @@ import os from 'node:os';
 import path from 'node:path';
 // The suite's temporary folder and git identity; the studio's model-free stand-ins.
 import { createStudio } from './model-free-studio.mjs';
-import { git } from '../src/connectors/source-integration.mjs';
-import { proposeSourceProfile } from '../src/connectors/source-projects.mjs';
-import { sourcePlan } from '../src/connectors/source-checks.mjs';
+import { git, repositoryState } from '../src/connectors/source-integration.mjs';
+import { projectRepository, proposeSourceProfile } from '../src/connectors/source-projects.mjs';
+import { copySource, sourcePlan } from '../src/connectors/source-checks.mjs';
+import { measureLine } from '../src/connectors/source-lines.mjs';
+import { ensureInstall, installKey } from '../src/connectors/package-installs.mjs';
+import { testRecordStream } from '../src/connectors/test-records.mjs';
+import { artifactPath } from '../src/core/artifacts.mjs';
 import {
   createSourceWorktree,
   removeSourceWorktree,
@@ -152,4 +156,155 @@ test('a worktree and a measured copy made from another spelling keep the real on
     inside(real, snapshot.root);
     assert.ok(fs.existsSync(path.join(destination, 'src', 'value.mjs')), 'The copy holds the measured files.');
   }
+});
+
+// A Windows short name for a fixture folder (SPELLE~1 for "Spelled dir"), as a computer with 8.3 names on answers
+// it. This computer has them off, so both resolvers are stubbed at their boundary: fs.realpathSync keeps a short name
+// as given, so it answers the short spelling for a path reached through the folder (under reached, the folder itself
+// unless named), and the native resolver expands it, so it answers the long spelling for either one. elsewhere maps a
+// path whose real place is somewhere else (a link or a moved file), for both resolvers.
+function shortSpelled(t, long, { reached = long, elsewhere = new Map() } = {}) {
+  const short = path.join(path.dirname(long), 'SPELLE~1'),
+    native = fs.realpathSync.native,
+    plain = fs.realpathSync,
+    under = (value, folder) => value === folder || value.startsWith(folder + path.sep),
+    toLong = value => {
+      if (typeof value !== 'string') return value;
+      const given = path.resolve(value);
+      return under(given, short) ? long + given.slice(short.length) : given;
+    },
+    moved = value => elsewhere.get(value) ?? value;
+  t.mock.method(fs.realpathSync, 'native', (value, ...rest) => moved(native(toLong(value), ...rest)));
+  t.mock.method(fs, 'realpathSync', (value, ...rest) => {
+    const real = moved(plain(toLong(value), ...rest));
+    return under(real, reached) ? short + real.slice(long.length) : real;
+  });
+  return short;
+}
+
+test("a short spelling of the controller's default source or another project's root is still refused", t => {
+  const { real, repository } = spelledFolder(t),
+    short = shortSpelled(t, real),
+    shortRepository = path.join(short, 'repo'),
+    none = { projects: () => [] };
+  assert.equal(fs.realpathSync(repository), shortRepository, 'The plain resolver keeps the short spelling.');
+  assert.equal(fs.realpathSync.native(shortRepository), repository, 'The native resolver expands it.');
+  // The controller's default source, reached by its short spelling.
+  assert.throws(
+    () => projectRepository(none, 'project-a', repository, { sourceChangeRoot: shortRepository }),
+    /^Error: This repository is the controller's default source\.$/,
+  );
+  // Another project's root recorded by its short spelling.
+  const taken = { projects: () => [{ id: 'project-b', name: 'Other', source: { root: shortRepository } }] };
+  assert.throws(
+    () => projectRepository(taken, 'project-a', repository, { sourceChangeRoot: path.join(real, 'elsewhere') }),
+    /Project Other already works on this repository\./,
+  );
+  // A repository no other project uses is recorded by its real spelling, whichever spelling it was given by.
+  assert.equal(projectRepository(none, 'project-a', shortRepository, {}).root, repository);
+});
+
+test('the live source by a short spelling is the root of its repository, and a subfolder is still refused', t => {
+  const { real, repository } = spelledFolder(t);
+  shortSpelled(t, real);
+  assert.equal(repositoryState(repository, 'testing', { clean: false }).branch, 'main');
+  assert.throws(
+    () => repositoryState(path.join(repository, 'src'), 'testing', { clean: false }),
+    /The live source must be the root of its git repository\./,
+  );
+});
+
+test('a source snapshot through a short spelling still refuses a symbolic link', t => {
+  const { real, repository } = spelledFolder(t),
+    short = shortSpelled(t, real),
+    profile = proposeSourceProfile(repository);
+  assert.equal(sourcePlan(path.join(short, 'repo'), profile).root, repository);
+  // The link is modeled at its boundary: the candidate test sandbox refuses to make links.
+  const link = path.join(repository, 'src', 'value.mjs'),
+    lstat = fs.lstatSync;
+  t.mock.method(fs, 'lstatSync', (file, ...rest) =>
+    file === link
+      ? { isSymbolicLink: () => true, isDirectory: () => false, isFile: () => false }
+      : lstat(file, ...rest),
+  );
+  assert.throws(() => sourcePlan(path.join(short, 'repo'), profile), /Source snapshots do not follow symbolic links\./);
+  assert.throws(() => sourcePlan(repository, profile), /Source snapshots do not follow symbolic links\./);
+});
+
+test('a line measured through a short spelling is not seen as changed, and a real change still is', t => {
+  const { real, repository } = spelledFolder(t);
+  git(repository, ['branch', 'fixes']);
+  const profile = proposeSourceProfile(repository);
+  shortSpelled(t, real);
+  // The fixes branch is not checked out, so it is measured in a worktree of its commit and recorded by the repository.
+  const plan = measureLine(repository, 'fixes', profile, path.join(real, 'wt'));
+  assert.equal(plan.root, repository);
+  copySource(plan, path.join(real, 'copy-1'));
+  assert.ok(fs.existsSync(path.join(real, 'copy-1', 'src', 'value.mjs')), 'The copy holds the measured files.');
+  fs.writeFileSync(path.join(repository, 'src', 'value.mjs'), 'export const value = 2;\n');
+  assert.throws(
+    () => copySource(plan, path.join(real, 'copy-2')),
+    /Source changed after its attempt snapshot\. Start a newly scoped attempt\./,
+  );
+});
+
+test('the package install takes a tested copy reached by a short spelling inside the data folder, and no other', t => {
+  const { real } = spelledFolder(t),
+    data = path.join(real, 'data'),
+    copy = path.join(data, 'tests', 'copy'),
+    outside = path.join(real, 'outside');
+  for (const folder of [copy, outside]) {
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, 'package.json'), '{"name":"spelled","private":true}\n');
+    fs.writeFileSync(path.join(folder, 'package-lock.json'), '{"name":"spelled","lockfileVersion":3}\n');
+  }
+  // The packages for this lockfile are already installed, so nothing runs npm.
+  fs.mkdirSync(path.join(data, 'node_modules'));
+  fs.writeFileSync(path.join(data, 'node_modules', '.studio-lockfile'), installKey(copy));
+  // The tested copies are reached by the short spelling; the data folder is kept by its long one.
+  shortSpelled(t, real, { reached: path.join(data, 'tests') });
+  const said = [],
+    npm = [process.execPath, '--eval', 'process.exit(9)'];
+  ensureInstall(copy, data, npm, line => said.push(line));
+  assert.match(said.join('\n'), /Using the packages installed for this lockfile/);
+  assert.throws(
+    () => ensureInstall(outside, data, npm, line => said.push(line)),
+    /^Error: The tested copy is outside the controller's data folder, so it cannot use the installed packages\.$/,
+  );
+});
+
+test('an artifact or test record reached by a short spelling inside its job folder is read, and one outside is not', async t => {
+  const { real } = spelledFolder(t),
+    store = { directory: path.join(real, 'data') },
+    measured = [{ kind: 'test-log', path: 'test-output.txt' }],
+    attempt = { id: 'attempt-short', artifacts: measured },
+    moved = { id: 'attempt-moved', artifacts: measured },
+    output = path.join(store.directory, 'jobs', attempt.id, 'output'),
+    movedOutput = path.join(store.directory, 'jobs', moved.id, 'output'),
+    elsewhere = path.join(real, 'elsewhere.txt');
+  for (const folder of [output, movedOutput]) {
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, 'result.txt'), 'done\n');
+    fs.writeFileSync(path.join(folder, 'test-output-full.txt'), '# pass 1\n');
+  }
+  fs.writeFileSync(path.join(output, 'moved.txt'), 'moved\n');
+  fs.writeFileSync(elsewhere, '# pass 1\n');
+  // The output folders are reached by the short spelling; the store keeps the data folder by its long one. Two files
+  // are really elsewhere, outside their job folders, as behind a link or after a move.
+  shortSpelled(t, real, {
+    reached: path.join(store.directory, 'jobs', attempt.id, 'output'),
+    elsewhere: new Map([
+      [path.join(output, 'moved.txt'), elsewhere],
+      [path.join(movedOutput, 'test-output-full.txt'), elsewhere],
+    ]),
+  });
+  // An artifact is recorded by its real spelling.
+  assert.equal(artifactPath(store, attempt, 'result.txt'), path.join(output, 'result.txt'));
+  assert.throws(
+    () => artifactPath(store, attempt, 'moved.txt'),
+    /Artifact symlinks outside the workspace are not allowed\./,
+  );
+  const stream = testRecordStream(store, attempt, 'attempt');
+  assert.equal(Buffer.concat(await stream.toArray()).toString('utf8'), '# pass 1\n');
+  assert.throws(() => testRecordStream(store, moved, 'attempt'), /The whole record is outside its job folder\./);
 });

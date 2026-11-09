@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { jobDirectory } from '../core/projects.mjs';
+import { realPath } from '../core/real-path.mjs';
 import { failedTestReader, testOutput, testPhaseEvidence, testRecordLimit } from './source-checks.mjs';
 
 export const testRecordRuns = Object.freeze({ attempt: 'output', merge: 'integration' });
@@ -39,7 +40,7 @@ function openTestRecord(store, attempt, run) {
     throw error;
   }
   if (!stat.isFile()) throw new Error('The whole record is not a plain file.');
-  if (!fs.realpathSync(file).startsWith(fs.realpathSync(job) + path.sep))
+  if (!realPath(file).startsWith(realPath(job) + path.sep))
     throw new Error('The whole record is outside its job folder.');
   const fd = fs.openSync(file, 'r');
   try {

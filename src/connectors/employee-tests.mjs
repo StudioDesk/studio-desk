@@ -14,6 +14,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { subscriptionEnvironment, command as nativeCommand } from '../adapters/process.mjs';
 import { jobDirectory } from '../core/projects.mjs';
+import { realPath } from '../core/real-path.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
 import { failedTestReader, sourceTestArgs, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, profileOf } from './source-profile.mjs';
@@ -254,7 +255,7 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
       plan = await makeTestCopy(
         {
           source: scope.source,
-          worktree: fs.realpathSync(a.sourceWorktree.path),
+          worktree: realPath(a.sourceWorktree.path),
           output: entry.output,
           directory,
           allowedFiles: scope.allowedFiles,

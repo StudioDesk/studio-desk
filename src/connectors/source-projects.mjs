@@ -8,6 +8,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { recordProject } from '../core/projects.mjs';
+import { samePath } from '../core/real-path.mjs';
 import { subscriptionEnvironment } from '../adapters/process.mjs';
 import { snapshotCommit } from '../adapters/source-snapshot.mjs';
 import { failedTests, sourcePlan, testOutput, testTotals } from './source-checks.mjs';
@@ -65,8 +66,8 @@ export function projectRepository(store, projectId, root, runtime) {
     );
   }
   const state = repositoryState(real, 'adding a project', { clean: false });
-  const same = other =>
-    other && (process.platform === 'win32' ? other.toLowerCase() === real.toLowerCase() : other === real);
+  // Each spelling is compared by its real one, so a short or differently cased spelling of a root is the same root.
+  const same = other => typeof other === 'string' && other !== '' && samePath(other, real);
   if (same(runtime?.sourceChangeRoot)) throw new Error("This repository is the controller's default source.");
   const taken = store.projects().find(project => project.id !== projectId && same(project.source?.root));
   if (taken) throw new Error(`Project ${taken.name || taken.id} already works on this repository.`);

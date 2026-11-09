@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hash } from './contracts.mjs';
 import { jobDirectory, recordProject, assertProject } from './projects.mjs';
+import { realPath } from './real-path.mjs';
 
 // Protected inputs may be outside output but must remain regular local files
 // inside this attempt's job. Hash equality alone does not detect a symlink swap.
@@ -29,8 +30,8 @@ export function artifactPath(store, a, relative) {
   const target = path.resolve(output, relative);
   if (!target.startsWith(output + path.sep) || !fs.existsSync(target))
     throw new Error('Artifact is missing or outside its output folder.');
-  const real = fs.realpathSync(target);
-  if (!real.startsWith(fs.realpathSync(output) + path.sep))
+  const real = realPath(target);
+  if (!real.startsWith(realPath(output) + path.sep))
     throw new Error('Artifact symlinks outside the workspace are not allowed.');
   const stat = fs.statSync(real);
   if (!stat.isFile() || stat.size > 8 * 1024 * 1024) throw new Error('Artifact must be a file smaller than 8 MB.');

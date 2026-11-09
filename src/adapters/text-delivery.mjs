@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hash, resultSchema, validateResult } from '../core/contracts.mjs';
 import { validateProtectedFiles } from '../core/artifacts.mjs';
+import { realPath } from '../core/real-path.mjs';
 
 export const TEXT_INPUT_LIMIT = 512 * 1024;
 export const TEXT_DELIVERY_LIMIT = 1024 * 1024;
@@ -121,7 +122,7 @@ export function stageTextDelivery(delivery, entry, { editable = [] } = {}) {
     throw new Error('The model did not return a valid file delivery.');
   const result = validateResult(delivery.result);
   if (result.taskId !== entry.attempt.taskId) throw new Error('Result belongs to a different assignment.');
-  const root = fs.realpathSync(entry.output),
+  const root = realPath(entry.output),
     replaceable = new Set(editable.map(relative => path.resolve(entry.output, relative).toLowerCase())),
     paths = new Set(),
     writes = [];
@@ -163,7 +164,7 @@ export function stageTextDelivery(delivery, entry, { editable = [] } = {}) {
         fs.existsSync(parent) &&
         (!fs.statSync(parent).isDirectory() ||
           fs.lstatSync(parent).isSymbolicLink() ||
-          !fs.realpathSync(parent).startsWith(root + path.sep))
+          !realPath(parent).startsWith(root + path.sep))
       )
         throw new Error('A delivered file is outside its output folder.');
     }
@@ -189,7 +190,7 @@ export function stageTextDelivery(delivery, entry, { editable = [] } = {}) {
       throw new Error('The model proposed conflicting file and directory paths.');
   for (const item of writes) {
     fs.mkdirSync(path.dirname(item.target), { recursive: true });
-    const parent = fs.realpathSync(path.dirname(item.target));
+    const parent = realPath(path.dirname(item.target));
     if (parent !== root && !parent.startsWith(root + path.sep))
       throw new Error('A delivered file is outside its output folder.');
     fs.writeFileSync(item.target, item.content, { flag: item.replacing ? 'w' : 'wx' });

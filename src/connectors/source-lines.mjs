@@ -24,16 +24,7 @@ import { fastForward, git, gitAsync, landed, repositoryState } from './source-in
 import { projectSource } from './source-projects.mjs';
 import { projectCatalog } from '../core/project-organization.mjs';
 import { recordProject } from '../core/projects.mjs';
-
-const realpath = value => {
-  try {
-    return fs.realpathSync.native(value);
-  } catch {
-    return fs.realpathSync(value);
-  }
-};
-const samePath = (a, b) =>
-  process.platform === 'win32' ? realpath(a).toLowerCase() === realpath(b).toLowerCase() : realpath(a) === realpath(b);
+import { realPath as realpath, samePath } from '../core/real-path.mjs';
 
 // The branch a folder has checked out, or null when its HEAD is detached.
 export function checkedOut(root) {
@@ -126,7 +117,7 @@ export function measureLine(root, line, profile, parent) {
       key,
       inCommit(root, commit, parent, profile, worktree => ({
         ...sourcePlan(worktree, profile),
-        root: fs.realpathSync(root),
+        root: realpath(root),
       })),
     );
   return structuredClone(plan);
@@ -288,7 +279,7 @@ export function lineMeasurement(root, line, profile, parent, { ignored = [], kno
         if (plan)
           Object.assign(
             plan,
-            answer(() => ({ ...sourcePlan(worktree, profile), root: fs.realpathSync(root) })),
+            answer(() => ({ ...sourcePlan(worktree, profile), root: realpath(root) })),
           );
         for (const files of asked)
           answers.set(

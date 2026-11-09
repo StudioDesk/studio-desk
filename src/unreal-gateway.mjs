@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hash } from './core/contracts.mjs';
 import { jobDirectory } from './core/projects.mjs';
+import { realPath } from './core/real-path.mjs';
 import { attemptResource } from './core/store.mjs';
 import { unrealEndpoint } from './unreal-discovery.mjs';
 
@@ -81,7 +82,7 @@ export function validateEditorPin(pin) {
   if (
     !path.isAbsolute(pin.projectFile) ||
     path.extname(pin.projectFile) !== '.uproject' ||
-    fs.realpathSync(pin.projectFile) !== pin.projectFile ||
+    realPath(pin.projectFile) !== pin.projectFile ||
     typeof pin.projectId !== 'string' ||
     !pin.projectId ||
     pin.projectId.length > 128 ||
@@ -115,7 +116,7 @@ export function validateEditorPin(pin) {
     if (
       typeof source.role !== 'string' ||
       !path.isAbsolute(source.path) ||
-      fs.realpathSync(source.path) !== source.path ||
+      realPath(source.path) !== source.path ||
       !digest(source.hash) ||
       !fs.statSync(source.path).isFile() ||
       fs.statSync(source.path).size > 1024 * 1024 ||

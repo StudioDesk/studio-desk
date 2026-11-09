@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntryPoint } from '../core/entry-point.mjs';
+import { realPath } from '../core/real-path.mjs';
 import {
   builtInSandboxCommandLine,
   builtInSandboxEnvironment,
@@ -57,7 +58,7 @@ export async function runBuiltInSandbox(
     { executable, args } = parsed,
     launcher = fileURLToPath(new URL('./built-in-sandbox-launch.mjs', import.meta.url)),
     // Node as the sandbox account sees it: the installed folder, not a link to it (nvm's, for one).
-    node = fs.realpathSync(process.execPath),
+    node = realPath(process.execPath),
     runDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-sandbox-')),
     settings = path.join(runDirectory, 'settings.json'),
     instructions = path.join(runDirectory, `run-${randomUUID()}.json`),

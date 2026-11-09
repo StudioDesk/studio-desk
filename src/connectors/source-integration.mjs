@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { command, subscriptionEnvironment } from '../adapters/process.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
 import { hash } from '../core/contracts.mjs';
+import { samePath } from '../core/real-path.mjs';
 import { runGit, runGitAsync } from '../git.mjs';
 import { releaseTestTurn, testTurnResource } from '../core/test-turn.mjs';
 import { sourcePlan, testOutput, testPhaseEvidence } from './source-checks.mjs';
@@ -24,20 +25,6 @@ export const installTimeoutMs = 10 * 60 * 1000,
 const formatTimeoutMs = 5 * 60 * 1000,
   logLimit = 192 * 1024;
 
-// The native resolver also expands Windows short names, but sandboxes (Codex MXC) can deny it.
-const realpath = value => {
-  try {
-    return fs.realpathSync.native(value);
-  } catch {
-    return fs.realpathSync(value);
-  }
-};
-const samePath = (a, b) => {
-  const resolve = value => path.resolve(realpath(value));
-  return process.platform === 'win32'
-    ? resolve(a).toLowerCase() === resolve(b).toLowerCase()
-    : resolve(a) === resolve(b);
-};
 // The connectors' git: the controller's own git (src/git.mjs), with exact pathspecs, the repository's hooks and
 // fsmonitor off, and long paths on. check-ignore matches each path against the ignore rules as written, and only its
 // check for tracked files reads [ ] as a glob. Output is trimmed unless raw is set.
