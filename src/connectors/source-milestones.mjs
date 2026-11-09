@@ -328,12 +328,12 @@ export function ideaRelease(store, projectId, runtime, { milestone, line }) {
   }
   if (line !== undefined) {
     const branch = ideaLine(store, projectId, runtime, line),
-      newest = branch === undefined || branch === projectLine(store, projectId, undefined),
-      picked = newest
-        ? nextRelease(milestones, store.project(projectId).shipsTo)
-        : milestones
-            .filter(item => open(item) && item.line === branch)
-            .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
+      legacyNewest =
+        !store.project(projectId).shipsTo &&
+        (branch === undefined || branch === projectLine(store, projectId, undefined)),
+      picked = milestones
+        .filter(item => open(item) && (item.line === branch || (legacyNewest && item.line === null)))
+        .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
     return {
       line: branch,
       release: picked ? { milestoneId: picked.id, version: picked.version, by: { type: 'director' } } : undefined,

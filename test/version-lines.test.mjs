@@ -484,6 +484,33 @@ test('switching gives each open version its own line, in version order, and new 
   );
 });
 
+test('an explicitly selected version line keeps its own milestone while the default stays on the lowest open version', async t => {
+  const c = await released(t, true),
+    store = c.app.store,
+    runtime = c.app.runner,
+    minor = makeMilestone(store, project, runtime, { version: '1.1.0' }),
+    next = makeMilestone(store, project, runtime, { version: '1.2.0' });
+  assert.deepEqual(ideaRelease(store, project, runtime, { line: 'main' }), {
+    line: undefined,
+    release: { milestoneId: minor.id, version: '1.1.0', by: { type: 'director' } },
+  });
+  useVersionLines(store, project, runtime, { shipsTo: 'main' });
+  const milestones = projectMilestones(store, project);
+  assert.deepEqual(ideaRelease(store, project, runtime, { line: 'release/1.2' }), {
+    line: 'release/1.2',
+    release: { milestoneId: next.id, version: '1.2.0', by: { type: 'director' } },
+  });
+  assert.deepEqual(ideaRelease(store, project, runtime, { line: 'release/1.1' }), {
+    line: 'release/1.1',
+    release: { milestoneId: minor.id, version: '1.1.0', by: { type: 'director' } },
+  });
+  assert.deepEqual(ideaRelease(store, project, runtime, {}), {
+    line: 'release/1.1',
+    release: { milestoneId: minor.id, version: '1.1.0', by: { type: 'default' } },
+  });
+  assert.deepEqual(projectMilestones(store, project), milestones, 'Selection does not change milestones.');
+});
+
 test('a release ships to main: a fast-forward, a merge whose content is the release, never back to an older one', async t => {
   const c = await released(t),
     store = c.app.store;
