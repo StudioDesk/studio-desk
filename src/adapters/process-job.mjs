@@ -44,7 +44,16 @@ export const windowsCommandLine = (file, args) => [file, ...args].map(quoteWindo
 
 // How to start a command inside a job of its own: the wrapper, with the command line and its options passed in the
 // environment (PowerShell's own argument parsing changes embedded quotes), or the command as it is.
-export function jobbedCommand(file, args, environment, { report = '', keep = false, enabled = true } = {}) {
+// `testPause` is for test/process-job.test.mjs alone, and no caller in the studio sets it: a file where the wrapper
+// writes the command's PID once it is created, after which the wrapper waits 30 seconds before letting it run, so a test
+// can end the wrapper in between. It is always set, empty by default, so a value in the controller's own environment never
+// reaches the wrapper.
+export function jobbedCommand(
+  file,
+  args,
+  environment,
+  { report = '', keep = false, enabled = true, testPause = '' } = {},
+) {
   if (!enabled) return { file, args, environment };
   return {
     file: windowsPowerShell,
@@ -54,6 +63,7 @@ export function jobbedCommand(file, args, environment, { report = '', keep = fal
       STUDIO_JOB_COMMAND_LINE: windowsCommandLine(file, args),
       STUDIO_JOB_REPORT: report,
       STUDIO_JOB_KEEP: keep ? '1' : '',
+      STUDIO_JOB_TEST_PAUSE: testPause,
     },
   };
 }
