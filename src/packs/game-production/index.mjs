@@ -113,7 +113,7 @@ export const gameProductionPack = {
     {
       ...common,
       kind: 'plan',
-      step: { kind: 'plan' },
+      step: { kind: 'plan', acceptance: { acceptOver: false } },
       version: 'plan-v1',
       label: 'Bounded plan proposal',
       cardLabel: 'Plan',

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStudio } from './model-free-studio.mjs';
 import { waitFor, waitForTask } from './wait-for.mjs';
+import { stepContract } from '../src/core/step-contract.mjs';
 
 async function setup(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-plan-'));
@@ -147,6 +148,45 @@ test('one bounded plan approval creates shared tasks atomically and dispatches o
   await c.connect();
   assert.deepEqual(c.app.store.task(p.id).materializedTaskIds, res.data.taskIds);
   assert.equal(c.app.store.task(review).status, 'done');
+});
+
+test('legacy plan capability matches refusal of failed worker checks through accept and approve-plan', async t => {
+  const c = await setup(t),
+    { store, runner } = c.app,
+    { workflows } = runner.registries,
+    definition = workflows.get('plan'),
+    finish = runner.finish,
+    failed = { name: 'Worker plan check', status: 'fail', evidence: 'Model-free worker failure fixture.' };
+  // Supply a failed worker check at the adapter's result boundary, before controller validation.
+  t.mock.method(runner, 'finish', function (entry, result, error) {
+    if (entry.attempt.assignment.kind === 'plan' && result) result.checks.push(failed);
+    return finish.call(this, entry, result, error);
+  });
+  const p = await c.plan('Failed worker check plan');
+  await c.wait(p.id, 'review');
+  const approval = c.approval(p.id),
+    attempt = store.attempt(approval.attemptId),
+    before = store.tasks();
+  assert.equal(store.task(p.id).kind, 'plan');
+  assert.equal(attempt.result.outcome, 'completed');
+  assert.ok(attempt.result.checks.some(check => check.name === failed.name && check.status === 'fail'));
+  assert.ok(
+    attempt.controllerChecks.some(check => check.name === 'Controller plan validation' && check.status === 'pass'),
+  );
+  for (const [action, body, status, message] of [
+    ['accept', { overReason: 'Accept the reported gap.' }, 400, /Use plan approval/],
+    ['approve-plan', approval, 409, /Plan is not ready for approval/],
+  ]) {
+    const response = await c.request(`/api/tasks/${p.id}/${action}`, body);
+    assert.equal(response.status, status, JSON.stringify(response.data));
+    assert.match(response.data.error, message);
+    assert.deepEqual(store.tasks(), before, 'Refusal accepts no result, creates no assignments and queues no work.');
+    assert.deepEqual(store.attempt(attempt.id), attempt, 'Refusal preserves the validated attempt.');
+  }
+  assert.deepEqual(
+    { resolved: stepContract(definition).acceptance.acceptOver, described: workflows.describe().plan.acceptOver },
+    { resolved: false, described: false },
+  );
 });
 
 test('invalid model proposals cannot create work or automatically retry', async t => {

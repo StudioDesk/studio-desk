@@ -10,8 +10,9 @@ export const STEP_KINDS = Object.freeze(['work', 'review', 'plan', 'decide', 'ga
 export const LIBRARY_DELIVERY = Object.freeze(['current', 'same-as-inputs', 'none']);
 
 // What each kind does unless its contract says otherwise. Only an agent's step proposes files for the library; a step
-// the studio runs itself, or a decision, has no agent to propose them. The director may accept any recorded result over
-// a failed check, with a reason (decided November 2, 2026); a decision, a gate, a for-each or a join records none.
+// the studio runs itself, or a decision, has no agent to propose them. Result-producing kinds default to acceptance over
+// a failed check with a director's reason (decided November 2, 2026); a decision, a gate, a for-each or a join records none.
+// The legacy game-production `plan` type opts out: its separate plan/proposal approval refuses failed checks.
 const kindDefaults = Object.freeze({
   work: { receives: { library: 'current' }, proposes: { library: true }, acceptance: { acceptOver: true } },
   review: { receives: { library: 'same-as-inputs' }, proposes: { library: false }, acceptance: { acceptOver: true } },

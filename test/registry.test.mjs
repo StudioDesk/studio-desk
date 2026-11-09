@@ -407,6 +407,21 @@ test('each task type tells the pages how a failed check meets acceptance, as the
     );
 });
 
+test('only the legacy plan opts out of the planning result acceptance override', () => {
+  const { workflows } = createRegistries(),
+    described = workflows.describe();
+  assert.equal(stepContract({ step: { kind: 'plan' } }).acceptance.acceptOver, true, 'The catalog default stays true.');
+  for (const kind of ['plan', 'general:plan', 'general:split', 'studio-development:breakdown']) {
+    const definition = workflows.get(kind);
+    assert.equal(stepContract(definition).kind, 'plan', kind);
+    assert.deepEqual(
+      { resolved: stepContract(definition).acceptance.acceptOver, described: described[kind].acceptOver },
+      { resolved: kind !== 'plan', described: kind !== 'plan' },
+      kind,
+    );
+  }
+});
+
 test('legacy review attempts and planning contexts retain acceptance and independent-review rules', async t => {
   const c = await setup(t);
   const legacy = c.app.store.task('R-001'),
