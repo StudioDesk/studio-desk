@@ -8,7 +8,7 @@
 // Ubuntu lets only the system's bubblewrap make sandboxes. The same setup installs them through the
 // system's own password prompt, or the director copies the command.
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -390,14 +390,119 @@ export const dataDenyTimeoutMs = 30 * 60 * 1000;
 export const dataDenyLock = '.sandbox-data-deny.lock',
   dataDenyDone = '.sandbox-data-denied';
 const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const lockHolderAlive = file => {
+const readSandboxHolder = file => {
   try {
-    process.kill(JSON.parse(fs.readFileSync(file, 'utf8')).pid, 0);
-    return true;
+    const holder = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Number.isInteger(holder?.pid) && holder.pid > 0 ? holder : null;
   } catch (error) {
-    return error.code === 'EPERM';
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) return null;
+    throw error;
   }
 };
+// A virus scanner briefly holds a just-closed file or folder on Windows, which refuses its rename or removal meanwhile.
+// As src/core/attempt-continuation.mjs and src/connectors/package-installs.mjs do, only those transient refusals are
+// tried again, for a moment; the operation stays the same atomic rename or removal.
+const lockedCodes = new Set(['EPERM', 'EACCES', 'EBUSY']);
+export const sandboxFileRetryMs = 2000;
+function whenFree(operation, waitMs = sandboxFileRetryMs) {
+  for (let delay = 10, until = Date.now() + waitMs; ; delay = Math.min(delay * 2, 250)) {
+    try {
+      return operation();
+    } catch (error) {
+      if (!lockedCodes.has(error.code) || Date.now() + delay > until) throw error;
+      sleepSync(delay);
+    }
+  }
+}
+// One wait's view of the processes it asks about. Reading a start time starts PowerShell on Windows, so a holder found
+// genuine is asked again by its ID alone, and by its start time at most every `recheckMs`; an ownership entry younger
+// than `youngOwnershipMs` is asked only by its ID, since an ID handed on within seconds of its claim is rare and such
+// an entry is judged by its time once it is older. Either way an ended ID frees at once, and a reused one at the next
+// full check: never a live owner early, only a dead one late, by a bounded time.
+export const identityRecheckMs = 30 * 1000,
+  youngOwnershipMs = 5 * 1000;
+function processIdentity(readStartTime, recheckMs = identityRecheckMs) {
+  const genuine = new Map();
+  return (pid, since, { youngMs = 0 } = {}) => {
+    const now = Date.now(),
+      key = `${pid}|${since instanceof Date ? since.toISOString() : since}`,
+      at = since instanceof Date ? since.getTime() : Date.parse(since);
+    if ((Number.isFinite(at) && now - at < youngMs) || now - (genuine.get(key) ?? -Infinity) < recheckMs) {
+      if (!processEnded(pid, null)) return false;
+      genuine.delete(key);
+      return true;
+    }
+    const ended = processEnded(pid, since, { readStartTime });
+    if (ended) genuine.delete(key);
+    else genuine.set(key, now);
+    return ended;
+  };
+}
+const lockHolderAlive = (holder, ended) => holder && !ended(holder.pid, holder.since);
+
+// A filesystem bakery lock. Each entrant atomically makes a unique directory whose NAME already holds its identity;
+// no crash between ownership and publication can leave an ownerless recovery lock. An empty directory means choosing
+// a ticket; mkdir publishes the complete ticket atomically. Entrants wait for choosing peers and then for smaller
+// (ticket, name) pairs. A failed try withdraws before yielding, so a synchronous release cannot block an async entrant
+// in this same process. All protected reads, reclaims, publications and releases are synchronous under this ownership.
+// Recovery removes only a dead entrant's unique directory, never a shared path a replacement could have acquired.
+// `ended` is the wait's process identity (processIdentity above). A peer that cannot be read or removed for a moment
+// (a scanner holding it) counts as still present: this entrant defers and tries again on its next pass.
+function trySandboxOwnership(folder, prefix, ended) {
+  const name = `${prefix}${process.pid}-${Date.now()}-${randomUUID()}`,
+    directory = path.join(folder, name);
+  fs.mkdirSync(directory);
+  const release = () => whenFree(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const peers = () => fs.readdirSync(folder).filter(peer => peer.startsWith(prefix) && peer !== name);
+  const ticketOf = peer => {
+    try {
+      const ticket = fs.readdirSync(path.join(folder, peer)).find(part => /^\d+$/.test(part));
+      return ticket ? Number(ticket) : 0;
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      if (lockedCodes.has(error.code)) return 0;
+      throw error;
+    }
+  };
+  try {
+    const ticket = 1 + Math.max(0, ...peers().map(peer => ticketOf(peer) || 0));
+    fs.mkdirSync(path.join(directory, String(ticket)));
+    for (const peer of peers()) {
+      const identity = /^(\d+)-(\d+)-[\da-f-]+$/.exec(peer.slice(prefix.length));
+      if (!identity) throw new Error('The sandbox found unreadable ownership metadata.');
+      if (ended(Number(identity[1]), new Date(Number(identity[2])), { youngMs: youngOwnershipMs })) {
+        try {
+          whenFree(() => fs.rmSync(path.join(folder, peer), { recursive: true, force: true }));
+          continue;
+        } catch (error) {
+          if (!lockedCodes.has(error.code)) throw error;
+          release();
+          return null;
+        }
+      }
+      const other = ticketOf(peer);
+      if (other !== null && (!other || other < ticket || (other === ticket && peer < name))) {
+        release();
+        return null;
+      }
+    }
+    return { directory, release };
+  } catch (error) {
+    try {
+      release();
+    } catch {
+      // The first error says what went wrong; a directory left behind is a dead entrant's once this process ends.
+    }
+    throw error;
+  }
+}
+// Called only under ownership: the temporary file may be torn by a killed publisher, but its shared name cannot be.
+function publishSandboxHolder(ownership, file, holder) {
+  const temporary = path.join(ownership.directory, 'publication');
+  fs.writeFileSync(temporary, JSON.stringify(holder));
+  whenFree(() => fs.renameSync(temporary, file));
+}
+const ownsSandboxHolder = (file, token) => readSandboxHolder(file)?.token === token;
 export const insideFolder = (parent, child) => {
   const relative = path.relative(parent.toLowerCase(), child.toLowerCase());
   return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
@@ -414,31 +519,44 @@ export function denyBuiltInSandboxData(
     profile = process.env.USERPROFILE || os.homedir(),
     timeoutMs = dataDenyTimeoutMs,
     waitMs = 1000,
+    readStartTime,
+    identityRecheck = identityRecheckMs,
   } = {},
 ) {
   if (!folder || insideFolder(profile, folder)) return null;
   const lock = path.join(folder, dataDenyLock),
     done = path.join(folder, dataDenyDone),
-    denied = () => fs.existsSync(done) && builtInSandboxDataDenied(folder, run);
+    denied = () => fs.existsSync(done) && builtInSandboxDataDenied(folder, run) && fs.existsSync(done);
   if (denied()) return folder;
+  let ownership;
+  const holder = { pid: process.pid, since: new Date().toISOString(), token: randomUUID() },
+    ended = processIdentity(readStartTime, identityRecheck);
   for (const until = Date.now() + timeoutMs; ; ) {
-    try {
-      fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, since: new Date().toISOString() }), { flag: 'wx' });
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+    ownership = trySandboxOwnership(folder, '.sandbox-data-owner-', ended);
+    if (ownership) {
+      let keep = false;
+      try {
+        if (denied()) return folder;
+        if (!lockHolderAlive(readSandboxHolder(lock), ended)) {
+          publishSandboxHolder(ownership, lock, holder);
+          keep = true;
+          break;
+        }
+      } finally {
+        if (!keep) ownership.release();
+      }
     }
-    // Another run is writing the entry: it is there once that run is done, or the lock was left by a run that ended.
-    if (!lockHolderAlive(lock)) fs.rmSync(lock, { force: true });
-    else if (denied()) return folder;
-    else if (Date.now() > until)
+    if (Date.now() >= until)
       throw new Error(
         `The sandbox could not be kept from the data folder (${folder}): another run held its lock too long.`,
       );
-    else sleepSync(waitMs);
+    sleepSync(Math.min(waitMs, Math.max(0, until - Date.now())));
   }
   try {
     if (denied()) return folder;
+    // The previous mark must be gone BEFORE even the root's ACL changes. A failed or killed propagation then stays
+    // incomplete for waiters and restarts, even though the root itself already holds the deny.
+    whenFree(() => fs.rmSync(done, { force: true }));
     const result = run('icacls', [folder, '/deny', `${builtInSandboxGroup}:(OI)(CI)(RD)`], {
       encoding: 'utf8',
       windowsHide: true,
@@ -448,10 +566,24 @@ export function denyBuiltInSandboxData(
       throw new Error(
         `The sandbox could not be kept from the data folder (${folder}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
       );
-    fs.writeFileSync(done, `${new Date().toISOString()}\n`);
+    if (!ownsSandboxHolder(lock, holder.token)) throw new Error('The sandbox data repair lost its ownership.');
+    const temporary = path.join(ownership.directory, 'completion');
+    fs.writeFileSync(temporary, `${new Date().toISOString()}\n`);
+    whenFree(() => fs.renameSync(temporary, done));
     return folder;
   } finally {
-    fs.rmSync(lock, { force: true });
+    // Giving the lock back never replaces the repair's own outcome: a lock or directory left behind records this
+    // process, so it is a dead owner's, reclaimed, once the process ends, and a completed repair is read before them.
+    try {
+      if (ownsSandboxHolder(lock, holder.token)) whenFree(() => fs.rmSync(lock, { force: true }));
+    } catch {
+      // Left for reclamation, as above.
+    }
+    try {
+      ownership.release();
+    } catch {
+      // Left for reclamation, as above.
+    }
   }
 }
 // What a Windows run does before it starts to keep the sandbox from the data folders: the secrets of the data folder
@@ -485,63 +617,81 @@ const waitedFor = ms => {
 };
 
 // Takes one of the computer's session slots, waiting in turn while all are taken, and answers the function that gives
-// it back. A slot is a file made only if absent; a slot whose holder has ended (stopped hard, say) is free again. A
+// it back. Claim, reclaim and release share interprocess ownership; a holder that ended frees its slot again. A
 // slot records its holder's ID and when it was taken, after the holder started, so a process that now has the ID but
 // started later is not the holder (Windows hands freed IDs on quickly), through the check every caller shares; a slot
-// without a readable time keeps the ID-only answer. Reading a start time starts PowerShell on Windows, so a holder found
-// genuine is asked again only by its ID (`alive` without a time) on later passes for as long as its slot reads the same.
-// Two waiters freeing the same ended slot at the same moment could share it, which the spare session above absorbs.
-// With no slot free after `waitBoundMs`, it stops with a plain reason and changes no slot.
+// without a readable time keeps the ID-only answer. Identity is revalidated on later passes, even with unchanged bytes:
+// by ID on each pass and by start time at most every `identityRecheck` (processIdentity above). A unique token also
+// keeps an old release from removing a new claim by the same PID. Publication is an atomic rename from the ownership
+// directory; malformed legacy files can be recovered under ownership without racing a publisher. `onWait` is told once,
+// when the run first finds every slot in use; a turn at the shared ownership that other runs keep for a moment is no
+// such wait. With no slot free after `waitBoundMs`, it stops with a plain reason, saying whether the slots were in use
+// or other runs kept it from looking, and changes no slot. Giving back is best-effort and never throws, within its own
+// bound (`releaseBoundMs`): a slot it could not give back records this process, so it is free once the process ends.
+export const builtInSandboxSessionReleaseMs = 10 * 1000;
 export async function takeBuiltInSandboxSession(
   folder,
   {
     slots = builtInSandboxSessionsAtOnce,
     pid = process.pid,
     readStartTime,
-    alive = (holder, since) => !processEnded(holder, since, { readStartTime }),
+    identityRecheck = identityRecheckMs,
+    alive,
     waitMs = 500,
     waitBoundMs = builtInSandboxSessionWaitMs,
+    releaseBoundMs = builtInSandboxSessionReleaseMs,
     onWait,
   } = {},
 ) {
   fs.mkdirSync(folder, { recursive: true });
   const started = Date.now(),
-    genuine = new Set();
-  for (let waited = false; ; waited = true) {
-    for (let slot = 0; slot < slots; slot++) {
-      const file = path.join(folder, `slot-${slot}.lock`);
+    ended = processIdentity(readStartTime, identityRecheck),
+    holds = alive ?? ((holder, since) => !ended(holder, since));
+  let full = false;
+  for (;;) {
+    const ownership = trySandboxOwnership(folder, '.sandbox-session-owner-', ended);
+    if (ownership) {
       try {
-        fs.writeFileSync(file, JSON.stringify({ pid, since: new Date().toISOString() }), { flag: 'wx' });
-        return () => {
-          try {
-            if (JSON.parse(fs.readFileSync(file, 'utf8')).pid === pid) fs.rmSync(file, { force: true });
-          } catch {}
-        };
-      } catch (error) {
-        if (error.code !== 'EEXIST') throw error;
-      }
-      let text = '',
-        holder = null;
-      try {
-        text = fs.readFileSync(file, 'utf8');
-        holder = JSON.parse(text);
-      } catch {
-        // Being written, or just given back: the next pass looks again.
-      }
-      if (!holder || !Number.isInteger(holder.pid)) continue;
-      const known = genuine.has(text);
-      if (alive(holder.pid, known ? null : holder.since)) genuine.add(text);
-      else {
-        genuine.delete(text);
-        fs.rmSync(file, { force: true });
-        slot--;
+        for (let slot = 0; slot < slots; slot++) {
+          const file = path.join(folder, `slot-${slot}.lock`),
+            holder = readSandboxHolder(file);
+          if (holder && holds(holder.pid, holder.since)) continue;
+          const token = randomUUID();
+          publishSandboxHolder(ownership, file, { pid, since: new Date().toISOString(), token });
+          let released = false;
+          return () => {
+            if (released) return;
+            try {
+              const until = Date.now() + releaseBoundMs,
+                giving = processIdentity(readStartTime, identityRecheck);
+              let releasing;
+              while (!(releasing = trySandboxOwnership(folder, '.sandbox-session-owner-', giving))) {
+                if (Date.now() >= until) return;
+                sleepSync(Math.min(waitMs, Math.max(0, until - Date.now())));
+              }
+              try {
+                if (ownsSandboxHolder(file, token)) whenFree(() => fs.rmSync(file, { force: true }));
+                released = true;
+              } finally {
+                releasing.release();
+              }
+            } catch {
+              // Left for reclamation once this process ends, as above; the run's own outcome stands.
+            }
+          };
+        }
+        if (!full) onWait?.(slots);
+        full = true;
+      } finally {
+        ownership.release();
       }
     }
-    if (!waited) onWait?.(slots);
     const elapsed = Date.now() - started;
     if (elapsed >= waitBoundMs)
       throw new Error(
-        `All ${slots} of this computer's built-in sandbox sessions stayed in use by runs still going, so this run stopped after waiting ${waitedFor(elapsed)} for one.`,
+        full
+          ? `All ${slots} of this computer's built-in sandbox sessions stayed in use by runs still going, so this run stopped after waiting ${waitedFor(elapsed)} for one.`
+          : `Other runs were taking or giving back this computer's built-in sandbox sessions the whole time, so this run stopped after waiting ${waitedFor(elapsed)} for its turn to look for a free one.`,
       );
     await new Promise(resolve => setTimeout(resolve, Math.min(waitMs, waitBoundMs - elapsed)));
   }

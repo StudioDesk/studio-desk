@@ -8,7 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
-import { spawnSync } from 'node:child_process';
+import { fork, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { setup } from './source-story-setup.mjs';
 import {
   builtInSandbox,
@@ -38,6 +39,469 @@ import {
 import { checkSeconds } from '../src/packs/studio-development/index.mjs';
 import { repositoryTestSeconds } from '../src/connectors/source-projects.mjs';
 import { testTimeoutMs } from '../src/connectors/source-integration.mjs';
+
+const sessionFixture = fileURLToPath(new URL('./fixture-sandbox-session.mjs', import.meta.url));
+function sessionChild(t, folder, options = {}) {
+  const child = fork(sessionFixture, [folder, JSON.stringify(options)], { silent: true, windowsHide: true });
+  const messages = [];
+  let errors = '';
+  child.stderr.on('data', chunk => (errors += chunk));
+  child.on('message', message => messages.push(message));
+  const closed = new Promise(resolve => child.once('close', resolve));
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await closed;
+  });
+  return {
+    child,
+    messages,
+    closed,
+    resume: phase => fs.writeFileSync(path.join(folder, `${child.pid}-${phase}.go`), ''),
+    async event(...names) {
+      const until = Date.now() + 10000;
+      while (Date.now() < until) {
+        const found = messages.find(message => names.includes(message.event));
+        if (found) return found;
+        if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Fixture ended: ${errors}`);
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      throw new Error(`Fixture did not report ${names}: ${JSON.stringify(messages)} ${errors}`);
+    },
+  };
+}
+
+test('RF-005: three independent stale reapers cannot admit more than four active holders', async t => {
+  const folder = sessionFolder(t);
+  for (let slot = 0; slot < 3; slot++) writeSlot(folder, slot, process.pid, new Date().toISOString());
+  writeSlot(folder, 3, 987654321, new Date().toISOString());
+  const contenders = Array.from({ length: 3 }, () => sessionChild(t, folder, { pause: 'stale', waitBoundMs: 1800 }));
+  const reported = (contender, event) => contender.messages.some(message => message.event === event);
+  // Before the fix all three reach the same stale observation. With serialization the first holds the ownership while
+  // it looks, so the others cannot reach it.
+  for (const until = Date.now() + 10000; !contenders.some(contender => reported(contender, 'stale')); )
+    if (Date.now() > until) assert.fail('no contender reached the stale slot');
+    else await new Promise(resolve => setTimeout(resolve, 5));
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const observed = contenders.filter(contender => reported(contender, 'stale'));
+  // Resume their reclamation in the review's order.
+  for (const contender of observed) contender.resume('stale');
+  for (const contender of contenders) {
+    const result = await contender.event('claimed', 'exhausted');
+    if (result.event === 'exhausted') assert.match(result.detail, /stayed in use/);
+  }
+  const admitted = contenders.filter(contender => contender.messages.some(message => message.event === 'claimed'));
+  assert.equal(3 + admitted.length, 4, 'measure running claimants, not the four on-disk filenames');
+});
+
+test('RF-013: abandoned empty and truncated slot publications recover bounded capacity', async t => {
+  for (const text of ['', '{"pid":'])
+    await t.test(JSON.stringify(text), async t => {
+      const folder = sessionFolder(t);
+      fs.writeFileSync(path.join(folder, 'slot-0.lock'), text);
+      const release = await takeBuiltInSandboxSession(folder, { slots: 1, waitMs: 5, waitBoundMs: 150 });
+      assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8')).pid, process.pid);
+      release();
+    });
+});
+
+test('UL-001: unchanged slot bytes do not hide PID reuse after a genuine first observation', async t => {
+  const folder = sessionFolder(t),
+    since = '2026-11-01T08:00:00.000Z';
+  writeSlot(folder, 0, process.pid, since);
+  const original = fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8');
+  let reads = 0;
+  // A start time is read again at most every identityRecheck (30 s on a real run), here 20 ms.
+  const release = await takeBuiltInSandboxSession(folder, {
+    slots: 1,
+    waitMs: 5,
+    waitBoundMs: 300,
+    identityRecheck: 20,
+    readStartTime: () => {
+      assert.equal(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8'), original);
+      return new Date(Date.parse(since) + (++reads === 1 ? -60000 : 60000));
+    },
+  });
+  assert.ok(reads >= 2, 'revalidate identity even after the original holder was genuine');
+  release();
+});
+
+test('RF-001: a previous completion mark cannot certify partial or failed ACL propagation', t => {
+  const folder = sessionFolder(t),
+    done = path.join(folder, dataDenyDone);
+  fs.writeFileSync(done, 'old completed propagation');
+  let root = false,
+    descendants = false,
+    missingBeforeDeny = false,
+    contenderSucceeded = false;
+  const options = {
+    profile: path.join(folder, 'elsewhere'),
+    waitMs: 1,
+    timeoutMs: 25,
+    readStartTime: () => new Date(0),
+  };
+  const run = (program, args) => {
+    if (args[1] !== '/deny') return { status: 0, stdout: root ? 'sandbox-runtime-users:(OI)(CI)(DENY)(RD)' : '' };
+    missingBeforeDeny = !fs.existsSync(done);
+    root = true;
+    try {
+      denyBuiltInSandboxData(folder, { ...options, run });
+      contenderSucceeded = true;
+    } catch {}
+    return { status: 5, stderr: 'propagation failed with descendants unprotected' };
+  };
+  assert.throws(() => denyBuiltInSandboxData(folder, { ...options, run }), /propagation failed/);
+  assert.equal(missingBeforeDeny, true, 'invalidate old completion before the first ACL mutation');
+  assert.equal(contenderSucceeded, false, 'a second invocation must wait for descendants');
+  assert.equal(descendants, false);
+  assert.equal(fs.existsSync(done), false);
+  assert.throws(() => denyBuiltInSandboxData(folder, { ...options, run }), /propagation failed/);
+  const timeout = (program, args) =>
+    args[1] === '/deny' ? { status: null, error: new Error('propagation timed out') } : run(program, args);
+  assert.throws(() => denyBuiltInSandboxData(folder, { ...options, run: timeout }), /timed out/);
+  assert.equal(fs.existsSync(done), false);
+  let writes = 0;
+  const success = (program, args) => {
+    if (args[1] === '/deny') {
+      writes++;
+      descendants = true;
+      return { status: 0 };
+    }
+    return run(program, args);
+  };
+  assert.equal(denyBuiltInSandboxData(folder, { ...options, run: success }), folder);
+  assert.equal(descendants, true);
+  assert.equal(fs.existsSync(done), true);
+  assert.equal(denyBuiltInSandboxData(folder, { ...options, run: success }), folder);
+  assert.equal(writes, 1, 'completed propagation retains the inexpensive root-only check');
+});
+
+test('RF-006: a data repair lock is reclaimed when its answering PID belongs to a later process', t => {
+  const folder = sessionFolder(t);
+  fs.writeFileSync(
+    path.join(folder, dataDenyLock),
+    JSON.stringify({ pid: process.pid, since: '2026-11-01T08:00:00Z' }),
+  );
+  const fake = fakeAccessList();
+  assert.equal(
+    denyBuiltInSandboxData(folder, {
+      run: fake.run,
+      profile: path.join(folder, 'elsewhere'),
+      waitMs: 1,
+      timeoutMs: 30,
+      readStartTime: () => new Date('2026-11-02T08:00:00Z'),
+    }),
+    folder,
+  );
+  assert.ok(fs.existsSync(path.join(folder, dataDenyDone)));
+});
+
+test('RF-001: a killed ACL writer and its waiter cannot certify a partially protected tree on restart', async t => {
+  const folder = sessionFolder(t),
+    done = path.join(folder, dataDenyDone);
+  fs.writeFileSync(done, 'old mark');
+  const writer = sessionChild(t, folder, { mode: 'data', pause: 'data-deny' });
+  await writer.event('data-deny');
+  assert.ok(writer.messages.some(message => message.event === 'old-mark-absent'));
+  assert.equal(fs.existsSync(done), false);
+  assert.equal(fs.existsSync(path.join(folder, 'descendants-protected')), false);
+  const waiter = sessionChild(t, folder, { mode: 'data', waitBoundMs: 100 });
+  assert.match((await waiter.event('exhausted')).detail, /held its lock too long/);
+  assert.equal(
+    waiter.messages.some(message => message.event === 'completed'),
+    false,
+  );
+  writer.child.kill();
+  await writer.closed;
+  const restart = sessionChild(t, folder, { mode: 'data', failDeny: true });
+  assert.match((await restart.event('exhausted')).detail, /partial propagation/);
+  assert.equal(fs.existsSync(done), false, 'the protected root alone never certifies the interrupted tree');
+  const success = sessionChild(t, folder, { mode: 'data' });
+  await success.event('completed');
+  assert.equal(fs.existsSync(done), true);
+  assert.equal(fs.existsSync(path.join(folder, 'descendants-protected')), true);
+});
+
+test('data lock identity keeps legacy, genuine and unreadable live owners safe', t => {
+  const folder = sessionFolder(t),
+    lock = path.join(folder, dataDenyLock),
+    since = '2026-11-01T08:00:00Z';
+  const checkHeld = (record, readStartTime) => {
+    const text = JSON.stringify(record);
+    fs.writeFileSync(lock, text);
+    assert.throws(
+      () =>
+        denyBuiltInSandboxData(folder, {
+          profile: path.join(folder, 'elsewhere'),
+          run: fakeAccessList().run,
+          readStartTime,
+          timeoutMs: 15,
+          waitMs: 1,
+        }),
+      /held its lock too long/,
+    );
+    assert.equal(fs.readFileSync(lock, 'utf8'), text);
+  };
+  checkHeld({ pid: process.pid }, () => assert.fail('legacy identity must remain ID-only'));
+  checkHeld({ pid: process.pid, since }, () => new Date('2026-11-01T07:59:59Z'));
+  checkHeld({ pid: process.pid, since }, () => 'unknown');
+  const kill = process.kill;
+  t.mock.method(process, 'kill', (pid, signal) => {
+    if (pid === 123456789) throw Object.assign(new Error('access refused'), { code: 'EPERM' });
+    return kill(pid, signal);
+  });
+  checkHeld({ pid: 123456789 }, () => assert.fail('legacy EPERM is not death'));
+  fs.writeFileSync(lock, JSON.stringify({ pid: 123456789, since }));
+  assert.equal(
+    denyBuiltInSandboxData(folder, {
+      profile: path.join(folder, 'elsewhere'),
+      run: fakeAccessList().run,
+      readStartTime: () => 'unknown',
+    }),
+    folder,
+    'recorded timestamp and unreadable EPERM follow the shared identity policy',
+  );
+});
+
+test('a displaced data repair cannot publish completion or release a replacement owner with the same PID', t => {
+  const folder = sessionFolder(t),
+    lock = path.join(folder, dataDenyLock);
+  const replacement = JSON.stringify({ pid: process.pid, since: new Date().toISOString(), token: 'replacement-owner' });
+  const run = (program, args) => {
+    assert.equal(args[1], '/deny');
+    // Model a lost owner resuming after a replacement has already taken its recorded lock.
+    fs.writeFileSync(lock, replacement);
+    return { status: 0 };
+  };
+  assert.throws(
+    () => denyBuiltInSandboxData(folder, { profile: path.join(folder, 'elsewhere'), run }),
+    /lost its ownership/,
+  );
+  assert.equal(fs.readFileSync(lock, 'utf8'), replacement);
+  assert.equal(fs.existsSync(path.join(folder, dataDenyDone)), false);
+});
+
+test('an old session release cannot remove a replacement claim with the same PID', async t => {
+  const folder = sessionFolder(t);
+  const old = await takeBuiltInSandboxSession(folder, { slots: 1 });
+  const replacement = await takeBuiltInSandboxSession(folder, { slots: 1, alive: () => false });
+  const before = fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8');
+  old();
+  assert.equal(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8'), before);
+  replacement();
+  assert.deepEqual(fs.readdirSync(folder), []);
+});
+
+test('legacy session identity and unreadable start times retain the shared liveness policy', async t => {
+  const folder = sessionFolder(t),
+    file = path.join(folder, 'slot-0.lock');
+  for (const since of [undefined, 'not a time', new Date().toISOString()]) {
+    writeSlot(folder, 0, process.pid, since);
+    const before = fs.readFileSync(file, 'utf8');
+    await assert.rejects(
+      takeBuiltInSandboxSession(folder, {
+        slots: 1,
+        waitMs: 1,
+        waitBoundMs: 15,
+        readStartTime: () => {
+          assert.ok(since && since !== 'not a time', 'legacy records need no start-time query');
+          return 'unknown';
+        },
+      }),
+      /stayed in use/,
+    );
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+  }
+});
+
+test('RF-013: live incomplete publishers retain ownership; killing them at each boundary recovers capacity', async t => {
+  for (const phase of ['ownership', 'ticket', 'publication', 'published'])
+    await t.test(phase, async t => {
+      const folder = sessionFolder(t),
+        writer = sessionChild(t, folder, { slots: 1, pause: phase });
+      await writer.event(phase);
+      const waiter = sessionChild(t, folder, { slots: 1, waitBoundMs: 100 });
+      // The writer keeps the ownership while it is paused, so the waiter says it never got its turn to look.
+      assert.match((await waiter.event('exhausted')).detail, /^Other runs were taking or giving back .* for its turn/);
+      assert.equal(
+        waiter.messages.some(message => message.event === 'claimed'),
+        false,
+        'live writer cannot be stolen',
+      );
+      assert.equal(
+        waiter.messages.some(message => message.event === 'waiting'),
+        false,
+        'no slot was seen in use',
+      );
+      writer.child.kill();
+      await writer.closed;
+      const restart = sessionChild(t, folder, { slots: 1 });
+      await restart.event('claimed');
+      assert.equal(fs.readdirSync(folder).filter(name => name.startsWith('.sandbox-session-owner-')).length, 0);
+      restart.child.send('release');
+      await restart.closed;
+      assert.deepEqual(fs.readdirSync(folder), []);
+    });
+});
+
+test('RF-013: a failed publisher and an interrupted recovery owner leave no permanent recovery lock', async t => {
+  const folder = sessionFolder(t),
+    failed = sessionChild(t, folder, { slots: 1, failPublication: true });
+  assert.match((await failed.event('exhausted')).detail, /injected publisher failure/);
+  assert.deepEqual(fs.readdirSync(folder), [], 'throwing publication cleans private bytes and ownership');
+  const abandoned = sessionChild(t, folder, { slots: 1, pause: 'ownership' });
+  await abandoned.event('ownership');
+  abandoned.child.kill();
+  await abandoned.closed;
+  const recovery = sessionChild(t, folder, { slots: 1, pause: 'recovery' });
+  await recovery.event('recovery');
+  recovery.child.kill();
+  await recovery.closed;
+  const restart = sessionChild(t, folder, { slots: 1 });
+  await restart.event('claimed');
+  restart.child.send('release');
+  await restart.closed;
+  assert.deepEqual(fs.readdirSync(folder), []);
+});
+
+test('session release waits for an independent live publisher before touching the shared slot', async t => {
+  const folder = sessionFolder(t),
+    first = sessionChild(t, folder, { slots: 1, waitBoundMs: 5000 });
+  await first.event('claimed');
+  const before = fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8');
+  const second = sessionChild(t, folder, { slots: 1, pause: 'ownership', waitBoundMs: 5000 });
+  await second.event('ownership');
+  first.child.send('release');
+  await first.event('releasing');
+  assert.equal(
+    fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8'),
+    before,
+    'release must enter ownership before deleting',
+  );
+  second.resume('ownership');
+  assert.equal(await first.closed, 0, 'the original holder releases normally, rather than being reaped after a crash');
+  await second.event('claimed');
+  second.child.send('release');
+  assert.equal(await second.closed, 0);
+  assert.deepEqual(fs.readdirSync(folder), []);
+});
+
+// A virus scanner briefly holding a just-written file refuses its rename or removal with EPERM on Windows.
+const scannerRefusal = () => Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+
+test('a rename a scanner refuses once still takes the session and still records completed data protection', async t => {
+  const folder = sessionFolder(t),
+    rename = fs.renameSync,
+    refused = [];
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    const name = path.basename(String(from));
+    if (!refused.includes(name)) {
+      refused.push(name);
+      throw scannerRefusal();
+    }
+    return rename(from, to);
+  });
+  const release = await takeBuiltInSandboxSession(folder, { slots: 1, waitMs: 5, waitBoundMs: 2000 });
+  assert.deepEqual(refused, ['publication']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8')).pid, process.pid);
+  release();
+  assert.deepEqual(fs.readdirSync(folder), []);
+  const data = sessionFolder(t);
+  assert.equal(
+    denyBuiltInSandboxData(data, { profile: path.join(data, 'elsewhere'), run: fakeAccessList().run }),
+    data,
+  );
+  assert.deepEqual(refused, ['publication', 'completion']);
+  assert.ok(fs.existsSync(path.join(data, dataDenyDone)));
+});
+
+test('a peer a scanner holds is still there: the run defers rather than failing', async t => {
+  const folder = sessionFolder(t),
+    peer = `.sandbox-session-owner-${process.pid}-${Date.now()}-${randomUUID()}`,
+    readdir = fs.readdirSync;
+  fs.mkdirSync(path.join(folder, peer));
+  t.mock.method(fs, 'readdirSync', (file, ...args) => {
+    if (path.basename(String(file)) === peer) throw scannerRefusal();
+    return readdir(file, ...args);
+  });
+  const waits = [];
+  await assert.rejects(
+    takeBuiltInSandboxSession(folder, { slots: 1, waitMs: 5, waitBoundMs: 60, onWait: slots => waits.push(slots) }),
+    /Other runs were taking or giving back this computer's built-in sandbox sessions the whole time/,
+  );
+  assert.deepEqual(waits, [], 'a busy turn is not every slot in use');
+  assert.deepEqual(readdir(folder), [peer]);
+});
+
+test("giving a session back never throws, within its own bound, so a run's exit code is unchanged", async t => {
+  const folder = sessionFolder(t),
+    file = path.join(folder, 'slot-0.lock');
+  // In this process: a slot a scanner keeps holding, then an ownership another live run keeps past the release's bound.
+  const release = await takeBuiltInSandboxSession(folder, { slots: 1, waitBoundMs: 1, releaseBoundMs: 50 });
+  const claim = fs.readFileSync(file, 'utf8'),
+    remove = fs.rmSync;
+  t.mock.method(fs, 'rmSync', (target, ...args) => {
+    if (target === file) throw scannerRefusal();
+    return remove(target, ...args);
+  });
+  assert.doesNotThrow(release);
+  assert.equal(fs.readFileSync(file, 'utf8'), claim);
+  fs.rmSync.mock.restore();
+  const busy = path.join(folder, `.sandbox-session-owner-${process.pid}-${Date.now()}-${randomUUID()}`);
+  fs.mkdirSync(path.join(busy, '1'), { recursive: true });
+  const begun = Date.now();
+  assert.doesNotThrow(release);
+  assert.ok(Date.now() - begun < 1000, 'its own bound, not the acquisition wait');
+  assert.equal(fs.readFileSync(file, 'utf8'), claim);
+  fs.rmSync(busy, { recursive: true });
+  release();
+  assert.deepEqual(fs.readdirSync(folder), []);
+  // In a run's own process, as the runner's finish gives the session back and then exits with the run's code.
+  const run = sessionChild(t, folder, { slots: 1, failRelease: true, exitCode: 7 });
+  await run.event('claimed');
+  run.child.send('release');
+  assert.equal(await run.closed, 7, 'a failed give-back keeps the run’s own exit code');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).pid, run.child.pid);
+  // The slot left behind records the ended run, so the next run takes it.
+  const next = await takeBuiltInSandboxSession(folder, { slots: 1, waitMs: 5, waitBoundMs: 2000 });
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).pid, process.pid);
+  next();
+});
+
+test('a wait reads a live holder’s start time at most every 30 seconds, and a young owner’s not at all', async t => {
+  const folder = sessionFolder(t),
+    since = new Date(Date.now() - 60000).toISOString();
+  for (let slot = 0; slot < 4; slot++)
+    writeSlot(folder, slot, process.pid, new Date(Date.parse(since) + slot).toISOString());
+  let reads = 0;
+  const readStartTime = () => (reads++, new Date(Date.parse(since) - 60000));
+  // Four sessions busy: a waiter passing every 5 ms reads each holder's start time once, rather than on every pass.
+  await assert.rejects(
+    takeBuiltInSandboxSession(folder, { waitMs: 5, waitBoundMs: 300, readStartTime }),
+    /All 4 of this computer's built-in sandbox sessions stayed in use/,
+  );
+  assert.equal(reads, 4);
+  for (let slot = 0; slot < 4; slot++) fs.rmSync(path.join(folder, `slot-${slot}.lock`));
+  // A live ownership entry a few seconds old is asked by its ID alone; an older one by its start time, once a wait.
+  for (const [age, expected] of [
+    [0, 0],
+    [60000, 1],
+  ]) {
+    reads = 0;
+    const owner = path.join(folder, `.sandbox-session-owner-${process.pid}-${Date.now() - age}-${randomUUID()}`);
+    fs.mkdirSync(path.join(owner, '1'), { recursive: true });
+    await assert.rejects(
+      takeBuiltInSandboxSession(folder, {
+        waitMs: 5,
+        waitBoundMs: 150,
+        readStartTime: () => (reads++, new Date(Date.now() - 120000)),
+      }),
+      /for its turn/,
+    );
+    assert.equal(reads, expected, `an owner ${age} ms old`);
+    fs.rmSync(owner, { recursive: true });
+  }
+  assert.deepEqual(fs.readdirSync(folder), []);
+});
 
 test("the computer's built-in sandbox sessions are taken in turn, an ended holder's slot freed, and a waiter told once", async t => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-sessions-'));
@@ -101,7 +565,7 @@ test('a slot whose ID now belongs to a process started after the slot was taken 
   assert.deepEqual(fs.readdirSync(folder), []);
 });
 
-test('a slot whose live holder started before the slot was taken stays taken, its start time read once', async t => {
+test('a slot whose live holder started before the slot was taken stays taken, its identity revalidated', async t => {
   const folder = sessionFolder(t),
     since = new Date().toISOString();
   let reads = 0;
@@ -112,11 +576,12 @@ test('a slot whose live holder started before the slot was taken stays taken, it
     pid: 4243,
     waitMs: 10,
     waitBoundMs: 5000,
+    identityRecheck: 20,
     readStartTime: () => (reads++, new Date(Date.parse(since) - 60000)),
   }).then(release => (taken = release));
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.equal(taken, null, 'still waiting');
-  assert.equal(reads, 1, 'asked once across several passes');
+  assert.ok(reads > 1, 'identity asked again across several passes');
   assert.equal(JSON.parse(fs.readFileSync(path.join(folder, 'slot-0.lock'), 'utf8')).pid, process.pid);
   // The holder gives its slot back, and the waiter takes it.
   fs.rmSync(path.join(folder, 'slot-0.lock'));
@@ -141,6 +606,7 @@ test('a run that finds every session held by runs still going stops after its wa
       pid: 4244,
       waitMs: 10,
       waitBoundMs: 120,
+      identityRecheck: 20,
       onWait: slots => waits.push(slots),
       readStartTime: () => (reads++, new Date(Date.parse(since) - 60000)),
     }),
@@ -150,7 +616,7 @@ test('a run that finds every session held by runs still going stops after its wa
       ),
   );
   assert.ok(Date.now() - begun >= 120, 'waited out its bound');
-  assert.equal(reads, 2, 'each holder asked once');
+  assert.ok(reads > 2, 'each holder revalidated across passes');
   assert.deepEqual(waits, [2]);
   assert.deepEqual(slotFiles(), before);
   // A run that waits out the bound still has half its own time limit left to say why, for every sandboxed run: an
