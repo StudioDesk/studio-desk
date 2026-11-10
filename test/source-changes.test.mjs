@@ -2159,6 +2159,19 @@ test("an agent's whole-suite run waits for the test turn while its editor runs; 
   assert.equal(store.leases().length, 0);
 });
 
+// The seconds a whole-suite run's answer says it waited when it stopped at its bound, in the controller's words for
+// a wait ("1 second", "2 minutes 5 seconds"), or null when the answer is not that sentence naming `holder`. The wait
+// is measured when the bound's timer fires, so a late event loop can make it read more than the bound.
+const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function boundedWaitSeconds(summary, holder) {
+  const match = new RegExp(
+    `^${escapeRegExp('No tests ran: after ')}(?:(\\d+) minutes? )?(\\d+) seconds?${escapeRegExp(
+      `, ${holder} still had this computer's one test turn (it runs one full test suite at a time). Run the test files your edits touch by name instead, which start at once, for example: `,
+    )}`,
+  ).exec(summary);
+  return match ? Number(match[1] || 0) * 60 + Number(match[2]) : null;
+}
+
 test("an agent's whole-suite run frees the turn when it fails or its client leaves, and stops waiting at its bound", async t => {
   const c = await suiteTurnStudio(t),
     { store, runner } = c.app;
@@ -2195,14 +2208,17 @@ test("an agent's whole-suite run frees the turn when it fails or its client leav
   // A wait past its bound answers without running, naming whose suite holds the turn, and leaves the queue.
   runner.employeeTestTurnWaitMs = 300;
   store.claim([testTurnResource], c.holder);
-  const bounded = await c.run(),
+  const asked = Date.now(),
+    bounded = await c.run(),
+    elapsed = Date.now() - asked,
     holder = /^Waiting for (.+) to finish: /.exec(c.reason)[1];
   assert.equal(bounded.exitCode, 1);
+  // However late the bound fires, the wait it reports is at least a second and no longer than the request took.
+  const reported = boundedWaitSeconds(bounded.summary, holder);
+  assert.notEqual(reported, null, bounded.summary);
   assert.ok(
-    bounded.summary.startsWith(
-      `No tests ran: after 1 second, ${holder} still had this computer's one test turn (it runs one full test suite at a time). Run the test files your edits touch by name instead, which start at once, for example: `,
-    ),
-    bounded.summary,
+    reported >= 1 && reported <= Math.max(1, Math.round(elapsed / 1000)),
+    `${reported} seconds reported of a request of ${elapsed} ms: ${bounded.summary}`,
   );
   assert.equal(c.waiting(), undefined);
   assert.equal(c.started.length, 2);
@@ -2217,6 +2233,31 @@ test("an agent's whole-suite run frees the turn when it fails or its client leav
         event => event.kind === 'employee_tests' && event.message.includes('whole suite did not start: No tests ran'),
       ),
   );
+  // A wait that lasts over a second reports it, whatever the computer's speed: a bound over 1.5 seconds always rounds
+  // to at least 2, so an exact "after 1 second" would not match the answer, and the wait's words do.
+  runner.employeeTestTurnWaitMs = 1700;
+  store.claim([testTurnResource], c.holder);
+  const askedLonger = Date.now(),
+    longer = await c.run(),
+    elapsedLonger = Date.now() - askedLonger;
+  assert.equal(longer.exitCode, 1);
+  assert.ok(
+    !longer.summary.startsWith(
+      `No tests ran: after 1 second, ${holder} still had this computer's one test turn (it runs one full test suite at a time). Run the test files your edits touch by name instead, which start at once, for example: `,
+    ),
+    longer.summary,
+  );
+  const reportedLonger = boundedWaitSeconds(longer.summary, holder);
+  assert.notEqual(reportedLonger, null, longer.summary);
+  assert.ok(
+    reportedLonger >= 2 && reportedLonger <= Math.max(1, Math.round(elapsedLonger / 1000)),
+    `${reportedLonger} seconds reported of a request of ${elapsedLonger} ms: ${longer.summary}`,
+  );
+  assert.equal(c.waiting(), undefined);
+  assert.equal(c.started.length, 2);
+  store.releaseResource(testTurnResource, c.holder);
+  await c.settle();
+  assert.equal(c.turn(), null, 'The longer bounded wait left the queue and holds no turn.');
   // The editor stopping takes a waiting run out of the queue too, and the attempt finishes.
   runner.employeeTestTurnWaitMs = undefined;
   store.claim([testTurnResource], c.holder);
