@@ -130,3 +130,34 @@ test("the confirmed Push runs git with push's own arguments and none of the cont
     assert.ok(!source.includes(option), `Push's file names no ${option}.`);
   assert.doesNotMatch(source, /controllerGit(Options|Arguments)/);
 });
+
+// Some refusals go to git's standard output: git commit with nothing to commit says so there and exits 1, which read
+// as a blank "git commit failed: " in the recovery drill. A refusal with error output names that, and only that.
+test("a git refusal names git's standard output when its error output is empty", async t => {
+  const r = repository(t),
+    nothing = { name: 'Error', message: /^git commit failed: .*nothing to commit/s },
+    verify = { name: 'Error', message: /^git rev-parse failed: fatal: Needed a single revision$/ };
+  assert.throws(() => runGit(r.root, ['commit', '-m', 'x']), nothing);
+  assert.throws(() => runGit(r.root, ['commit', '-m', 'x'], { encoding: null }), nothing);
+  await assert.rejects(runGitAsync(r.root, ['commit', '-m', 'x']), nothing);
+  await assert.rejects(runGitAsync(r.root, ['commit', '-m', 'x'], { encoding: null }), nothing);
+  // rev-parse --verify says why on its error output, as before.
+  assert.throws(() => runGit(r.root, ['rev-parse', '--verify', 'no-such-branch']), verify);
+  await assert.rejects(runGitAsync(r.root, ['rev-parse', '--verify', 'no-such-branch']), verify);
+  // rev-parse prints HEAD's commit on its standard output and refuses the missing name on its error output.
+  const head = runGit(r.root, ['rev-parse', 'HEAD']);
+  for (const refused of [
+    (() => {
+      try {
+        runGit(r.root, ['rev-parse', 'HEAD', 'no-such-branch']);
+      } catch (error) {
+        return error;
+      }
+    })(),
+    await runGitAsync(r.root, ['rev-parse', 'HEAD', 'no-such-branch']).catch(error => error),
+  ]) {
+    assert.ok(refused instanceof Error);
+    assert.match(refused.message, /^git rev-parse failed: fatal: ambiguous argument 'no-such-branch'/);
+    assert.ok(!refused.message.includes(head), 'the message leaves out what git wrote on standard output');
+  }
+});

@@ -35,6 +35,14 @@ export const controllerGitArguments = (args, { literal = true } = {}) => [
   ...args,
 ];
 
+// A refusal in git's own words: its error output, or its standard output when the error output is empty (git commit
+// with nothing to commit says so on standard output), or else the spawn error. Bytes become text for the message.
+// Callers match or strip the 'git <command> failed: ' prefix, so it stays as it is.
+const refusal = (args, stderr, stdout, error) => {
+  const words = String(stderr || '').trim() || String(stdout || '').trim() || error?.message || '';
+  return new Error(`git ${args[0]} failed: ${words.trim().slice(0, 500)}`);
+};
+
 // Runs one git command for the controller and answers its output, trimmed unless raw is set (porcelain status lines
 // may start with a space). An encoding of null answers the bytes. A command git refuses throws with git's own words.
 export function runGit(
@@ -51,10 +59,7 @@ export function runGit(
     ...(maxBuffer ? { maxBuffer } : {}),
     ...(env ? { env } : {}),
   });
-  if (result.error || result.status !== 0)
-    throw new Error(
-      `git ${args[0]} failed: ${(String(result.stderr || '') || result.error?.message || '').trim().slice(0, 500)}`,
-    );
+  if (result.error || result.status !== 0) throw refusal(args, result.stderr, result.stdout, result.error);
   if (encoding === null) return result.stdout;
   return raw ? result.stdout : result.stdout.trim();
 }
@@ -85,14 +90,7 @@ export async function runGitAsync(
         'git',
         controllerGitArguments(args, { literal }),
         { cwd, encoding: encoding ?? 'buffer', windowsHide: true, timeout, maxBuffer, ...(env ? { env } : {}) },
-        (error, out, stderr) =>
-          error
-            ? reject(
-                new Error(
-                  `git ${args[0]} failed: ${(String(stderr || '') || error.message || '').trim().slice(0, 500)}`,
-                ),
-              )
-            : resolve(out),
+        (error, out, stderr) => (error ? reject(refusal(args, stderr, out, error)) : resolve(out)),
       ),
     );
     if (encoding === null) return stdout;
