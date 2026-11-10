@@ -1,11 +1,17 @@
 // What needs the director now, for one project (GET /api/projects/:id/calls): the calls the shared rules
 // (public/runs.js needsYouItems) list from the records the dashboard holds, keeping only those whose requiresDirector
 // is true, so a wait (a usage reset, another story, the test turn, a free slot) is never on it. Each task's call
-// carries the actions its task read answers (core/task-actions.mjs taskRead), worked out by that same helper. Reading
-// writes nothing and runs no action: the shared script sets its rules on globalThis when loaded and sends nothing.
+// carries the actions its task read answers (core/task-actions.mjs taskRead), worked out by that same helper. After
+// them come the two stops only the director moves on, which the shared rules do not list: a milestone's release that
+// stopped (Release again) and a story whose next carry or bring-back was turned down or stopped part-way (Carry or
+// Bring back again, Not needed), each only once the test turn it held is given back. Reading writes nothing and runs
+// no action: the shared script sets its rules on globalThis when loaded and sends nothing.
 import '../../public/runs.js';
+import { projectMilestones } from '../connectors/source-milestones.mjs';
 import { liveMaxLimit, liveRecords } from './project-records.mjs';
+import { recordProject } from './projects.mjs';
 import { taskRead } from './task-actions.mjs';
+import { holdsTestTurn } from './test-turn.mjs';
 
 // The whole live set, every page of it read at once as the dashboard holds it (dashboard/src/records.ts joinLive):
 // each page's tasks and attempts in order, each open run once and each finished idea once with its tasks from every
@@ -55,8 +61,10 @@ export function sharedCalls(state) {
 
 // The list for one project: { projectId, items, count, version }. `taskPage` and `shared` are what the task read
 // takes (core/task-actions.mjs taskRead); `registries` as the live read takes them. Each item is plain: a task's
-// call, a cleanup of a run's unstarted steps with its member task calls, a CLI's usage hold with no known reset, or the
-// project's resume while a restart holds it, with the queued work waiting only for that.
+// call, a cleanup of a run's unstarted steps with its member task calls, a CLI's usage hold with no known reset, the
+// project's resume while a restart holds it, with the queued work waiting only for that, then a milestone's stopped
+// release (type 'release', in milestone order) and a story's turned-down or stopped carry (type 'carry', in record
+// order).
 // The resume call's one action: the project's resume step (POST /api/pipeline), in the shape task actions take
 // (public/task-actions.js).
 export const resumeAction = projectId => ({
@@ -71,6 +79,94 @@ export const resumeAction = projectId => ({
     { name: 'action', required: true, kind: 'text', value: 'resume' },
   ],
 });
+
+// The release call's one action: Release again (POST /api/projects/<id>/milestones/<id>/release/again), sending
+// exactly what the Releases page sends, the project's ID and nothing else.
+export const releaseAgainAction = (projectId, milestoneId) => ({
+  key: 'release-again',
+  label: 'Release again',
+  emphasis: 'primary',
+  closing: false,
+  method: 'POST',
+  path: `/api/projects/${encodeURIComponent(projectId)}/milestones/${encodeURIComponent(milestoneId)}/release/again`,
+  fields: [{ name: 'projectId', required: true, kind: 'id', value: projectId }],
+});
+
+// The states a release or carry stops in that only the director moves on (connectors/source-releases.mjs
+// releaseAgain, connectors/source-carries.mjs approveCarry), and a reason worded with its recorded error.
+const stoppedStates = ['rejected', 'needs-reconciliation'],
+  carryActions = ['carry', 'carry-skip'],
+  stoppedWith = (text, error) => (error ? `${text}: ${error}` : `${text}.`);
+
+// A milestone's release that stopped, while the test turn it held is given back (a stopped release whose test run may
+// still go on waits for that, not for the director).
+function releaseCall(store, projectId, milestone) {
+  const release = milestone.release;
+  if (!release || !stoppedStates.includes(release.state) || holdsTestTurn(store, release.id)) return null;
+  const partWay = release.state === 'needs-reconciliation';
+  return {
+    type: 'release',
+    projectId,
+    milestoneId: milestone.id,
+    version: milestone.version,
+    state: release.state,
+    taskIds: release.notesTaskId ? [release.notesTaskId] : [],
+    runId: null,
+    kind: 'release-stopped',
+    reason: stoppedWith(
+      `The release of ${milestone.version} ${partWay ? 'stopped part-way' : 'stopped'}`,
+      release.error,
+    ),
+    next: partWay
+      ? "Restore or commit any of the release's files left changed in the project's folder, then release it again; it is tagged once."
+      : 'Release it again; it is tagged once.',
+    action: 'Release again',
+    details: release.error ? [release.error] : [],
+    actions: [releaseAgainAction(projectId, milestone.id)],
+  };
+}
+
+// The carry whose turn it is on a story's accepted review (the first neither carried nor skipped, as
+// public/task-actions.js picks it), when it was turned down or stopped part-way and holds no test turn; else null.
+function stoppedCarry(store, projectId, journal) {
+  let story;
+  try {
+    story = store.task(journal.taskId);
+  } catch {
+    return null;
+  }
+  if (recordProject(story) !== projectId || story.sourceStage?.review?.attemptId !== journal.id) return null;
+  const carry = journal.sourceCarries.find(item => !['carried', 'skipped'].includes(item.state));
+  if (!carry || !stoppedStates.includes(carry.state) || holdsTestTurn(store, carry.id)) return null;
+  return { story, carry };
+}
+
+// A story's carry call, with the story's own Carry (or Bring back) again and Not needed actions.
+function carryCall(projectId, { story, carry }, actions) {
+  const back = !!carry.back,
+    partWay = carry.state === 'needs-reconciliation',
+    moving = back ? `Bringing this fix back to ${carry.line}` : `Carrying this fix to ${carry.line}`,
+    again = back ? 'bring it back again' : 'carry it again';
+  return {
+    type: 'carry',
+    projectId,
+    taskId: story.id,
+    taskIds: [story.id],
+    title: story.title,
+    line: carry.line,
+    back,
+    state: carry.state,
+    runId: null,
+    kind: 'carry-stopped',
+    reason: stoppedWith(`${moving} ${partWay ? 'stopped part-way' : 'was turned down'}`, carry.error),
+    next: partWay
+      ? `Restore or commit any of its files left changed in the project's folder, then ${again}.`
+      : `${again[0].toUpperCase()}${again.slice(1)}, or say it is not needed there.`,
+    action: actions[0].label,
+    details: carry.error ? [carry.error] : [],
+    actions,
+  };
+}
 
 // Whether a task's actions read git: the shared rules name the older lines a story whose review's change landed on a
 // line can be brought back to, which reads each line's history (connectors/source-carries.mjs bringBackTargets, which
@@ -158,6 +254,27 @@ function workCalls(store, projectId, { taskPage, shared, registries = null }) {
           };
         return taskCall(item);
       });
+  // The stops the shared rules do not list: releases in milestone order, then carries in record order, a story with a
+  // call of its own listed once.
+  const listed = new Set(
+    items.flatMap(item =>
+      item.type === 'task' ? [item.taskId] : item.type === 'cleanup' ? item.members.map(member => member.taskId) : [],
+    ),
+  );
+  for (const milestone of projectMilestones(store, projectId)) {
+    const call = releaseCall(store, projectId, milestone);
+    if (call) items.push(call);
+  }
+  for (const journal of store.carryJournals()) {
+    if (listed.has(journal.taskId)) continue;
+    const stopped = stoppedCarry(store, projectId, journal);
+    if (!stopped) continue;
+    // Listed only while the story itself offers to move it on.
+    const actions = actionsOf(journal.taskId).filter(action => carryActions.includes(action.key));
+    if (!actions.length) continue;
+    listed.add(journal.taskId);
+    items.push(carryCall(projectId, stopped, actions));
+  }
   return { answer: { projectId, items, count: items.length, version }, keepable };
 }
 
