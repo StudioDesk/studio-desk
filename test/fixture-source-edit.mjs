@@ -16,8 +16,13 @@ const limit =
 if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500));
 // A longer edit, for a time limit with room for a slow setup on a busy computer.
 if (mode === 'slower') await new Promise(resolve => setTimeout(resolve, 4000));
+// 'hang-late' hangs like 'hang', its work written only after a delay that stands in for a slow setup on a busy
+// computer (November 10, 2026: a two-second time limit ran out before a 'hang' attempt had written its work). The
+// delay outlasts a two-second limit and the runner's two-second grace before it forces the process to end.
+const hang = mode === 'hang' || mode === 'hang-late';
+if (mode === 'hang-late') await new Promise(resolve => setTimeout(resolve, 5000));
 // Identifiable work survives even when no common result can be returned.
-if ((limit || mode === 'hang') && assignment.kind === 'studio-development:change') {
+if ((limit || hang) && assignment.kind === 'studio-development:change') {
   const scope = JSON.parse(fs.readFileSync('source-scope.json')),
     line = `\n// Retained ${mode} fixture work.\n`;
   // Carried work already holds the line (continueFrom); a continuation does not repeat it.
@@ -31,7 +36,7 @@ if (limit) {
   console.log(JSON.stringify({ type: 'error', message: `usage limit reached${reset}` }));
   process.exit(1);
 }
-if (mode === 'hang') {
+if (hang) {
   setInterval(() => {}, 1000);
 } else {
   let artifacts;

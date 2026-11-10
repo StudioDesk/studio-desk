@@ -4145,15 +4145,21 @@ test('a retry after failing candidate tests continues from the earlier work and 
 });
 
 test('work written before a usage limit or a time limit is carried into the next attempt', async t => {
-  for (const stop of ['quota', 'hang']) {
+  for (const stop of ['quota', 'hang-late']) {
     const c = await setup(t, 'pass', continuationFiles),
       store = c.app.store;
-    if (stop === 'hang') {
-      const task = store.task(c.taskId);
-      task.maxSeconds = 2;
-      store.putTask(task);
-    }
     await c.start(stop);
+    // The time limit applies once the attempt has written its work, through the runner's own deadline, rather than
+    // being set before the start: a limit set then also covers the story's setup (November 10, 2026: a merge check
+    // failed 1485 of 1486 when a two-second limit ran out during setup on a busy computer). 'hang-late' writes its
+    // work only after a delay, so a limit that raced setup would leave nothing to carry.
+    if (stop === 'hang-late') {
+      const attemptId = await waitFor(() => {
+        const id = store.task(c.taskId).lastAttemptId;
+        return id && store.events(id).some(e => /fixture.work-written/.test(e.message)) && id;
+      }, 'the fixture to write its work');
+      c.app.runner.setTimeLimit(c.app.runner.active.get(attemptId), 50);
+    }
     const stopped = await c.wait(c.taskId, stop === 'quota' ? 'blocked' : 'failed');
     if (stop === 'quota') assert.equal((await c.request('/api/control', { clearQuota: 'codex' })).status, 200);
     else assert.equal(stopped.error, 'Assignment time limit reached.');
