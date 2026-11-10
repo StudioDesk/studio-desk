@@ -16,6 +16,7 @@ import { addWaitingIdea, makeMilestone, useVersionLines } from '../src/connector
 import { repositoryOrganization } from '../src/organizations/studio-development/project.mjs';
 import { projectTemplate, templateFiles } from '../src/templates/index.mjs';
 import { isEntryPoint } from '../src/core/entry-point.mjs';
+import { runGit } from '../src/git.mjs';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { realPath } from '../src/core/real-path.mjs';
@@ -96,21 +97,22 @@ function buildDashboard(base) {
   if (built.status !== 0) throw new Error(`The dashboard did not build (exit code ${built.status}).`);
 }
 
-const git = (cwd, args) => {
-  const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
-  if (result.status !== 0) throw new Error(`git ${args[0]} failed: ${result.stderr.trim()}`);
-};
-
-// The To-do list sample's files as a repository of its own on main, as Studio desk's first-run sample makes it.
-function sampleRepository(directory) {
-  const folder = path.join(directory, 'repositories', 'todo-list');
+// The To-do list sample's files as a repository of its own on main, as Studio desk's first-run sample makes it. Its
+// three commands are the controller's git (November 9): each carries the controller's options, core.longpaths among
+// them, since a copy's sample folder can sit deep inside a job folder, where plain git on Windows refused the
+// repository's object files as too long. Long paths do not reach every depth there: on Git for Windows 2.49 no
+// repository folder past about 204 characters takes all three. None names a path, so none needs literal pathspecs.
+// A test may pass its own git, called as runGit is, to see the commands.
+export function sampleRepository(directory, git = runGit) {
+  const folder = path.join(directory, 'repositories', 'todo-list'),
+    options = { literal: false };
   for (const file of templateFiles(projectTemplate('code'))) {
     const target = path.join(folder, ...file.path.split('/'));
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, file.data);
   }
-  git(folder, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
-  git(folder, ['add', '-A']);
+  git(folder, ['-c', 'init.defaultBranch=main', 'init', '--quiet'], options);
+  git(folder, ['add', '-A'], options);
   const identity = [
     '-c',
     'user.name=Studio desk',
@@ -119,7 +121,7 @@ function sampleRepository(directory) {
     '-c',
     'commit.gpgsign=false',
   ];
-  git(folder, [...identity, 'commit', '--quiet', '-m', 'To-do list sample, made by Studio desk']);
+  git(folder, [...identity, 'commit', '--quiet', '-m', 'To-do list sample, made by Studio desk'], options);
   return folder;
 }
 

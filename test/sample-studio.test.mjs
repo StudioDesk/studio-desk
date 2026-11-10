@@ -10,9 +10,11 @@ import {
   buildArguments,
   sampleDirectory,
   sampleProjects,
+  sampleRepository,
   startSampleStudio,
   viteProgram,
 } from '../scripts/sample-studio.mjs';
+import { controllerGitArguments, controllerGitOptions } from '../src/git.mjs';
 
 // The sample studio Studio desk development's visual check starts (October 30, 2026): the two projects at the addresses
 // the planner names, ideas waiting, every agent the Simulator and the studio paused, so a capture never runs a model.
@@ -85,4 +87,45 @@ test("the sample studio's folder is never the data folder, and Vite is found fro
   // one built into dashboard/dist, and the captures showed The dashboard is not built).
   const args = buildArguments();
   assert.equal(args[args.indexOf('--outDir') + 1], path.join(fileURLToPath(new URL('..', import.meta.url)), 'dist'));
+});
+
+// Each command is the controller's git: its options first (hooks and fsmonitor off, long paths on), then the sample's
+// own settings, on every platform.
+test("the sample repository's git commands carry the controller's options and the sample's own settings", t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-sample-git-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const commands = [];
+  const folder = sampleRepository(base, (cwd, args, options) => {
+    commands.push({ cwd, argv: controllerGitArguments(args, options) });
+    return '';
+  });
+  assert.deepEqual(controllerGitOptions, [
+    '--no-optional-locks',
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'core.longpaths=true',
+  ]);
+  assert.equal(commands.length, 3);
+  for (const command of commands) {
+    assert.equal(command.cwd, folder);
+    assert.deepEqual(command.argv.slice(0, controllerGitOptions.length), controllerGitOptions);
+  }
+  const own = commands.map(command => command.argv.slice(controllerGitOptions.length));
+  assert.deepEqual(own[0], ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  assert.deepEqual(own[1], ['add', '-A']);
+  assert.deepEqual(own[2], [
+    '-c',
+    'user.name=Studio desk',
+    '-c',
+    'user.email=studio-desk@localhost',
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '--quiet',
+    '-m',
+    'To-do list sample, made by Studio desk',
+  ]);
 });
