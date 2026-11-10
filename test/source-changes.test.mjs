@@ -1365,6 +1365,45 @@ test('breakdown instructions explain both recorded artifact file names versus st
   assert.ok(!contract.includes('Before planning, read and search'), 'File searching is delivery-specific.');
 });
 
+test("a plan's stories list the tests that check what they change, and the stylesheet for a visual change", () => {
+  const registries = createRegistries();
+  for (const [kind, title] of [
+    ['studio-development:breakdown', 'Source breakdown contract'],
+    ['studio-development:review', 'Source review contract'],
+  ]) {
+    const text = registries.workflows
+      .get(kind)
+      .instructions({ org: { workers: [] } })
+      .layers.find(layer => layer.title === title).text;
+    assert.ok(
+      text.includes(
+        "Before naming a story's files, search the tests (the source copy's test folder, or the measured file list when only that list is supplied) for what the story changes or removes: its functions, exports, routes, messages and page text.",
+      ),
+      `${title} tells the planner to search the tests for what a story changes or removes.`,
+    );
+    assert.ok(
+      text.includes(
+        "List every existing test file that asserts on them among the story's files, and say in the story's scope which tests check what.",
+      ),
+    );
+    assert.ok(
+      text.includes('When a story changes how a page looks, also list the stylesheet that styles the changed part.'),
+    );
+    // The rule comes before the unchanged bounds, which stay word for word.
+    const rule = text.indexOf("Before naming a story's files"),
+      bounds = text.indexOf('List each path once, at most 100 in total.');
+    assert.ok(rule >= 0 && bounds > rule, `${title} keeps the bounds after the new rule.`);
+    assert.ok(
+      text.includes(
+        'Prefer small stories: say why when a story lists many files (for example a mechanical update of every caller).',
+      ),
+    );
+    assert.match(text, /The change's diff must stay within \d+ KiB, and complexity sets the time limit\./);
+    // File searching itself is delivery-specific, so the shared rule never carries the workspace wording.
+    assert.ok(!text.includes('Before planning, read and search'));
+  }
+});
+
 test("a breakdown's and a source review's instructions name the paths of the profile their check measured with", async t => {
   const registries = createRegistries(),
     fieldNotes = {
