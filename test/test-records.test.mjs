@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStudio } from './model-free-studio.mjs';
 import { sourceRepository } from './source-repository.mjs';
-import { waitForTask } from './wait-for.mjs';
+import { waitForTask, waitLimit } from './wait-for.mjs';
 import {
   failedTests,
   testOutput,
@@ -18,8 +18,16 @@ import {
 } from '../src/connectors/source-checks.mjs';
 import { hash } from '../src/core/contracts.mjs';
 import { jobDirectory } from '../src/core/projects.mjs';
+import { checkSeconds } from '../src/packs/studio-development/index.mjs';
 
 const checkFixture = fileURLToPath(new URL('./fixture-source-check.mjs', import.meta.url));
+
+// The checks run below measures a long fixture run (5001 tests), which took over 60 s on GitHub's Windows runner, past
+// one waitLimit. Its wait lasts as long as the checks run may take: the checks task's own time limit as the controller
+// records it. The test's own bound covers that wait plus its setup and requests (one waitLimit), past the suite's
+// 120 seconds (package.json); the test after it runs the wait on a mocked clock against the earlier budget too.
+const checksWait = task => task.maxSeconds * 1000;
+const recordBudget = { timeout: checkSeconds * 1000 + waitLimit };
 
 async function setup(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-records-')),
@@ -102,67 +110,123 @@ function assertInertText(res) {
   assert.equal(res.headers.get('content-disposition'), null, 'It is sent inline, not as an attachment.');
 }
 
-test("a checks run's whole record is summarized and served as inert text, read-only and project-checked", async t => {
-  const c = await setup(t),
-    run = await c.send(`/api/workflows/${c.workflow.id}/run`, {
-      projectId: c.project.id,
-      expectedVersion: c.workflow.version,
-    });
-  assert.equal(run.status, 201, JSON.stringify(run.data));
-  const checked = await waitForTask(c.store, run.data.taskIds[0], 'review', { interval: 20 }),
-    output = path.join(jobDirectory(c.store, checked), 'output'),
-    bytes = fs.readFileSync(path.join(output, 'test-output-full.txt')),
-    text = bytes.toString('utf8'),
-    report = JSON.parse(fs.readFileSync(path.join(output, 'check-report.json'), 'utf8'));
-  assert.ok(checked.artifacts.some(item => item.kind === 'test-log' && item.path === 'test-output.txt'));
-  // The record holds what the bounded text that reviews read leaves out.
-  assert.ok(bytes.length > fs.statSync(path.join(output, 'test-output.txt')).size);
-  const expected = {
-    recorded: true,
-    run: 'attempt',
-    bytes: bytes.length,
-    limited: false,
-    totals: testTotals(text),
-    failedTests: failedTests(text),
-  };
-  assert.deepEqual(expected.totals, report.totals);
-  assert.equal(expected.totals.tests, 5001);
-  assert.deepEqual(expected.failedTests, [
-    {
-      name: 'fails early in a long run',
-      file: 'early.test.mjs',
-      error: "Expected values to be strictly equal: 'lost' !== 'kept'",
-    },
-  ]);
-  for (const query of ['', '&run=attempt'])
-    assert.deepEqual(await c.summary(checked.id, query), { status: 200, data: expected });
-  const whole = await fetch(c.address(checked.id, '/text'));
-  assertInertText(whole);
-  assert.ok(Buffer.from(await whole.arrayBuffer()).equals(bytes));
-  // Its story's merge is another run, and this attempt has none.
-  assert.equal((await c.summary(checked.id, '&run=merge')).status, 404);
-  assert.equal((await fetch(c.address(checked.id, '/text', '&run=merge'))).status, 404);
-  // The project check of the attempt routes applies unchanged.
-  for (const suffix of ['', '/text']) {
-    const route = `${c.origin}/api/attempts/${checked.id}/test-record${suffix}`;
-    assert.equal((await fetch(route)).status, 400);
-    assert.equal((await fetch(route + '?projectId=project-legacy')).status, 400);
+test(
+  "a checks run's whole record is summarized and served as inert text, read-only and project-checked",
+  { timeout: recordBudget.timeout },
+  async t => {
+    const c = await setup(t),
+      run = await c.send(`/api/workflows/${c.workflow.id}/run`, {
+        projectId: c.project.id,
+        expectedVersion: c.workflow.version,
+      });
+    assert.equal(run.status, 201, JSON.stringify(run.data));
+    const checks = c.store.task(run.data.taskIds[0]);
+    assert.equal(checks.maxSeconds, checkSeconds, "The test's own bound covers the checks task's recorded time limit.");
+    const checked = await waitForTask(c.store, checks.id, 'review', { interval: 20, limit: checksWait(checks) }),
+      output = path.join(jobDirectory(c.store, checked), 'output'),
+      bytes = fs.readFileSync(path.join(output, 'test-output-full.txt')),
+      text = bytes.toString('utf8'),
+      report = JSON.parse(fs.readFileSync(path.join(output, 'check-report.json'), 'utf8'));
+    assert.ok(checked.artifacts.some(item => item.kind === 'test-log' && item.path === 'test-output.txt'));
+    // The record holds what the bounded text that reviews read leaves out.
+    assert.ok(bytes.length > fs.statSync(path.join(output, 'test-output.txt')).size);
+    const expected = {
+      recorded: true,
+      run: 'attempt',
+      bytes: bytes.length,
+      limited: false,
+      totals: testTotals(text),
+      failedTests: failedTests(text),
+    };
+    assert.deepEqual(expected.totals, report.totals);
+    assert.equal(expected.totals.tests, 5001);
+    assert.deepEqual(expected.failedTests, [
+      {
+        name: 'fails early in a long run',
+        file: 'early.test.mjs',
+        error: "Expected values to be strictly equal: 'lost' !== 'kept'",
+      },
+    ]);
+    for (const query of ['', '&run=attempt'])
+      assert.deepEqual(await c.summary(checked.id, query), { status: 200, data: expected });
+    const whole = await fetch(c.address(checked.id, '/text'));
+    assertInertText(whole);
+    assert.ok(Buffer.from(await whole.arrayBuffer()).equals(bytes));
+    // Its story's merge is another run, and this attempt has none.
+    assert.equal((await c.summary(checked.id, '&run=merge')).status, 404);
+    assert.equal((await fetch(c.address(checked.id, '/text', '&run=merge'))).status, 404);
+    // The project check of the attempt routes applies unchanged.
+    for (const suffix of ['', '/text']) {
+      const route = `${c.origin}/api/attempts/${checked.id}/test-record${suffix}`;
+      assert.equal((await fetch(route)).status, 400);
+      assert.equal((await fetch(route + '?projectId=project-legacy')).status, 400);
+    }
+    // Nothing writes through it: no POST or PATCH route, and reads change neither the record nor what reviews read.
+    for (const method of ['POST', 'PATCH']) {
+      const refused = await c.send(`/api/attempts/${checked.id}/test-record?projectId=${c.project.id}`, {}, method);
+      assert.equal(refused.status, 404, JSON.stringify(refused.data));
+    }
+    assert.deepEqual(c.store.attempt(checked.id).artifacts, checked.artifacts);
+    assert.ok(fs.readFileSync(path.join(output, 'test-output-full.txt')).equals(bytes));
+    const log = await fetch(
+      `${c.origin}/api/attempts/${checked.id}/artifact?projectId=${c.project.id}&path=test-output.txt`,
+    );
+    assert.equal(log.status, 200);
+    assert.equal(
+      hash(Buffer.from(await log.arrayBuffer())),
+      checked.artifacts.find(a => a.path === 'test-output.txt').hash,
+    );
+  },
+);
+
+// Waits for a stand-in checks task, as the record test does, with a budget's wait limit and test bound on a mocked
+// clock, against a checks run that finishes delay ms after it starts, and says how it ended: the attempt's ID, the wait
+// that ran out, or that the test's own bound ran out first.
+async function checksUnderSlowRun(t, budget, delay) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  try {
+    const start = Date.now(),
+      task = { id: 'T-checks', status: 'working', maxSeconds: checkSeconds, lastAttemptId: 'attempt-checks' },
+      store = {
+        task: id => ({ ...task, id, status: Date.now() - start >= delay ? 'review' : task.status }),
+        attempt: id => ({ id, status: Date.now() - start >= delay ? 'succeeded' : 'running' }),
+      };
+    let outcome;
+    waitForTask(store, task.id, 'review', { interval: 20, limit: budget.limit(store.task(task.id)) }).then(
+      attempt => (outcome = attempt.id),
+      error => (outcome = error.message),
+    );
+    for (;;) {
+      await new Promise(resolve => setImmediate(resolve));
+      if (outcome !== undefined) return outcome;
+      if (Date.now() - start > budget.timeout) return `still waiting when the test's ${budget.timeout} ms ran out`;
+      t.mock.timers.tick(500);
+    }
+  } finally {
+    t.mock.timers.reset();
   }
-  // Nothing writes through it: no POST or PATCH route, and reads change neither the record nor what reviews read.
-  for (const method of ['POST', 'PATCH']) {
-    const refused = await c.send(`/api/attempts/${checked.id}/test-record?projectId=${c.project.id}`, {}, method);
-    assert.equal(refused.status, 404, JSON.stringify(refused.data));
-  }
-  assert.deepEqual(c.store.attempt(checked.id).artifacts, checked.artifacts);
-  assert.ok(fs.readFileSync(path.join(output, 'test-output-full.txt')).equals(bytes));
-  const log = await fetch(
-    `${c.origin}/api/attempts/${checked.id}/artifact?projectId=${c.project.id}&path=test-output.txt`,
+}
+
+test("the checks-run record test's wait outlasts a slow checks run, where its earlier wait ran out", async t => {
+  const earlier = { limit: () => waitLimit, timeout: 120000 },
+    budget = { limit: checksWait, timeout: recordBudget.timeout };
+  // GitHub's Windows runner took 75 s: the earlier wait ran out first.
+  assert.match(
+    await checksUnderSlowRun(t, earlier, 75000),
+    /^Timed out after 60000 ms waiting for task T-checks to be review; task T-checks is working/,
   );
-  assert.equal(log.status, 200);
-  assert.equal(
-    hash(Buffer.from(await log.arrayBuffer())),
-    checked.artifacts.find(a => a.path === 'test-output.txt').hash,
+  assert.equal(await checksUnderSlowRun(t, budget, 75000), 'attempt-checks');
+  // Under one waitLimit both wait long enough.
+  assert.equal(await checksUnderSlowRun(t, earlier, waitLimit - 500), 'attempt-checks');
+  assert.equal(await checksUnderSlowRun(t, budget, waitLimit - 500), 'attempt-checks');
+  // The new wait lasts the checks run's whole time limit, and stays bounded by it.
+  assert.equal(await checksUnderSlowRun(t, budget, checkSeconds * 1000 - 500), 'attempt-checks');
+  assert.match(
+    await checksUnderSlowRun(t, budget, checkSeconds * 1000 + 500),
+    /^Timed out after 600000 ms waiting for task T-checks to be review; task T-checks is working/,
   );
+  // The test's own bound covers its whole wait and leaves the setup and requests one waitLimit more.
+  assert.ok(budget.timeout >= checkSeconds * 1000 + waitLimit);
 });
 
 test("a story's merge record, runs that kept none and the runs an attempt does not have", async t => {
