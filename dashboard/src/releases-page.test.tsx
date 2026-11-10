@@ -432,16 +432,23 @@ test('on a phone the map is only as wide as its columns at their narrowest, 84px
   expect((await mapRows()).style.minWidth).toBe('606px');
 });
 
-test('above the phone break the map keeps its 760px minimum, set on its rows, however many releases it holds', async () => {
+// The director's walkthrough, November 10: a fixed 760px gave a map of one release a long scroll bar in a window
+// narrower than about 1150px. Above the break each slot is as wide as a station, and the map no wider than its columns.
+test('above the phone break the map is only as wide as its columns, 140px more for each release', async () => {
   // Where matchMedia is absent, as in the other tests.
   open('/p/project-x/releases');
-  expect((await mapRows()).style.minWidth).toBe('760px');
+  // The line's name 150px, a slot each for 1.0.0, 1.0.1 and 1.1.0 at 140px, and where its fixes go 120px.
+  const rows = await mapRows();
+  expect(rows.style.minWidth).toBe('690px');
+  expect(rows.querySelector<HTMLElement>('.sd-linemap__row')!.style.gridTemplateColumns).toContain(
+    'repeat(3, minmax(140px, 1fr))',
+  );
   cleanup();
   // And where the window is wider than the break.
   width(false);
   controller.releases!.milestones!.push(milestone('1.2.0', 'main'));
   open('/p/project-x/releases');
-  expect((await mapRows()).style.minWidth).toBe('760px');
+  expect((await mapRows()).style.minWidth).toBe('830px');
 });
 
 test('a line is retired after asking, and a retired line is maintained again from the bottom of the page', async () => {

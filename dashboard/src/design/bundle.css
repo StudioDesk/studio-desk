@@ -7185,7 +7185,7 @@ button.sd-tab {
   overflow-x: auto;
   padding-bottom: 4px;
 }
-/* Its minimum width is set by LineMap: 760px, or on a phone the sum of its columns' minimums */
+/* Its minimum width is set by LineMap: the sum of its columns' minimums, with narrower slots on a phone */
 .sd-linemap__rows {
   display: flex;
   flex-direction: column;

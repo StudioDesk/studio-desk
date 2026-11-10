@@ -411,13 +411,14 @@ function mapRows(
   return { rows, slots };
 }
 
-// The map's columns at their narrowest, in pixels: the line's name, each release slot and where its fixes go. On a
-// phone the rows are as wide as these add up to, so the map scrolls sideways only when they do not fit; above the
-// break they are at least 760px wide.
+// The map's columns at their narrowest, in pixels: the line's name, each release slot and where its fixes go. The rows
+// are as wide as these add up to, so the map scrolls sideways only when they do not fit. Above the phone break a slot
+// is as wide as its station ("1.0.0 open" is 116px, a planned one about 138px), so stations never overlap; a fixed
+// 760px there gave a map of one release a scroll bar in any window narrower than about 1150px (November 10).
 const nameMin = 150,
   slotMin = 84,
-  carryMin = 120,
-  wideMin = 760;
+  slotWide = 140,
+  carryMin = 120;
 
 // How the lines fit together: time runs left to right, each line a track in its own color, made from a release on the
 // newest line, with its releases filled, its open milestone ringed and later ones dashed; a fix is carried up to the
@@ -436,8 +437,9 @@ function LineMap({
   const narrow = useNarrow(),
     { rows, slots } = mapRows(lines, maintained, milestones, shipping),
     count = Math.max(1, slots.length),
-    columns = `minmax(${nameMin}px, 200px) repeat(${count}, minmax(${slotMin}px, 1fr)) minmax(${carryMin}px, 150px)`,
-    minWidth = narrow ? nameMin + slotMin * count + carryMin : wideMin,
+    slot = narrow ? slotMin : slotWide,
+    columns = `minmax(${nameMin}px, 200px) repeat(${count}, minmax(${slot}px, 1fr)) minmax(${carryMin}px, 150px)`,
+    minWidth = nameMin + slot * count + carryMin,
     column = (version: string) => slots.indexOf(version) + 2;
   return (
     <section className="sd-card sd-linemap" aria-label="How your lines fit together">
