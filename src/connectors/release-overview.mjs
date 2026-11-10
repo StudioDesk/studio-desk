@@ -8,6 +8,7 @@ import { gitAsync } from './source-integration.mjs';
 import { branchCommitAsync, checkedOutAsync, projectLines } from './source-lines.mjs';
 import {
   compareVersions,
+  nextRelease,
   projectMilestones,
   releaseTagsAsync,
   versionLinesReadiness,
@@ -163,7 +164,10 @@ export async function releaseOverview(store, projectId, runtime) {
     stories = store.tasks().filter(task => task.kind === story && recordProject(task) === projectId),
     runOf = task => runs.find(run => run.id === runIdOf(task)),
     milestoneOf = task => task.release?.milestoneId ?? runOf(task)?.release?.milestoneId ?? null;
-  const milestones = projectMilestones(store, projectId)
+  // The next release, by intake's own rule on the milestones as recorded, before the page fills in their lines.
+  const recordedMilestones = projectMilestones(store, projectId),
+    next = nextRelease(recordedMilestones, project.shipsTo);
+  const milestones = recordedMilestones
     .slice()
     .sort((a, b) => compareVersions(a.version.split('.').map(Number), b.version.split('.').map(Number)))
     .map(milestone => {
@@ -195,6 +199,7 @@ export async function releaseOverview(store, projectId, runtime) {
           milestone.line ?? (milestone.state === 'released' ? milestone.release?.repository?.branch : null) ?? newest,
         goal: milestone.goal,
         state: milestone.state,
+        ...(milestone.id === next?.id ? { next: true } : {}),
         waiting: milestone.waiting,
         ...(milestone.release ? { release: milestone.release } : {}),
         ideas,

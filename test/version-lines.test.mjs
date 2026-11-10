@@ -790,6 +790,20 @@ test('an explicitly selected version line keeps its own milestone while the defa
     line: 'release/1.1',
     release: { milestoneId: minor.id, version: '1.1.0', by: { type: 'default' } },
   });
+  // The Releases page marks the same next release intake picks: 1.1.0 on its own line, not 1.2.0 on the newest one.
+  const view = await releaseOverview(store, project, runtime);
+  assert.deepEqual(
+    view.milestones.map(item => [item.version, item.line, item.next ?? null]),
+    [
+      ['1.1.0', 'release/1.1', true],
+      ['1.2.0', 'release/1.2', null],
+    ],
+  );
+  assert.ok(view.milestones.every(item => item.next === true || !('next' in item)));
+  assert.equal(
+    view.milestones.find(item => item.next).id,
+    ideaRelease(store, project, runtime, {}).release.milestoneId,
+  );
   assert.deepEqual(projectMilestones(store, project), milestones, 'Selection does not change milestones.');
 });
 

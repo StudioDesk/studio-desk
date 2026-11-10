@@ -127,6 +127,25 @@ test('a released milestone without a line keeps the branch its release was made 
   );
 });
 
+test('the Releases page marks the next release, the lowest open milestone on the newest line, though every line is filled', async t => {
+  const c = await setup(t);
+  git(c.root, ['tag', 'v1.0.0']);
+  await make(c, '1.0.1');
+  const next = await make(c, '1.1.0');
+  await make(c, '1.2.0');
+  const view = await overview(c);
+  assert.deepEqual(
+    view.milestones.map(item => [item.version, item.line, item.next ?? null]),
+    [
+      ['1.0.1', 'release/1.0', null],
+      ['1.1.0', 'main', true],
+      ['1.2.0', 'main', null],
+    ],
+  );
+  assert.equal(view.milestones.find(item => item.next).id, next.id);
+  assert.ok(view.milestones.every(item => item.next === true || !('next' in item)));
+});
+
 test('waiting ideas keep the order the director gives them and move between milestones', async t => {
   const c = await setup(t),
     store = c.app.store;

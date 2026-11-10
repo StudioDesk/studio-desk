@@ -301,8 +301,8 @@ function findMilestone(store, projectId, named) {
 }
 const open = milestone => milestone.state === 'open';
 // The next release on the newest line: its lowest open milestone, if any. On version lines it is the lowest open
-// minor or major version, on whichever line it has.
-const nextRelease = (milestones, shipsTo) =>
+// minor or major version, on whichever line it has. The Releases page marks the same one.
+export const nextRelease = (milestones, shipsTo) =>
   milestones
     .filter(item => open(item) && (shipsTo ? parseVersion(item.version)[2] === 0 : item.line === null))
     .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
