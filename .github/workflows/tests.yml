@@ -53,15 +53,9 @@ jobs:
       - name: Install the development tools
         run: npm ci
 
+      # One pass. A second spelling of a folder is covered inside it: test/linked-temp.test.mjs runs the link-sensitive
+      # files under a link, and every path the controller compares goes through src/core/real-path.mjs. The whole
+      # suite with its temporary folder reached through a link (STUDIO_TEST_LINKED_TEMP=1) runs once per release
+      # candidate, by hand.
       - name: Run the suite
         run: npm test
-
-      # The same suite with its temporary folder reached through a link (a junction on Windows, a symbolic link
-      # elsewhere), as on a computer whose temporary folder is reached that way (macOS's /var): the harness links a
-      # fresh folder and points TEMP, TMP and TMPDIR at the link (test/model-free-studio.mjs). It runs after a failed
-      # first run too, so one run of the workflow reports both.
-      - name: Run the suite with its temporary folder reached through a link
-        if: success() || failure()
-        run: npm test
-        env:
-          STUDIO_TEST_LINKED_TEMP: '1'
