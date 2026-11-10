@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 // Reuse the candidate-local temp policy: MXC's redirected OS temp denies some writes.
@@ -10,7 +11,7 @@ import { listFolders, maxFolders } from '../src/connectors/folders.mjs';
 
 // A file, a dot folder, a plain folder, a repository's folder and a worktree's folder (a .git file).
 function fixture(t) {
-  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-folders-')));
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-folders-')));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.writeFileSync(path.join(directory, 'notes.txt'), 'A file is never listed.\n');
   fs.mkdirSync(path.join(directory, '.hidden'));
@@ -56,7 +57,7 @@ test('a folder lists the folders inside, sorted ignoring case and marking reposi
 
 test('without a folder the home folder is listed, and a path that is not an absolute folder is refused plainly', t => {
   const directory = fixture(t);
-  assert.equal(listFolders().path, fs.realpathSync.native(os.homedir()));
+  assert.equal(listFolders().path, realPath(os.homedir()));
   assert.equal(listFolders(undefined, { home: directory }).path, directory);
   assert.deepEqual(names(listFolders(null, { home: directory })), ['plain', 'Site', 'worktree']);
   for (const target of ['relative/folder', 'plain', '', 42, ['/']])
@@ -126,7 +127,7 @@ test('a folder that opens but refuses reading is left out, and each folder opene
 
 test("a Windows drive's own top-level $ folders are left out, and deeper ones and other platforms' are kept", t => {
   const directory = fixture(t),
-    root = fs.realpathSync.native(path.parse(directory).root),
+    root = realPath(path.parse(directory).root),
     readdir = fs.readdirSync,
     opendir = fs.opendirSync,
     read = ['$Recycle.Bin', '$WinREAgent', 'Program Files', 'Users'],
@@ -170,16 +171,20 @@ test('with nearest, a missing folder or a file lists the nearest existing folder
   });
   assert.throws(() => listFolders(plain, { nearest: true }), { message: 'The folder cannot be opened.' });
   t.mock.restoreAll();
-  // At the boundary: every platform has its root, so a drive that is not there is modeled by refusing it.
+  // At the boundary: every platform has its root, so a drive that is not there is modeled by refusing it. Both
+  // resolvers refuse it, as both do for a missing drive: the shared lookup falls back to the plain one.
   const root = path.parse(directory).root,
     nowhere = path.join(root, 'studio-folders-nowhere', 'deeper'),
     absent = [nowhere, path.dirname(nowhere), root],
-    realpath = fs.realpathSync.native;
-  t.mock.method(fs.realpathSync, 'native', (folder, ...rest) => {
-    if (absent.includes(folder))
-      throw Object.assign(new Error(`ENOENT: no such file or directory, realpath '${folder}'`), { code: 'ENOENT' });
-    return realpath(folder, ...rest);
-  });
+    refusing =
+      resolve =>
+      (folder, ...rest) => {
+        if (absent.includes(folder))
+          throw Object.assign(new Error(`ENOENT: no such file or directory, realpath '${folder}'`), { code: 'ENOENT' });
+        return resolve(folder, ...rest);
+      };
+  t.mock.method(fs.realpathSync, 'native', refusing(fs.realpathSync.native));
+  t.mock.method(fs, 'realpathSync', refusing(fs.realpathSync));
   assert.deepEqual(listFolders(nowhere, { nearest: true, home: directory }), listed);
   assert.throws(() => listFolders(nowhere, { home: directory }), { message: 'The folder does not exist.' });
 });

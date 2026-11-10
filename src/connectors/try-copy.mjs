@@ -14,6 +14,7 @@
 // the copy's record is the setting `try:<projectId>`, and its Run's output a file in the data folder.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../core/real-path.mjs';
 import path from 'node:path';
 import { recordProject } from '../core/projects.mjs';
 import { subscriptionEnvironment } from '../adapters/process.mjs';
@@ -179,7 +180,7 @@ async function moveCopy(runtime, task, projectId, { discard = false, by = { type
   const existing = fs.existsSync(folder);
   if (existing) {
     const owner = worktreeRepository(folder);
-    if (!owner || !sameFolder(owner, fs.realpathSync.native(root)))
+    if (!owner || !sameFolder(owner, realPath(root)))
       throw failure(
         `${folder} holds something other than this project's try copy. Choose another folder in the project's settings.`,
         409,
@@ -235,7 +236,7 @@ async function moveCopy(runtime, task, projectId, { discard = false, by = { type
   const previous = tryCopy(store, projectId),
     record = {
       projectId,
-      folder: fs.realpathSync.native(folder),
+      folder: realPath(folder),
       taskId: task.id,
       title: task.title,
       candidateAttemptId: candidate.id,

@@ -1,6 +1,7 @@
 // Trusted, controller-owned operation. Run the installed Node test runner on a
 // copied source tree; assignments cannot supply commands, paths or environment.
 import fs from 'node:fs';
+import { realPath } from '../core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,7 +58,7 @@ export const sourceTestArgs = (tests, timeoutMs = sourceTestTimeoutMs) => [
 
 export function sourcePlan(root = studioSourceRoot, profile = studioDeskProfile) {
   // One spelling for the measured folder: its real one, a Windows short name expanded too.
-  root = fs.realpathSync.native(root);
+  root = realPath(root);
   const manifest = [],
     limits = measuringLimits(profile);
   let total = 0;

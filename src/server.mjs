@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import { realPath } from './core/real-path.mjs';
 import zlib from 'node:zlib';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -322,7 +323,7 @@ export function createStudio({
   // The folder is kept by one spelling, its real one, whichever spelling it was given by (a junction or symbolic link,
   // macOS's /var for /private/var, a Windows short name such as RUNNER~1), so every folder made inside it compares
   // with the project repositories, which are kept the same way (connectors/source-projects.mjs).
-  const dataFolder = fs.realpathSync.native(path.resolve(directory));
+  const dataFolder = realPath(path.resolve(directory));
   const releaseLock = takeDataFolderLock(dataFolder);
   let store;
   try {

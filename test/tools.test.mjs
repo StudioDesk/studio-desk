@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { Store } from '../src/core/store.mjs';
@@ -372,7 +373,7 @@ test("programAvailability says whether this computer has a command's program, ne
 });
 
 test('the default finder looks in the PATH folders, with each PATHEXT extension on Windows', t => {
-  const folder = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-tools-')));
+  const folder = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-tools-')));
   t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
   const empty = path.join(folder, 'empty'),
     bin = path.join(folder, 'bin');

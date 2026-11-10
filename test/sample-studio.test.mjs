@@ -1,6 +1,7 @@
 import './model-free-studio.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -27,7 +28,7 @@ test('the sample studio holds both projects at their fixed addresses, paused, wi
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
   // By its real spelling, whichever one the temporary folder was reached by (a junction or symbolic link, a short name).
-  assert.equal(studio.directory, fs.realpathSync.native(path.join(base, '.studio-sample')));
+  assert.equal(studio.directory, realPath(path.join(base, '.studio-sample')));
   assert.equal(studio.store.directory, studio.directory);
   assert.ok(!fs.existsSync(path.join(base, '.studio-sample', 'leftover.txt')));
   assert.ok(!fs.existsSync(path.join(base, 'data')), 'The sample never makes or uses the data folder.');

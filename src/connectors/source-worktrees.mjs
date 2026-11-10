@@ -2,6 +2,7 @@
 // commit its story started from, in a disposable worktree at a short path, and committed
 // there; the development copy's working tree is never written by an attempt.
 import fs from 'node:fs';
+import { realPath } from '../core/real-path.mjs';
 import path from 'node:path';
 import { copySource, ensureSourceDirectories, sourcePlan } from './source-checks.mjs';
 import { git, repositoryState, stageFiles } from './source-integration.mjs';
@@ -82,7 +83,7 @@ export function snapshotCommit(root, parent, name, base, destination, profile = 
   try {
     const plan = sourcePlan(worktree, profile);
     copySource(plan, destination);
-    return { ...plan, root: fs.realpathSync.native(root), base };
+    return { ...plan, root: realPath(root), base };
   } finally {
     removeSourceWorktree(root, worktree);
   }
@@ -95,7 +96,7 @@ export function createSourceWorktree(root, parent, name, commit, profile = studi
   git(root, ['worktree', 'add', '--detach', target, commit]);
   ensureSourceDirectories(target, profile);
   // Its real spelling, which also expands a Windows short name (fs.realpathSync keeps those, and the given case).
-  return fs.realpathSync.native(target);
+  return realPath(target);
 }
 
 // Gives a worktree of `commit` the bytes of the folder its snapshot measured (plan.root), file by file, where git
@@ -207,7 +208,7 @@ export function worktreeRepository(worktree) {
   try {
     const line = fs.readFileSync(path.join(worktree, '.git'), 'utf8').trim(),
       match = /^gitdir: (.+)[\\/]\.git[\\/]worktrees[\\/][^\\/]+$/.exec(line);
-    return match ? fs.realpathSync.native(match[1]) : null;
+    return match ? realPath(match[1]) : null;
   } catch {
     return null;
   }

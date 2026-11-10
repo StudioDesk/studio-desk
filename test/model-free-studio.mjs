@@ -1,6 +1,7 @@
 import { createStudio as createController } from '../src/server.mjs';
 import { directorAccess } from '../src/director-access.mjs';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,7 +37,7 @@ function linkTemporaryFolder() {
   const given = os.tmpdir(),
     inherited = process.env.STUDIO_TEST_LINKED_TEMP_LINK;
   if (inherited && path.resolve(inherited) === path.resolve(given) && fs.lstatSync(given).isSymbolicLink())
-    return { link: given, real: fs.realpathSync.native(given), made: false };
+    return { link: given, real: realPath(given), made: false };
   // Short names: fixtures nest job folders and git repositories under it (see above).
   const holder = fs.mkdtempSync(path.join(given, 'sl-')),
     real = path.join(holder, 'r'),
@@ -63,7 +64,7 @@ function linkTemporaryFolder() {
       // A file a test left open stays until the computer's own temporary-folder cleanup.
     }
   });
-  return { link, real: fs.realpathSync.native(real), made: true };
+  return { link, real: realPath(real), made: true };
 }
 // The tests' git identity, never the computer's: one with no global user.name and email (a fresh Mac or Linux
 // install) refuses to add a project, and one with settings of its own (signing, hooks) changes what git does.

@@ -18,6 +18,7 @@ import { projectTemplate, templateFiles } from '../src/templates/index.mjs';
 import { isEntryPoint } from '../src/core/entry-point.mjs';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -171,7 +172,7 @@ export async function startSampleStudio({ base = root, port = samplePort, build 
   fs.rmSync(given, { recursive: true, force: true });
   fs.mkdirSync(given, { recursive: true });
   // By its real spelling, as the studio keeps its data folder, so the sample repository made inside it is inside it.
-  const directory = fs.realpathSync.native(given);
+  const directory = realPath(given);
   if (build) buildDashboard(base);
   const registries = createRegistries(),
     studio = createStudio({

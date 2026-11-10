@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -121,7 +122,7 @@ test('the Code sample is a git repository with one commit whose tests pass, its 
   assert.deepEqual(log.stdout.trim().split('\n'), ['To-do list sample, made by Studio desk']);
   const project = c.app.store.project(projectId);
   assert.equal(project.name, 'To-do list sample');
-  assert.equal(project.source.root, fs.realpathSync.native(folder));
+  assert.equal(project.source.root, realPath(folder));
   assert.deepEqual(project.source.profile.tests, { directory: 'test', suffix: '.test.js' });
   assert.deepEqual(project.sample, { template: 'code', folder });
   // The sample's floor titles its team as No projects yet does, whatever the work.
@@ -265,14 +266,14 @@ test('a sample goes in a new folder inside a folder the director chose, outside 
   assert.deepEqual((await c.get('/api/projects')).data, { projects: [] });
   const created = await send({ name: 'Volunteer guide sample', location: outside });
   assert.equal(created.status, 201, JSON.stringify(created.data));
-  const folder = path.join(fs.realpathSync.native(outside), 'volunteer-guide-sample');
+  const folder = path.join(realPath(outside), 'volunteer-guide-sample');
   assert.equal(created.data.folder, folder);
   assert.deepEqual(fs.readdirSync(folder).sort(), ['brief.md', 'notes.md', 'style.md']);
   assert.deepEqual(fs.readdirSync(outside).sort(), ['mine.txt', 'volunteer-guide-sample']);
   assert.equal(fs.readFileSync(path.join(outside, 'mine.txt'), 'utf8'), 'Already here.\n');
   // A second sample whose name makes the same folder name gets a numbered folder beside it.
   const second = await send({ name: 'Volunteer guide sample!', location: outside });
-  assert.equal(second.data.folder, path.join(fs.realpathSync.native(outside), 'volunteer-guide-sample-2'));
+  assert.equal(second.data.folder, path.join(realPath(outside), 'volunteer-guide-sample-2'));
   const { projectId } = created.data,
     deleted = await c.request(`/api/projects/${projectId}/delete`, { projectId, name: 'Volunteer guide sample' });
   assert.equal(deleted.status, 200, JSON.stringify(deleted.data));

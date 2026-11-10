@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,7 +46,7 @@ before(() => {
 after(() => mock.restoreAll());
 
 function dataFolder(t) {
-  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-tool-keys-')));
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-tool-keys-')));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return directory;
 }

@@ -8,7 +8,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { recordProject } from '../core/projects.mjs';
-import { samePath } from '../core/real-path.mjs';
+import { realPath, samePath } from '../core/real-path.mjs';
 import { subscriptionEnvironment } from '../adapters/process.mjs';
 import { snapshotCommit } from '../adapters/source-snapshot.mjs';
 import { failedTests, sourcePlan, testOutput, testTotals } from './source-checks.mjs';
@@ -49,7 +49,7 @@ export function projectRepository(store, projectId, root, runtime) {
   if (typeof root !== 'string' || !path.isAbsolute(root)) throw new Error('The repository must be an absolute path.');
   let real;
   try {
-    real = fs.realpathSync.native(root);
+    real = realPath(root);
   } catch {
     throw new Error('The repository folder does not exist.');
   }

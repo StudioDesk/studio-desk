@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -15,7 +16,7 @@ const refused = new Set(['EPERM', 'EACCES', 'ENOTSUP', 'EINVAL']);
 // link to that folder (a junction on Windows, a symbolic link elsewhere). The link goes first when it is removed, so
 // removing the folder never follows it. Where links cannot be made, linked is false and no link exists.
 function linkedFolder(t) {
-  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-entry-point-'))),
+  const base = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-entry-point-'))),
     real = path.join(base, 'real'),
     link = path.join(base, 'link');
   fs.mkdirSync(real);

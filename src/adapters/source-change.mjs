@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { realPath } from '../core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { runGit } from '../git.mjs';
@@ -88,9 +89,9 @@ export const sourceChangeAdapter = {
   quotaKey: worker => worker.provider,
   initialize(runtime, options) {
     // Both by their real spelling, a Windows short name expanded too, as project repositories are kept.
-    runtime.sourceChangeRoot = fs.realpathSync.native(options.sourceChangeRoot || studioSourceRoot);
+    runtime.sourceChangeRoot = realPath(options.sourceChangeRoot || studioSourceRoot);
     // When the controller develops its own installed source, integrations need a restart.
-    runtime.selfHosted = runtime.sourceChangeRoot === fs.realpathSync.native(studioSourceRoot);
+    runtime.selfHosted = runtime.sourceChangeRoot === realPath(studioSourceRoot);
     runtime.sourceChangeFixture = !!options.sourceChangeFixture;
     runtime.sourceFormatCommand = options.sourceFormatCommand; // trusted model-free test seam, never exposed by HTTP
     runtime.packageInstallCommand = options.packageInstallCommand; // trusted model-free stand-in for npm ci, never exposed by HTTP
@@ -204,7 +205,7 @@ function prepareSourceJob(runtime, entry, edit) {
   fs.mkdirSync(sourceWorktreeRoot(runtime), { recursive: true });
   // The worktrees' folder by its real spelling, so the candidate's recorded path is the one git and the setup use.
   const repository = scope.source.root,
-    parent = fs.realpathSync.native(sourceWorktreeRoot(runtime)),
+    parent = realPath(sourceWorktreeRoot(runtime)),
     leftovers = leftoverWorktrees(runtime, parent);
   const candidate = path.join(parent, worktreeName(a.id));
   a.sourceWorktree = { path: candidate, baseCommit: scope.base.commit };

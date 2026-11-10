@@ -6,6 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 // The suite's temporary folder and git identity; the studio's model-free stand-ins.
@@ -56,7 +57,7 @@ function shortName(folder) {
 // is removed, so removing it never follows the link.
 function spelledFolder(t) {
   const given = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-sp-')),
-    base = fs.realpathSync.native(given),
+    base = realPath(given),
     name = 'Spelled dir',
     real = path.join(base, name),
     link = path.join(base, 'link');
@@ -84,7 +85,7 @@ function spelledFolder(t) {
       candidates.filter(spelling => {
         if (!spelling || spelling === real) return false;
         try {
-          return fs.realpathSync.native(spelling) === real;
+          return realPath(spelling) === real;
         } catch {
           return false;
         }
@@ -187,8 +188,8 @@ test("a short spelling of the controller's default source or another project's r
     short = shortSpelled(t, real),
     shortRepository = path.join(short, 'repo'),
     none = { projects: () => [] };
-  assert.equal(fs.realpathSync(repository), shortRepository, 'The plain resolver keeps the short spelling.');
-  assert.equal(fs.realpathSync.native(shortRepository), repository, 'The native resolver expands it.');
+  assert.equal(fs.realpathSync(repository), shortRepository, 'The plain resolver keeps the short spelling.'); // real-path-guard: deliberate stub
+  assert.equal(fs.realpathSync.native(shortRepository), repository, 'The native resolver expands it.'); // real-path-guard: deliberate stub
   // The controller's default source, reached by its short spelling.
   assert.throws(
     () => projectRepository(none, 'project-a', repository, { sourceChangeRoot: shortRepository }),

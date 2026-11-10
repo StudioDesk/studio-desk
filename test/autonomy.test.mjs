@@ -788,11 +788,10 @@ test('supervisor relaunches the controller after a planned restart and exits wit
   fs.mkdirSync(path.join(directory, 'src', 'core'), { recursive: true });
   for (const script of ['supervisor.mjs', 'build-dashboard.mjs'])
     fs.copyFileSync(new URL('../scripts/' + script, import.meta.url), path.join(directory, 'scripts', script));
-  // The supervisor knows it was started with the shared entry check, which it imports from src/core.
-  fs.copyFileSync(
-    new URL('../src/core/entry-point.mjs', import.meta.url),
-    path.join(directory, 'src', 'core', 'entry-point.mjs'),
-  );
+  // The supervisor knows it was started with the shared entry check, which it imports from src/core, and the entry
+  // check resolves real paths through the shared lookup beside it.
+  for (const file of ['entry-point.mjs', 'real-path.mjs'])
+    fs.copyFileSync(new URL('../src/core/' + file, import.meta.url), path.join(directory, 'src', 'core', file));
   // Fake controller: a planned restart (75) on the first launch, a clean exit on the second.
   fs.writeFileSync(
     path.join(directory, 'src/server.mjs'),

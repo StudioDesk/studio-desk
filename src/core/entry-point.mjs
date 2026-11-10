@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import { realPath } from './real-path.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,7 +9,7 @@ export function isEntryPoint(meta, argv = process.argv) {
   if (typeof meta.main === 'boolean') return meta.main;
   if (!argv[1]) return false;
   try {
-    return fs.realpathSync.native(path.resolve(argv[1])) === fs.realpathSync.native(fileURLToPath(meta.url));
+    return realPath(path.resolve(argv[1])) === realPath(fileURLToPath(meta.url));
   } catch {
     return false;
   }

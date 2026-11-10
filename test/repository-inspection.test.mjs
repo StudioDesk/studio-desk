@@ -143,7 +143,7 @@ test('inspection lists problems instead of recording, and a repository may have 
 });
 
 test('a folder that is not a git repository is refused in plain words', t => {
-  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-plain-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-plain-'))),
     folder = path.join(directory, 'notes'),
     ceiling = process.env.GIT_CEILING_DIRECTORIES;
   fs.mkdirSync(folder);
@@ -170,7 +170,7 @@ test('a folder that is not a git repository is refused in plain words', t => {
 // 1.1 (MP-028): a repository git refuses for another reason, such as another user's repository without
 // safe.directory or a broken configuration, is refused in git's own words rather than as no repository.
 test("a repository git refuses for another reason is refused in git's own words", t => {
-  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-refused-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-refused-'))),
     folder = path.join(directory, 'broken');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.mkdirSync(folder);

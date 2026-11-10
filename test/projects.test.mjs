@@ -2369,7 +2369,7 @@ test('a project with its own repository checks it with its own profile and sourc
     /already works on this repository/,
   );
   const source = projectSource(store, project.id, runner);
-  assert.equal(source.root, fs.realpathSync.native(root));
+  assert.equal(source.root, realPath(root));
   assert.deepEqual(source.resources, [`source:${project.id}:integration`, `source:${project.id}:tests`]);
   // A story builds in its own worktree and holds no source resources (October 29: two build at once); its integration
   // holds this repository's, and Studio desk's stay its own.
@@ -2479,7 +2479,7 @@ test('adding a project for a git repository checks the repository and its tests 
   assert.equal(created.data.tests.tests, 1);
   assert.equal(created.data.tests.pass, 1);
   const project = store.project(created.data.id);
-  assert.equal(project.source.root, fs.realpathSync.native(root));
+  assert.equal(project.source.root, realPath(root));
   assert.deepEqual(project.source.profile, {
     ...inspected.data.profile,
     tests: { directory: 'tests', suffix: '.test.mjs' },
@@ -2576,7 +2576,7 @@ test('the folder list answers the dashboard with its request token and nothing e
   fs.mkdirSync(path.join(folder, 'Notes'));
   fs.mkdirSync(path.join(folder, '.cache'));
   fs.writeFileSync(path.join(folder, 'readme.txt'), 'A file is never listed.\n');
-  const real = fs.realpathSync.native(folder),
+  const real = realPath(folder),
     listed = await c.request('/api/folders', { path: folder });
   assert.equal(listed.status, 200, JSON.stringify(listed.data));
   assert.equal(listed.data.path, real);

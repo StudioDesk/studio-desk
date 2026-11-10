@@ -10,7 +10,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url)),
-  harness = new URL('./model-free-studio.mjs', import.meta.url).href;
+  harness = new URL('./model-free-studio.mjs', import.meta.url).href,
+  realPathModule = new URL('../src/core/real-path.mjs', import.meta.url).href;
 
 // A child with the setting on, and a link of its own: one the run inherits is not handed on. It is a run of its own,
 // not part of this file's (node:test marks its files' processes with NODE_TEST_CONTEXT).
@@ -28,11 +29,12 @@ test("with the setting on, a test process's temporary folder is a link to anothe
     process.execPath,
     withHarness(`
 const fs = await import('node:fs'), os = await import('node:os');
+const { realPath } = await import(${JSON.stringify(realPathModule)});
 const folder = os.tmpdir();
 console.log(JSON.stringify({
   folder,
   link: fs.lstatSync(folder).isSymbolicLink(),
-  real: fs.realpathSync.native(folder),
+  real: realPath(folder),
   temp: [process.env.TEMP, process.env.TMP, process.env.TMPDIR],
 }));`),
     { cwd: root, env: linkedEnvironment(), encoding: 'utf8', timeout: 60000 },
