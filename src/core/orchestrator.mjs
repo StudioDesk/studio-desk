@@ -989,8 +989,9 @@ export class Runner {
       delivery: stepContract(this.workflows.find(task.kind)).receives.library,
     });
     // The director's notes left on the story's thread while it could not take them reach this attempt after its
-    // direction, in its instructions and recorded assignment only: the task keeps its own direction, so the attempt
-    // after this one does not receive them again, and a refused start leaves them waiting.
+    // direction, in its instructions and recorded assignment only: the task keeps its own direction. A note waits until
+    // an attempt that received it hands back a result, so one whose receiving attempt ended without a result reaches
+    // this attempt again, and this attempt becomes its receivedBy; a refused start leaves them waiting.
     const notes = store.waitingNotes(projectId, task.id),
       delivered = notes.length ? { ...task, direction: directionWithNotes(task.direction, notes) } : task;
     const snapshot = this.compileInstructions(

@@ -1,9 +1,11 @@
 // A director's note on a busy or finished story (team chat, November 2026): a message naming the story's builder
 // while the story cannot act on it is kept as a note waiting for an attempt. The story's next attempt receives every
 // waiting note after its own direction, in Send back's words, within the direction limit, and each note records that
-// attempt in the transaction that records it. The story's own direction never changes, so the attempt after does not
-// receive them again, and a start the studio refuses leaves them waiting. Model-free: attempts are claimed by the
-// controller (Runner.claimAttempt) and no process or model runs.
+// attempt in the transaction that records it. The story's own direction never changes. A note waits until an attempt
+// that received it hands back a result: one whose receiving attempt ended without a result (cut off and reconciled,
+// cancelled or stopped) waits again for the next attempt, which it then records, one whose receiving attempt is live
+// never waits, and a start the studio refuses leaves them waiting. Model-free: attempts are claimed by the controller
+// (Runner.claimAttempt) and no process or model runs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setup as studio } from './studio-setup.mjs';
@@ -71,6 +73,22 @@ async function stories(t) {
     task.status = 'failed';
     store.putTask(task);
   };
+  // The story's running attempt hands back a result and the director sends it back: the attempt records the result,
+  // its resources are released, and the story is ready for its next attempt.
+  const handBack = taskId => {
+    for (const attempt of store.attempts(taskId).filter(a => a.status === 'running')) {
+      store.updateAttempt({
+        ...attempt,
+        status: 'revision_requested',
+        result: { taskId, outcome: 'completed', summary: 'Done.', artifacts: [], checks: [], issues: [], handoff: '' },
+        finishedAt: new Date().toISOString(),
+      });
+      store.release(attempt.id);
+    }
+    const task = store.task(taskId);
+    task.status = 'ready';
+    store.putTask(task);
+  };
   const note = async (taskId, words) => {
     const posted = await post(c, taskId, `@${builder.displayName} ${words}`);
     assert.equal(posted.status, 201, JSON.stringify(posted.data));
@@ -78,11 +96,11 @@ async function stories(t) {
     return posted.data;
   };
   const claim = taskId => runner.claimAttempt(taskId, { director: true }).a.id;
-  return { c, store, runner, builder, seed, stop, note, claim };
+  return { c, store, runner, builder, seed, stop, handBack, note, claim };
 }
 
 test("a note kept while a story runs reaches its next attempt after the story's direction, and records it", async t => {
-  const { store, seed, stop, note, claim } = await stories(t),
+  const { store, seed, stop, handBack, note, claim } = await stories(t),
     direction = 'Keep the fixture small.',
     taskId = seed('busy', { direction }),
     kept = await note(taskId, 'please also check the empty case');
@@ -99,8 +117,9 @@ test("a note kept while a story runs reaches its next attempt after the story's 
   assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: attemptId });
   assert.deepEqual(store.waitingNotes(projectId, taskId), []);
 
-  // The attempt after it does not receive the note again.
-  stop(taskId);
+  // The attempt handed back a result, so the attempt after it does not receive the note again.
+  handBack(taskId);
+  assert.deepEqual(store.waitingNotes(projectId, taskId), []);
   const nextId = claim(taskId),
     next = store.attempt(nextId);
   assert.notEqual(nextId, attemptId);
@@ -109,6 +128,77 @@ test("a note kept while a story runs reaches its next attempt after the story's 
   assert.ok(!next.instructions.text.includes('please also check the empty case'));
   assert.ok(!next.instructions.text.includes("Director's note:"));
   assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: attemptId });
+});
+
+test('a note whose attempt is cut off by a restart waits while it is unreconciled, then reaches the next attempt once', async t => {
+  const { store, runner, seed, stop, note, claim } = await stories(t),
+    direction = 'Keep the fixture small.',
+    resource = 'note-cut-off-resource',
+    taskId = seed('cut-off', { direction, resources: [resource] }),
+    kept = await note(taskId, 'check the restart case too'),
+    expected = `${direction}
+
+Director's note: ${kept.text}`;
+  stop(taskId);
+  const firstId = claim(taskId);
+  assert.equal(store.attempt(firstId).assignment.direction, expected);
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: firstId });
+  // While the receiving attempt runs, the note does not wait, so no second attempt can receive it.
+  assert.equal(store.attempt(firstId).status, 'running');
+  assert.deepEqual(store.waitingNotes(projectId, taskId), []);
+
+  // A controller restart leaves the attempt interrupted, unreconciled, with its reservation held.
+  const cut = store.attempt(firstId);
+  store.updateAttempt({ ...cut, status: 'interrupted', finishedAt: new Date().toISOString() });
+  const task = store.task(taskId);
+  task.status = 'blocked';
+  task.reason = 'Controller restarted. Reconcile the previous attempt before retrying.';
+  store.putTask(task);
+  assert.ok(store.leases().some(lease => lease.attemptId === firstId && lease.resource === resource));
+  assert.deepEqual(store.waitingNotes(projectId, taskId), [], 'An unreconciled attempt may still hold the note.');
+
+  runner.reconcile(taskId);
+  assert.ok(store.attempt(firstId).reconciledAt);
+  assert.ok(!store.attempt(firstId).result);
+  assert.ok(!store.leases().some(lease => lease.attemptId === firstId));
+  assert.equal(store.task(taskId).status, 'ready');
+  assert.deepEqual(
+    store.waitingNotes(projectId, taskId).map(message => message.id),
+    [kept.id],
+  );
+
+  const nextId = claim(taskId),
+    next = store.attempt(nextId);
+  assert.notEqual(nextId, firstId);
+  assert.equal(next.assignment.direction, expected);
+  assert.equal(assignmentLayer(next).direction, expected);
+  assert.ok(next.instructions.text.includes(JSON.stringify(expected)), 'The compiled text carries the note.');
+  assert.equal(next.assignment.direction.split("Director's note:").length, 2, 'The note is delivered once.');
+  assert.equal(store.task(taskId).direction, direction, "The story's own direction is unchanged.");
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: nextId });
+  assert.deepEqual(store.waitingNotes(projectId, taskId), []);
+});
+
+test('a note whose attempt is cancelled with no result reaches the next attempt, which it then records', async t => {
+  const { store, seed, stop, note, claim } = await stories(t),
+    direction = 'Own direction.',
+    taskId = seed('cancelled', { direction }),
+    kept = await note(taskId, 'keep the old name'),
+    expected = `${direction}
+
+Director's note: ${kept.text}`;
+  stop(taskId);
+  const firstId = claim(taskId);
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: firstId });
+  // Stopped before it handed anything back: the attempt ends failed with no result.
+  stop(taskId);
+  assert.equal(store.attempt(firstId).status, 'failed');
+  assert.ok(!store.attempt(firstId).result);
+  const nextId = claim(taskId);
+  assert.notEqual(nextId, firstId);
+  assert.equal(store.attempt(nextId).assignment.direction, expected);
+  assert.deepEqual(store.message(kept.id).outcome, { type: 'note', taskId, receivedBy: nextId });
+  assert.equal(store.task(taskId).direction, direction);
 });
 
 test('two notes reach one attempt in the order they were written, and both record it', async t => {

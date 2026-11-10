@@ -320,7 +320,9 @@ function plannerMention(store, registries, message, keep, queueStart) {
 // queued as those buttons queue it (`queueStart`, the controller's queued Start), and the queue's answer is added as
 // the outcome's `start`. Work the mention cannot act on keeps the message as a note ({ type: 'note', taskId,
 // receivedBy: null }), delivered to the story's next attempt after its direction (directionWithNotes, when the
-// controller claims that attempt), which the note then records as its receivedBy; an action that refuses (`refuseIntegration`, the controller's refusal of an approved
+// controller claims that attempt), which the note then records as its receivedBy (the last attempt that received it).
+// A note waits until an attempt that received it hands back a result: one whose receiving attempt ended without a
+// result waits again for the next attempt (store.waitingNotes); an action that refuses (`refuseIntegration`, the controller's refusal of an approved
 // integration, or the action's own checks) keeps it with { type: 'refused', reason } and changes nothing else. Any
 // other message waits for a reply. Returns the message as the store reads it back.
 export function postMessage(store, registries, projectId, fields, { queueStart, refuseIntegration } = {}) {

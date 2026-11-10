@@ -882,15 +882,33 @@ export class Store {
   }
   // Every note on one task's thread that waits for the task's next attempt, oldest first: a director's message kept
   // as { type: 'note', taskId, receivedBy: null } (postMessage). The attempt that receives them records itself as
-  // each one's receivedBy (setMessageOutcome), so a note is read here until it is delivered and never after.
+  // each one's receivedBy (setMessageOutcome), so receivedBy names the last attempt that received it. A note waits
+  // until an attempt that received it hands back a result: one whose receiving attempt ended without a result (cut
+  // off and reconciled, cancelled, or stopped at a limit) waits again for the next attempt, and one whose receiving
+  // attempt is live (liveAttempts' rule) does not, so two running attempts never hold it. A receivedBy naming no
+  // recorded attempt counts as received. Only the receiving attempt's data is read, not its instructions.
   waitingNotes(projectId, taskId) {
+    const attemptData = this.db.prepare('SELECT data FROM attempts WHERE id=?'),
+      endedWithoutResult = attemptId => {
+        const row = attemptData.get(attemptId);
+        if (!row) return false;
+        const a = JSON.parse(row.data),
+          live =
+            ['running', 'stopping', 'quarantined'].includes(a.status) ||
+            (a.status === 'interrupted' && !a.reconciledAt);
+        return !live && !a.result;
+      };
     return this.db
       .prepare(
         "SELECT * FROM messages WHERE project_id=? AND channel_type='task' AND channel_id=? AND json_extract(data, '$.outcome.type')='note' ORDER BY seq",
       )
       .all(projectId, taskId)
       .map(messageOf)
-      .filter(message => message.outcome?.taskId === taskId && message.outcome.receivedBy === null);
+      .filter(
+        message =>
+          message.outcome?.taskId === taskId &&
+          (message.outcome.receivedBy === null || endedWithoutResult(message.outcome.receivedBy)),
+      );
   }
   // Records what a message led to; its words, sender and place stay as they were.
   setMessageOutcome(id, outcome) {
