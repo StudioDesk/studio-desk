@@ -72,19 +72,25 @@ const settledTask = task =>
     : ['done', 'denied', 'cancelled'].includes(task.status);
 // Version-line minors and majors move on to the next open minor/major, on its own line. Patches and legacy releases
 // keep their same-line progression. Make the next patch or minor only when there is no open destination.
+// The open destination that already exists, if any: looked up apart from making one, so a release can check it first.
+function laterMilestone(store, projectId, milestone) {
+  const version = parseVersion(milestone.version),
+    versionLine = store.project(projectId).shipsTo && version[2] === 0;
+  return projectMilestones(store, projectId)
+    .filter(item => item.state === 'open' && item.id !== milestone.id)
+    .filter(item => (versionLine ? parseVersion(item.version)[2] === 0 : item.line === milestone.line))
+    .filter(item => compareVersions(parseVersion(item.version), version) > 0)
+    .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
+}
 function nextMilestone(store, projectId, runtime, milestone) {
+  const later = laterMilestone(store, projectId, milestone);
+  if (later) return later;
   const version = parseVersion(milestone.version),
     versionLine = store.project(projectId).shipsTo && version[2] === 0,
-    later = projectMilestones(store, projectId)
-      .filter(item => item.state === 'open' && item.id !== milestone.id)
-      .filter(item => (versionLine ? parseVersion(item.version)[2] === 0 : item.line === milestone.line))
-      .filter(item => compareVersions(parseVersion(item.version), version) > 0)
-      .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
-  if (later) return later;
-  const next =
-    !versionLine && (version[2] > 0 || milestone.line !== null)
-      ? [version[0], version[1], version[2] + 1]
-      : [version[0], version[1] + 1, 0];
+    next =
+      !versionLine && (version[2] > 0 || milestone.line !== null)
+        ? [version[0], version[1], version[2] + 1]
+        : [version[0], version[1] + 1, 0];
   return makeMilestone(store, projectId, runtime, { version: next, by: { type: 'release', from: milestone.id } });
 }
 
@@ -96,8 +102,8 @@ export function releasePlanner(store, projectId, org = projectOrganization(store
   );
 }
 
-// Release on a milestone: refuses while its ideas are open unless moveOpen moves them to the next release,
-// then asks the planner for the notes. Returns the notes task.
+// Release on a milestone: refuses while its ideas are open or waiting unless moveOpen moves them, the open work and the
+// waiting ideas together, to the next release, then asks the planner for the notes. Returns the notes task.
 export function startRelease(store, runtime, projectId, milestoneId, { moveOpen = false } = {}) {
   const { milestone } = milestoneOf(store, projectId, milestoneId),
     root = projectSource(store, projectId, runtime).root;
@@ -107,23 +113,42 @@ export function startRelease(store, runtime, projectId, milestoneId, { moveOpen 
   const tag = tagFor(root, milestone.version);
   if (tagExists(root, tag)) throw new Error(`The repository already has a tag named ${tag}.`);
   const tasks = milestoneTasks(store, projectId, milestoneId),
-    open = tasks.filter(task => !settledTask(task));
-  if (open.length && !moveOpen)
+    open = tasks.filter(task => !settledTask(task)),
+    // Ideas still waiting in the milestone are open work too: a released milestone never sends them.
+    waiting = milestone.waiting ?? [];
+  if ((open.length || waiting.length) && !moveOpen) {
+    const list = (items, name) => items.slice(0, 5).map(name).join(', ') + (items.length > 5 ? ' and more' : ''),
+      start = text => {
+        const words = String(text ?? '').trim();
+        return words.length > 60 ? `${words.slice(0, 60).trimEnd()}…` : words;
+      },
+      parts = [
+        ...(open.length
+          ? [
+              `${open.length} ${open.length === 1 ? 'piece of work is' : 'pieces of work are'} still open on ${milestone.version}: ${list(open, task => `${task.id} (“${task.title}”)`)}`,
+            ]
+          : []),
+        ...(waiting.length
+          ? [
+              `${waiting.length} ${waiting.length === 1 ? 'idea still waits' : 'ideas still wait'} on ${milestone.version}: ${list(waiting, idea => `${idea.id} (“${start(idea.idea)}”)`)}`,
+            ]
+          : []),
+      ];
     throw Object.assign(
       new Error(
-        `${open.length} ${open.length === 1 ? 'piece of work is' : 'pieces of work are'} still open on ${milestone.version}: ${open
-          .slice(0, 5)
-          .map(task => `${task.id} (“${task.title}”)`)
-          .join(
-            ', ',
-          )}${open.length > 5 ? ' and more' : ''}. Release it after they settle, or move them to the next milestone.`,
+        `${parts.join('; ')}. ${
+          waiting.length
+            ? `Release it after ${open.length ? 'they settle and ' : ''}its waiting ideas are sent`
+            : 'Release it after they settle'
+        }, or move them to the next milestone.`,
       ),
-      { status: 409, open: open.map(task => task.id) },
+      { status: 409, open: open.map(task => task.id), waiting: waiting.map(idea => idea.id) },
     );
+  }
   const stories = tasks.filter(task => task.kind === 'studio-development:change' && integrated(task));
   if (!stories.length)
     throw new Error(`Nothing on ${milestone.version} has been integrated yet, so there is nothing to release.`);
-  if (open.length) {
+  if (open.length || waiting.length) {
     // A later version line changes future routing, never the branch of work already executing. As with moveStory,
     // source work that has started stays on its branch; it must settle or close before this release can move it on.
     if (store.project(projectId).shipsTo && parseVersion(milestone.version)[2] === 0) {
@@ -143,10 +168,19 @@ export function startRelease(store, runtime, projectId, milestoneId, { moveOpen 
           { status: 409, open: started.map(task => task.id) },
         );
     }
+    // The waiting ideas follow those already waiting in an existing next milestone, within its limit; a milestone made
+    // for them starts empty. Checked before anything is made or moved.
+    const later = laterMilestone(store, projectId, milestone);
+    if (later && waiting.length && (later.waiting ?? []).length + waiting.length > 100)
+      throw Object.assign(new Error('A milestone holds at most 100 waiting ideas.'), {
+        status: 409,
+        waiting: waiting.map(idea => idea.id),
+      });
     const next = nextMilestone(store, projectId, runtime, milestone),
       line = lineOf(store, projectId, next),
       moved = { milestoneId: next.id, version: next.version, ...(line !== undefined ? { line } : {}) },
       runs = new Set(open.filter(task => !task.release).map(runIdOf));
+    let ideas = [];
     store.tx(() => {
       for (const runId of runs) {
         const run = store.run(runId);
@@ -165,12 +199,28 @@ export function startRelease(store, runtime, projectId, milestoneId, { moveOpen 
         store.putRun({ ...run, ...(line !== undefined ? { line } : {}), release: { ...run.release, ...moved } });
       }
       for (const task of open) if (task.release) store.putTask({ ...task, release: { ...task.release, ...moved } });
+      // Making the next milestone saved the list, so it is read again. Each idea keeps its record, as moving one does.
+      const milestones = projectMilestones(store, projectId),
+        from = milestones.find(item => item.id === milestoneId),
+        to = milestones.find(item => item.id === next.id);
+      ideas = from?.waiting ?? [];
+      if (ideas.length && to) {
+        from.waiting = [];
+        to.waiting = [...(to.waiting ?? []), ...ideas];
+        store.putSetting(key(projectId), milestones);
+      } else ideas = [];
     });
+    const named = [
+      ...(open.length ? [open.map(task => task.id).join(', ')] : []),
+      ...(ideas.length
+        ? [`waiting ${ideas.length === 1 ? 'idea' : 'ideas'} ${ideas.map(idea => idea.id).join(', ')}`]
+        : []),
+    ];
     store.event(
       'release_moved',
       null,
       null,
-      `Open work on ${milestone.version} moved to ${next.version}: ${open.map(task => task.id).join(', ')}.`,
+      `Open work on ${milestone.version} moved to ${next.version}: ${named.join('; ')}.`,
       projectId,
     );
   }

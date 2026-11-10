@@ -9,7 +9,12 @@ import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
 import { waitFor } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
-import { makeMilestone, projectMilestones, useVersionLines } from '../src/connectors/source-milestones.mjs';
+import {
+  addWaitingIdea,
+  makeMilestone,
+  projectMilestones,
+  useVersionLines,
+} from '../src/connectors/source-milestones.mjs';
 import { interruptedReleases, runRelease, startRelease } from '../src/connectors/source-releases.mjs';
 import { Store } from '../src/store.mjs';
 import { sourceResources } from '../src/connectors/source-projects.mjs';
@@ -63,6 +68,147 @@ for (const [version, nextVersion, reuse] of [
     assert.equal(milestone(c, current.id).release.state, 'drafting');
   });
 }
+
+// Waiting ideas are open work too: a released milestone never sends them, so a release moves them on or refuses.
+// 1.1.0 with one integrated story, in a paused organization; the next milestone it moves to is 1.2.0.
+function ideasRelease(t) {
+  return setup(t, 'pass', undefined, {}, true).then(c => {
+    const store = c.app.store,
+      runtime = c.app.runner;
+    saveProjectOrganization(store, runtime.registries, project, developmentOrganization(store.organization()));
+    store.setOrganization({ ...store.organization(), paused: true });
+    git(c.root, ['tag', 'v1.0.0']);
+    const current = makeMilestone(store, project, runtime, { version: '1.1.0' }),
+      base = store.task(c.taskId),
+      release = { milestoneId: current.id, version: '1.1.0', line: current.line };
+    store.putTask({ ...base, id: 'T-done', status: 'done', release, sourceStage: { current: 'integrated' } });
+    return { c, store, runtime, current, base, release };
+  });
+}
+const ideasOf = (count, prefix) =>
+  Array.from({ length: count }, (_, i) => ({ id: `waiting-${prefix}${i}`, idea: `Idea ${prefix}${i}`, at: `t${i}` }));
+const setWaiting = (store, milestoneId, waiting) => {
+  const milestones = projectMilestones(store, project);
+  milestones.find(item => item.id === milestoneId).waiting = waiting;
+  store.putSetting(`milestones:${project}`, milestones);
+};
+const movedEvents = store =>
+  store.db
+    .prepare("SELECT message FROM events WHERE kind='release_moved' ORDER BY seq")
+    .all()
+    .map(event => event.message);
+
+test('a release with moveOpen moves its waiting idea to the next milestone, unchanged, and still drafts its notes', async t => {
+  const { c, store, runtime, current } = await ideasRelease(t),
+    idea = addWaitingIdea(store, project, { milestoneId: current.id, idea: 'Show the release date', autoMode: true });
+  const notes = startRelease(store, runtime, project, current.id, { moveOpen: true });
+  assert.deepEqual(milestone(c, current.id).waiting, [], 'The released milestone holds no waiting ideas.');
+  const next = projectMilestones(store, project).find(item => item.version === '1.2.0');
+  assert.deepEqual(next.waiting[0], idea, 'The idea keeps its id, words, auto mode and time.');
+  assert.match(notes.brief, /- T-done:/);
+  assert.equal(notes.title, 'Draft the 1.1.0 release notes');
+  assert.equal(milestone(c, current.id).release.state, 'drafting');
+  assert.deepEqual(movedEvents(store), [`Open work on 1.1.0 moved to 1.2.0: waiting idea ${idea.id}.`]);
+});
+
+test('a release whose only open work is waiting ideas makes the next milestone and moves them in their order', async t => {
+  const { store, runtime, current } = await ideasRelease(t),
+    ideas = ideasOf(3, 'a');
+  setWaiting(store, current.id, ideas);
+  const before = projectMilestones(store, project).length;
+  startRelease(store, runtime, project, current.id, { moveOpen: true });
+  const after = projectMilestones(store, project);
+  assert.equal(after.length, before + 1);
+  const next = after.at(-1);
+  assert.equal(next.version, '1.2.0');
+  assert.deepEqual(next.waiting, ideas);
+  assert.deepEqual(after.find(item => item.id === current.id).waiting, []);
+  assert.deepEqual(movedEvents(store), [
+    'Open work on 1.1.0 moved to 1.2.0: waiting ideas waiting-a0, waiting-a1, waiting-a2.',
+  ]);
+});
+
+test('a release without moveOpen refuses while ideas wait, names them and changes nothing', async t => {
+  const { c, store, runtime, current, base, release } = await ideasRelease(t);
+  setWaiting(store, current.id, [
+    { id: 'waiting-first', idea: 'Let the director pin a milestone to the top of the board', at: 't0' },
+    ...ideasOf(5, 'b'),
+  ]);
+  const before = projectMilestones(store, project);
+  assert.throws(
+    () => startRelease(store, runtime, project, current.id),
+    error => {
+      assert.equal(error.status, 409);
+      assert.match(error.message, /^6 ideas still wait on 1\.1\.0: waiting-first \(“Let the director pin a milestone/);
+      assert.match(error.message, /waiting-b3 \(“Idea b3”\) and more\. /);
+      assert.doesNotMatch(error.message, /waiting-b4/);
+      assert.deepEqual(error.open, []);
+      assert.deepEqual(error.waiting, ['waiting-first', ...ideasOf(5, 'b').map(idea => idea.id)]);
+      return true;
+    },
+  );
+  assert.deepEqual(projectMilestones(store, project), before, 'No milestone is made and every idea stays in place.');
+  assert.equal(milestone(c, current.id).release, undefined);
+  // Open stories and waiting ideas are named in the same refusal, the stories' words as before.
+  store.putTask({ ...base, id: 'T-open', title: 'Improve later', status: 'ready', release });
+  assert.throws(
+    () => startRelease(store, runtime, project, current.id),
+    error =>
+      error.status === 409 &&
+      /^1 piece of work is still open on 1\.1\.0: T-open \(“Improve later”\); 6 ideas still wait on 1\.1\.0: /.test(
+        error.message,
+      ) &&
+      error.open.join() === 'T-open' &&
+      error.waiting.length === 6,
+  );
+  assert.deepEqual(projectMilestones(store, project), before);
+  assert.equal(store.task('T-open').release.milestoneId, current.id);
+  assert.deepEqual(movedEvents(store), []);
+});
+
+test('moved ideas follow those already waiting in the next milestone, and the event names the stories and the ideas', async t => {
+  const { c, store, runtime, current, base, release } = await ideasRelease(t),
+    next = makeMilestone(store, project, runtime, { version: '1.2.0' }),
+    earlier = ideasOf(2, 'n'),
+    moving = ideasOf(2, 'm');
+  setWaiting(store, next.id, earlier);
+  setWaiting(store, current.id, moving);
+  store.putTask({ ...base, id: 'T-open', status: 'ready', release });
+  const before = projectMilestones(store, project).length;
+  startRelease(store, runtime, project, current.id, { moveOpen: true });
+  assert.equal(projectMilestones(store, project).length, before, 'The existing next milestone is used.');
+  assert.deepEqual(milestone(c, next.id).waiting, [...earlier, ...moving]);
+  assert.deepEqual(milestone(c, current.id).waiting, []);
+  assert.equal(store.task('T-open').release.milestoneId, next.id);
+  assert.deepEqual(movedEvents(store), [
+    'Open work on 1.1.0 moved to 1.2.0: T-open; waiting ideas waiting-m0, waiting-m1.',
+  ]);
+});
+
+test('a release refuses, changing nothing, when the moved ideas would take the next milestone past 100', async t => {
+  const { c, store, runtime, current, base, release } = await ideasRelease(t),
+    next = makeMilestone(store, project, runtime, { version: '1.2.0' });
+  setWaiting(store, next.id, ideasOf(99, 'n'));
+  setWaiting(store, current.id, ideasOf(2, 'm'));
+  store.putTask({ ...base, id: 'T-open', status: 'ready', release });
+  const before = projectMilestones(store, project),
+    open = store.task('T-open').release;
+  assert.throws(
+    () => startRelease(store, runtime, project, current.id, { moveOpen: true }),
+    error => error.status === 409 && /at most 100 waiting ideas/.test(error.message),
+  );
+  assert.deepEqual(projectMilestones(store, project), before);
+  assert.deepEqual(store.task('T-open').release, open);
+  assert.equal(milestone(c, current.id).release, undefined);
+  assert.equal(store.tasks().filter(task => task.releaseOf).length, 0, 'No notes task is made.');
+  assert.deepEqual(movedEvents(store), []);
+  // Exactly 100 fits.
+  setWaiting(store, current.id, ideasOf(1, 'm'));
+  startRelease(store, runtime, project, current.id, { moveOpen: true });
+  assert.equal(milestone(c, next.id).waiting.length, 100);
+  assert.equal(milestone(c, next.id).waiting.at(-1).id, 'waiting-m0');
+});
+
 // Whether git can push to a repository in a folder here. Every such push runs git's receiving side through its shell,
 // which the Codex test sandbox does not let git start, so there Push refuses with git's own reason instead. The probe's
 // repository has a name as long as the test's remote.git: git's receiving side writes each object at a path that, at
