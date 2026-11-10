@@ -15,7 +15,7 @@ import { artifactPath } from '../src/core/artifacts.mjs';
 import { hash } from '../src/core/contracts.mjs';
 import { buildAttemptHistory } from '../src/core/attempt-history.mjs';
 import { expandRun } from '../src/core/graph.mjs';
-import { generalWorkPack, validateWorkReview } from '../src/packs/general-work/index.mjs';
+import { generalWorkPack, maxWorkFileBytes, validateWorkReview } from '../src/packs/general-work/index.mjs';
 
 const kinds = ['general:plan', 'general:work', 'general:review'];
 const shapes = {
@@ -156,6 +156,39 @@ test("an independent review is judged by its verdict; only the controller's chec
   assert.match(
     definition.instructions().layers[0].text,
     /checks record what you verified; put a problem you found in the work in findings, which set the verdict, not in a failed check\./,
+  );
+});
+
+test('the planner is told a work step returns text files only, within the size the work step states', () => {
+  const registries = createRegistries(),
+    org = { taskKinds: kinds, workers: [{ id: 'W-03', enabled: true, roles: ['planner', 'worker'] }] },
+    layer = (kind, title) =>
+      generalWorkPack.tasks
+        .find(definition => definition.kind === kind)
+        .instructions({ org, registries })
+        .layers.find(item => item.title === title).text;
+  const planning = layer('general:plan', 'Planning contract'),
+    work = layer('general:work', 'Work contract'),
+    size = `${maxWorkFileBytes / 1024 / 1024} MiB`;
+  // Both contracts state the one limit the work step's file check enforces.
+  assert.ok(work.includes(`at most ${size}`), work);
+  assert.ok(
+    planning.includes(
+      `A Do the work task returns text files only (for example Markdown, plain text, CSV or JSON), each at most ${size},`,
+    ),
+    planning,
+  );
+  // A plan never asks for a binary file; it asks for the text source and says the binary is not made.
+  assert.match(planning, /never plan a task that returns a PDF, an image or another binary file\./);
+  assert.match(
+    planning,
+    /When the idea asks for one, plan its text source instead \(for example Markdown laid out for one page\) and say in that task's brief that the binary file is not made\./,
+  );
+  // The contract still opens with its JSON line and closes with what to return.
+  assert.doesNotThrow(() => JSON.parse(planning.split('\n')[0]));
+  assert.match(
+    planning,
+    /Return only plan\.json with artifact kind graph-proposal, in this shape \(replace the example tasks\)\.$/,
   );
 });
 
