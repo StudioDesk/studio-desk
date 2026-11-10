@@ -1,7 +1,8 @@
 // The suite with its temporary folder reached through a link (November 9, 2026): STUDIO_TEST_LINKED_TEMP=1 in the
 // suite's harness links a fresh temporary folder (a junction on Windows, a symbolic link elsewhere) and points TEMP,
-// TMP and TMPDIR at the link, as a computer whose temporary folder is reached that way does (macOS's /var). GitHub's
-// runs add a leg with it on. Model-free: child node processes, temporary folders and git repositories.
+// TMP and TMPDIR at the link, as a computer whose temporary folder is reached that way does (macOS's /var). The online
+// checks run one pass, without it; the whole suite with it on is run once per release candidate, by hand. Model-free:
+// child node processes, temporary folders and git repositories.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -45,8 +46,13 @@ console.log(JSON.stringify({
   assert.notEqual(seen.real, seen.folder, 'Its real path is another spelling.');
   assert.notEqual(path.relative(seen.folder, seen.real), '', 'It leads to another folder.');
   assert.deepEqual(seen.temp, [seen.folder, seen.folder, seen.folder], 'TEMP, TMP and TMPDIR all name the link.');
-  assert.ok(!fs.existsSync(seen.folder), 'The link is gone once the process exits.');
-  assert.ok(!fs.existsSync(seen.real), 'So is the folder it led to.');
+  // The link entry itself, not what it leads to: a link left behind with nothing at its end still has an entry.
+  assert.equal(
+    fs.lstatSync(seen.folder, { throwIfNoEntry: false }),
+    undefined,
+    'The link is gone once the process exits.',
+  );
+  assert.equal(fs.lstatSync(seen.real, { throwIfNoEntry: false }), undefined, 'So is the folder it led to.');
 });
 
 // The checks a second spelling of a folder breaks: programs started through a link, one folder by two spellings, and
