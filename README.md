@@ -35,7 +35,7 @@ You'll need:
 
 Then:
 
-1. Download the release and extract it somewhere you'll keep it (or clone the repository and check out `v1.1.0`).
+1. Download the release and extract it somewhere you'll keep it (or clone the repository and check out `v1.2.0`).
 2. Run `npm ci` in that folder, once.
 3. Double-click `start-studio.cmd` on Windows, or run `npm start`.
 4. Open the link the controller's window prints, in Chrome or Edge. It starts with `http://127.0.0.1:4317/launch/` and signs your browser in, so programs on your computer, an agent's tests included, can't act as you. From then on **http://127.0.0.1:4317** opens it, restarts included.
@@ -72,6 +72,12 @@ When something needs you, like approving a plan or accepting a result, it shows 
 
 **House rules** decide how much needs you. Every project starts on the recommended ones: you approve every plan, and work that passes its tests and review goes in on its own. Turn that up or down any time.
 
+Sometimes you know better than a failed check. Accept the work anyway, and your reason goes on the record with it.
+
+## A library your team follows
+
+Some things every piece of work should follow: brand guidelines, a design system, a spec. Put them in the project's library, or add a file the work made, and every agent reads them from then on, with a record of which version it read. Agents can suggest additions too, and your house rules decide whether those wait for you.
+
 ## Watch it happen
 
 Today shows who's working on what and what shipped. Follow each idea from start to finish, see the whole board at a glance, read every change with its tests and reviews, and open any attempt to see exactly what an agent did and said.
@@ -91,6 +97,8 @@ Not code? Start a project without a folder.
 Send ideas to a release. A milestone like 1.2.0 gathers the ideas you send it; when it's done, Release tags it, drafts its notes for you to approve and moves anything unfinished to the next one.
 
 Need to fix something people already run? Open a patch milestone like 1.1.1. Studio desk makes a release line from that version's tag, lands the fix there and carries it up to every newer line, so nobody loses it when they upgrade. When a line has had its day, retire it.
+
+Looking after several versions at once? Give each version its own line: new work lands on the next version's line, and a release ships it to your main branch. A fix made on a newer line can be brought back to an older one, so people still on that version get it too.
 
 ![A project's release lines: v1.0.0 released on main with 1.1.0 open, and a release/1.0 line made from its tag with 1.0.1 open, whose fixes go up to main](.github/images/release-lines.png)
 
