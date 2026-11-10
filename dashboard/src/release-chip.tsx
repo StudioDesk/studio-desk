@@ -60,9 +60,10 @@ export const releaseKind = (version: string) => {
   const [, minor, patch] = versionOf(version);
   return patch ? 'Patch' : minor ? 'Minor' : 'Major';
 };
-// The release new work lands in when nobody picks one: the lowest open milestone on the newest line.
+// The release new work lands in when nobody picks one: the open milestone the controller marks next, by the rule it
+// uses at intake.
 export const nextRelease = (milestones: Milestone[]) =>
-  milestones.filter(item => item.state === 'open' && item.line === null).sort(byVersion)[0];
+  milestones.filter(item => item.state === 'open' && item.next).sort(byVersion)[0];
 export const newestBranch = (overview?: ReleaseOverview) => overview?.lines?.find(line => line.newest)?.branch ?? null;
 
 // The open milestones, lowest version first, each with its kind, line and whether it is the next release.
@@ -290,7 +291,7 @@ export function StoryReleaseChip({
       onError: error => toast(error.message),
     });
   if (task.kind !== story || !release) return null;
-  // A milestone on the newest line names no line, while a story records the branch it is on; both read as branches.
+  // A milestone and a story both name the branch they are on; one that names none is on the newest line.
   const newest = newestBranch(releases.data),
     linked = linkedStories(task, tasks),
     own = release.line ?? newest,

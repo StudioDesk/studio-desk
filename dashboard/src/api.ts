@@ -1173,6 +1173,8 @@ export interface Milestone {
   line: string | null;
   goal: string;
   state: 'open' | 'released';
+  // The open milestone new work lands in when nobody picks one, as the controller names it.
+  next?: boolean;
   waiting: WaitingIdea[];
   release?: MilestoneRelease;
   ideas: ReleaseIdea[];

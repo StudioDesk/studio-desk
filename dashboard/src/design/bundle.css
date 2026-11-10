@@ -7659,6 +7659,29 @@ a.sd-storyrow__title:hover {
   font-size: 12.5px;
   color: var(--ink-3);
 }
+/* On a phone the picker is a sheet over the bottom of the screen, inside its edges, that scrolls when its choices do not
+   fit, wherever the chip sits (the New idea sheet or a story card); its chip rises above the bottom tabs while it is open */
+@media (max-width: 860px) {
+  .sd-relchip:has(> .sd-relpick) {
+    z-index: 45;
+  }
+  .sd-relpick {
+    position: fixed;
+    top: auto;
+    left: var(--space-16);
+    right: var(--space-16);
+    bottom: calc(var(--space-16) + env(safe-area-inset-bottom, 0px));
+    z-index: 45;
+    width: auto;
+    max-height: calc(100vh - 2 * var(--space-16) - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - 2 * var(--space-16) - env(safe-area-inset-bottom, 0px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .sd-relpick > * {
+    flex-shrink: 0;
+  }
+}
 /* A story card opens its page through its title's link, stretched over the card, so the release chip above it can
    move the story without opening it */
 .sd-storycard {
