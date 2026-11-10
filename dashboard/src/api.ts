@@ -433,6 +433,7 @@ export interface AutonomyPolicy {
   retries?: number;
   kinds?: Record<string, KindModes>;
   cycle?: { enabled?: boolean; [field: string]: unknown };
+  sendWaiting?: boolean;
 }
 
 // Model, effort and mode for each tier and CLI, over the employees' own settings.

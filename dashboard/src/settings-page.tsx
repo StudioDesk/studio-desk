@@ -774,6 +774,7 @@ interface RulesDraft {
   enabled: boolean;
   retries: number;
   kinds: Record<string, KindModes>;
+  sendWaiting: boolean;
 }
 
 // House rules (the autonomy policy): who decides at each gate, task type by task type. A tap switches a cell in a
@@ -793,6 +794,7 @@ function HouseRules({ projectId, state }: { projectId: string; state: StudioStat
       kinds: Object.fromEntries(
         available.map(([kind]) => [kind, { approve: 'director', accept: 'director', ...policy.kinds?.[kind] }]),
       ),
+      sendWaiting: !!policy.sendWaiting,
     }),
     [draft, setDraft] = useState<RulesDraft>(from),
     changed = JSON.stringify(draft) !== JSON.stringify(from()),
@@ -818,6 +820,7 @@ function HouseRules({ projectId, state }: { projectId: string; state: StudioStat
           ]),
         ),
         cycle: { ...policy.cycle },
+        sendWaiting: draft.sendWaiting,
       }),
     onSuccess: () => toast('House rules saved. They apply to results from now on.'),
     onError: error => toast(error.message),
@@ -847,6 +850,7 @@ function HouseRules({ projectId, state }: { projectId: string; state: StudioStat
             className="sd-btn sd-btn--sm"
             onClick={() =>
               setDraft(current => ({
+                ...current,
                 enabled: true,
                 retries: 1,
                 kinds: Object.fromEntries(
@@ -985,6 +989,14 @@ function HouseRules({ projectId, state }: { projectId: string; state: StudioStat
               </button>
             ))}
           </span>
+        </span>
+        <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-8)' }}>
+          <b style={{ color: 'var(--ink)' }}>Send waiting ideas when their line is free</b>
+          <Toggle
+            label="Send waiting ideas when their line is free"
+            on={draft.sendWaiting}
+            onChange={() => setDraft(current => ({ ...current, sendWaiting: !current.sendWaiting }))}
+          />
         </span>
         <span>
           <b style={{ color: 'var(--ink)' }}>Failing tests on the live source</b> always stop for you.

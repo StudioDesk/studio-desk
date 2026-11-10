@@ -568,8 +568,88 @@ test('the house rules switch a gate between you and the studio, and save against
         general: { approve: 'auto', accept: 'auto' },
       },
       cycle: { enabled: false },
+      sendWaiting: false,
     },
   });
+});
+
+const sendWaiting = 'Send waiting ideas when their line is free';
+
+test('house rules show the send-waiting rule as one labelled switch beside When something fails, off as recorded', async () => {
+  open('/p/project-x/settings');
+  const region = await screen.findByRole('region', { name: 'House rules' }),
+    rules = within(region),
+    toggle = rules.getByRole('switch', { name: sendWaiting });
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  expect(rules.queryByRole('button', { name: 'Save house rules' })).toBeNull();
+  // It sits in the same line as the other studio-wide rule.
+  const line = rules.getByRole('group', { name: 'When something fails' }).closest('.sd-meta')!;
+  expect(line.contains(toggle)).toBe(true);
+  // Its label is the only text it adds: no note or hint explains it.
+  const mentions = rules.getAllByText(/waiting ideas/);
+  expect(mentions).toHaveLength(1);
+  expect(mentions[0]!.textContent).toBe(sendWaiting);
+  expect(mentions[0]!.tagName).toBe('B');
+});
+
+test('turning the send-waiting switch on saves it with the rest of the house rules against the revision read', async () => {
+  const user = userEvent.setup();
+  open('/p/project-x/settings');
+  const rules = within(await screen.findByRole('region', { name: 'House rules' }));
+  await user.click(rules.getByRole('switch', { name: sendWaiting }));
+  expect(rules.getByRole('switch', { name: sendWaiting }).getAttribute('aria-checked')).toBe('true');
+  await user.click(rules.getByRole('button', { name: 'Save house rules' }));
+  await waitFor(() => expect(commands()).toHaveLength(1));
+  expect(commands()[0]).toEqual({
+    url: '/api/projects/project-x/autonomy',
+    method: 'POST',
+    body: {
+      projectId: 'project-x',
+      expectedRevision: 6,
+      enabled: false,
+      retries: 0,
+      kinds: {
+        'studio-development:change': {
+          approve: 'director',
+          accept: 'director',
+          scope: 'director',
+          integrate: 'director',
+        },
+        general: { approve: 'director', accept: 'director' },
+      },
+      cycle: { enabled: false },
+      sendWaiting: true,
+    },
+  });
+});
+
+test('a recorded send-waiting rule shows on, is kept when other rules are saved, and Use recommended leaves it', async () => {
+  const user = userEvent.setup();
+  controller.shell = {
+    ...controller.shell,
+    autonomy: {
+      ...controller.shell.autonomy,
+      policy: { enabled: false, revision: 6, retries: 0, kinds: {}, cycle: { enabled: false }, sendWaiting: true },
+    },
+  };
+  open('/p/project-x/settings');
+  const rules = within(await screen.findByRole('region', { name: 'House rules' }));
+  expect(rules.getByRole('switch', { name: sendWaiting }).getAttribute('aria-checked')).toBe('true');
+  await user.click(rules.getByRole('button', { name: 'Use recommended' }));
+  expect(rules.getByRole('switch', { name: sendWaiting }).getAttribute('aria-checked')).toBe('true');
+  await user.click(rules.getByRole('button', { name: 'Discard changes' }));
+  await user.click(rules.getByRole('button', { name: 'Retry once with the failure details, then ask you' }));
+  await user.click(rules.getByRole('button', { name: 'Save house rules' }));
+  await waitFor(() => expect(commands()).toHaveLength(1));
+  expect(commands()[0]!.body).toMatchObject({ expectedRevision: 6, enabled: false, retries: 1, sendWaiting: true });
+});
+
+test('Use recommended leaves the send-waiting switch off when it is off', async () => {
+  const user = userEvent.setup();
+  open('/p/project-x/settings');
+  const rules = within(await screen.findByRole('region', { name: 'House rules' }));
+  await user.click(rules.getByRole('button', { name: 'Use recommended' }));
+  expect(rules.getByRole('switch', { name: sendWaiting }).getAttribute('aria-checked')).toBe('false');
 });
 
 test('under the house rules table, a quiet line names each kind the project does not take yet, linking to the Agents page', async () => {
