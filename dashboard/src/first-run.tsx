@@ -48,7 +48,7 @@ const kinds: Record<
     icon: 'code',
     chips: ['its own git repository', 'tests included'],
     lead: chosen =>
-      `It’s a real git repository with a small library and its tests, ${chosen ? 'in a new folder inside the one you chose' : 'kept in your Studio desk data folder, so nothing else on your computer changes'}. You can change any of this later.`,
+      `A real git repository with a small library and its tests, ${chosen ? 'in a new folder inside the one you chose' : 'kept in your Studio desk data folder, so nothing else on your computer changes'}. You can change any of this later.`,
     where: 'A new git repository with one commit.',
     placeholder: 'For example: add a search box that finds items by name',
     steps: ([planner, maker, reviewer]) => [
@@ -484,7 +484,9 @@ function Setup({
       <header className="sd-pagehead">
         <div className="sd-pagehead__text">
           <div className="sd-eyebrow">{kind.title} example</div>
-          <h1 className="sd-pagehead__title">Here’s your sample project.</h1>
+          {/* Nothing is made until a Create button is pressed, so the heading never says the project exists: the
+              director's walkthrough, November 10, read "Here’s your sample project." as made and looked for its folder. */}
+          <h1 className="sd-pagehead__title">Create your sample project.</h1>
           <p className="sd-pagehead__lead sd-start__lead">{kind.lead(!!location)}</p>
         </div>
       </header>
