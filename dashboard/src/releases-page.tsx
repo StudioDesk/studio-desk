@@ -165,7 +165,9 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
     openOn = (line: ReleaseLine) =>
       milestones.filter(item => item.state === 'open' && (item.line ?? newest) === line.branch).sort(byVersion),
     released = milestones.filter(item => item.state === 'released').reverse(),
-    shipping = overview.shipsTo ?? null;
+    shipping = overview.shipsTo ?? null,
+    // Who drafts the release notes, as the controller names them; an older answer names nobody.
+    planner = overview.planner?.name ?? null;
   return (
     <div className="sd-releases">
       <Heading
@@ -229,6 +231,7 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
             opened={opened}
             studio={state}
             switched={!!shipping}
+            planner={planner}
           />
         ))}
         {retired.length > 0 && <RetiredLines projectId={projectId} lines={retired} />}
@@ -244,6 +247,7 @@ function Releases({ projectId, overview, opened }: { projectId: string; overview
               all={milestones}
               opened={opened}
               studio={state}
+              planner={planner}
               compact
             />
           ))}
@@ -550,6 +554,7 @@ function LineRow({
   opened,
   studio,
   switched,
+  planner,
 }: {
   projectId: string;
   line: ReleaseLine;
@@ -560,6 +565,7 @@ function LineRow({
   opened?: string;
   studio: StudioState | null;
   switched: boolean;
+  planner: string | null;
 }) {
   const action = useReleaseAction(projectId),
     [retiring, setRetiring] = useState(false),
@@ -638,6 +644,7 @@ function LineRow({
               all={all}
               opened={opened}
               studio={studio}
+              planner={planner}
             />
           ))}
         </div>
@@ -774,6 +781,7 @@ function MilestoneCard({
   all,
   opened,
   studio,
+  planner,
   compact,
 }: {
   projectId: string;
@@ -781,6 +789,7 @@ function MilestoneCard({
   all: Milestone[];
   opened?: string;
   studio: StudioState | null;
+  planner: string | null;
   compact?: boolean;
 }) {
   const action = useReleaseAction(projectId),
@@ -920,7 +929,11 @@ function MilestoneCard({
                       className="sd-btn sd-btn--sm"
                       disabled={action.isPending}
                       onClick={() =>
-                        action.mutate({ url: `${base}/ideas/${waiting.id}/send`, body: {}, done: 'Sent to Mara.' })
+                        action.mutate({
+                          url: `${base}/ideas/${waiting.id}/send`,
+                          body: {},
+                          done: `Sent to ${planner ?? 'the planner'}.`,
+                        })
                       }
                     >
                       Send now
@@ -937,7 +950,7 @@ function MilestoneCard({
         </>
       )}
       <div className="sd-milestone__actions">
-        <ReleaseState release={release} projectId={projectId} />
+        <ReleaseState release={release} projectId={projectId} planner={planner} />
         {milestone.state === 'open' && !release && (
           <button type="button" className="sd-btn sd-btn--sm" onClick={() => setReleasing(true)}>
             Release {milestone.version}…
@@ -997,11 +1010,16 @@ function MilestoneCard({
       <ReleaseDialog
         open={releasing}
         milestone={milestone}
+        planner={planner}
         busy={action.isPending}
         onClose={() => setReleasing(false)}
         onRelease={moveOpen =>
           action.mutate(
-            { url: `${base}/release`, body: { moveOpen }, done: 'Mara is drafting the release notes.' },
+            {
+              url: `${base}/release`,
+              body: { moveOpen },
+              done: `${planner ?? 'The planner'} is drafting the release notes.`,
+            },
             { onSuccess: () => setReleasing(false) },
           )
         }
@@ -1052,12 +1070,20 @@ const releaseKind = (version: string) => {
 };
 
 // Where a milestone's release stands, in words.
-function ReleaseState({ release, projectId }: { release?: Milestone['release']; projectId: string }) {
+function ReleaseState({
+  release,
+  projectId,
+  planner,
+}: {
+  release?: Milestone['release'];
+  projectId: string;
+  planner: string | null;
+}) {
   if (!release) return null;
   if (release.state === 'drafting')
     return (
       <span className="sd-meta">
-        Mara is drafting the notes.{' '}
+        {planner ?? 'The planner'} is drafting the notes.{' '}
         {release.notesTaskId && (
           <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: release.notesTaskId }}>
             Read and approve them
@@ -1112,12 +1138,14 @@ function ShippedState({ shipped }: { shipped?: MilestoneRelease['shipped'] }) {
 function ReleaseDialog({
   open,
   milestone,
+  planner,
   busy,
   onClose,
   onRelease,
 }: {
   open: boolean;
   milestone: Milestone;
+  planner: string | null;
   busy: boolean;
   onClose: () => void;
   onRelease: (moveOpen: boolean) => void;
@@ -1128,8 +1156,8 @@ function ReleaseDialog({
     <Dialog open={open} label={`Release ${milestone.version}`} busy={busy} onClose={onClose}>
       <h2 className="sd-dialog__title">Release {milestone.version}?</h2>
       <p>
-        Mara drafts the notes from what was integrated, and you approve them before anything is written or tagged. Then
-        the version is written, the line's build and tests run on it, and it is tagged.
+        {planner ?? 'The planner'} drafts the notes from what was integrated, and you approve them before anything is
+        written or tagged. Then the version is written, the line's build and tests run on it, and it is tagged.
       </p>
       {unfinished > 0 && (
         <label className="sd-releases__check">

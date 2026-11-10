@@ -15,6 +15,7 @@ import {
   versionText,
 } from './source-milestones.mjs';
 import { projectSource } from './source-projects.mjs';
+import { releasePlanner } from './source-releases.mjs';
 import { projectCatalog } from '../core/project-organization.mjs';
 import { runIdOf } from '../core/graph.mjs';
 import { recordProject } from '../core/projects.mjs';
@@ -213,9 +214,11 @@ export async function releaseOverview(store, projectId, runtime) {
         },
       };
     });
-  const readiness = project.shipsTo ? null : versionLinesReadiness(store, projectId, runtime, { copy });
+  const readiness = project.shipsTo ? null : versionLinesReadiness(store, projectId, runtime, { copy }),
+    planner = releasePlanner(store, projectId);
   return {
     available: true,
+    planner: planner ? { id: planner.id, name: planner.displayName || planner.id } : null,
     copy: {
       branch: copy,
       clean: !status,

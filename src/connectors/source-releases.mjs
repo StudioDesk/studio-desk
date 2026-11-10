@@ -88,6 +88,14 @@ function nextMilestone(store, projectId, runtime, milestone) {
   return makeMilestone(store, projectId, runtime, { version: next, by: { type: 'release', from: milestone.id } });
 }
 
+// The project's planner, who drafts its release notes: its enabled breakdown owner, or null when it has none. Release
+// and the Releases page both ask here, so they name the same agent.
+export function releasePlanner(store, projectId, org = projectOrganization(store, projectId)) {
+  return (
+    org.workers.find(worker => worker.id === org.kindOwners?.['studio-development:breakdown'] && worker.enabled) ?? null
+  );
+}
+
 // Release on a milestone: refuses while its ideas are open unless moveOpen moves them to the next release,
 // then asks the planner for the notes. Returns the notes task.
 export function startRelease(store, runtime, projectId, milestoneId, { moveOpen = false } = {}) {
@@ -167,9 +175,7 @@ export function startRelease(store, runtime, projectId, milestoneId, { moveOpen 
     );
   }
   const org = projectOrganization(store, projectId),
-    planner = org.workers.find(
-      worker => worker.id === org.kindOwners?.['studio-development:breakdown'] && worker.enabled,
-    );
+    planner = releasePlanner(store, projectId, org);
   if (!planner)
     throw new Error('Choose an enabled breakdown owner in Edit the teams; the planner drafts the release notes.');
   const line = lineOf(store, projectId, milestone),

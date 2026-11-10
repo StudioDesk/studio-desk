@@ -334,6 +334,61 @@ test('Release on an unshipped version line offers the next release and preserves
   ]);
 });
 
+// The Release dialog, its toast, a drafting release's card and Send now's toast, read with the overview's planner.
+async function plannerWords(planner: ReleaseOverview['planner']) {
+  const user = userEvent.setup();
+  if (planner === undefined) delete controller.releases!.planner;
+  else controller.releases!.planner = planner;
+  controller.releases!.milestones![1] = milestone('1.1.0', 'main', {
+    release: { state: 'drafting', notesTaskId: 'T-notes' },
+  });
+  open('/p/project-x/releases?milestone=1.0.1');
+  const patchLine = await screen.findByRole('region', { name: 'release/1.0' });
+  await user.click(within(patchLine).getByRole('button', { name: 'Release 1.0.1…' }));
+  const dialog = screen.getByText(/drafts the notes from what was integrated/).textContent!;
+  await user.click(screen.getByRole('button', { name: 'Draft the notes' }));
+  const drafting = within(document.getElementById('milestone-1.1.0')!).getByText(/is drafting the notes./).textContent!;
+  // The page shows one toast at a time, so each is read when it shows.
+  const released = (await screen.findByText(/is drafting the release notes./)).textContent!;
+  await user.click(within(patchLine).getAllByRole('button', { name: 'Send now' })[0]!);
+  const sent = (await screen.findByText(/^Sent to /)).textContent!;
+  expect(commands()).toEqual([
+    {
+      url: '/api/projects/project-x/milestones/milestone-1.0.1/release',
+      method: 'POST',
+      body: { projectId: 'project-x', moveOpen: true },
+    },
+    {
+      url: '/api/projects/project-x/milestones/milestone-1.0.1/ideas/waiting-a/send',
+      method: 'POST',
+      body: { projectId: 'project-x' },
+    },
+  ]);
+  return { dialog, released, drafting, sent };
+}
+
+test("Release, its toast, a drafting release and Send now name the project's planner", async () => {
+  const words = await plannerWords({ id: 'W-9', name: 'Quinn' });
+  expect(words.dialog).toMatch(/^Quinn drafts the notes from what was integrated, and you approve them/);
+  expect(words.released).toBe('Quinn is drafting the release notes.');
+  expect(words.drafting).toMatch(/^Quinn is drafting the notes./);
+  expect(words.sent).toBe('Sent to Quinn.');
+  expect(Object.values(words).join(' ')).not.toContain('Mara');
+  expect(document.body.textContent).not.toContain('Mara');
+});
+
+test.each([
+  ['names none', null],
+  ['is an older answer without one', undefined],
+])('when the overview %s, Release and Send now say the planner', async (_, planner) => {
+  const words = await plannerWords(planner);
+  expect(words.dialog).toMatch(/^The planner drafts the notes from what was integrated, and you approve them/);
+  expect(words.released).toBe('The planner is drafting the release notes.');
+  expect(words.drafting).toMatch(/^The planner is drafting the notes./);
+  expect(words.sent).toBe('Sent to the planner.');
+  expect(document.body.textContent).not.toContain('Mara');
+});
+
 test('the map shows how the lines fit together: each in time order, made from a release, its fixes carried up', async () => {
   controller.releases!.lines![0]!.from = 'v1.0.0';
   controller.releases!.milestones!.push(milestone('1.2.0', 'main'));

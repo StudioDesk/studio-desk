@@ -9,6 +9,8 @@ import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { projectMilestones, restoreWaitingIdea, takeWaitingIdea } from '../src/connectors/source-milestones.mjs';
+import { saveProjectOrganization } from '../src/core/project-organization.mjs';
+import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
 
 const project = 'project-legacy';
 const make = async (c, version) => {
@@ -187,6 +189,54 @@ test('waiting ideas keep the order the director gives them and move between mile
   assert.equal(taken.index, 1);
   restoreWaitingIdea(store, project, next.id, taken.waiting, taken.index);
   assert.deepEqual(waiting(next.id), [third, second]);
+});
+
+test("the Releases page names the project's planner, the enabled breakdown owner Release asks for the notes", async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    config = developmentOrganization(store.organization()),
+    ownerId = config.kindOwners['studio-development:breakdown'];
+  saveProjectOrganization(store, c.app.runner.registries, project, config);
+  const org = store.organization();
+  org.workers.find(worker => worker.id === ownerId).displayName = 'Quinn';
+  store.setOrganization(org);
+  assert.deepEqual((await overview(c)).planner, { id: ownerId, name: 'Quinn' });
+  // A milestone with one integrated story, so Release reaches the question of who drafts the notes.
+  git(c.root, ['tag', 'v1.0.0']);
+  const next = await make(c, '1.1.0');
+  store.putTask({
+    ...store.task(c.taskId),
+    id: 'T-integrated',
+    status: 'done',
+    sourceStage: { current: 'integrated' },
+    release: { milestoneId: next.id, version: '1.1.0' },
+  });
+  const release = () => c.request(`/api/projects/${project}/milestones/${next.id}/release`, { projectId: project });
+  const refusal = 'Choose an enabled breakdown owner in Edit the teams; the planner drafts the release notes.';
+  // A disabled breakdown owner is no planner: the page names none, and Release refuses as before.
+  const disabled = store.organization();
+  disabled.workers.find(worker => worker.id === ownerId).enabled = false;
+  store.setOrganization(disabled);
+  assert.equal((await overview(c)).planner, null);
+  const refused = await release();
+  assert.equal(refused.status, 400, JSON.stringify(refused.data));
+  assert.equal(refused.data.error, refusal);
+  // Nor is a project without a breakdown owner.
+  const enabled = store.organization();
+  enabled.workers.find(worker => worker.id === ownerId).enabled = true;
+  store.setOrganization(enabled);
+  const owners = { ...config.kindOwners };
+  delete owners['studio-development:breakdown'];
+  saveProjectOrganization(store, c.app.runner.registries, project, {
+    ...config,
+    expectedRevision: 1,
+    kindOwners: owners,
+  });
+  assert.equal((await overview(c)).planner, null);
+  const unset = await release();
+  assert.equal(unset.status, 400, JSON.stringify(unset.data));
+  assert.equal(unset.data.error, refusal);
+  assert.equal(projectMilestones(store, project).find(item => item.id === next.id).release, undefined);
 });
 
 test('a project without the source workflow has no Releases page', async t => {

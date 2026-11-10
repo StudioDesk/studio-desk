@@ -1224,6 +1224,8 @@ export interface ReleaseOverview {
   lines?: ReleaseLine[];
   milestones?: Milestone[];
   tags?: string[];
+  // Who drafts the release notes: the project's enabled breakdown owner, or null when it has none.
+  planner?: { id: string; name: string } | null;
 }
 export const releasesUrl = (projectId: string) => projectPath(projectId, 'releases');
 export const milestonesUrl = (projectId: string) => projectPath(projectId, 'milestones');
