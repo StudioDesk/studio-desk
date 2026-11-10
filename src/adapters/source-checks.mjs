@@ -14,6 +14,7 @@ import { sourceWorktreeRoot, worktreeName } from '../connectors/source-worktrees
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
 import { runInstallStep } from '../connectors/package-installs.mjs';
 import { inSnapshotProcess } from './source-snapshot.mjs';
+import { realPath } from '../core/real-path.mjs';
 import { subscriptionEnvironment } from './process.mjs';
 import { chosenTestSandbox } from './source-test-sandbox.mjs';
 import { builtInSandboxCommand, builtInSandboxReady } from './built-in-sandbox.mjs';
@@ -52,8 +53,17 @@ export const sourceChecksAdapter = {
   deliveryScope:
     'Only the controller runs the fixed Node test command on copied source. Assignments cannot select shell commands, source paths or external tools.',
   start(runtime, entry) {
-    const a = entry.attempt,
-      snapshot = path.join(entry.job, 'source');
+    const a = entry.attempt;
+    // The copy the tests run on is a short folder beside the candidates' working copies (<data>/wt/<name>), at the
+    // same depth and name length as a candidate's, not deep inside the job folder, so a nested test stays within
+    // the Windows path limit. Taken by the worktrees' folder's real spelling, recorded before the copy is made, and
+    // removed when the attempt ends, after a stop too; leftoverWorktrees keeps it while the attempt holds it. It is a
+    // plain copy, never a git worktree, so its removal never goes through git.
+    fs.mkdirSync(sourceWorktreeRoot(runtime), { recursive: true });
+    const snapshot = path.join(realPath(sourceWorktreeRoot(runtime)), worktreeName(a.id));
+    a.sourceCheckFolder = { path: snapshot };
+    runtime.store.updateAttempt(a);
+    entry.cleanup.push(() => fs.rmSync(snapshot, { recursive: true, force: true }));
     // Measure the recorded commit in its own worktree (MP-016 slice 4), which is removed again
     // before the tests start; the copy is what the tests run on. The project's source profile
     // was recorded with the commit when the attempt was prepared. Made in a process of its own.

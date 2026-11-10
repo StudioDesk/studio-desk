@@ -229,14 +229,15 @@ export function leftoverWorktrees(runtime, parent) {
   const kept = new Set(),
     store = runtime.store;
   // Read through the store's lookups, not the whole history: every code story's setup asks.
+  // An idea's checks copy (sourceCheckFolder) stays under the same conditions as a candidate's worktree.
   for (const attempt of [...store.liveAttempts(), ...[...runtime.active.values()].map(entry => entry.attempt)])
     if (
-      attempt.sourceWorktree &&
-      (runtime.active.has(attempt.id) ||
-        attempt.status === 'quarantined' ||
-        (attempt.status === 'interrupted' && !attempt.reconciledAt))
+      runtime.active.has(attempt.id) ||
+      attempt.status === 'quarantined' ||
+      (attempt.status === 'interrupted' && !attempt.reconciledAt)
     )
-      kept.add(path.basename(attempt.sourceWorktree.path));
+      for (const folder of [attempt.sourceWorktree, attempt.sourceCheckFolder])
+        if (folder?.path) kept.add(path.basename(folder.path));
   // So does the worktree an idea's checks or planner measures its snapshot in, while its process makes it.
   for (const entry of runtime.active.values()) if (entry.snapshotWorktree) kept.add(entry.snapshotWorktree);
   // An integration's worktree, and a carry's (1.1 step 4), stay while they run or wait to be reconciled.

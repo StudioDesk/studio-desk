@@ -1025,10 +1025,11 @@ test('source checks measure the current commit in their own worktree while a sto
   const report = JSON.parse(fs.readFileSync(path.join(attempt.outputFolder, 'check-report.json'), 'utf8'));
   assert.equal(report.source.commit, head);
   assert.equal(report.source.root, root);
-  assert.deepEqual(
-    fs.readFileSync(path.join(path.dirname(attempt.outputFolder), 'source', 'src/core/projects.mjs')),
-    committed,
-  );
+  // The checks copied the commit into their own short folder under wt, not the job folder, and
+  // removed it when they ended; the measured hash above still pins the committed bytes.
+  assert.equal(fs.existsSync(path.join(path.dirname(attempt.outputFolder), 'source')), false);
+  assert.ok(attempt.sourceCheckFolder?.path, 'the checks record their copy folder');
+  assert.equal(fs.existsSync(attempt.sourceCheckFolder.path), false);
   // The worktree was removed before the tests ran, and the held locks were never touched.
   assert.equal(fs.existsSync(path.join(store.directory, 'wt', 'c-' + worktreeName(attempt.id))), false);
   assert.equal(git(root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);

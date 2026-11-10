@@ -1,5 +1,5 @@
 // Installed packages for the source pipeline (Decision MP-026, v1.0 item 19b). Every copy the pipeline tests
-// lives inside the controller's data folder (check copies under jobs/, worktrees under wt/), and Node,
+// lives inside the controller's data folder (check copies and worktrees under wt/), and Node,
 // TypeScript, ESLint and Vite find packages by walking up from a file to the nearest node_modules. So one
 // install at <data>/node_modules serves every tested copy, with no link or copy for git or the test
 // sandbox to trip over. Before tests run, the controller makes sure that install matches the copy's lockfile,

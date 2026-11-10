@@ -91,6 +91,7 @@ export class OrganizationPresetRegistry {
   'sourceEditExecution',
   'sourceCandidate',
   'sourceWorktree',
+  'sourceCheckFolder',
   'sourceIntegration',
   'approval',
   'proposalReference',

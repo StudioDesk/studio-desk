@@ -185,7 +185,7 @@ function measuredConsumer(t, mode, partial, budget, changeSelection = false) {
   const original = sourcePlan(root),
     base = { commit: git(root, ['rev-parse', 'HEAD']), branch: 'main' },
     attempt = { id: 'attempt-12345678', taskId: 'T-check-consumer', pid: 123, sourceCheck: { ...original, base } },
-    entry = { attempt, job, output };
+    entry = { attempt, job, output, cleanup: [] };
   if (budget) {
     attempt.assignment = { maxSeconds: 5 };
     attempt.configuration = { testSandbox: 'built-in' };
@@ -243,7 +243,7 @@ function measuredConsumer(t, mode, partial, budget, changeSelection = false) {
   assert.deepEqual(recorded.sourceCheck, { ...original, base });
   assert.equal(installed?.status, 0, installed?.stderr);
   assert.equal(
-    fs.existsSync(path.join(job, 'source', 'node_modules')),
+    fs.existsSync(path.join(recorded.sourceCheckFolder.path, 'node_modules')),
     false,
     'The copy holds no packages of its own.',
   );
@@ -256,13 +256,20 @@ function measuredConsumer(t, mode, partial, budget, changeSelection = false) {
     assert.deepEqual(parsed.args, original.command.args);
   } else assert.deepEqual(invocation.args, original.command.args);
   assert.equal(invocation.input, '');
-  assert.equal(invocation.options.cwd, path.join(job, 'source'));
+  // The tests run on the recorded copy, a short folder beside the candidates' worktrees, not in the job folder.
+  assert.equal(recorded.sourceCheckFolder.path, path.join(realPath(runtime.sourceWorktreeRoot), '12345678'));
+  assert.equal(invocation.options.cwd, recorded.sourceCheckFolder.path);
+  assert.equal(fs.existsSync(path.join(job, 'source')), false);
   assert.equal(invocation.options.resultOnFailure, true);
   assert.equal(
     Object.keys(invocation.options.environment).some(key => /^STUDIO_/i.test(key)),
     !!budget,
   );
-  assert.deepEqual(fs.readdirSync(runtime.sourceWorktreeRoot), [], 'The worktree is gone before tests start.');
+  assert.deepEqual(
+    fs.readdirSync(runtime.sourceWorktreeRoot),
+    [path.basename(recorded.sourceCheckFolder.path)],
+    "The worktree is gone before tests start; only the checks' own copy is there.",
+  );
   const environment = { ...invocation.options.environment };
   delete environment.NODE_TEST_CONTEXT;
   // For budget fixtures, replace the process only after capturing the real wrapper the adapter selected.
