@@ -385,8 +385,13 @@ export function moveLine(root, journal) {
     );
   try {
     git(root, ['update-ref', '-m', 'Studio desk integration', `refs/heads/${branch}`, journal.commit, head]);
-  } catch {
-    throw new Error(`${branch} moved during verification. Approve integration again to merge onto the current tip.`);
+  } catch (error) {
+    // git can move the ref and then exit abnormally, as the November 10 recovery drill did: a line that already holds
+    // the commit counts as moved, and the caller records the landing once from the line.
+    if (lineReached(root, journal)) return;
+    throw new Error(`${branch} moved during verification. Approve integration again to merge onto the current tip.`, {
+      cause: error,
+    });
   }
 }
 // Whether an integration's commit has reached its line.

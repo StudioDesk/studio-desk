@@ -165,6 +165,36 @@ test('the director brings a fix that landed on main back to an older line, which
   assert.match((await act({ line: 'release/1.0' })).data.error, /release\/1\.0 already has it/);
 });
 
+// git can move a line and then report a failure (the November 10 recovery drill): the line already holds the carried
+// commit, so the bring-back counts as made, once, rather than rejected as a line that moved during verification.
+test('a bring-back whose line git moved before reporting a failure is carried once, not rejected as moved', async t => {
+  const c = await lined(t, ['release/1.0']),
+    store = c.app.store,
+    release10 = git(c.root, ['rev-parse', 'refs/heads/release/1.0']),
+    { review, storyId } = await landedFix(c);
+  // Just before the line moves, the carry is recorded 'committing' with its commit: git "moves" the line there first,
+  // so the move's own update-ref fails its old-value check while the line already holds the commit.
+  const updateAttempt = store.updateAttempt.bind(store);
+  let moved = 0;
+  t.mock.method(store, 'updateAttempt', (attempt, ...rest) => {
+    const committing = attempt?.sourceCarries?.find(item => item.state === 'committing' && item.commit);
+    if (committing && !moved++) git(c.root, ['update-ref', `refs/heads/${committing.line}`, committing.commit]);
+    return updateAttempt(attempt, ...rest);
+  });
+  const brought = await c.request(`/api/tasks/${storyId}/bring-back`, { projectId: project, line: 'release/1.0' });
+  assert.equal(brought.status, 202, JSON.stringify(brought.data));
+  const carry = await settledCarry(c, review, 0);
+  assert.equal(moved, 1, 'The line was moved before the bring-back moved it.');
+  assert.equal(carry.state, 'carried', JSON.stringify(carry));
+  assert.equal(git(c.root, ['rev-parse', 'refs/heads/release/1.0']), carry.commit);
+  assert.equal(git(c.root, ['rev-parse', 'refs/heads/release/1.0~1']), release10, 'One commit; nothing landed twice.');
+  assert.equal(store.events().filter(event => event.kind === 'carry_done' && event.task_id === storyId).length, 1);
+  assert.deepEqual(await read(c, `/api/tasks/${storyId}/bring-back`), {
+    lines: [{ line: 'release/1.0', reason: 'release/1.0 already has it.' }],
+  });
+  assert.equal(store.leases().length, 0);
+});
+
 test('a fix brought back goes through every maintained line between, newest first, each from the line before', async t => {
   const c = await lined(t, ['release/1.0', 'release/1.1']),
     { review, integration, storyId } = await landedFix(c);
