@@ -18,17 +18,24 @@ import {
   type Change,
   type ChangeMessage,
   type CommandRecords,
+  type DirectorCall,
   type DirectorCalls,
+  type DirectorCarryCall,
+  type DirectorReleaseCall,
+  type DirectorTaskCall,
   type FinishedPage,
   type Live,
   type ReleaseOverview,
+  type RunRecord,
   type Task,
+  type TaskAction,
   type TaskPage,
 } from './api';
 import { ProjectLive } from './live-context';
-import { RecordSync, queryKeys, readLive } from './records';
+import { RecordSync, callKey, queryKeys, readLive, servedItems } from './records';
 import { StreamFactoryContext } from './stream-context';
-import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
+import { isCarry, isRelease, runStories, type StudioState } from './studio-runs';
+import { createStream, fakeController, shellFixture, taskFixture, type Controller } from './test-controller';
 
 let controller: Controller, client: QueryClient, sync: RecordSync;
 const unsubscribe: (() => void)[] = [];
@@ -553,4 +560,226 @@ test('a following page whose cursor settled out of the set reads the set again f
   const always = livePages(pages, url => url === following);
   await expect(readLive('project-x')).rejects.toThrow('That page of open work no longer exists.');
   expect(always).toHaveLength(6);
+});
+
+// The served calls as the pages draw them (records.ts callKey and servedItems): a stopped release and a stopped carry
+// each get a key of their own and an item with their served actions, and a task's, cleanup's, hold's and resume's
+// call is drawn as before.
+test('callKey and servedItems give a stopped release and a stopped carry their own key and item, and the others as before', () => {
+  const action = (key: string, label: string, path: string, fields: TaskAction['fields']): TaskAction => ({
+    key,
+    label,
+    emphasis: 'primary',
+    closing: false,
+    method: 'POST',
+    path,
+    fields: [{ name: 'projectId', required: true, kind: 'id', value: 'project-x' }, ...fields],
+  });
+  const release: DirectorReleaseCall = {
+      type: 'release',
+      projectId: 'project-x',
+      milestoneId: 'm-120',
+      version: '1.2.0',
+      state: 'needs-reconciliation',
+      taskIds: ['T-notes'],
+      runId: null,
+      kind: 'release-stopped',
+      reason: 'The release of 1.2.0 stopped part-way: The controller stopped.',
+      next: 'Release it again; it is tagged once.',
+      action: 'Release again',
+      details: ['The controller stopped.'],
+      actions: [action('release-again', 'Release again', '/api/projects/project-x/milestones/m-120/release/again', [])],
+    },
+    carry: DirectorCarryCall = {
+      type: 'carry',
+      projectId: 'project-x',
+      taskId: 'T-fix',
+      taskIds: ['T-fix'],
+      title: 'Keep the board',
+      line: 'main',
+      back: false,
+      state: 'rejected',
+      runId: null,
+      kind: 'carry-stopped',
+      reason: 'Carrying this fix to main was turned down.',
+      next: 'Carry it again, or say it is not needed there.',
+      action: 'Carry to main again',
+      details: [],
+      actions: [
+        action('carry', 'Carry to main again', '/api/tasks/T-fix/carry', [
+          { name: 'line', required: true, kind: 'text', value: 'main' },
+        ]),
+      ],
+    },
+    task: DirectorTaskCall = {
+      type: 'task',
+      taskId: 'T-1',
+      runId: null,
+      kind: 'ready',
+      reason: 'Ready.',
+      next: 'Start it.',
+      action: 'Start assignment',
+      details: [],
+      attemptId: null,
+      canClose: true,
+      actions: [],
+    },
+    cleanupCall: DirectorCall = {
+      type: 'cleanup',
+      runId: 'run-1',
+      taskIds: ['T-next'],
+      members: [{ ...task, taskId: 'T-next', runId: 'run-1', reason: 'Waits on stopped work.' }],
+    },
+    hold: DirectorCall = {
+      type: 'hold',
+      provider: 'claude',
+      label: 'Claude Code',
+      taskIds: ['T-1'],
+      runId: null,
+      kind: 'subscription-hold',
+      reason: 'Held.',
+      next: 'Clear it.',
+      action: null,
+      details: [],
+      actions: [],
+    },
+    resume: DirectorCall = {
+      type: 'resume',
+      projectId: 'project-x',
+      taskIds: ['T-1'],
+      runId: null,
+      kind: 'project-resume',
+      reason: 'Restarted.',
+      next: 'Resume it.',
+      action: 'Resume this project',
+      details: [],
+      actions: [],
+    };
+  const tasks = [
+      taskFixture('T-1'),
+      taskFixture('T-next', { workflowReference: { runId: 'run-1', key: 'run-1', id: 'workflow-1', name: 'Flow' } }),
+    ],
+    run: RunRecord = {
+      id: 'run-1',
+      createdAt: '2026-10-29T09:00:00.000Z',
+      brief: 'An idea',
+      workflow: { id: 'workflow-1', name: 'Flow', version: 1 },
+      revisions: [{ revision: 1, at: '2026-10-29T09:00:00.000Z', reason: 'created' }],
+      nodes: [
+        {
+          taskId: 'T-next',
+          key: 'T-next',
+          kind: 'general',
+          title: 'T-next',
+          workerId: 'W-1',
+          dependencies: [],
+          revision: 1,
+        },
+      ],
+    },
+    state: StudioState = { ...shellFixture(), tasks, attempts: [], runs: [run] },
+    stories = runStories(state),
+    served = [task, cleanupCall, hold, resume, release, carry];
+  expect(served.map(callKey)).toEqual([
+    'T-1',
+    'cleanup:run-1',
+    'hold:claude',
+    'resume:project-x',
+    'release:m-120',
+    'carry:T-fix',
+  ]);
+  const items = servedItems(served, state, stories);
+  // Each item keeps its call's key.
+  expect(items.map(callKey)).toEqual(served.map(callKey));
+  expect(items.map(item => [isRelease(item), isCarry(item)])).toEqual([
+    [false, false],
+    [false, false],
+    [false, false],
+    [false, false],
+    [true, false],
+    [false, true],
+  ]);
+  expect(items[4]).toEqual({
+    kind: 'release-stopped',
+    projectId: 'project-x',
+    milestoneId: 'm-120',
+    version: '1.2.0',
+    state: 'needs-reconciliation',
+    taskIds: ['T-notes'],
+    reason: release.reason,
+    next: release.next,
+    action: 'Release again',
+    details: ['The controller stopped.'],
+    actions: release.actions,
+    requiresDirector: true,
+  });
+  expect(items[5]).toEqual({
+    kind: 'carry-stopped',
+    projectId: 'project-x',
+    taskId: 'T-fix',
+    taskIds: ['T-fix'],
+    title: 'Keep the board',
+    line: 'main',
+    back: false,
+    state: 'rejected',
+    reason: carry.reason,
+    next: carry.next,
+    action: 'Carry to main again',
+    details: [],
+    actions: carry.actions,
+    requiresDirector: true,
+  });
+  // The task's, cleanup's, hold's and resume's items as they were drawn before.
+  expect(items[0]).toEqual({
+    taskId: 'T-1',
+    kind: 'ready',
+    reason: 'Ready.',
+    details: [],
+    next: 'Start it.',
+    action: 'Start assignment',
+    requiresDirector: true,
+    text: 'Ready.',
+    cleanup: false,
+    canClose: true,
+  });
+  expect(items[1]).toEqual({
+    run: stories[0],
+    members: [
+      {
+        taskId: 'T-next',
+        kind: 'ready',
+        reason: 'Waits on stopped work.',
+        details: [],
+        next: 'Start it.',
+        action: 'Start assignment',
+        requiresDirector: true,
+        text: 'Waits on stopped work.',
+        cleanup: true,
+        canClose: true,
+      },
+    ],
+    taskIds: ['T-next'],
+    requiresDirector: true,
+  });
+  expect(items[2]).toEqual({
+    kind: 'subscription-hold',
+    provider: 'claude',
+    label: 'Claude Code',
+    resetAt: null,
+    resetTime: null,
+    taskIds: ['T-1'],
+    reason: 'Held.',
+    next: 'Clear it.',
+    action: null,
+    requiresDirector: true,
+  });
+  expect(items[3]).toEqual({
+    kind: 'project-resume',
+    projectId: 'project-x',
+    taskIds: ['T-1'],
+    reason: 'Restarted.',
+    next: 'Resume it.',
+    action: 'Resume this project',
+    requiresDirector: true,
+  });
 });

@@ -156,7 +156,8 @@ export interface TaskPage {
 
 // What needs the director now in one project (GET /api/projects/<id>/calls, src/core/director-calls.mjs): a task's
 // call with its task's actions, a cleanup of a run's unstarted steps with its member task calls, a CLI's usage hold
-// with no known reset, or the project's resume while a restart holds it.
+// with no known reset, the project's resume while a restart holds it, then a milestone's stopped release and a
+// story's turned-down or stopped carry, which only the director moves on.
 export interface DirectorTaskCall {
   type: 'task';
   taskId: string;
@@ -203,7 +204,50 @@ export interface DirectorResumeCall {
   details: string[];
   actions: TaskAction[];
 }
-export type DirectorCall = DirectorTaskCall | DirectorCleanupCall | DirectorHoldCall | DirectorResumeCall;
+// A milestone's release that stopped (turned down, or stopped part-way and needing reconciliation) once the test turn
+// it held is given back. Its one action is Release again, sending only the project's ID. Its taskIds name the
+// release's notes story, when it has one.
+export interface DirectorReleaseCall {
+  type: 'release';
+  projectId: string;
+  milestoneId: string;
+  version: string;
+  state: string;
+  taskIds: string[];
+  runId: null;
+  kind: 'release-stopped';
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+}
+// A story whose next carry (or bring-back, `back`) to a line was turned down or stopped part-way, with the story's
+// own Carry (or Bring back) again and Not needed actions.
+export interface DirectorCarryCall {
+  type: 'carry';
+  projectId: string;
+  taskId: string;
+  taskIds: string[];
+  title: string;
+  line: string;
+  back: boolean;
+  state: string;
+  runId: null;
+  kind: 'carry-stopped';
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+}
+export type DirectorCall =
+  | DirectorTaskCall
+  | DirectorCleanupCall
+  | DirectorHoldCall
+  | DirectorResumeCall
+  | DirectorReleaseCall
+  | DirectorCarryCall;
 export interface DirectorCalls {
   projectId: string;
   items: DirectorCall[];

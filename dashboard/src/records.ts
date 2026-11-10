@@ -37,6 +37,8 @@ import {
 import { useStreamReady } from './stream-context';
 import {
   explain,
+  isCarry,
+  isRelease,
   isResume,
   settled,
   type HomeItem,
@@ -431,8 +433,8 @@ export function useCalls(projectId: string) {
   });
 }
 
-// A call's name on a page, served or worked out from the records: its task, its idea's cleanup, its CLI's hold or its
-// project's resume.
+// A call's name on a page, served or worked out from the records: its task, its idea's cleanup, its CLI's hold, its
+// project's resume, its milestone's stopped release or its story's stopped carry.
 export function callKey(call: DirectorCall | HomeItem) {
   if ('type' in call)
     return call.type === 'hold'
@@ -441,9 +443,15 @@ export function callKey(call: DirectorCall | HomeItem) {
         ? `resume:${call.projectId}`
         : call.type === 'cleanup'
           ? `cleanup:${call.runId}`
-          : call.taskId;
+          : call.type === 'release'
+            ? `release:${call.milestoneId}`
+            : call.type === 'carry'
+              ? `carry:${call.taskId}`
+              : call.taskId;
   if ('members' in call) return `cleanup:${call.run.id}`;
   if (isResume(call)) return `resume:${call.projectId}`;
+  if (isRelease(call)) return `release:${call.milestoneId}`;
+  if (isCarry(call)) return `carry:${call.taskId}`;
   return 'provider' in call ? `hold:${call.provider}` : call.taskId;
 }
 
@@ -472,8 +480,9 @@ function needsItem(call: DirectorTaskCall, state: StudioState, stories: RunStory
 }
 
 // The served calls, in the served order, as the items the pages draw: each task's call joined with the task, attempts
-// and idea the records hold, a cleanup with its members and its idea, a hold with its CLI, and a project's resume with
-// the work waiting only for it. A cleanup whose idea
+// and idea the records hold, a cleanup with its members and its idea, a hold with its CLI, a project's resume with
+// the work waiting only for it, and a milestone's stopped release and a story's stopped carry, each with its served
+// actions. A cleanup whose idea
 // the records do not hold has nothing to draw it by and is left out.
 export function servedItems(calls: DirectorCall[], state: StudioState, stories: RunStory[]): HomeItem[] {
   return calls.flatMap((call): HomeItem[] => {
@@ -501,6 +510,42 @@ export function servedItems(calls: DirectorCall[], state: StudioState, stories: 
           reason: call.reason,
           next: call.next,
           action: call.action,
+          requiresDirector: true,
+        },
+      ];
+    if (call.type === 'release')
+      return [
+        {
+          kind: 'release-stopped',
+          projectId: call.projectId,
+          milestoneId: call.milestoneId,
+          version: call.version,
+          state: call.state,
+          taskIds: call.taskIds,
+          reason: call.reason,
+          next: call.next,
+          action: call.action,
+          details: call.details,
+          actions: call.actions,
+          requiresDirector: true,
+        },
+      ];
+    if (call.type === 'carry')
+      return [
+        {
+          kind: 'carry-stopped',
+          projectId: call.projectId,
+          taskId: call.taskId,
+          taskIds: call.taskIds,
+          title: call.title,
+          line: call.line,
+          back: call.back,
+          state: call.state,
+          reason: call.reason,
+          next: call.next,
+          action: call.action,
+          details: call.details,
+          actions: call.actions,
           requiresDirector: true,
         },
       ];

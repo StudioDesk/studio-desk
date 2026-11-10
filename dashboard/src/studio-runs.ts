@@ -224,10 +224,46 @@ export interface ResumeItem {
   action: string | null;
   requiresDirector: boolean;
 }
-export type HomeItem = (NeedsItem & { run?: RunStory }) | CleanupItem | HoldItem | ResumeItem;
+// A milestone's release that stopped, as the controller lists it (GET /api/projects/:id/calls): one item for the
+// release, with its notes story when it has one and the served Release again action. Only the controller lists it.
+export interface ReleaseItem {
+  kind: 'release-stopped';
+  projectId: string;
+  milestoneId: string;
+  version: string;
+  state: string;
+  taskIds: string[];
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+  requiresDirector: boolean;
+}
+// A story whose next carry or bring-back (`back`) to a line was turned down or stopped part-way, as the controller
+// lists it, with the story's own served Carry (or Bring back) again and Not needed actions.
+export interface CarryItem {
+  kind: 'carry-stopped';
+  projectId: string;
+  taskId: string;
+  taskIds: string[];
+  title: string;
+  line: string;
+  back: boolean;
+  state: string;
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+  requiresDirector: boolean;
+}
+export type HomeItem = (NeedsItem & { run?: RunStory }) | CleanupItem | HoldItem | ResumeItem | ReleaseItem | CarryItem;
 export const isCleanup = (item: HomeItem): item is CleanupItem => 'members' in item;
 export const isHold = (item: HomeItem): item is HoldItem => 'kind' in item && item.kind === 'subscription-hold';
 export const isResume = (item: HomeItem): item is ResumeItem => 'kind' in item && item.kind === 'project-resume';
+export const isRelease = (item: HomeItem): item is ReleaseItem => 'kind' in item && item.kind === 'release-stopped';
+export const isCarry = (item: HomeItem): item is CarryItem => 'kind' in item && item.kind === 'carry-stopped';
 
 // What Home lists (public/runs.js needsYouItems): each run's items, its unstarted steps waiting on stopped work as
 // one cleanup, then work outside any run, then each CLI's usage hold with no known reset, once, then the project's

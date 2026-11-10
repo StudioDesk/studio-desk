@@ -8,6 +8,8 @@ import type {
   CommandRecords,
   DirectorCall,
   DirectorCalls,
+  DirectorCarryCall,
+  DirectorReleaseCall,
   DirectorTaskCall,
   FinishedPage,
   FirstRunTemplates,
@@ -29,6 +31,7 @@ import type {
   StoryActivity,
   StoryPagesView,
   Task,
+  TaskAction,
   TestRecordSummary,
   ToldLayer,
   ToldView,
@@ -38,14 +41,19 @@ import type {
 import type { BringBackTargets } from './bring-back';
 import {
   bringBackable,
+  isCarry,
   isCleanup,
   isHold,
+  isRelease,
   isResume,
   needsYouItems,
   runStories,
   settled,
   taskActions,
+  type CarryItem,
+  type HomeItem,
   type NeedsItem,
+  type ReleaseItem,
   type RunStory,
   type StudioState,
 } from './studio-runs';
@@ -237,7 +245,12 @@ export interface Controller {
   snapshots: Snapshot[];
   // The release an idea's words name, by the words; words not listed name none.
   requests: { url: string; method: string; body?: unknown }[];
-  // Answers a command; the default accepts it, and one that throws refuses it with the error's message, with the
+  // Calls the test supplies beyond those worked out from the records, listed last as the controller lists a stopped
+  // release or carry, each in the list of the project it names (this one or another the test names); none supplies
+  // none.
+  servedCalls?: (DirectorReleaseCall | DirectorCarryCall)[];
+  // Answers a command; the default accepts it (moving a release released again or a carry carried again or not
+  // needed, as the controller does), and one that throws refuses it with the error's message, with the
   // error's `status` (400 without one) and its `fields` beside the message, as src/server.mjs answers a refusal. A
   // promise holds the answer until the test resolves it, or refuses the command when the test rejects it.
   command(url: string, method: string, body: unknown): unknown;
@@ -276,8 +289,150 @@ export function actionsOf(controller: Controller, task: Task) {
   );
 }
 
+// The stops only the director moves on, as the controller words them (src/core/director-calls.mjs): a release or a
+// carry that was turned down or stopped part-way. The stand-in holds no test turn, so none waits for one.
+const stoppedStates = ['rejected', 'needs-reconciliation'],
+  stoppedWith = (text: string, error?: string) => (error ? `${text}: ${error}` : `${text}.`);
+
+// The release call's one action, Release again, as the controller serves it (director-calls.mjs releaseAgainAction).
+export const releaseAgainAction = (projectId: string, milestoneId: string): TaskAction => ({
+  key: 'release-again',
+  label: 'Release again',
+  emphasis: 'primary',
+  closing: false,
+  method: 'POST',
+  path: `/api/projects/${encodeURIComponent(projectId)}/milestones/${encodeURIComponent(milestoneId)}/release/again`,
+  fields: [{ name: 'projectId', required: true, kind: 'id', value: projectId }],
+});
+
+// Each milestone's stopped release the Releases page's records hold, in milestone order (director-calls.mjs
+// releaseCall).
+function releaseCalls(controller: Controller, projectId: string): DirectorReleaseCall[] {
+  return (controller.releases?.milestones ?? []).flatMap((milestone): DirectorReleaseCall[] => {
+    const release = milestone.release;
+    if (!release || !stoppedStates.includes(release.state)) return [];
+    const partWay = release.state === 'needs-reconciliation';
+    return [
+      {
+        type: 'release',
+        projectId,
+        milestoneId: milestone.id,
+        version: milestone.version,
+        state: release.state,
+        taskIds: release.notesTaskId ? [release.notesTaskId] : [],
+        runId: null,
+        kind: 'release-stopped',
+        reason: stoppedWith(
+          `The release of ${milestone.version} ${partWay ? 'stopped part-way' : 'stopped'}`,
+          release.error,
+        ),
+        next: partWay
+          ? "Restore or commit any of the release's files left changed in the project's folder, then release it again; it is tagged once."
+          : 'Release it again; it is tagged once.',
+        action: 'Release again',
+        details: release.error ? [release.error] : [],
+        actions: [releaseAgainAction(projectId, milestone.id)],
+      },
+    ];
+  });
+}
+
+// The attempt a source story records as its review.
+const reviewOf = (task?: Task) => (task?.sourceStage?.review as { attemptId?: string } | undefined)?.attemptId;
+
+// Each story whose next carry on its accepted review was turned down or stopped part-way, in record order, unless
+// the story is already listed, and only while the story's own actions offer to move it on (director-calls.mjs
+// stoppedCarry and carryCall).
+function carryCalls(controller: Controller, projectId: string, listed: Set<string>): DirectorCarryCall[] {
+  return controller.attempts.flatMap((review): DirectorCarryCall[] => {
+    const story = controller.tasks.find(task => task.id === review.taskId);
+    if (!story || listed.has(story.id) || reviewOf(story) !== review.id) return [];
+    const carry = review.sourceCarries?.find(item => !['carried', 'skipped'].includes(item.state));
+    if (!carry || !stoppedStates.includes(carry.state)) return [];
+    const actions = actionsOf(controller, story).filter(action => ['carry', 'carry-skip'].includes(action.key));
+    if (!actions.length) return [];
+    listed.add(story.id);
+    const back = !!carry.back,
+      partWay = carry.state === 'needs-reconciliation',
+      moving = back ? `Bringing this fix back to ${carry.line}` : `Carrying this fix to ${carry.line}`,
+      again = back ? 'bring it back again' : 'carry it again';
+    return [
+      {
+        type: 'carry',
+        projectId,
+        taskId: story.id,
+        taskIds: [story.id],
+        title: story.title,
+        line: carry.line,
+        back,
+        state: carry.state,
+        runId: null,
+        kind: 'carry-stopped',
+        reason: stoppedWith(`${moving} ${partWay ? 'stopped part-way' : 'was turned down'}`, carry.error),
+        next: partWay
+          ? `Restore or commit any of its files left changed in the project's folder, then ${again}.`
+          : `${again[0]!.toUpperCase()}${again.slice(1)}, or say it is not needed there.`,
+        action: actions[0]!.label,
+        details: carry.error ? [carry.error] : [],
+        actions,
+      },
+    ];
+  });
+}
+
+// The stand-in's answer to the release-again and carry routes, as the controller moves the records: a release is
+// ready again, a carry waits again with the director's approval, and a carry not needed is skipped with its reason. A
+// call the test supplied for the same release or story leaves the list with it. Other commands are accepted as they
+// are.
+function standInCommand(controller: Controller, url: string, body: unknown) {
+  const path = url.split('?')[0]!,
+    again = path.match(/^\/api\/projects\/[^/]+\/milestones\/([^/]+)\/release\/again$/)?.[1];
+  if (again) {
+    const milestoneId = decodeURIComponent(again);
+    if (controller.releases?.milestones)
+      controller.releases = {
+        ...controller.releases,
+        milestones: controller.releases.milestones.map(milestone => {
+          if (milestone.id !== milestoneId || !milestone.release) return milestone;
+          const release = { ...milestone.release, state: 'ready' };
+          delete release.error;
+          return { ...milestone, release };
+        }),
+      };
+    controller.servedCalls = controller.servedCalls?.filter(
+      call => !(call.type === 'release' && call.milestoneId === milestoneId),
+    );
+    return { state: 'ready' };
+  }
+  const [, task, step] = path.match(/^\/api\/tasks\/([^/]+)\/(carry|carry-skip)$/) ?? [];
+  if (task) {
+    const taskId = decodeURIComponent(task),
+      { line, reason } = (body ?? {}) as { line?: string; reason?: string },
+      reviewId = reviewOf(controller.tasks.find(item => item.id === taskId)),
+      state = step === 'carry' ? 'waiting' : 'skipped';
+    controller.attempts = controller.attempts.map(attempt =>
+      attempt.id === reviewId && attempt.taskId === taskId && attempt.sourceCarries
+        ? {
+            ...attempt,
+            sourceCarries: attempt.sourceCarries.map(carry => {
+              if (carry.line !== line) return carry;
+              const moved = step === 'carry' ? { ...carry, state, approved: true } : { ...carry, state, reason };
+              delete moved.error;
+              return moved;
+            }),
+          }
+        : attempt,
+    );
+    controller.servedCalls = controller.servedCalls?.filter(call => !(call.type === 'carry' && call.taskId === taskId));
+    return { state };
+  }
+  return {};
+}
+
 // The project's list of calls, as the controller answers it (src/core/director-calls.mjs directorCalls): the shared
-// needsYouItems kept to the director's, each task's call with the actions its task read answers.
+// needsYouItems kept to the director's, each task's call with the actions its task read answers, then each stopped
+// release the Releases page's records hold and each stopped carry the records hold, then the calls the test supplied
+// (servedCalls).
 export function callsOf(controller: Controller, projectId: string): DirectorCalls {
   const state = studioOf(controller),
     actions = (taskId: string) => {
@@ -298,7 +453,11 @@ export function callsOf(controller: Controller, projectId: string): DirectorCall
       actions: actions(item.taskId),
     }),
     items = needsYouItems(state, runStories(state))
-      .filter(item => item.requiresDirector)
+      // The shared rules list no stopped release or carry: those are the controller's own, listed after them.
+      .filter(
+        (item): item is Exclude<HomeItem, ReleaseItem | CarryItem> =>
+          !!item.requiresDirector && !isRelease(item) && !isCarry(item),
+      )
       .map((item): DirectorCall => {
         if (isHold(item))
           return {
@@ -350,6 +509,16 @@ export function callsOf(controller: Controller, projectId: string): DirectorCall
           };
         return taskCall(item);
       });
+  const listed = new Set(
+    items.flatMap(item =>
+      item.type === 'task' ? [item.taskId] : item.type === 'cleanup' ? item.members.map(member => member.taskId) : [],
+    ),
+  );
+  items.push(
+    ...releaseCalls(controller, projectId),
+    ...carryCalls(controller, projectId, listed),
+    ...(controller.servedCalls ?? []).filter(call => call.projectId === projectId),
+  );
   return { projectId, items, count: items.length, version: FakeSource.hello?.version ?? 1 };
 }
 
@@ -407,7 +576,7 @@ export function fakeController(projectId = 'project-x'): Controller {
     libraryTexts: {},
     snapshots: [],
     requests: [],
-    command: () => ({}),
+    command: (url, _method, body) => standInCommand(controller, url, body),
     records: taskIds => {
       const changes = taskIds.map(id => ({ seq: ++version, type: 'task', id, projectId }));
       return {
@@ -454,7 +623,15 @@ export function fakeController(projectId = 'project-x'): Controller {
         if (page === 'calls')
           return respond(
             callsOf(
-              { ...controller, shell: otherShell, tasks: live.tasks, attempts: live.attempts, runs: live.runs },
+              {
+                ...controller,
+                shell: otherShell,
+                tasks: live.tasks,
+                attempts: live.attempts,
+                runs: live.runs,
+                // The Releases page's records are the test's own project's.
+                releases: undefined,
+              },
               otherId!,
             ),
           );

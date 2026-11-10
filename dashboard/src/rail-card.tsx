@@ -18,8 +18,10 @@ import { initials, projectColor } from './frame';
 import type { ProjectCalls } from './rail-calls';
 import { queryKeys, readLive } from './records';
 import {
+  isCarry,
   isCleanup,
   isHold,
+  isRelease,
   isResume,
   liveSummary,
   type HomeItem,
@@ -42,8 +44,9 @@ export interface CallLine {
   verb: string;
   // Where: the idea in the director's words, or the task's title.
   where: string | null;
-  // The call's page, after the project's address (/p/<id>): its idea's page, the step's own page outside any idea, or
-  // Today at Your calls for a hold, a project's resume or a call with neither.
+  // The call's page, after the project's address (/p/<id>): its idea's page, the step's own page outside any idea, the
+  // Releases page for a stopped release, the story's page for a stopped carry, or Today at Your calls for a hold, a
+  // project's resume or a call with neither.
   to: string;
 }
 
@@ -70,6 +73,22 @@ export function callLine(item: HomeItem, state: StudioState, stories: RunStory[]
       to: '#calls',
     };
   }
+  // A milestone's stopped release links to the Releases page, where it is released again.
+  if (isRelease(item))
+    return {
+      key: `release:${item.milestoneId}`,
+      verb: `Release ${item.version} again`,
+      where: null,
+      to: '/releases',
+    };
+  // A story's turned-down or stopped carry links to the story's own page.
+  if (isCarry(item))
+    return {
+      key: `carry:${item.taskId}`,
+      verb: `${item.back ? 'Bring back' : 'Carry'} to ${item.line} again`,
+      where: item.title,
+      to: `/tasks/${encodeURIComponent(item.taskId)}`,
+    };
   if (isCleanup(item)) {
     const count = item.members.length;
     return {

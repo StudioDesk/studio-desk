@@ -11,6 +11,7 @@ import {
   type CommandRecords,
   type DirectorCall,
   type Task,
+  type TaskAction,
   type Worker,
 } from './api';
 import { askedPaths, commandRequest, decisionState, fileRequest, sendIdeaLimit, storyIdea } from './decisions';
@@ -30,15 +31,19 @@ import { callKey, finishedState, queryKeys, servedItems, useCalls, useFinished, 
 import {
   active,
   integrationAction,
+  isCarry,
   isCleanup,
   isHold,
+  isRelease,
   isResume,
   liveSummary,
   runStories,
+  type CarryItem,
   type CleanupItem,
   type HoldItem,
   type HomeItem,
   type NeedsItem,
+  type ReleaseItem,
   type ResumeItem,
   type RunStory,
   type StudioState,
@@ -69,8 +74,16 @@ function useAct(projectId: string) {
   const toast = useToast(),
     client = useQueryClient();
   const request = useMutation({
-    mutationFn: ({ path, body = {} }: { path: string; body?: Record<string, unknown>; done?: Done }) =>
-      send<Record<string, unknown>>(path, { projectId, ...body }),
+    mutationFn: ({
+      path,
+      body = {},
+      method = 'POST',
+    }: {
+      path: string;
+      body?: Record<string, unknown>;
+      method?: TaskAction['method'];
+      done?: Done;
+    }) => send<Record<string, unknown>>(path, { projectId, ...body }, method),
     onSuccess: (result, { done }) => {
       if (!result?.records) void client.invalidateQueries({ queryKey: queryKeys.calls(projectId) });
       const message = done?.(result);
@@ -82,10 +95,17 @@ function useAct(projectId: string) {
   return {
     busy: request.isPending,
     act: (path: string, body?: Record<string, unknown>, done?: Done) => request.mutate({ path, body, done }),
+    // A served action (api.ts TaskAction), sent exactly as served: its method and path, with its fields' values and
+    // the words the director gave (a required reason).
+    sendAction: (action: TaskAction, words: Record<string, unknown> = {}, done?: Done) =>
+      request.mutate({ path: action.path, method: action.method, body: { ...valuesOf(action), ...words }, done }),
   };
 }
 type Done = (result: Record<string, unknown>) => string | void;
 const taskPath = (task: Task, step: string) => `/api/tasks/${encodeURIComponent(task.id)}/${step}`;
+// The values a served action carries for its fields (the project's ID, a carry's line).
+const valuesOf = (action: TaskAction) =>
+  Object.fromEntries(action.fields.filter(field => 'value' in field).map(field => [field.name, field.value]));
 
 interface Action {
   label: string;
@@ -94,6 +114,8 @@ interface Action {
   emphasis: 'primary' | 'default' | 'quiet';
   onClick?: () => void;
   task?: string;
+  // A link to the project's Releases page.
+  releases?: boolean;
 }
 
 // The quieter choices behind "More choices" on a phone; on a wider screen they show in the row.
@@ -134,6 +156,12 @@ function ActionButton({ action, projectId, menu }: { action: Action; projectId: 
   if (action.task)
     return (
       <Link className={className} to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: action.task }}>
+        {words}
+      </Link>
+    );
+  if (action.releases)
+    return (
+      <Link className={className} to="/p/$projectId/releases" params={{ projectId }}>
         {words}
       </Link>
     );
@@ -941,6 +969,101 @@ function ResumeCall({ projectId, state, item }: { projectId: string; state: Stud
   );
 }
 
+// A stopped release's or carry's words: what happened and what to do, then any recorded error its reason does not
+// already say.
+function StoppedWords({ item }: { item: ReleaseItem | CarryItem }) {
+  const more = item.details.filter(detail => !item.reason.includes(detail));
+  return (
+    <>
+      <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
+        {item.reason} {item.next}
+      </p>
+      {more.map(detail => (
+        <p key={detail} style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
+          {detail}
+        </p>
+      ))}
+    </>
+  );
+}
+
+// A milestone's release that stopped: Release again, sent exactly as the controller serves it, and the way to the
+// Releases page.
+function ReleaseCall({ projectId, item }: { projectId: string; item: ReleaseItem }) {
+  const { sendAction, busy } = useAct(projectId);
+  return (
+    <Decision
+      projectId={projectId}
+      busy={busy}
+      chip={chip('you', 'Release stopped')}
+      time=""
+      title={`Release ${item.version} stopped`}
+      actions={[
+        ...item.actions.map(
+          (action): Action => ({
+            label: action.label,
+            emphasis: action.emphasis,
+            onClick: () => sendAction(action, {}, () => `Releasing ${item.version} again.`),
+          }),
+        ),
+        { label: 'Open releases', emphasis: 'default', releases: true },
+      ]}
+    >
+      <StoppedWords item={item} />
+    </Decision>
+  );
+}
+
+// A story whose carry or bring-back to a line was turned down or stopped part-way: the story's own Carry (or Bring
+// back) again and Not needed, sent exactly as served, Not needed after the reason it requires, and the way to the
+// story.
+function CarryCall({ projectId, item }: { projectId: string; item: CarryItem }) {
+  const { sendAction, busy } = useAct(projectId),
+    [asking, setAsking] = useState<TaskAction | null>(null),
+    { line, back } = item,
+    skipped = () => (back ? `Not bringing the fix back to ${line}.` : `Not needed on ${line}.`);
+  const actions: Action[] = item.actions.map(action => ({
+    label: action.label,
+    emphasis: action.emphasis,
+    onClick:
+      action.key === 'carry-skip'
+        ? () => setAsking(action)
+        : () =>
+            sendAction(action, {}, () => (back ? `Bringing the fix back to ${line}.` : `Carrying the fix to ${line}.`)),
+  }));
+  return (
+    <Decision
+      projectId={projectId}
+      busy={busy}
+      chip={chip('you', back ? 'Bring back stopped' : 'Carry stopped')}
+      time=""
+      title={item.title}
+      origin={back ? `Bringing the fix back to ${line}` : `Carrying the fix to ${line}`}
+      actions={[...actions, { label: 'Open the story', emphasis: 'default', task: item.taskId }]}
+    >
+      <StoppedWords item={item} />
+      <NoteDialog
+        open={!!asking}
+        title={`Not needed on ${line}?`}
+        text={
+          back
+            ? `${line} won't get the fix brought back. Your reason is kept with the story, and any older line it was going on to still gets it.`
+            : `${line} won't get this fix. Your reason is kept with the story, and any newer line is still offered it.`
+        }
+        label="Why"
+        submit="Skip it"
+        required
+        onClose={() => setAsking(null)}
+        onSubmit={reason => {
+          const action = asking;
+          setAsking(null);
+          if (action) sendAction(action, { reason }, skipped);
+        }}
+      />
+    </Decision>
+  );
+}
+
 // Unstarted steps that wait on stopped work: close them, or recover what they wait on.
 function CleanupCall({ projectId, state, item }: { projectId: string; state: StudioState; item: CleanupItem }) {
   const { act, busy } = useAct(projectId),
@@ -994,6 +1117,8 @@ function Call(props: CallProps & { item: HomeItem }) {
   const { item, state, projectId } = props;
   if (isHold(item)) return <HoldCall projectId={projectId} state={state} item={item} />;
   if (isResume(item)) return <ResumeCall projectId={projectId} state={state} item={item} />;
+  if (isRelease(item)) return <ReleaseCall projectId={projectId} item={item} />;
+  if (isCarry(item)) return <CarryCall projectId={projectId} item={item} />;
   if (isCleanup(item)) return <CleanupCall projectId={projectId} state={state} item={item} />;
   const task = state.tasks.find(record => record.id === item.taskId);
   if (!task) return null;
@@ -1404,7 +1529,11 @@ function Moving({
   calls: HomeItem[];
 }) {
   const added = policyAddedToday(useLibraryIndex(projectId).data),
-    listed = new Set(calls.flatMap(call => (isHold(call) || isResume(call) || isCleanup(call) ? call.taskIds : []))),
+    listed = new Set(
+      calls.flatMap(call =>
+        isHold(call) || isResume(call) || isCleanup(call) || isRelease(call) || isCarry(call) ? call.taskIds : [],
+      ),
+    ),
     answers = state.tasks.flatMap(task => {
       const answer = changeableAnswer(task),
         asking =
@@ -1414,7 +1543,13 @@ function Moving({
     answered = new Set(answers.map(({ task }) => task.id)),
     waits = items.filter(
       (item): item is NeedsItem & { run?: RunStory } =>
-        !isHold(item) && !isResume(item) && !isCleanup(item) && !listed.has(item.taskId) && !answered.has(item.taskId),
+        !isHold(item) &&
+        !isResume(item) &&
+        !isCleanup(item) &&
+        !isRelease(item) &&
+        !isCarry(item) &&
+        !listed.has(item.taskId) &&
+        !answered.has(item.taskId),
     ),
     count = answers.length + waits.length + added.length;
   if (!count) return null;
@@ -1476,7 +1611,8 @@ const answeredTasks = (records: CommandRecords) => [
   }),
 ];
 
-// The tasks a served call stands for: its task, a cleanup's steps or the work waiting on a hold.
+// The tasks a served call stands for: its task, a cleanup's steps, the work waiting on a hold or a resume, a stopped
+// release's notes story or a stopped carry's story.
 const callTasks = (call: DirectorCall) => (call.type === 'task' ? [call.taskId] : call.taskIds);
 
 export function TodayPage({ projectId }: { projectId: string }) {
@@ -1611,7 +1747,12 @@ export function TodayPage({ projectId }: { projectId: string }) {
                 : 'Send an idea, and the calls it needs appear here.'}
             </div>
           )}
-          <Moving projectId={projectId} state={state} items={waits} calls={own} />
+          <Moving
+            projectId={projectId}
+            state={state}
+            items={waits}
+            calls={[...own, ...calls.filter(item => isRelease(item) || isCarry(item))]}
+          />
         </section>
         <aside className="sd-columns__side sd-wide-only" aria-label="On the floor">
           <h2 className="sd-section-title">On the floor</h2>

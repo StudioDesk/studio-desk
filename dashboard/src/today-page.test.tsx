@@ -6,7 +6,16 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary, CommandRecords, DirectorCalls, LibraryProposal, Live, Task } from './api';
+import type {
+  AttemptSummary,
+  CommandRecords,
+  DirectorCalls,
+  LibraryProposal,
+  Live,
+  Milestone,
+  MilestoneRelease,
+  Task,
+} from './api';
 import { App } from './app';
 import type { Answer, Question } from './questions';
 import { createAppRouter } from './router';
@@ -1637,4 +1646,264 @@ test('a flow story on its second round reads Attempt 1 of 3 on the floor, as the
   open();
   const live = await screen.findByRole('region', { name: 'Eli is working' });
   expect(within(live).getByText('Attempt 1 of 3 · doing the work')).toBeTruthy();
+});
+
+// The two stops only the director moves on, as the controller lists them after the shared calls
+// (src/core/director-calls.mjs): a milestone's release that stopped, and a story whose carry to a line was turned down.
+const stoppedRelease = (release: MilestoneRelease): Milestone => ({
+  id: 'm-120',
+  version: '1.2.0',
+  line: 'release/1.2',
+  goal: '',
+  state: 'open',
+  waiting: [],
+  release,
+  ideas: [],
+  movedIn: [],
+  counts: { ideas: 0, waiting: 0, stories: 0, integrated: 0, started: 0 },
+});
+const releaseStopped = () => {
+  controller.releases = {
+    available: true,
+    milestones: [
+      stoppedRelease({
+        state: 'needs-reconciliation',
+        error: 'The controller stopped while this release moved its line.',
+        notesTaskId: 'T-notes',
+      }),
+    ],
+  };
+};
+// A fix that landed, whose carry (or bring-back) to a line was turned down.
+const landedFix = (carry: NonNullable<AttemptSummary['sourceCarries']>[number]) => {
+  controller.attempts.push({
+    id: 'attempt-review',
+    taskId: 'T-fix',
+    status: 'accepted',
+    workerId: 'W-1',
+    assignment: { kind: 'studio-development:change-review' },
+    candidateReviewVerdict: 'pass',
+    sourceIntegration: { state: 'integrated' },
+    sourceCarries: [carry],
+  });
+  controller.tasks.push(
+    taskFixture('T-fix', {
+      title: 'Keep the board when a filter is empty',
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'integration',
+        current: 'integrated',
+        review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+      },
+    }),
+  );
+};
+// The release notes story, waiting on running work: on its own a wait under Moving on their own.
+const notesWaiting = () => {
+  controller.tasks.push(
+    taskFixture('T-2', { title: 'Build the board', status: 'running', lastAttemptId: 'attempt-2' }),
+    taskFixture('T-notes', { title: 'Write the notes', status: 'blocked', queued: true, dependencies: ['T-2'] }),
+  );
+  controller.attempts.push({
+    id: 'attempt-2',
+    taskId: 'T-2',
+    status: 'running',
+    workerId: 'W-1',
+    startedAt: new Date().toISOString(),
+  });
+};
+const cardOf = async (region: HTMLElement, title: string) =>
+  within((await within(region).findByRole('heading', { level: 3, name: title })).closest('article')!);
+// Words the director reads carry no file name, record ID or internal key.
+const plainWords =
+  /m-120|T-notes|T-fix|attempt-|needs-reconciliation|release-stopped|carry-stopped|\.(mjs|json|tsx?)\b/;
+
+test('a stopped release is one call titled for its release, and Release again sends only the project and leaves', async () => {
+  const user = userEvent.setup();
+  releaseStopped();
+  notesWaiting();
+  open();
+  const region = await calls(),
+    card = await cardOf(region, 'Release 1.2.0 stopped');
+  expect(callsShown(region)).toEqual({ cards: ['Release 1.2.0 stopped'], count: '1 waiting on you' });
+  expect(card.getByText('Release stopped')).toBeTruthy();
+  expect(
+    card.getByText(
+      /^The release of 1\.2\.0 stopped part-way: The controller stopped while this release moved its line\. Restore or commit/,
+    ),
+  ).toBeTruthy();
+  expect(card.getByRole('link', { name: 'Open releases' }).getAttribute('href')).toBe('/p/project-x/releases');
+  expect(card.getByRole('button', { name: 'Release again' }).className).toMatch(/sd-btn--primary/);
+  expect(region.textContent).not.toMatch(plainWords);
+  // The notes story it stands for is on the call, not also moving on its own.
+  expect(fold()).toBeNull();
+
+  await user.click(card.getByRole('button', { name: 'Release again' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/projects/project-x/milestones/m-120/release/again',
+        method: 'POST',
+        body: { projectId: 'project-x' },
+      },
+    ]),
+  );
+  expect(await screen.findByText('Releasing 1.2.0 again.')).toBeTruthy();
+  // The list read again holds no release, and the card is gone.
+  await waitFor(() => expect(within(region).queryByRole('heading', { name: 'Release 1.2.0 stopped' })).toBeNull());
+  expect(controller.releases?.milestones?.[0]?.release?.state).toBe('ready');
+});
+
+test('a turned-down carry is one call titled with its story, and Carry again sends the served carry with its line', async () => {
+  const user = userEvent.setup();
+  landedFix({ line: 'main', state: 'rejected', error: 'The conflict needs a different approach.' });
+  open();
+  const region = await calls(),
+    card = await cardOf(region, 'Keep the board when a filter is empty');
+  expect(callsShown(region)).toEqual({ cards: ['Keep the board when a filter is empty'], count: '1 waiting on you' });
+  expect(card.getByText('Carry stopped')).toBeTruthy();
+  expect(card.getByText('Carrying the fix to main')).toBeTruthy();
+  expect(
+    card.getByText(
+      'Carrying this fix to main was turned down: The conflict needs a different approach. Carry it again, or say it is not needed there.',
+    ),
+  ).toBeTruthy();
+  expect(card.getAllByRole('button').map(button => button.textContent)).toEqual([
+    'Carry to main again',
+    'Not needed on main…',
+  ]);
+  expect(card.getByRole('link', { name: 'Open the story' }).getAttribute('href')).toBe('/p/project-x/tasks/T-fix');
+  expect(region.textContent).not.toMatch(plainWords);
+
+  await user.click(card.getByRole('button', { name: 'Carry to main again' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/tasks/T-fix/carry', method: 'POST', body: { projectId: 'project-x', line: 'main' } },
+    ]),
+  );
+  expect(await screen.findByText('Carrying the fix to main.')).toBeTruthy();
+  await waitFor(() =>
+    expect(within(region).queryByRole('heading', { name: 'Keep the board when a filter is empty' })).toBeNull(),
+  );
+});
+
+test('Not needed on a turned-down carry asks for the reason, then sends the served carry-skip with line and reason', async () => {
+  const user = userEvent.setup();
+  landedFix({ line: 'main', state: 'rejected' });
+  open();
+  const card = await cardOf(await calls(), 'Keep the board when a filter is empty');
+  await user.click(card.getByRole('button', { name: 'Not needed on main…' }));
+  const skip = within(await screen.findByRole('dialog', { name: 'Not needed on main?' }));
+  // Nothing is sent without a reason.
+  expect((skip.getByRole('button', { name: 'Skip it' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(posted()).toEqual([]);
+  await user.type(skip.getByLabelText('Why'), 'main replaced this code.');
+  await user.click(skip.getByRole('button', { name: 'Skip it' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-fix/carry-skip',
+        method: 'POST',
+        body: { projectId: 'project-x', line: 'main', reason: 'main replaced this code.' },
+      },
+    ]),
+  );
+  expect(await screen.findByText('Not needed on main.')).toBeTruthy();
+  await waitFor(() =>
+    expect(screen.queryByRole('heading', { name: 'Keep the board when a filter is empty' })).toBeNull(),
+  );
+});
+
+test('a turned-down bring-back is worded as bringing the fix back', async () => {
+  const user = userEvent.setup();
+  landedFix({ line: 'release/1.0', state: 'rejected', back: true, approved: true });
+  open();
+  const card = await cardOf(await calls(), 'Keep the board when a filter is empty');
+  expect(card.getByText('Bring back stopped')).toBeTruthy();
+  expect(card.getByText('Bringing the fix back to release/1.0')).toBeTruthy();
+  expect(
+    card.getByText(
+      'Bringing this fix back to release/1.0 was turned down. Bring it back again, or say it is not needed there.',
+    ),
+  ).toBeTruthy();
+  expect(card.getAllByRole('button').map(button => button.textContent)).toEqual([
+    'Bring back to release/1.0 again',
+    'Not needed on release/1.0…',
+  ]);
+  await user.click(card.getByRole('button', { name: 'Not needed on release/1.0…' }));
+  const skip = within(await screen.findByRole('dialog', { name: 'Not needed on release/1.0?' }));
+  expect(skip.getByText(/^release\/1\.0 won't get the fix brought back\./)).toBeTruthy();
+  await user.click(skip.getByRole('button', { name: 'Cancel' }));
+  await user.click(card.getByRole('button', { name: 'Bring back to release/1.0 again' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/tasks/T-fix/carry', method: 'POST', body: { projectId: 'project-x', line: 'release/1.0' } },
+    ]),
+  );
+  expect(await screen.findByText('Bringing the fix back to release/1.0.')).toBeTruthy();
+});
+
+test('a stopped release and a turned-down carry count in Your calls and the rail, and neither moves on its own', async () => {
+  releaseStopped();
+  notesWaiting();
+  landedFix({ line: 'main', state: 'rejected' });
+  open();
+  const region = await calls();
+  await waitFor(() =>
+    expect(callsShown(region)).toEqual({
+      cards: ['Release 1.2.0 stopped', 'Keep the board when a filter is empty'],
+      count: '2 waiting on you',
+    }),
+  );
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
+  expect(screen.getAllByLabelText('2 calls for you').length).toBeGreaterThan(0);
+  expect(fold()).toBeNull();
+  expect(region.textContent).not.toMatch(plainWords);
+});
+
+test('a release call the controller serves is drawn from its words and sends the action as served', async () => {
+  const user = userEvent.setup();
+  controller.servedCalls = [
+    {
+      type: 'release',
+      projectId: 'project-x',
+      milestoneId: 'm-9',
+      version: '0.9.0',
+      state: 'rejected',
+      taskIds: [],
+      runId: null,
+      kind: 'release-stopped',
+      reason: 'The release of 0.9.0 stopped: Its tests failed.',
+      next: 'Release it again; it is tagged once.',
+      action: 'Release again',
+      details: ['Its tests failed.', 'The tag was not made.'],
+      actions: [
+        {
+          key: 'release-again',
+          label: 'Release again',
+          emphasis: 'primary',
+          closing: false,
+          method: 'POST',
+          path: '/api/projects/project-x/milestones/m-9/release/again',
+          fields: [{ name: 'projectId', required: true, kind: 'id', value: 'project-x' }],
+        },
+      ],
+    },
+  ];
+  open();
+  const card = await cardOf(await calls(), 'Release 0.9.0 stopped');
+  // The recorded error is said once, with the reason; a detail the reason does not hold is said on its own.
+  expect(card.getAllByText(/Its tests failed\./)).toHaveLength(1);
+  expect(card.getByText('The tag was not made.')).toBeTruthy();
+  await user.click(card.getByRole('button', { name: 'Release again' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/projects/project-x/milestones/m-9/release/again', method: 'POST', body: { projectId: 'project-x' } },
+    ]),
+  );
+  await waitFor(() => expect(screen.queryByRole('heading', { name: 'Release 0.9.0 stopped' })).toBeNull());
 });
