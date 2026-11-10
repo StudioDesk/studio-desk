@@ -7053,6 +7053,8 @@ button.sd-tab {
   gap: 10px;
   padding: 16px 18px;
 }
+/* The Release dialog's Move the open work box: as far from the buttons below it as the paragraph above it is from
+   it, since the dialog spaces its parts by their own margins (the director's walkthrough, November 10: it touched them) */
 .sd-releases__check {
   display: flex;
   gap: 10px;
@@ -7060,6 +7062,7 @@ button.sd-tab {
   padding: 12px 14px;
   border-radius: var(--radius-md);
   border: 1.5px solid var(--line-2);
+  margin-bottom: 1em;
 }
 .sd-rellines {
   display: flex;
