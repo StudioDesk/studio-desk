@@ -441,7 +441,10 @@ test('a command asked for its records answers with the changes it recorded and t
     { store, watch, until } = c;
   const [id, plain, unnamed] = [await assignment(c), await assignment(c), await assignment(c)];
   const stream = await watch();
-  await until(() => stream.named('change').length === 1, 'the connection change event');
+  // The three assignments' own throttled change event can reach the stream beside its connection event on a slow
+  // computer (GitHub's Windows runner, November 10, 2026: waiting for exactly one timed out), so the wait takes the
+  // first and lets more come; what the command recorded is told apart below by its sequence numbers.
+  await until(() => stream.named('change').length >= 1, 'the connection change event');
   const { start } = stream.named('change')[0].data,
     before = store.version,
     body = { projectId: 'project-legacy' };
