@@ -21,7 +21,7 @@ import { waitFor } from './wait-for.mjs';
 import { testTurnResource } from '../src/core/test-turn.mjs';
 import { attemptResource } from '../src/core/store.mjs';
 import { recordedProcessesEnded } from '../src/core/orchestrator.mjs';
-import { live, processStartTimes } from '../src/adapters/process.mjs';
+import { live, processStartTimes, startTimeSlackMs } from '../src/adapters/process.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { sourceResources } from '../src/connectors/source-projects.mjs';
 import { keptTurnChecks } from '../src/core/autonomy-runtime.mjs';
@@ -333,32 +333,161 @@ for (const [label, field] of [
   });
 
 test('the restart check reads every process an attempt recorded', async t => {
-  const ended = exited(),
-    gone = ended.pid,
-    attempt = liveProcess(t, { leader: true }),
+  // The stubbed cases decide every answer themselves: made-up IDs with fixed recorded start times, and what answers to
+  // each ID set by the case (`machine`), never by whatever this computer runs. The liveness signal
+  // (process.kill(target, 0)) and the start time reader (processStartTimes.read) are replaced, and both answer by
+  // Math.abs(target), since on macOS and Linux the attempt's own ID is signalled as the process group it leads (live()).
+  // An ID a case did not set is a stray, so no real process is signalled or looked up.
+  const attempt = { pid: 4242, startedAt: '2026-11-03T09:00:00.000Z' },
     // Not the leader of a process group, as an agent's run of the whole suite is not: it still counts as running.
-    suite = liveProcess(t, { leader: false });
-  assert.equal(recordedProcessesEnded({}), true, 'An attempt that recorded no process has none running.');
+    suite = { pid: 4343, startedAt: '2026-11-03T09:00:05.000Z' },
+    ended = { pid: 4141, startedAt: '2026-11-03T08:59:00.000Z' },
+    gone = ended.pid;
+  // What answers to an ID: the signal's error code ('ESRCH' no such process, 'EPERM' another account's process) or
+  // null when it answers, and what the reader says (a Date, 'gone' or 'unknown').
+  const running = startedAt => ({ code: null, start: new Date(startedAt) }),
+    exitedState = { code: 'ESRCH', start: 'gone' },
+    machine = new Map(),
+    on = states => {
+      machine.clear();
+      machine.set(gone, exitedState);
+      for (const [pid, state] of Object.entries(states)) machine.set(Number(pid), state);
+    },
+    strays = [],
+    pause = new Int32Array(new SharedArrayBuffer(4));
+  // The busy machine, for the IDs a case did not set: a later process holds the ID and its start cannot be read in time
+  // (the reader also answers slowly).
+  let busy = false;
+  const answer = pid => {
+    if (machine.has(pid)) return machine.get(pid);
+    if (busy) return { code: null, start: 'unknown' };
+    strays.push(pid);
+    return exitedState;
+  };
+  const signals = t.mock.method(process, 'kill', target => {
+      const { code } = answer(Math.abs(target));
+      if (code) throw Object.assign(new Error(`kill ${code}`), { code });
+      return true;
+    }),
+    reads = t.mock.method(processStartTimes, 'read', pid => {
+      if (busy) Atomics.wait(pause, 0, 0, 2);
+      return answer(Math.abs(pid)).start;
+    });
+  // Each stubbed answer with the machine it was read on, so they can be read again on the busy machine below.
+  const asked = [],
+    check = record => {
+      const result = recordedProcessesEnded(record);
+      asked.push({ record, states: [...machine], result });
+      return result;
+    };
+
+  // The old test's cases, in its order: its own process (attempt) and its agent's run of the whole suite (suite)
+  // running since their recorded starts, and an exited one (ended, gone).
+  on({ [attempt.pid]: running(attempt.startedAt), [suite.pid]: running(suite.startedAt) });
+  assert.equal(check({}), true, 'An attempt that recorded no process has none running.');
   // With the start times each process is recorded with.
-  assert.equal(recordedProcessesEnded(recorded({ own: ended, suite: ended })), true);
-  assert.equal(recordedProcessesEnded(recorded({ own: attempt, suite: ended })), false, 'Its true start: running.');
-  assert.equal(recordedProcessesEnded(recorded({ own: ended, suite })), false, 'Its true start: running.');
+  assert.equal(check(recorded({ own: ended, suite: ended })), true);
+  assert.equal(check(recorded({ own: attempt, suite: ended })), false, 'Its true start: running.');
+  assert.equal(check(recorded({ own: ended, suite })), false, 'Its true start: running.');
   // A recorded ID that a later process now has: that process started after the recorded one, so it is not the one.
-  assert.equal(recordedProcessesEnded(recorded({ own: reused(attempt), suite: ended })), true);
-  assert.equal(recordedProcessesEnded(recorded({ own: ended, suite: reused(suite) })), true);
-  assert.equal(recordedProcessesEnded(recorded({ own: reused(attempt), suite: reused(suite) })), true);
-  assert.equal(recordedProcessesEnded(recorded({ own: reused(attempt), suite })), false, 'One really runs.');
-  assert.equal(recordedProcessesEnded(recorded({ own: attempt, suite: reused(suite) })), false, 'One really runs.');
+  assert.equal(check(recorded({ own: reused(attempt), suite: ended })), true);
+  assert.equal(check(recorded({ own: ended, suite: reused(suite) })), true);
+  assert.equal(check(recorded({ own: reused(attempt), suite: reused(suite) })), true);
+  assert.equal(check(recorded({ own: reused(attempt), suite })), false, 'One really runs.');
+  assert.equal(check(recorded({ own: attempt, suite: reused(suite) })), false, 'One really runs.');
   // Records made before start times were recorded keep the answer by ID alone.
-  assert.equal(recordedProcessesEnded({ pid: gone, employeeTestPid: gone }), true);
-  assert.equal(recordedProcessesEnded({ pid: attempt.pid }), false);
-  assert.equal(recordedProcessesEnded({ pid: attempt.pid, employeeTestPid: gone }), false);
-  assert.equal(recordedProcessesEnded({ pid: gone, employeeTestPid: suite.pid }), false);
-  assert.equal(recordedProcessesEnded({ employeeTestPid: suite.pid }), false);
-  await suite.stop();
-  assert.equal(recordedProcessesEnded({ pid: gone, employeeTestPid: suite.pid }), true, 'Once it exits, it is gone.');
-  await attempt.stop();
-  assert.equal(recordedProcessesEnded({ pid: attempt.pid, employeeTestPid: suite.pid }), true);
+  assert.equal(check({ pid: gone, employeeTestPid: gone }), true);
+  assert.equal(check({ pid: attempt.pid }), false);
+  assert.equal(check({ pid: attempt.pid, employeeTestPid: gone }), false);
+  assert.equal(check({ pid: gone, employeeTestPid: suite.pid }), false);
+  assert.equal(check({ employeeTestPid: suite.pid }), false);
+  // The suite's process exits.
+  machine.set(suite.pid, exitedState);
+  assert.equal(check({ pid: gone, employeeTestPid: suite.pid }), true, 'Once it exits, it is gone.');
+  // The attempt's own process exits.
+  machine.set(attempt.pid, exitedState);
+  assert.equal(check({ pid: attempt.pid, employeeTestPid: suite.pid }), true);
+
+  // The reader's other answers, for an ID this account can signal and a recorded start time: a start it cannot read
+  // keeps the process running; 'gone' for a single process (the suite's run) means it ended after it answered.
+  on({ [attempt.pid]: { code: null, start: 'unknown' }, [suite.pid]: { code: null, start: 'unknown' } });
+  assert.equal(check(recorded({ own: attempt, suite: ended })), false, 'Start unread: its own process runs.');
+  assert.equal(check(recorded({ own: ended, suite })), false, "Start unread: the suite's run runs.");
+  on({ [suite.pid]: { code: null, start: 'gone' } });
+  assert.equal(check(recorded({ own: ended, suite })), true, 'A single process gone after it answered has ended.');
+  // Another account's process (EPERM) under a recorded ID: Studio desk records only its own processes, so it is the
+  // recorded one only when it started no later than the record allows.
+  const after = (at, ms) => new Date(Date.parse(at) + ms);
+  for (const [label, recordedProcess, record] of [
+    ['its own process', attempt, own => recorded({ own, suite: ended })],
+    ["its agent's run of the whole suite", suite, run => recorded({ own: ended, suite: run })],
+  ]) {
+    const otherAccount = start => on({ [recordedProcess.pid]: { code: 'EPERM', start } });
+    otherAccount(after(recordedProcess.startedAt, hour));
+    assert.equal(check(record(recordedProcess)), true, `Another account's later process (${label}): ended.`);
+    otherAccount('unknown');
+    assert.equal(check(record(recordedProcess)), true, `Another account's process, start unread (${label}): ended.`);
+    otherAccount('gone');
+    assert.equal(check(record(recordedProcess)), true, `Another account's process, read gone (${label}): ended.`);
+    otherAccount(after(recordedProcess.startedAt, startTimeSlackMs));
+    assert.equal(check(record(recordedProcess)), false, `Started no later than the record allows (${label}): running.`);
+    otherAccount(new Date(recordedProcess.startedAt));
+    assert.equal(check(record(recordedProcess)), false, `Started at its recorded time (${label}): running.`);
+  }
+  // Without a recorded start time, another account's process keeps the ID-only answer: running.
+  on({ [attempt.pid]: { code: 'EPERM', start: 'unknown' }, [suite.pid]: { code: 'EPERM', start: 'unknown' } });
+  assert.equal(check({ pid: attempt.pid }), false, "Another account's process, no start recorded: running.");
+  assert.equal(check({ employeeTestPid: suite.pid }), false, "Another account's process, no start recorded: running.");
+
+  // Failing first: the old test's inputs under the answers the busy machine gave it. It recorded an exited process
+  // (exited(), a minute before) and a running one recorded an hour early (reused()), and expected both ended; on a busy
+  // computer a later process held the exited ID, and the reader answered 'unknown' within its time limit. The answer
+  // is then false, where the old test expected true: its result depended on the machine.
+  on({ [ended.pid]: { code: null, start: 'unknown' } });
+  assert.equal(
+    recordedProcessesEnded(recorded({ own: ended, suite: ended })),
+    false,
+    'An exited record whose ID a later process holds, start unread: the old test expected true.',
+  );
+  on({ [attempt.pid]: { code: null, start: 'unknown' } });
+  assert.equal(
+    recordedProcessesEnded(recorded({ own: reused(attempt), suite: ended })),
+    false,
+    'A reused ID, start unread: the old test expected true.',
+  );
+  // The stubbed cases set their own answers, so the same conditions for every other ID (alive, read slowly as
+  // 'unknown') change none of them.
+  busy = true;
+  const busyAnswers = asked.map(({ record, states }) => {
+    machine.clear();
+    for (const [pid, state] of states) machine.set(pid, state);
+    return recordedProcessesEnded(record);
+  });
+  busy = false;
+  assert.deepEqual(
+    busyAnswers,
+    asked.map(item => item.result),
+    'Every stubbed answer is the same on the busy machine.',
+  );
+  // No real process was signalled or looked up: every signal and read went to the stubs, for a case's own IDs only.
+  assert.deepEqual(strays, [], 'Only the IDs a case set were signalled or read.');
+  assert.ok(signals.mock.callCount() >= asked.length, 'Every case signalled through the stub.');
+  assert.ok(reads.mock.callCount() > 0, 'The start times were read through the stub.');
+  assert.ok(
+    signals.mock.calls.every(call => call.arguments[1] === 0),
+    'Only signal 0, which stops nothing.',
+  );
+  signals.mock.restore();
+  reads.mock.restore();
+
+  // One real process, which ID reuse cannot flip, through the real liveness check and reader: one this test started and
+  // still holds reads as running with its own ID and true start time; once it is stopped and its exit awaited, it reads
+  // as ended.
+  const held = liveProcess(t, { leader: true }),
+    record = { pid: held.pid, pidStartedAt: held.startedAt };
+  assert.equal(recordedProcessesEnded(record), false, 'A process this test still holds runs.');
+  await held.stop();
+  assert.equal(recordedProcessesEnded(record), true, 'Once it exits, it is gone.');
 });
 
 test("an agent's run of the whole suite records its process while it holds the turn; a run of named files does not", async t => {
