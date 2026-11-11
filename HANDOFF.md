@@ -30,7 +30,7 @@ The dashboard (`dashboard/`, React with a Vite build) is served by the controlle
 
 ## What's next
 
-Next is One chat: a conversation beside the board, where each piece of work starts and stays, led by the agent the director picks. The work as a graph the director shapes, building on the graph-v2 pieces above, comes later. Planned work is grouped by theme, not version, and ships in whichever release is called when it is done.
+Next is One chat: a conversation beside the board, where each piece of work starts and stays, led by the agent the director picks. Planned work is grouped by theme, not version, and ships in whichever release is called when it is done.
 
 ## How to work on it
 
