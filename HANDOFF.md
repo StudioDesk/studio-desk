@@ -11,23 +11,26 @@ Studio desk is a local controller that runs AI agents (Claude Code and Codex CLI
 
 The dashboard (`dashboard/`, React with a Vite build) is served by the controller at its own address.
 
-## What 1.1 holds
+## What 1.2 holds
 
 - Projects for git repositories and for general work, started from the dashboard or from the Code and Writing samples, each with its own agents (agents a project made work only there).
 - Teams, agents and instructions at three levels (everyone, a team, one agent), each with drafts and published revisions, edited in place on the Agents page; every attempt records the instructions, configuration and inputs it ran with.
 - Ready → Working → Review → Accepted for every story and step, with independent review, send-back and retries that see earlier attempts. An agent runs several attempts at once, within the studio's limits, and a code project's stories run side by side; one that conflicts with an earlier merge is rebuilt on the new tip.
-- Releases and lines (`src/connectors/source-lines.mjs`, `src/connectors/source-milestones.mjs`): milestones as releases, a patch on its release line carried forward to every newer line, a fix brought back to an older line at the director's word, Release, and Push to the remote, confirmed each time.
+- Releases and lines (`src/connectors/source-lines.mjs`, `src/connectors/source-milestones.mjs`): milestones as releases, a patch on its release line carried forward to every newer line, a fix brought back to an older line at the director's word, Release, and Push to the remote, confirmed each time. A code project can give each version its own line (Settings asks before switching): new work lands on the next version's line, and Release ships it to the shipping branch, with Ship again when shipping stopped. A release moves its milestone's waiting ideas to the next milestone.
+- The director can accept a story or step over a failed check, with a reason kept on the record (`src/core/acceptance.mjs`), where the step's contract allows it.
+- The controller works out each task's actions and each project's list of what needs the director (`src/core/task-actions.mjs`, `src/core/director-calls.mjs`), and the dashboard draws them as served. Every route is in one table, and a request for any other is refused (`src/core/routes.mjs`, `GET /api/routes`).
 - An agent asks the director a question and continues from its saved work with the answer (`src/core/questions.mjs`); an idea's planning is a conversation the director can reply to.
 - Try a story yourself in a copy of its own (`src/connectors/try-copy.mjs`), and the visual check, which photographs a story's pages for the reviewer (`src/connectors/visual-check.mjs`, Windows only for now).
 - The project library every attempt reads, the Artifacts page and snapshots (`src/core/library.mjs`, `src/core/snapshots.mjs`).
 - Candidate tests, integration verification and an idea's checks in the built-in sandbox, Anthropic's sandbox runtime pinned in the lockfile (`src/adapters/built-in-sandbox*.mjs`), on Windows, macOS and Linux; No sandbox is the director's explicit choice.
 - Every request needs the director's session or key (`src/director-access.mjs`).
-- House rules for what runs on its own and what waits for the director, and recovery after a restart: interrupted attempts, integrations and releases are reconciled from the dashboard, never replayed blindly.
-- A model-free test suite: `npm test`.
+- House rules for what runs on its own and what waits for the director, and recovery after a restart: interrupted attempts, integrations and releases are reconciled from the dashboard, never replayed blindly. One controller holds a data folder at a time (its lock), and on Windows an attempt's processes run in a job of their own, so nothing it started outlives it (`src/adapters/process-job.mjs`).
+- In the controller, with no dashboard screen yet: team messages on a project's, an idea's or a story's channel, where naming a story's builder or an idea's planner with @ acts on that story or plan (`src/core/messages.mjs`); tool records with each key kept in this computer's own credential store (`src/core/tools.mjs`, `src/connectors/tool-key-store.mjs`); and graph-v2 flows for a group (`src/core/graph-v2.mjs`, `src/core/flow-run.mjs`), which no route starts yet.
+- A model-free test suite: `npm test`, also run by GitHub Actions on Windows, macOS and Linux (`.github/workflows/tests.yml`).
 
 ## What's next
 
-1.2's core is the work as a graph the director shapes: any step given to any agent, team or role, more than one reviewer on a story, and loops, with today's flow as the default template. The [release notes](RELEASE-NOTES.md) list what else is planned.
+Next is One chat: a conversation beside the board, where each piece of work starts and stays, led by the agent the director picks. The work as a graph the director shapes, building on the graph-v2 pieces above, comes later. Planned work is grouped by theme, not version, and ships in whichever release is called when it is done.
 
 ## How to work on it
 
