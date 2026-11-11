@@ -100,7 +100,7 @@ Need to fix something people already run? Open a patch milestone like 1.1.1. Stu
 
 Looking after several versions at once? Give each version its own line: new work lands on the next version's line, and a release ships it to your main branch. A fix made on a newer line can be brought back to an older one, so people still on that version get it too.
 
-![A project's release lines: v1.0.0 released on main with 1.1.0 open, and a release/1.0 line made from its tag with 1.0.1 open, whose fixes go up to main](.github/images/release-lines.png)
+![Studio desk's own release lines while 1.2 was being built: v1.1.0 released on main, release/1.2 being built with 1.2.0 open, and release/1.0 taking patches, whose fixes go up to release/1.2](.github/images/release-lines.png)
 
 Push sends a released line and its tag to your remote, with your own git sign-in. It asks every time.
 
