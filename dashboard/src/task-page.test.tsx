@@ -5,7 +5,7 @@ import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import type { AttemptSummary } from './api';
 import { App } from './app';
 import { LiveStream } from './live';
@@ -19,6 +19,13 @@ import {
   whenShown,
   type Controller,
 } from './test-controller';
+
+// The story page loads on demand (router.tsx). Its code is loaded before the tests, so the router's load resolves at
+// once and a test's one-second wait for the page measures only its rendering, not fetching and preparing its code,
+// which took more than a second on a busy computer.
+beforeAll(async () => {
+  await import('./task-page');
+});
 
 let controller: Controller;
 const taskUrl = '/api/tasks/T-1?projectId=project-x';
@@ -76,36 +83,59 @@ test("the page loads its task with the project's shared records, and a change fe
   open();
   expect(await screen.findByRole('heading', { level: 1, name: 'Show finished results' })).toBeTruthy();
   expect(latest().url).toBe('/api/events?projectId=project-x');
-  // Pages read once the stream has opened, so nothing is read twice; the attempt shown reads its full record, and the
-  // rail reads Project Y's shell and live set once for its count.
+  // Pages read once the stream has opened, so nothing is read twice; the attempt shown reads its full record, the
+  // frame reads each project's list of calls for the sidebar and the rail, and the rail reads Project Y's shell and
+  // live set once.
   await waitFor(() =>
     expect([...controller.reads()].sort()).toEqual([
       detailUrl,
+      '/api/projects/project-x/calls',
       '/api/projects/project-x/live',
       '/api/projects/project-x/shell',
+      '/api/projects/project-y/calls',
       '/api/projects/project-y/live',
       '/api/projects/project-y/shell',
       taskUrl,
     ]),
   );
-  // Another task and a run: the live set reloads, and nothing is read for the task no page holds.
+  // Another task and a run: the live set and the list of calls reload, and nothing is read for the task no page holds.
   change(11, [
     { seq: 11, type: 'task', id: 'T-2', projectId: 'project-x' },
     { seq: 11, type: 'attempt', id: 'attempt-9', taskId: 'T-2', projectId: 'project-x' },
     { seq: 11, type: 'run', id: 'run-1', projectId: 'project-x' },
   ]);
-  await waitFor(() => expect(controller.reads()).toHaveLength(7));
+  await waitFor(() => expect(controller.reads()).toHaveLength(10));
   await new Promise(resolve => setTimeout(resolve, 50));
-  expect(controller.reads().at(-1)).toBe('/api/projects/project-x/live');
-  expect(controller.reads()).toHaveLength(7);
+  expect(controller.reads().slice(8).sort()).toEqual(['/api/projects/project-x/calls', '/api/projects/project-x/live']);
+  expect(controller.reads()).toHaveLength(10);
   edit({ title: 'Show finished results inline' });
   change(12, [{ seq: 12, type: 'task', id: 'T-1', projectId: 'project-x' }]);
   expect(await screen.findByRole('heading', { name: 'Show finished results inline' })).toBeTruthy();
   controller.attempts = [{ ...controller.attempts[0]!, status: 'succeeded', result: { summary: 'Halfway.' } }];
+  const last = controller.reads().length;
   change(13, [{ seq: 13, type: 'attempt', id: 'attempt-1', taskId: 'T-1', projectId: 'project-x' }]);
   expect(await screen.findByText('Halfway.')).toBeTruthy();
   // A change to the shown attempt reads its full record again; one to the task alone does not.
-  await waitFor(() => expect(controller.reads().slice(7).sort()).toEqual([detailUrl, taskUrl, taskUrl]));
+  const calls = '/api/projects/project-x/calls';
+  await waitFor(() =>
+    expect(
+      controller
+        .reads()
+        .slice(10)
+        .filter(url => url !== calls)
+        .sort(),
+    ).toEqual([detailUrl, taskUrl, taskUrl]),
+  );
+  // The list of calls is read at most once a second, and the last change is always read: once, at once or when the
+  // second after the list's last read ends.
+  await waitFor(() => expect(controller.reads().slice(last)).toContain(calls), { timeout: 3000 });
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  expect(
+    controller
+      .reads()
+      .slice(last)
+      .filter(url => url === calls),
+  ).toEqual([calls]);
 });
 
 test('a brief written in Markdown reads as formatted text, not as its marks', async () => {
@@ -1476,6 +1506,65 @@ test('other work has the brief card too, with its brief and what it was handed; 
   open();
   expect(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 })).toBeTruthy();
   expect(screen.getByRole('tab', { name: 'Activity' }).getAttribute('aria-selected')).toBe('true');
+});
+
+// Finished work has no next attempt, so its brief card shows no direction for one, though the record keeps it: a code
+// story once integrated, other work once accepted. Work still going keeps the field.
+const recordedDirection = 'Independent review attempt-f1ca9924 passed, but its checks failed';
+const directed = (source: boolean, status: string, current?: string) => {
+  handed(source);
+  // The task with its direction, beside the plan that handed it its work.
+  controller.tasks[0] = {
+    ...controller.tasks[0]!,
+    status,
+    direction: recordedDirection,
+    ...(current
+      ? { sourceStage: { version: 'source-story-stages-v1', phase: 'integration', current, history: [] } }
+      : {}),
+  };
+};
+const noDirection = async () => {
+  const brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
+  await waitFor(() => handedTo(brief));
+  expect(screen.queryByLabelText('Direction for the next attempt')).toBeNull();
+  expect(document.querySelector('[aria-label="Direction"]')).toBeNull();
+  expect(screen.queryByText('Recorded attempts keep the direction they started with.')).toBeNull();
+  expect(document.body.textContent).not.toContain('attempt-f1ca9924');
+  const boxes = [...document.querySelectorAll('textarea, input')] as HTMLInputElement[];
+  expect(boxes.some(box => box.value.includes('attempt-f1ca9924'))).toBe(false);
+};
+
+test('an integrated code story shows no direction for a next attempt, though its record carries one', async () => {
+  directed(true, 'done', 'integrated');
+  open();
+  await noDirection();
+});
+
+test('accepted other work shows no direction for a next attempt, though its record carries one', async () => {
+  directed(false, 'done');
+  open();
+  await noDirection();
+});
+
+test('work still going keeps its direction: editable while it waits, read only once accepted but not integrated', async () => {
+  // A code story whose attempt failed may take new direction for its next one.
+  directed(true, 'failed', 'failed');
+  open();
+  let brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
+  let box = brief.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
+  expect(box.value).toBe(recordedDirection);
+  expect(box.readOnly).toBe(false);
+  expect(brief.getByRole('button', { name: 'Save future direction' })).toBeTruthy();
+  cleanup();
+  // A code story accepted but not yet integrated is not finished: its direction stays, read only, as before.
+  directed(true, 'done', 'waiting-for-integration');
+  open();
+  brief = within(await screen.findByRole('region', { name: 'The brief' }, { timeout: 5000 }));
+  box = brief.getByLabelText('Direction for the next attempt') as HTMLTextAreaElement;
+  expect(box.value).toBe(recordedDirection);
+  expect(box.readOnly).toBe(true);
+  expect(brief.queryByRole('button', { name: 'Save future direction' })).toBeNull();
+  expect(brief.getByText('Recorded attempts keep the direction they started with.')).toBeTruthy();
 });
 
 // Other work's Overview is where its Result tab was, on a wide screen and on a phone, and no story has an Attempts or a

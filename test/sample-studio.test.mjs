@@ -1,6 +1,7 @@
 import './model-free-studio.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,9 +10,11 @@ import {
   buildArguments,
   sampleDirectory,
   sampleProjects,
+  sampleRepository,
   startSampleStudio,
   viteProgram,
 } from '../scripts/sample-studio.mjs';
+import { controllerGitArguments, controllerGitOptions } from '../src/git.mjs';
 
 // The sample studio Studio desk development's visual check starts (October 30, 2026): the two projects at the addresses
 // the planner names, ideas waiting, every agent the Simulator and the studio paused, so a capture never runs a model.
@@ -26,7 +29,9 @@ test('the sample studio holds both projects at their fixed addresses, paused, wi
     await studio.close();
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
-  assert.equal(studio.directory, path.join(base, '.studio-sample'));
+  // By its real spelling, whichever one the temporary folder was reached by (a junction or symbolic link, a short name).
+  assert.equal(studio.directory, realPath(path.join(base, '.studio-sample')));
+  assert.equal(studio.store.directory, studio.directory);
   assert.ok(!fs.existsSync(path.join(base, '.studio-sample', 'leftover.txt')));
   assert.ok(!fs.existsSync(path.join(base, 'data')), 'The sample never makes or uses the data folder.');
   const get = async url => (await fetch(studio.address + url)).json();
@@ -47,7 +52,31 @@ test('the sample studio holds both projects at their fixed addresses, paused, wi
     const state = await get(`/api/state?mode=dashboard&projectId=${projectId}`);
     assert.equal(state.runs.length, 2, `${projectId} holds two ideas`);
     assert.equal(state.attempts.length, 0, `${projectId} started nothing`);
+    const shell = await get(`/api/projects/${projectId}/shell`);
+    assert.equal(shell.paused, true);
+    assert.ok(shell.employeeDirectory.every(worker => worker.provider === 'mock' && worker.cli === 'Simulator'));
+    for (const run of state.runs) {
+      const tasks = state.tasks.filter(task => (task.workflowReference?.runId ?? task.runReference?.runId) === run.id);
+      const first = tasks.filter(task => task.dependencies.length === 0);
+      assert.equal(first.length, 1, 'Each idea waits at its first step.');
+      assert.equal(first[0].kind, projectId === sampleProjects.code ? 'studio-development:checks' : 'general:plan');
+      assert.ok(
+        tasks.every(task => task.status === 'blocked'),
+        'The paused studio holds every step.',
+      );
+      assert.ok(tasks.every(task => !task.lastAttemptId && !task.acceptedAttemptId));
+    }
   }
+  const releases = await get(`/api/projects/${sampleProjects.code}/releases`),
+    milestone = releases.milestones.find(item => item.version === '1.1.0');
+  assert.equal(milestone.line, 'release/1.1');
+  assert.equal(milestone.state, 'open');
+  assert.equal(milestone.release, undefined);
+  assert.equal(milestone.ideas.length, 2, 'Both initial ideas belong to the open release.');
+  assert.equal(milestone.counts.waiting, 1, 'One waiting idea exposes the unfinished-work checkbox.');
+  assert.equal(milestone.counts.stories, 0, 'The sample invents no completed production work.');
+  const work = await get(`/api/projects/${sampleProjects.work}/releases`);
+  assert.equal(work.available, false);
 });
 
 test("the sample studio's folder is never the data folder, and Vite is found from the copy", () => {
@@ -58,4 +87,45 @@ test("the sample studio's folder is never the data folder, and Vite is found fro
   // one built into dashboard/dist, and the captures showed The dashboard is not built).
   const args = buildArguments();
   assert.equal(args[args.indexOf('--outDir') + 1], path.join(fileURLToPath(new URL('..', import.meta.url)), 'dist'));
+});
+
+// Each command is the controller's git: its options first (hooks and fsmonitor off, long paths on), then the sample's
+// own settings, on every platform.
+test("the sample repository's git commands carry the controller's options and the sample's own settings", t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-sample-git-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const commands = [];
+  const folder = sampleRepository(base, (cwd, args, options) => {
+    commands.push({ cwd, argv: controllerGitArguments(args, options) });
+    return '';
+  });
+  assert.deepEqual(controllerGitOptions, [
+    '--no-optional-locks',
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'core.longpaths=true',
+  ]);
+  assert.equal(commands.length, 3);
+  for (const command of commands) {
+    assert.equal(command.cwd, folder);
+    assert.deepEqual(command.argv.slice(0, controllerGitOptions.length), controllerGitOptions);
+  }
+  const own = commands.map(command => command.argv.slice(controllerGitOptions.length));
+  assert.deepEqual(own[0], ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  assert.deepEqual(own[1], ['add', '-A']);
+  assert.deepEqual(own[2], [
+    '-c',
+    'user.name=Studio desk',
+    '-c',
+    'user.email=studio-desk@localhost',
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '--quiet',
+    '-m',
+    'To-do list sample, made by Studio desk',
+  ]);
 });

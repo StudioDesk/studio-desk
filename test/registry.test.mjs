@@ -11,6 +11,7 @@ import { Store as CoreStore } from '../src/core/store.mjs';
 import { planningContext, simulatedPlan, validatePlan } from '../src/planning.mjs';
 import { validatePlan as validateCorePlan } from '../src/core/planning.mjs';
 import { validateWorkflow } from '../src/core/workflows.mjs';
+import { stepContract } from '../src/core/step-contract.mjs';
 
 // A trusted test-only pack. No model calls, browser checks or external services.
 const reportTask = {
@@ -372,6 +373,55 @@ test('a task type has an integrate mode only when it says when its result is rea
   assert.equal(described.scopeRequestLabel, undefined);
 });
 
+test('each task type tells the pages how a failed check meets acceptance, as the controller decides it', () => {
+  const registries = createRegistries(),
+    tasks = [
+      reportTask,
+      { ...reportTask, kind: 'test:accepting', acceptFailedChecks: true },
+      { ...reportTask, kind: 'test:decision', step: { kind: 'decide' } },
+      { ...reportTask, kind: 'test:gate', step: { kind: 'gate' }, acceptFailedChecks: true },
+      { ...reportTask, kind: 'test:held', step: { kind: 'work', acceptance: { acceptOver: false } } },
+      { ...reportTask, kind: 'test:joining', step: { kind: 'join', acceptance: { acceptOver: true } } },
+    ];
+  registries.workflows.register(testPack(tasks));
+  const described = registries.workflows.describe(),
+    facts = kind => ({
+      acceptsFailedChecks: described[kind].acceptsFailedChecks,
+      acceptOver: described[kind].acceptOver,
+    });
+  assert.deepEqual(facts(reportTask.kind), { acceptsFailedChecks: false, acceptOver: true });
+  assert.deepEqual(facts('test:accepting'), { acceptsFailedChecks: true, acceptOver: true });
+  assert.deepEqual(facts('test:decision'), { acceptsFailedChecks: false, acceptOver: false });
+  assert.deepEqual(facts('test:gate'), { acceptsFailedChecks: true, acceptOver: false });
+  assert.deepEqual(facts('test:held'), { acceptsFailedChecks: false, acceptOver: false });
+  assert.deepEqual(facts('test:joining'), { acceptsFailedChecks: false, acceptOver: true });
+  // Every registered type, the shipped packs' too, reports exactly what acceptAttempt reads.
+  for (const definition of registries.workflows.list())
+    assert.deepEqual(
+      facts(definition.kind),
+      {
+        acceptsFailedChecks: !!definition.acceptFailedChecks,
+        acceptOver: stepContract(definition).acceptance.acceptOver,
+      },
+      definition.kind,
+    );
+});
+
+test('only the legacy plan opts out of the planning result acceptance override', () => {
+  const { workflows } = createRegistries(),
+    described = workflows.describe();
+  assert.equal(stepContract({ step: { kind: 'plan' } }).acceptance.acceptOver, true, 'The catalog default stays true.');
+  for (const kind of ['plan', 'general:plan', 'general:split', 'studio-development:breakdown']) {
+    const definition = workflows.get(kind);
+    assert.equal(stepContract(definition).kind, 'plan', kind);
+    assert.deepEqual(
+      { resolved: stepContract(definition).acceptance.acceptOver, described: described[kind].acceptOver },
+      { resolved: kind !== 'plan', described: kind !== 'plan' },
+      kind,
+    );
+  }
+});
+
 test('legacy review attempts and planning contexts retain acceptance and independent-review rules', async t => {
   const c = await setup(t);
   const legacy = c.app.store.task('R-001'),
@@ -680,4 +730,33 @@ test('an attempt stopped by a usage limit does not count toward an attempt limit
   assert.deepEqual(workflows.stageAttempts(store, { id: 'T-1', kind: 'layout' }), [failed]);
   store.task = id => ({ id, kind: 'unreal-integration' });
   assert.deepEqual(workflows.stageAttempts(store, { id: 'T-1', kind: 'unreal-integration' }), [stopped, failed]);
+});
+
+test('only an attempt the work itself ended counts toward an attempt limit, except a fixed one', () => {
+  const { workflows } = createRegistries(),
+    held = { id: 'attempt-held', status: 'blocked', subscriptionHold: 'codex', endCause: { cause: 'usage-limit' } },
+    asked = { id: 'attempt-asked', status: 'blocked', question: { ask: 'Which?' }, endCause: { cause: 'question' } },
+    stopped = {
+      id: 'attempt-stopped',
+      status: 'cancelled',
+      endCause: { cause: 'environment', detail: 'controller-stop' },
+    },
+    sandbox = { id: 'attempt-sandbox', status: 'failed', endCause: { cause: 'environment', detail: 'sandbox' } },
+    directorStop = { id: 'attempt-director-stop', status: 'cancelled', endCause: { cause: 'work' } },
+    failed = { id: 'attempt-failed', status: 'failed', endCause: { cause: 'work' } },
+    all = [held, asked, stopped, sandbox, directorStop, failed],
+    store = { task: id => ({ id, kind: 'layout' }), attempts: () => all };
+  assert.deepEqual(workflows.stageAttempts(store, { id: 'T-1', kind: 'layout' }), [directorStop, failed]);
+  store.task = id => ({ id, kind: 'unreal-integration' });
+  assert.deepEqual(workflows.stageAttempts(store, { id: 'T-1', kind: 'unreal-integration' }), all);
+});
+
+test('a task kind cannot declare the controller-owned endCause as one of its attempt fields', () => {
+  const { workflows } = createRegistries();
+  assert.throws(
+    () => workflows.register(testPack([{ ...reportTask, kind: 'test:cause-field', attemptFields: ['endCause'] }])),
+    /controller-owned attempt fields/,
+  );
+  // The same kind without it registers.
+  createRegistries().workflows.register(testPack([{ ...reportTask, kind: 'test:cause-field' }]));
 });

@@ -14,6 +14,7 @@ import { sourceWorktreeRoot, worktreeName } from '../connectors/source-worktrees
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
 import { runInstallStep } from '../connectors/package-installs.mjs';
 import { inSnapshotProcess } from './source-snapshot.mjs';
+import { realPath } from '../core/real-path.mjs';
 import { subscriptionEnvironment } from './process.mjs';
 import { chosenTestSandbox } from './source-test-sandbox.mjs';
 import { builtInSandboxCommand, builtInSandboxReady } from './built-in-sandbox.mjs';
@@ -52,8 +53,17 @@ export const sourceChecksAdapter = {
   deliveryScope:
     'Only the controller runs the fixed Node test command on copied source. Assignments cannot select shell commands, source paths or external tools.',
   start(runtime, entry) {
-    const a = entry.attempt,
-      snapshot = path.join(entry.job, 'source');
+    const a = entry.attempt;
+    // The copy the tests run on is a short folder beside the candidates' working copies (<data>/wt/<name>), at the
+    // same depth and name length as a candidate's, not deep inside the job folder, so a nested test stays within
+    // the Windows path limit. Taken by the worktrees' folder's real spelling, recorded before the copy is made, and
+    // removed when the attempt ends, after a stop too; leftoverWorktrees keeps it while the attempt holds it. It is a
+    // plain copy, never a git worktree, so its removal never goes through git.
+    fs.mkdirSync(sourceWorktreeRoot(runtime), { recursive: true });
+    const snapshot = path.join(realPath(sourceWorktreeRoot(runtime)), worktreeName(a.id));
+    a.sourceCheckFolder = { path: snapshot };
+    runtime.store.updateAttempt(a);
+    entry.cleanup.push(() => fs.rmSync(snapshot, { recursive: true, force: true }));
     // Measure the recorded commit in its own worktree (MP-016 slice 4), which is removed again
     // before the tests start; the copy is what the tests run on. The project's source profile
     // was recorded with the commit when the attempt was prepared. Made in a process of its own.
@@ -84,9 +94,15 @@ export const sourceChecksAdapter = {
 
 function testSnapshot(runtime, entry, a, snapshot) {
   const sandboxed = a.configuration?.testSandbox === 'built-in',
-    command =
-      runtime.sourceCheckCommand ||
-      (sandboxed ? builtInSandboxCommand({ root: snapshot, command: a.sourceCheck.command }) : a.sourceCheck.command);
+    selectedCommand = runtime.sourceCheckCommand || (!sandboxed && a.sourceCheck.command);
+  const command = deadlineMs =>
+    selectedCommand ||
+    builtInSandboxCommand({
+      root: snapshot,
+      data: runtime.store.directory,
+      command: a.sourceCheck.command,
+      deadlineMs,
+    });
   const environment = subscriptionEnvironment();
   // Snapshot tests must not inherit live provider/engine overrides.
   for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
@@ -98,10 +114,15 @@ function testSnapshot(runtime, entry, a, snapshot) {
   // running (C-10's interim, November 2026).
   takeTestTurn(runtime, entry, {
     limitMs: a.assignment?.maxSeconds * 1000,
-    start: () =>
+    start: () => {
+      // The test turn restarts this allowance; installation consumes it too. An absolute deadline also charges
+      // process startup and the runner's own setup before session acquisition, without counting the turn's wait.
+      const deadlineMs =
+        a.assignment?.maxSeconds === undefined ? undefined : Date.now() + a.assignment.maxSeconds * 1000;
       runInstallStep(runtime, entry, snapshot, installsPackages(profileOf(a.sourceCheck)), environment, () =>
-        runTests(runtime, entry, a, command, snapshot, environment),
-      ),
+        runTests(runtime, entry, a, command(deadlineMs), snapshot, environment),
+      );
+    },
   });
 }
 

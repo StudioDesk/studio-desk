@@ -1,9 +1,11 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import { realPath } from './core/real-path.mjs';
 import zlib from 'node:zlib';
 import path from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isEntryPoint } from './core/entry-point.mjs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { Store } from './store.mjs';
@@ -11,10 +13,13 @@ import {
   directorAccess,
   directorKey,
   launchFileName,
+  sameSecret,
   signInMessage,
   signInPage,
   staleLaunchPage,
 } from './director-access.mjs';
+import { previousStop, stopRecorder } from './stop-record.mjs';
+import { takeDataFolderLock } from './data-folder-lock.mjs';
 import { Runner, artifactPath, acceptedReference, validateAcceptedReferences } from './runner.mjs';
 import { hash, complexityPolicy, validateComplexity } from './core/contracts.mjs';
 import {
@@ -38,7 +43,7 @@ import {
   ideaBringBackTargets,
   skipCarry,
 } from './connectors/source-carries.mjs';
-import { pushRelease, releaseAgain, startRelease } from './connectors/source-releases.mjs';
+import { pushRelease, releaseAgain, shipAgain, startRelease } from './connectors/source-releases.mjs';
 import {
   addWaitingIdea,
   editMilestone,
@@ -48,6 +53,7 @@ import {
   orderWaitingIdea,
   projectMilestones,
   takeWaitingIdea,
+  useVersionLines,
 } from './connectors/source-milestones.mjs';
 import { releaseOverview } from './connectors/release-overview.mjs';
 import { listFolders } from './connectors/folders.mjs';
@@ -68,12 +74,15 @@ import { applyAgentPermissions, approveCommands, commandRule, taskAutoMode } fro
 import { employeeTestsAllowed, runEmployeeTests, savedTestRun } from './connectors/employee-tests.mjs';
 import { attemptTrace } from './core/attempt-trace.mjs';
 import { storyActivity } from './core/story-activity.mjs';
+import { taskRead } from './core/task-actions.mjs';
+import { directorCalls } from './core/director-calls.mjs';
+import { routes, rulesFor } from './core/routes.mjs';
 import { validateReview } from './packs/game-production/contracts.mjs';
 import { validatePlan } from './planning.mjs';
 import { createRegistries } from './registry.mjs';
 import { bootstrapFactory } from './core/bootstrap.mjs';
 import { createProject } from './core/project-creation.mjs';
-import { sendWaitingIdea, startIdeaIntake } from './core/idea-intake.mjs';
+import { sendStoryAsIdea, sendWaitingIdea, startIdeaIntake } from './core/idea-intake.mjs';
 import { answerQuestion, changeAnswer } from './core/questions.mjs';
 import {
   openTryFolder,
@@ -104,11 +113,15 @@ import { createFromTemplate, listTemplates, sampleIdeaFiles } from './core/proje
 import { deleteProject } from './core/project-deletion.mjs';
 import { agentName, createProjectAgent, deleteProjectAgent, sharedAgents, validFace } from './core/project-agents.mjs';
 import { LEGACY_PROJECT, recordProject, assertProject, validateTaskProject } from './core/projects.mjs';
+import { checkChannel, postMessage } from './core/messages.mjs';
 import {
   finishedRuns,
+  liveLimit,
+  liveMaxLimit,
   liveRecords,
   oneRun,
   peopleSummary,
+  servedAttemptCount,
   settledKinds,
   settledTasks,
 } from './core/project-records.mjs';
@@ -132,6 +145,8 @@ import {
   closeStartedWork,
   sendBackWork,
   replanWork,
+  reviseWork,
+  directStart,
 } from './core/proposals.mjs';
 import { acceptAttempt } from './core/acceptance.mjs';
 import { applyWorkerExecution, taskExecution } from './core/execution.mjs';
@@ -148,6 +163,9 @@ import {
 import { developmentOrganization } from './organizations/studio-development/project.mjs';
 import { toldView } from './core/instructions.mjs';
 import { formatRules } from './core/rules.mjs';
+import { createLoadMeasures } from './core/load-measures.mjs';
+import { addTool, changeTool, readTool, readTools, removeToolKey, retireTool, setToolKey } from './core/tools.mjs';
+import { toolKeyStore } from './connectors/tool-key-store.mjs';
 
 // The most attempts the studio-wide limit allows at once (MP-033).
 const mostAttemptsAtOnce = 16;
@@ -177,6 +195,13 @@ const dashboardTypes = {
 // tools read from the main address.
 const dashboardNotBuilt =
   '<!doctype html><meta charset="utf-8"><meta name="studio-token" content="%STUDIO_TOKEN%"><title>Studio desk</title><h1>The dashboard is not built</h1><p>Run <code>npm ci</code> in the controller\'s folder, then restart it: <code>npm start</code> builds the dashboard. A release includes it already built.</p>';
+// A command signed in by the session cookie alone is refused without this start's request token, saying which header
+// it lacks and where its value comes from, or, for a token that is not this start's, that the controller restarted.
+// The dashboard reads the second as a restart and reads the token again (dashboard/src/api.ts staleToken).
+const missingTokenMessage =
+  "This command needs the X-Studio-Token header: this start's request token, which the dashboard page the controller serves carries in its studio-token meta tag. The dashboard sends it with every command; a local tool sends the director's key (X-Studio-Key) instead.";
+const earlierTokenMessage =
+  "This command's X-Studio-Token is from an earlier start of the controller. Reload the page, or read the token from it again.";
 // A refusal the page can act on may carry fields beside its message, such as the files that keep the try copy from
 // moving (1.2 step 7).
 function fail(message, status = 400, fields) {
@@ -184,6 +209,29 @@ function fail(message, status = 400, fields) {
   e.status = status;
   if (fields) e.fields = fields;
   throw e;
+}
+// A studio tool's ID as the controller makes it (core/tools.mjs): 'tool-' and a UUID. Any other names no tool.
+const toolIdPattern = /^tool-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function toolId(id) {
+  if (!toolIdPattern.test(id)) fail('Tool not found.', 404);
+  return id;
+}
+// The revision a tool's change or retiring names; the tool list refuses it with 409 when it is not the current one.
+function toolRevision(data) {
+  if (!Object.hasOwn(data, 'expectedRevision'))
+    fail('Name the revision this changes as expectedRevision, from the tool as last read.');
+  if (!Number.isInteger(data.expectedRevision) || data.expectedRevision < 1)
+    fail('expectedRevision must be a whole number from 1.');
+  return data.expectedRevision;
+}
+// An integration approved for this work (by the director or the policy) and waiting to run refuses sending it back.
+function integrationRefusal(runner, task) {
+  return (
+    runner.autonomy.pendingIntegration()?.taskId === task.id &&
+    Object.assign(new Error('Integration is approved for this work and waiting to run; it cannot be sent back now.'), {
+      status: 409,
+    })
+  );
 }
 function text(v, field, max = 24000, required = false) {
   if (typeof v !== 'string' || v.length > max || (required && !v.trim())) fail(`${field} is missing or too long.`);
@@ -247,6 +295,11 @@ export function createStudio({
   // photographs (scripts/sample-studio.mjs). A trusted option of the code that starts the controller, never a
   // setting, a variable or a request.
   access = 'session',
+  // The credential store that keeps the tools' keys (connectors/tool-key-store.mjs: put, remove, read and has). Like
+  // access, a trusted option of the code that starts the controller, never a setting, a variable or a request. When it
+  // is not given, the controller makes this computer's own store for the data folder the first time a key command or
+  // retiring a tool with a key needs it. The suite's studios pass a stand-in (test/model-free-studio.mjs).
+  toolKeys = null,
   // A fresh data folder starts at No projects yet (v1.0 item 24); the game organization and its starter tasks are
   // the `game-studio` preset, chosen with STUDIO_ORGANIZATION_PRESET.
   bootstrap = {
@@ -263,33 +316,54 @@ export function createStudio({
 } = {}) {
   if (!['session', 'open'].includes(access)) throw new Error('Access must be session or open.');
   const registries = runnerOptions.registries || createRegistries();
-  const store = new Store(directory, bootstrapFactory(registries, bootstrap)),
-    owner = { id: randomUUID(), pid: process.pid };
+  // The data folder is claimed by a lock the operating system holds while this controller runs and releases however
+  // it ends (src/data-folder-lock.mjs), taken before the studio's records are opened, so a refused start neither opens
+  // nor changes them. Every start that fails after taking it releases it, and so does close.
+  fs.mkdirSync(path.resolve(directory), { recursive: true });
+  // The folder is kept by one spelling, its real one, whichever spelling it was given by (a junction or symbolic link,
+  // macOS's /var for /private/var, a Windows short name such as RUNNER~1), so every folder made inside it compares
+  // with the project repositories, which are kept the same way (connectors/source-projects.mjs).
+  const dataFolder = realPath(path.resolve(directory));
+  const releaseLock = takeDataFolderLock(dataFolder);
+  let store;
+  try {
+    store = new Store(dataFolder, bootstrapFactory(registries, bootstrap));
+  } catch (err) {
+    releaseLock();
+    throw err;
+  }
+  // The owner record says which start holds the folder; the lock, not its process ID or start time, decides. The
+  // record stays exactly this object: closing deletes it by comparing the stored JSON with JSON.stringify(owner).
+  const owner = {
+    id: randomUUID(),
+    pid: process.pid,
+    startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+  };
   try {
     store.tx(() => {
-      const row = store.db.prepare('SELECT data FROM settings WHERE id=?').get('controller-owner');
-      if (row) {
-        const previous = JSON.parse(row.data);
-        let alive = true;
-        try {
-          process.kill(previous.pid, 0);
-        } catch (err) {
-          if (err.code === 'ESRCH') alive = false;
-        }
-        if (alive) fail('Another controller owns this data folder. Stop it before starting another instance.');
-      }
       store.db
         .prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data')
         .run('controller-owner', JSON.stringify(owner));
     });
   } catch (err) {
     store.close();
+    releaseLock();
     throw err;
   }
   packageBoundary(store.directory);
   const key = directorKey(store.directory),
     director = directorAccess(key);
+  // The tools' credential store, made only when a key command or retiring first calls it.
+  let keyStore = toolKeys;
+  const credentials = () => (keyStore ??= toolKeyStore({ directory: store.directory }));
+  const toolCredentials = {
+    put: (id, value) => credentials().put(id, value),
+    remove: id => credentials().remove(id),
+    read: id => credentials().read(id),
+    has: id => credentials().has(id),
+  };
   let runner;
+  const measures = createLoadMeasures();
   const planningContext = (org, repair, projectId) =>
     registries.workflows.planningContext(org, repair, registries.adapters, store.project(projectId));
   try {
@@ -314,6 +388,7 @@ export function createStudio({
   } catch (error) {
     store.db.prepare('DELETE FROM settings WHERE id=? AND data=?').run('controller-owner', JSON.stringify(owner));
     store.close();
+    releaseLock();
     throw error;
   }
   // Each start has its own ID, so a cache tag from before a restart never matches (MP-026).
@@ -326,8 +401,28 @@ export function createStudio({
     lastBroadcast = 0,
     broadcastTimer = null;
   const origin = () => `http://127.0.0.1:${actualPort}`;
+  // The line a command sent with the director's key leaves in its project's activity: which route, and the task it
+  // names. A command for no known project leaves it in the activity that belongs to no project. A line that cannot
+  // be written never fails the command.
+  const keyedCommandRecorded = (method, route, parts, data) => {
+    try {
+      const named = typeof data?.projectId === 'string' ? data.projectId : parts[1] === 'projects' ? parts[2] : null,
+        projectId = named && store.projects().some(project => project.id === named) ? named : null,
+        task = typeof data?.taskId === 'string' && /^[\w.:-]{1,120}$/.test(data.taskId) ? ` for ${data.taskId}` : '';
+      store.event(
+        'director_key',
+        null,
+        null,
+        `A local tool sent ${method} ${route}${task} with the director's key.`,
+        projectId,
+      );
+    } catch (error) {
+      console.warn(`The command sent with the director's key was not recorded: ${error.message}`);
+    }
+  };
   // A code-editing employee's test command calls back here (connectors/employee-tests.mjs).
   runner.controllerOrigin = origin;
+  runner.loadMeasures = measures;
   // A burst of writes reaches each tab as one change event, at most four a second, naming each changed
   // record of the tab's project and every shared one, with the store's version. Log lines are not
   // changes: they go only to the tabs watching their attempt. Recent changes stay in a capped list in
@@ -358,7 +453,9 @@ export function createStudio({
     }
   };
   const notify = change => {
-    runner.schedule();
+    // An event row, an attempt's speech bubble or a chat message changes no task's readiness, so it starts no
+    // scheduler pass (C-19). Each is still journaled and sent to its project's tabs below.
+    if (!['event', 'message'].includes(change.type) && !change.trace) runner.schedule();
     journal.push(change);
     if (journal.length > journalLimit) journal.shift();
     pending.push(change);
@@ -426,6 +523,9 @@ export function createStudio({
         origin: origin(),
         engineConnected: false,
         integrationGateway: runner.gateway.status(),
+        // The journal ID of the integration the controller is running now (a source integration, carry or
+        // release), or null: a task's actions leave out reconciling the integration that is still running.
+        integrationRun: runner.sourceIntegrationRun?.id ?? null,
       },
     };
   };
@@ -450,19 +550,28 @@ export function createStudio({
       return undefined;
     }
   };
-  // One task as its page reads it, and as a command's records carry it.
+  // One task as its page reads it, and as a command's records carry it, with the change sequence it reflects, and its
+  // automatic attempts used and allowed as the scheduler counts them (attemptCount, core/registry.mjs).
   const taskPage = (projectId, record) => {
     const summary = storySummary(record);
     return {
-      task: { ...record, directorInputs: directorInputsOf(record), ...(summary ? { summary } : {}) },
+      task: {
+        ...record,
+        directorInputs: directorInputsOf(record),
+        ...(summary ? { summary } : {}),
+        ...servedAttemptCount(store, registries, record),
+      },
       attempts: store.dashboardAttempts(projectId, record.id),
+      version: store.version,
     };
   };
   // A command the dashboard sends with X-Studio-Records: 1 is answered with what it changed: the changes recorded
   // since it began that its project's tab would hear, as a change event names them, and the page of each task of
   // that project they name, so the page shows the effect without waiting for the stream. Beyond the stream's 200
   // changes, or 50 tasks, or past the capped list, the answer says reload instead. Kept per response.
-  const commands = new WeakMap();
+  const commands = new WeakMap(),
+    // A listed command the guard admitted with the director's key, until its handler answers (json).
+    keyedCommands = new WeakMap();
   const commandRecords = ({ projectId, after }) => {
     const base = { projectId, version: store.version, start: startId },
       changes = journal.filter(change => change.seq > after && relevant(change, projectId));
@@ -498,14 +607,20 @@ export function createStudio({
       }
       answer = { ...data, records };
     }
-    return send(
-      res,
-      status,
-      { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-      JSON.stringify(answer),
-    );
+    const text = JSON.stringify(answer);
+    // A command sent with the director's key leaves its line once its handler answers with a success, after its
+    // records are read, so the line is never among them; a refused one (a 4xx or 5xx answer) leaves none.
+    const keyedCommand = keyedCommands.get(res);
+    keyedCommands.delete(res);
+    if (keyedCommand && status < 400)
+      keyedCommandRecorded(keyedCommand.method, keyedCommand.route, keyedCommand.parts, keyedCommand.data);
+    return send(res, status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }, text);
   };
   const server = http.createServer(async (req, res) => {
+    // How long each request takes, for the controller's own measures (C-18); the change stream stays open, so not it.
+    const began = performance.now();
+    if (!req.url.startsWith('/api/events') && typeof res.on === 'function')
+      res.on('finish', () => measures.request(performance.now() - began));
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     try {
@@ -515,30 +630,60 @@ export function createStudio({
         fail('Cross-origin requests are not accepted.', 403);
       const url = new URL(req.url, origin()),
         parts = url.pathname.split('/').filter(Boolean);
+      // The guard: the route the request names (src/core/routes.mjs) decides which sign-in and which token it needs,
+      // for every request. Its access: 'director' needs the director's session cookie or key, reads and the change
+      // stream included; 'attempt' and 'anyone' need neither (the launch link, the built dashboard's files, which
+      // hold no records, and an agent's own test run, which its attempt's token authorizes). A request no route lists
+      // is weighed as it was before the table decided (rulesFor).
+      const rules = rulesFor(req.method, url.pathname),
+        listed = rules.route;
+      if (rules.access === 'director' && access === 'session' && !director.authenticated(req.headers)) {
+        if (parts[0] === 'api') fail(signInMessage, 401);
+        res.writeHead(401, signInHeaders);
+        return res.end(signInPage);
+      }
+      // Its token. 'unless-keyed': the page's request token keeps another page in the director's browser from riding
+      // on the session cookie, which the browser sends by itself. The key in its header needs no token: no page can
+      // send it without knowing the key, and whoever knows the key can read the token from the page anyway (the
+      // November 2 review). A request signed in by the cookie alone still needs the token, on every such route and on
+      // an /api command no route lists. Its refusal says whether the header is missing or carries a token from an
+      // earlier start, which the dashboard reads as a restart (dashboard/src/api.ts staleToken). 'attempt': the
+      // running attempt's own token, which exists only while its editor runs; the director's session does not stand
+      // for it.
+      const keyed = director.keyed(req.headers);
+      if (rules.token === 'unless-keyed' && !keyed) {
+        const token = req.headers['x-studio-token'];
+        if (token === undefined) fail(missingTokenMessage, 403);
+        if (!sameSecret(token, csrf)) fail(earlierTokenMessage, 403);
+      }
+      if (
+        rules.token === 'attempt' &&
+        !employeeTestsAllowed(runner.active.get(rules.params.id), req.headers['x-studio-attempt-token'])
+      )
+        fail('This attempt cannot run tests now.', 403);
       // The launch link this start printed signs a browser in (C-01): it sets the session cookie and opens the
       // dashboard. A link from an earlier start says so.
-      if (parts[0] === 'launch' && parts.length === 2 && req.method === 'GET') {
-        if (!director.launches(parts[1])) {
+      if (listed?.path === '/launch/:code') {
+        if (!director.launches(rules.params.code)) {
           res.writeHead(403, signInHeaders);
           return res.end(staleLaunchPage);
         }
         res.writeHead(303, { Location: '/', 'Set-Cookie': director.sessionCookie, 'Cache-Control': 'no-store' });
         return res.end();
       }
-      // Every other request needs the director's session or key, reads and the change stream included, apart from
-      // the built dashboard's files (they hold no records) and an agent's own test run, which its attempt's token
-      // authorizes below.
-      const attemptTests = parts[0] === 'api' && parts[1] === 'attempts' && parts[3] === 'tests' && parts.length === 4;
-      if (
-        access === 'session' &&
-        !attemptTests &&
-        !url.pathname.startsWith('/assets/') &&
-        !director.authenticated(req.headers)
-      ) {
-        if (parts[0] === 'api') fail(signInMessage, 401);
-        res.writeHead(401, signInHeaders);
-        return res.end(signInPage);
+      // Only a listed route is answered (src/core/routes.mjs), so a route that is handled but not listed can never be
+      // reached. A read the table does not name is refused here, before any handler runs: it names no read route (a
+      // mistyped one, or a command asked for with GET); a method other than a read's or a command's is not allowed.
+      // A command the table does not name is refused at the start of the commands below, once its token is weighed,
+      // before any command handler runs.
+      if (parts[0] === 'api' && !listed && !['POST', 'PATCH'].includes(req.method)) {
+        if (req.method === 'GET' || req.method === 'HEAD')
+          fail('Unknown read route. Commands are sent with POST or PATCH.', 404);
+        res.setHeader('Allow', 'POST, PATCH');
+        fail('Commands are sent with POST or PATCH.', 405);
       }
+      // Every route the controller answers, as the guard above reads them.
+      if (url.pathname === '/api/routes' && req.method === 'GET') return json(res, { routes });
       const queryProject = url.searchParams.get('projectId') || LEGACY_PROJECT;
       // The project a tab follows; none on a fresh install's No projects yet, where it follows only the changes that
       // belong to no project (a project appearing, the agents).
@@ -601,6 +746,13 @@ export function createStudio({
       if (url.pathname === '/api/projects' && req.method === 'GET') return json(res, { projects: store.projects() });
       // No projects yet: the samples, the signed-in CLIs, git and whether this is the first run (v1.0 item 24).
       if (url.pathname === '/api/templates' && req.method === 'GET') return json(res, listTemplates(store, runner));
+      // The studio's tools (1.4, tools, step 3; core/tools.mjs), which belong to no project: the list, retired ones
+      // included, and one tool, each with what the director may do with it and its key read as not set. Like every
+      // read they need the director's session or key; an attempt's token opens only its own test run.
+      if (parts[0] === 'api' && parts[1] === 'tools' && req.method === 'GET') {
+        if (parts.length === 2) return json(res, { tools: readTools(store, { reader: 'director' }) });
+        if (parts.length === 3) return json(res, { tool: readTool(store, toolId(parts[2]), { reader: 'director' }) });
+      }
       if (
         parts[0] === 'api' &&
         parts[1] === 'projects' &&
@@ -608,7 +760,7 @@ export function createStudio({
         parts.length === 5 &&
         req.method === 'GET'
       )
-        return json(res, oneRun(store, parts[2], parts[4]));
+        return json(res, oneRun(store, parts[2], parts[4], { registries }));
       // The older lines an idea whose stories landed can be brought back to, or why not.
       if (
         parts[0] === 'api' &&
@@ -714,7 +866,67 @@ export function createStudio({
       if (parts[0] === 'api' && parts[1] === 'projects' && parts.length === 4 && req.method === 'GET') {
         const projectId = parts[2];
         if (parts[3] === 'shell') return json(res, { ...store.shell(projectId), ...common(projectId) });
-        if (parts[3] === 'live') return json(res, liveRecords(store, projectId));
+        // What needs the director now: the shared rules' calls from the shell and the whole live set, those only the
+        // director's decision moves, each task's with the actions its task read answers (core/director-calls.mjs).
+        if (parts[3] === 'calls')
+          return json(res, directorCalls(store, projectId, { taskPage, shared: common(projectId), registries }));
+        // One chat of the project a page at a time (team chat): the newest page, the page before a message's seq, or
+        // what came after one, always newest last, with the highest seq read as the point a reader resumes from.
+        if (parts[3] === 'messages') {
+          store.project(projectId);
+          const channels = url.searchParams.getAll('channel'),
+            named = channels.length === 1 ? /^(?:(project)|(run|task):(.+))$/.exec(channels[0]) : null;
+          if (!named) fail('channel must be project, run:<runId> or task:<taskId>, given once.');
+          let channel;
+          try {
+            channel = checkChannel(store, projectId, named[1] ? { type: 'project' } : { type: named[2], id: named[3] });
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+          const paging = {};
+          for (const name of ['before', 'after', 'limit']) {
+            if (!url.searchParams.has(name)) continue;
+            const values = url.searchParams.getAll(name);
+            if (values.length !== 1 || !/^(0|[1-9][0-9]*)$/.test(values[0]))
+              fail(`${name} must be a single nonnegative integer.`);
+            paging[name] = Number(values[0]);
+          }
+          if ('before' in paging && 'after' in paging) fail('Read a page before a message or after one, not both.');
+          const { before = null, after, limit } = paging;
+          try {
+            if (after === undefined) {
+              const page = store.messagePage(projectId, channel, { before, ...(limit === undefined ? {} : { limit }) });
+              return json(res, { ...page, cursor: page.messages.at(-1)?.seq ?? null, version: store.version });
+            }
+            const page = store.messagesAfter(projectId, channel, after, limit === undefined ? {} : { limit }),
+              // Whether the chat holds messages before the first one read: before `after` itself when none was new.
+              first = Math.min(page.messages[0]?.seq ?? after + 1, Number.MAX_SAFE_INTEGER),
+              older = store.messagePage(projectId, channel, { before: first, limit: 1 }).messages.length > 0;
+            return json(res, {
+              messages: page.messages,
+              older,
+              newer: page.newer,
+              cursor: page.messages.at(-1)?.seq ?? after,
+              version: store.version,
+            });
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+        }
+        // The live set a page at a time in record order (page-read-limits): after the task before, limit at a time.
+        if (parts[3] === 'live') {
+          const limit = url.searchParams.get('limit') ?? String(liveLimit);
+          if (!/^[1-9][0-9]{0,2}$/.test(limit) || Number(limit) > liveMaxLimit)
+            fail(`limit must be a whole number from 1 to ${liveMaxLimit}.`);
+          return json(
+            res,
+            liveRecords(store, projectId, {
+              before: url.searchParams.get('before'),
+              limit: Number(limit),
+              registries,
+            }),
+          );
+        }
         // The project's library (1.2 step 6): every entry with its revisions, removed ones marked.
         if (parts[3] === 'library') return json(res, libraryOf(store, projectId));
         // Every file the project's accepted work handed back, and its snapshots (1.2 step 6).
@@ -730,7 +942,7 @@ export function createStudio({
         // A project's releases (1.1 step 6): its lines, milestones and their work, read from records and git alone.
         if (parts[3] === 'releases')
           try {
-            return json(res, releaseOverview(store, projectId, runner));
+            return json(res, await releaseOverview(store, projectId, runner));
           } catch (error) {
             fail(error.message);
           }
@@ -739,7 +951,11 @@ export function createStudio({
           if (!/^[1-9][0-9]?$/.test(limit) || Number(limit) > 50) fail('limit must be a whole number from 1 to 50.');
           return json(
             res,
-            finishedRuns(store, projectId, { before: url.searchParams.get('before'), limit: Number(limit) }),
+            finishedRuns(store, projectId, {
+              before: url.searchParams.get('before'),
+              limit: Number(limit),
+              registries,
+            }),
           );
         }
         // Settled work for the board, a page at a time; a limit of 0 reads only the counts.
@@ -757,6 +973,7 @@ export function createStudio({
               limit: Number(limit),
               workerId: url.searchParams.get('workerId'),
               team: url.searchParams.get('team'),
+              registries,
             }),
           );
         }
@@ -776,7 +993,11 @@ export function createStudio({
           const before = url.searchParams.get('before');
           if (before !== null && !/^[1-9][0-9]{0,15}$/.test(before)) fail('before must be an event sequence number.');
           store.project(projectId);
-          return json(res, store.activity(projectId, { before: before === null ? null : Number(before) }));
+          // The change sequence the page reflects, as every page read says it (page-read-limits).
+          return json(res, {
+            ...store.activity(projectId, { before: before === null ? null : Number(before) }),
+            version: store.version,
+          });
         }
         if (parts[3] === 'instructions') {
           const organization = projectOrganization(store, projectId),
@@ -788,8 +1009,9 @@ export function createStudio({
           });
         }
       }
-      // One task of the selected project with its attempt summaries: what a task's page shows. Its activity is what
-      // happened to it besides its agents' output, which its Activity tab reads.
+      // One task of the selected project with its attempt summaries: what a task's page shows, and the actions the
+      // director may take on it now, as the shared rules list them from the records the page holds (listed, never run).
+      // Its activity is what happened to it besides its agents' output, which its Activity tab reads.
       const taskRoute = parts[0] === 'api' && parts[1] === 'tasks' && req.method === 'GET';
       if (
         taskRoute &&
@@ -807,8 +1029,10 @@ export function createStudio({
         // A story's pages for the visual check, its planned ones until the director changes them (1.2 step 8).
         if (parts[3] === 'pages') return json(res, storyPagesView(store, record));
         if (parts[3]) return json(res, storyActivity(store, record));
-        return json(res, taskPage(queryProject, record));
+        return json(res, taskRead(store, queryProject, record, { taskPage, shared: common(queryProject) }));
       }
+      // The controller's own measures (C-18): event-loop delay, scheduler passes, requests, memory and record sizes.
+      if (url.pathname === '/api/health/load' && req.method === 'GET') return json(res, measures.snapshot(store));
       if (url.pathname === '/api/state' && req.method === 'GET') {
         const mode = url.searchParams.get('mode') ?? 'full';
         if (mode !== 'dashboard') return json(res, state(queryProject, { mode }));
@@ -964,11 +1188,10 @@ export function createStudio({
         return json(res, { ...attempt, phaseEvents: store.phaseEvents(attempt.id) });
       }
       // A code-editing employee runs the project's tests on its edits (v1.0 item 22). Its attempt's token, which
-      // exists only while its editor runs, authorizes this one request and nothing else; the dashboard's does not.
-      if (parts[0] === 'api' && parts[1] === 'attempts' && parts[3] === 'tests' && parts.length === 4) {
-        const entry = runner.active.get(parts[2]);
-        if (req.method !== 'POST' || !employeeTestsAllowed(entry, req.headers['x-studio-attempt-token']))
-          fail('This attempt cannot run tests now.', 403);
+      // exists only while its editor runs, authorizes this one request and nothing else; the dashboard's does not. The
+      // guard has weighed it (the route's token is 'attempt').
+      if (listed?.path === '/api/attempts/:id/tests') {
+        const entry = runner.active.get(rules.params.id);
         if (closing) fail('Controller is stopping.', 503);
         const data = await body(req);
         if (Object.keys(data).some(key => key !== 'files')) fail('A test run takes only files.');
@@ -977,8 +1200,11 @@ export function createStudio({
         return json(res, await runEmployeeTests(runner, entry, data));
       }
       if (parts[0] === 'api') {
-        if (req.headers['x-studio-token'] !== csrf || !['POST', 'PATCH'].includes(req.method))
-          fail('Invalid controller request.', 403);
+        // Every listed read answered above, and the guard after the sign-in check refused every other method, so only a
+        // command gets here; a read that does is answered as the guard answers an unknown one.
+        if (!['POST', 'PATCH'].includes(req.method))
+          fail('Unknown read route. Commands are sent with POST or PATCH.', 404);
+        // The guard has weighed the command's request token, or its key.
         if (closing) fail('Controller is stopping.', 503);
         // Idea intake: the Studio desk route, and the general one (1.0 item 11), which starts the
         // project's own intake: source checks and a breakdown for a source project, the planner for
@@ -992,6 +1218,12 @@ export function createStudio({
           req,
           intake ? ideaInputLimits.wireBytes : libraryUpload ? libraryLimits.wireBytes + 64 * 1024 : undefined,
         );
+        // The listed-routes guard for commands: one the table does not name reaches no handler.
+        if (!listed) fail('Unknown controller route.', 404);
+        // A command a local tool sends with the key leaves a line in its project's activity once its handler answers
+        // with a success (json below), so the director can tell a script's decisions from their own (the decisions
+        // themselves still say the director). One its handler refuses leaves none.
+        if (keyed) keyedCommands.set(res, { method: req.method, route: url.pathname, parts, data });
         // The newest change's seq before the command runs: its answer's records are what was recorded after it.
         if (req.headers['x-studio-records'] === '1' && typeof data?.projectId === 'string')
           commands.set(res, { projectId: data.projectId, after: store.version });
@@ -1100,6 +1332,69 @@ export function createStudio({
             fail(error.message, error.status);
           }
           return json(res, created, 201);
+        }
+        // The director's changes to the studio's tools (1.4, tools, step 3), which belong to no project: add one, change
+        // one by naming the revision it changes, set, replace or remove its key, or retire one, which keeps it and
+        // removes its key. A stale revision or a retired tool answers 409, and each answer is the tool as the director
+        // reads it. There is no delete. Each write goes on the change stream as { type: 'tool', id, revision }, for
+        // every tab (core/store.mjs). A key reaches only the credential store: no answer, refusal or record repeats it.
+        if (parts[1] === 'tools') {
+          if (!data || typeof data !== 'object' || Array.isArray(data)) fail('Send a tool command as a JSON object.');
+          const asDirector = { reader: 'director' };
+          if (parts.length === 2 && req.method === 'POST') {
+            const added = addTool(store, data);
+            return json(res, { tool: readTool(store, added.id, asDirector) }, 201);
+          }
+          if (parts.length === 3 && req.method === 'PATCH') {
+            const id = toolId(parts[2]),
+              { expectedRevision, ...fields } = data,
+              changed = changeTool(store, id, toolRevision(data), fields);
+            return json(res, { tool: readTool(store, changed.id, asDirector) });
+          }
+          if (parts.length === 4 && parts[3] === 'retire' && req.method === 'POST') {
+            const id = toolId(parts[2]);
+            if (Object.keys(data).some(field => field !== 'expectedRevision'))
+              fail('Retiring a tool takes only expectedRevision.');
+            const retired = retireTool(store, id, toolRevision(data), 'director', toolCredentials);
+            return json(res, { tool: readTool(store, retired.id, asDirector) });
+          }
+          // A key given as text sets or replaces the tool's key; key: null removes it.
+          if (parts.length === 4 && parts[3] === 'key' && req.method === 'POST') {
+            const id = toolId(parts[2]);
+            if (Object.keys(data).some(field => !['projectId', 'expectedRevision', 'key'].includes(field)))
+              fail("A tool's key command takes only expectedRevision and key.");
+            if (!Object.hasOwn(data, 'key')) fail('Send the key to set as key, or key: null to remove it.');
+            const expectedRevision = toolRevision(data),
+              changed =
+                data.key === null
+                  ? removeToolKey(store, toolCredentials, id, expectedRevision)
+                  : setToolKey(store, toolCredentials, id, expectedRevision, data.key);
+            return json(res, { tool: readTool(store, changed.id, asDirector) });
+          }
+          fail('Unknown controller route.', 404);
+        }
+        // A message to one of the selected project's chats (team chat), kept with what it led to in the same write. On
+        // a task's thread, naming the agent that builds the task takes the action the task's state allows, queued as
+        // the director's own buttons queue it; in an idea's chat, naming its planner replies to the plan as the idea
+        // conversation's reply does (planned again or revised, then queued as the replan route and Start queue it);
+        // other messages wait for a reply.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'messages' && !parts[4] && req.method === 'POST') {
+          if (!data || typeof data !== 'object' || Array.isArray(data) || data.projectId !== parts[2])
+            fail('Select this project before posting to its chat.');
+          if (Object.keys(data).some(key => !['projectId', 'channel', 'text', 'replyTo', 'attachments'].includes(key)))
+            fail('A message takes only projectId, channel, text, replyTo and attachments.');
+          store.project(parts[2]);
+          const { projectId: selected, ...fields } = data;
+          let message;
+          try {
+            message = postMessage(store, registries, selected, fields, {
+              queueStart: taskId => runner.queueStart(taskId),
+              refuseIntegration: task => integrationRefusal(runner, task),
+            });
+          } catch (error) {
+            fail(error.message, error.status);
+          }
+          return json(res, message, 201);
         }
         const projectId = data.projectId ?? LEGACY_PROJECT;
         store.project(projectId);
@@ -1473,6 +1768,18 @@ export function createStudio({
             fail(error.message);
           }
         }
+        // Version lines (decided by the director, November 2, 2026): each version has its own line and releases ship to
+        // shipsTo, which moves only when one is released.
+        if (parts[1] === 'projects' && parts[2] && parts[3] === 'version-lines' && !parts[4] && req.method === 'POST') {
+          if (parts[2] !== projectId) fail('Select this project before changing how it releases.');
+          if (Object.keys(data).some(key => !['projectId', 'shipsTo'].includes(key)))
+            fail('Version lines take shipsTo, the branch releases ship to.');
+          try {
+            return json(res, useVersionLines(store, projectId, runner, { shipsTo: data.shipsTo }));
+          } catch (error) {
+            fail(error.message);
+          }
+        }
         // A project's milestones (1.1 step 2a): one made for a version (POST) and its goal edited (PATCH); an idea
         // written into one to send later, and a waiting idea sent now or dropped.
         if (parts[1] === 'projects' && parts[2] && parts[3] === 'milestones') {
@@ -1517,6 +1824,11 @@ export function createStudio({
               runner.autonomy.tryReleases();
               return json(res, release, 202);
             }
+          }
+          // Ship again, after a release's shipping to the branch releases ship to stopped (version lines).
+          if (parts[4] && parts[5] === 'ship' && !parts[6] && req.method === 'POST') {
+            if (Object.keys(data).some(key => key !== 'projectId')) fail('Ship again takes no fields.');
+            return json(res, { shipped: settle(() => shipAgain(store, projectId, parts[4])) });
           }
           if (parts[4] && parts[5] === 'push' && !parts[6] && req.method === 'POST') {
             if (Object.keys(data).some(key => !['projectId', 'confirm'].includes(key)))
@@ -1960,6 +2272,33 @@ export function createStudio({
             runner.autonomy.sendWaiting(projectId);
             return json(res, closed);
           }
+          // Close and send as a new idea: a story whose plan the code moved past is closed once its remaining work has
+          // entered as a new idea on its line and milestone; a refused idea leaves the story as it was.
+          if (action === 'send-as-idea') {
+            if (Object.keys(data).some(key => !['projectId', 'idea'].includes(key)))
+              fail('Close and send as a new idea takes only the idea.');
+            let sent;
+            try {
+              sent = sendStoryAsIdea(
+                store,
+                registries,
+                runner,
+                t,
+                {
+                  idea: data.idea,
+                  refuse: current =>
+                    runner.autonomy.pendingIntegration()?.taskId === current.id
+                      ? new Error('Integration is approved for this work and waiting to run; it cannot be closed now.')
+                      : null,
+                },
+                sampleIdeaFiles,
+              );
+            } catch (error) {
+              fail(error.message, error.status);
+            }
+            runner.autonomy.sendWaiting(projectId);
+            return json(res, sent, 201);
+          }
           // Back to implementation with the review's findings, then queued like Start.
           if (action === 'send-back') {
             if (Object.keys(data).some(key => !['projectId', 'note'].includes(key)))
@@ -1967,12 +2306,7 @@ export function createStudio({
             // An integration approved for this work (by the director or the policy) is refused in the same
             // transaction that would send it back, so the two can never both happen.
             const sent = sendBackWork(store, registries, t, data.note ?? '', {
-              refuse: () =>
-                runner.autonomy.pendingIntegration()?.taskId === t.id &&
-                Object.assign(
-                  new Error('Integration is approved for this work and waiting to run; it cannot be sent back now.'),
-                  { status: 409 },
-                ),
+              refuse: () => integrationRefusal(runner, t),
             });
             let start;
             try {
@@ -2110,14 +2444,7 @@ export function createStudio({
           // limit), recorded as a PATCH direction is before the work starts; without one the direction is unchanged.
           // Work that Start refuses for its state keeps its direction.
           if (action === 'start') {
-            if (data.direction !== undefined) {
-              const direction = text(data.direction, 'Direction');
-              if (!['ready', 'failed', 'cancelled', 'blocked'].includes(t.status))
-                fail('Only ready or stopped assignments can start.');
-              registries.workflows.direct(t, direction);
-              store.putTask(t);
-              store.event('task_updated', t.id, null, 'Direction for the next attempt updated with Start.');
-            }
+            if (data.direction !== undefined) directStart(store, registries, t, data.direction);
             return json(res, runner.queueStart(t.id), 202);
           }
           // The director answers the question the task's latest attempt stopped to ask (1.2 step 2): one of its options,
@@ -2291,30 +2618,26 @@ export function createStudio({
             return json(res, { ok: true, taskIds: t.materializedTaskIds });
           }
           if (action === 'accept') {
-            const accepted = acceptAttempt(store, registries, t);
+            // Over a failed check, with the director's reason, where the step's contract allows it (November 2, 2026).
+            if (Object.keys(data).some(key => !['projectId', 'overReason'].includes(key)))
+              fail('Accepting takes only a reason, to accept over a failed check.');
+            const accepted = acceptAttempt(
+              store,
+              registries,
+              t,
+              data.overReason !== undefined
+                ? {
+                    type: 'director',
+                    over: { reason: text(data.overReason, 'Reason for accepting over a failed check', 2000, true) },
+                  }
+                : { type: 'director' },
+            );
             runner.autonomy.accepted(t.id);
             return json(res, { ok: true, proposedTaskIds: accepted.proposedTaskIds });
           }
-          if (action === 'revise') {
-            if (t.status !== 'review') fail('Only work awaiting review can be revised.');
-            // Past the attempt limit, the revised task waits for the director to press Start,
-            // except where the task type's limit is a safety rule.
-            if (registries.workflows.get(t.kind).fixedAttemptLimit && store.attempts(t.id).length >= t.maxAttempts)
-              fail('Attempt limit reached. Create a newly scoped assignment.');
-            const direction = text(data.direction, 'Revision direction', 24000, true);
-            registries.workflows.direct(t, direction);
-            const a = store.attempt(t.lastAttemptId);
-            a.status = 'revision_requested';
-            a.revisionRequestedBy = { type: 'director', at: new Date().toISOString(), reason: direction };
-            store.updateAttempt(a);
-            t.status = 'ready';
-            t.reason = '';
-            delete t.autonomyNote;
-            registries.workflows.stageProgress(store, t);
-            store.putTask(t);
-            store.event('revision', t.id, a.id, direction);
-            return json(res, { ok: true });
-          }
+          // Past the attempt limit, the revised task waits for the director to press Start, except where the task
+          // type's limit is a safety rule.
+          if (action === 'revise') return json(res, reviseWork(store, registries, t, data.direction));
           if (req.method === 'PATCH' && !action) {
             if (['running', 'stopping', 'done'].includes(t.status))
               fail('Edit future work only after its active attempt stops; accepted work stays recorded.');
@@ -2634,6 +2957,7 @@ export function createStudio({
       closing = true;
       closePromise = (async () => {
         await runner.shutdown();
+        measures.close();
         clearTimeout(broadcastTimer);
         for (const client of clients) client.res.end();
         // Node's close ends only the connections idle at that moment and stops timing out headers and requests. A
@@ -2649,8 +2973,12 @@ export function createStudio({
             resolve();
           });
         });
-        store.db.prepare('DELETE FROM settings WHERE id=? AND data=?').run('controller-owner', JSON.stringify(owner));
-        store.close();
+        try {
+          store.db.prepare('DELETE FROM settings WHERE id=? AND data=?').run('controller-owner', JSON.stringify(owner));
+          store.close();
+        } finally {
+          releaseLock();
+        }
       })();
       return closePromise;
     },
@@ -2681,10 +3009,15 @@ export function localConfiguration(installRoot = root, environment = process.env
     sourceRoot: resolve(environment.STUDIO_SOURCE_ROOT || local.sourceRoot),
   };
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta)) {
   // Under scripts/supervisor.mjs a planned restart exits with 75 and is relaunched.
   const supervised = process.env.STUDIO_SUPERVISED === '1',
     local = localConfiguration();
+  // Every stop this process sees is recorded, and said, before it happens (C-41, src/stop-record.mjs).
+  let stops = null;
+  const stop = reason => {
+    if (stops?.stop(reason)) console.log(`Studio desk: stopping at ${new Date().toISOString()}: ${reason}.`);
+  };
   const app = createStudio({
     directory: local.dataDirectory,
     // Only the controller itself looks at this computer's built-in sandbox; tests pass their own.
@@ -2692,23 +3025,46 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       ...(local.sourceRoot ? { sourceChangeRoot: local.sourceRoot } : {}),
       builtInSandbox: builtInSandbox(),
     },
-    restart: supervised ? () => app.close().then(() => process.exit(75)) : null,
+    restart: supervised
+      ? () =>
+          app.close().then(() => {
+            stop('a planned restart to load updated source');
+            process.exit(75);
+          })
+      : null,
   });
+  const previous = previousStop(app.store.directory);
+  stops = stopRecorder(app.store.directory);
+  process.on('uncaughtExceptionMonitor', (error, origin) =>
+    stop(
+      `${origin === 'unhandledRejection' ? 'an unhandled rejection' : 'an uncaught error'}: ${error?.message ?? error}`,
+    ),
+  );
+  process.on('exit', code => stop(`it exited with code ${code}`));
   try {
     const url = await app.start();
     console.log(
       `Studio desk: ${app.launchUrl}\nLocal records: ${app.store.directory}\nDeveloping: ${app.runner.sourceChangeRoot}${app.runner.selfHosted ? ' (this copy; integrations restart the controller)' : ' (separate development copy)'}\nOpen the link above in your browser once: it signs that browser in, and ${url} then opens the dashboard, also after restarts. Press Ctrl+C to stop. Approve a pipeline or start assignments individually. Restarts pause queued dispatch.${supervised ? '' : '\nRun through npm start or start-studio to allow planned restarts after source integration.'}`,
     );
+    // The previous run's stop, in this window and in the activity that belongs to no project.
+    if (previous) {
+      console.log(`Studio desk: ${previous.text}`);
+      app.store.event('controller_stop', null, null, previous.text);
+    }
   } catch (err) {
     console.error(`Cannot start: ${err.message}`);
+    stop(`it could not start: ${err.message}`);
     process.exitCode = 1;
     await app.close();
   }
   let stopping = false;
-  for (const signal of ['SIGINT', 'SIGTERM'])
+  // SIGHUP is Windows closing the window (it ends the process about ten seconds later) and SIGBREAK is Ctrl+Break;
+  // each is recorded before the controller closes.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', ...(process.platform === 'win32' ? ['SIGBREAK'] : [])])
     process.on(signal, async () => {
       if (stopping) return;
       stopping = true;
+      stop(`it was asked to stop (${signal})`);
       await app.close();
       process.exit(0);
     });

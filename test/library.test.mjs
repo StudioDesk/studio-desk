@@ -8,6 +8,7 @@ import path from 'node:path';
 import { setup } from './studio-setup.mjs';
 import { hash } from '../src/core/contracts.mjs';
 import { currentEntries, libraryOf, readLibraryRevision } from '../src/core/library.mjs';
+import { newRun } from '../src/core/graph.mjs';
 
 const project = 'project-legacy',
   upload = (name, text) => ({ name, data: Buffer.from(text).toString('base64') });
@@ -252,18 +253,135 @@ test('a revision reads back as an inert file: images as themselves, everything e
 
 // A plain task on the test studio's model-free employee, run to review.
 async function runTask(c, title, extra = {}) {
+  const { runReference, ...fields } = extra;
   const created = await c.request('/api/tasks', {
     title,
     workerId: 'W-03',
     kind: 'general',
     brief: 'Bounded model-free work.',
-    ...extra,
+    ...fields,
   });
   assert.equal(created.status, 201, JSON.stringify(created.data));
+  // Run membership is controller-owned, rather than a field the creation route takes.
+  if (runReference) c.app.store.putTask({ ...c.app.store.task(created.data.id), runReference });
   c.app.runner.start(created.data.id);
   const done = await c.wait(created.data.id);
   return done.attempt || c.app.store.attempt(c.app.store.task(created.data.id).lastAttemptId);
 }
+
+// Exercise delivery contracts through real claims and stored attempts, using only the simulator.
+function librarySteps(c) {
+  const workflows = c.app.runner.workflows,
+    general = workflows.get('general');
+  workflows.register({
+    id: 'library-fixture',
+    version: 'library-fixture-v1',
+    tasks: [
+      { ...general, kind: 'library-fixture:none', step: { kind: 'work', receives: { library: 'none' } } },
+      { ...general, kind: 'library-fixture:consumer', step: { kind: 'review' } },
+    ],
+  });
+}
+
+function assertEmptyLibrary(store, attempt) {
+  assert.deepEqual(attempt.libraryReferences, []);
+  assert.deepEqual(attempt.libraryLeftOut, []);
+  assert.equal(fs.existsSync(path.resolve(attempt.outputFolder, '../library')), false);
+  assert.ok(!store.attempt(attempt.id).instructions.layers.some(layer => layer.title === 'Project library'));
+}
+
+test('a persisted none delivery stays empty for a same-as-inputs consumer despite an existing library entry', async t => {
+  const c = await setup(t),
+    store = c.app.store;
+  librarySteps(c);
+  const added = await c.request('/api/projects/project-legacy/library', {
+    projectId: project,
+    name: 'Spec',
+    purpose: 'The rules.',
+    file: upload('spec.md', '# Spec\n'),
+  });
+  assert.equal(added.status, 201, JSON.stringify(added.data));
+  const work = await runTask(c, 'Work without the library', { kind: 'library-fixture:none' });
+  assert.equal((await c.request(`/api/tasks/${work.taskId}/accept`)).status, 200);
+  const producer = store.attempt(store.task(work.taskId).acceptedAttemptId),
+    review = await runTask(c, 'Consume the accepted work', {
+      kind: 'library-fixture:consumer',
+      dependencies: [producer.taskId],
+    });
+  assert.equal(producer.status, 'accepted');
+  assert.equal(review.status, 'review');
+  assert.equal(review.inputReferences[0].attemptId, producer.id);
+  assert.deepEqual(
+    { producer: producer.libraryReferences, consumer: review.libraryReferences },
+    { producer: [], consumer: [] },
+  );
+  assertEmptyLibrary(store, producer);
+  assertEmptyLibrary(store, store.attempt(review.id));
+});
+
+test('an initially empty current library stays empty through review and retry of the same accepted work', async t => {
+  const c = await setup(t),
+    store = c.app.store;
+  librarySteps(c);
+  const work = await runTask(c, 'Work before library uploads');
+  assert.equal((await c.request(`/api/tasks/${work.taskId}/accept`)).status, 200);
+  const producer = store.attempt(store.task(work.taskId).acceptedAttemptId);
+  assertEmptyLibrary(store, producer);
+  const added = await c.request('/api/projects/project-legacy/library', {
+    projectId: project,
+    name: 'New spec',
+    purpose: 'For later work.',
+    file: upload('spec.md', '# Added after the work\n'),
+  });
+  assert.equal(added.status, 201, JSON.stringify(added.data));
+  const first = await runTask(c, 'Review the earlier work', {
+    kind: 'library-fixture:consumer',
+    dependencies: [producer.taskId],
+  });
+  assert.equal(first.status, 'review');
+  assert.equal(first.inputReferences[0].attemptId, producer.id);
+  assertEmptyLibrary(store, store.attempt(first.id));
+  const revised = await c.request(`/api/tasks/${first.taskId}/revise`, {
+    direction: 'Check the same accepted work again.',
+  });
+  assert.equal(revised.status, 200, JSON.stringify(revised.data));
+  c.app.runner.start(first.taskId);
+  await c.wait(first.taskId);
+  const retry = store.attempt(store.task(first.taskId).lastAttemptId);
+  assert.equal(retry.status, 'review');
+  assert.notEqual(retry.id, first.id);
+  assert.equal(retry.inputReferences[0].attemptId, producer.id);
+  assertEmptyLibrary(store, retry);
+  assertEmptyLibrary(store, store.attempt(producer.id));
+});
+
+test('a legacy accepted attempt without a library snapshot keeps the current-library fallback', async t => {
+  const c = await setup(t),
+    store = c.app.store;
+  librarySteps(c);
+  const legacy = acceptedWork(store),
+    added = await c.request('/api/projects/project-legacy/library', {
+      projectId: project,
+      name: 'Spec',
+      purpose: 'The current rules.',
+      file: upload('spec.md', '# Current spec\n'),
+    });
+  assert.equal(added.status, 201, JSON.stringify(added.data));
+  assert.equal(store.attempt(legacy.id).libraryReferences, undefined);
+  const review = await runTask(c, 'Review legacy work', {
+    kind: 'library-fixture:consumer',
+    dependencies: [legacy.taskId],
+  });
+  assert.equal(review.status, 'review');
+  assert.equal(review.inputReferences[0].attemptId, legacy.id);
+  assert.equal(review.libraryReferences[0].entryId, added.data.id);
+  assert.equal(review.libraryReferences[0].sha256, hash(Buffer.from('# Current spec\n')));
+  assert.equal(
+    fs.readFileSync(path.resolve(review.outputFolder, review.libraryReferences[0].path), 'utf8'),
+    '# Current spec\n',
+  );
+  assert.equal(store.attempt(legacy.id).libraryReferences, undefined, 'Reading legacy work does not rewrite it.');
+});
 
 test("every attempt receives the library's index in its instructions and its files beside the work, recorded by hash", async t => {
   const c = await setup(t),
@@ -312,7 +430,8 @@ test("every attempt receives the library's index in its instructions and its fil
   // A removed entry reaches no later work.
   await c.request(`/api/projects/project-legacy/library/${spec.id}/remove`, { projectId: project });
   const after = await runTask(c, 'Write the jobs page');
-  assert.equal(after.libraryReferences, undefined);
+  assert.deepEqual(after.libraryReferences, []);
+  assert.deepEqual(after.libraryLeftOut, []);
   assert.doesNotMatch(store.attempt(after.id).instructions.text, /# Project library/);
 });
 
@@ -320,6 +439,7 @@ test('files past the size limit are in the index alone, and a review receives th
   const c = await setup(t),
     store = c.app.store,
     { libraryFor, libraryDeliveryBytes } = await import('../src/core/library.mjs');
+  librarySteps(c);
   const big = 'x'.repeat(4 * 1024 * 1024);
   for (let i = 1; i <= 6; i++)
     assert.equal(
@@ -339,15 +459,76 @@ test('files past the size limit are in the index alone, and a review receives th
     references.map(item => item.delivered),
     [true, true, true, true, true, false],
   );
-  // A review takes the reviewed attempt's references exactly, whatever the library holds now.
-  const reviewed = { libraryReferences: references.slice(0, 2), libraryLeftOut: [{ entryId: 'lib-x', name: 'Gone' }] };
-  const fake = { ...store, attempt: id => (id === 'attempt-reviewed' ? reviewed : store.attempt(id)) };
-  Object.setPrototypeOf(fake, Object.getPrototypeOf(store));
-  const review = libraryFor(fake, { projectId: project, kind: 'studio-development:change-review' }, [
-    { taskId: 'T-1', attemptId: 'attempt-reviewed' },
-  ]);
-  assert.deepEqual(review.references, reviewed.libraryReferences);
-  assert.deepEqual(review.leftOut, reviewed.libraryLeftOut);
+  const dropped = await c.request('/api/projects/project-legacy/library', {
+    projectId: project,
+    name: 'Old brand',
+    purpose: 'Leave this out of the idea.',
+    file: upload('old.md', '# Old\n'),
+  });
+  assert.equal(dropped.status, 201, JSON.stringify(dropped.data));
+  const runId = 'run-00000000-0000-4000-8000-000000000002';
+  store.putRun(
+    newRun({
+      id: runId,
+      projectId: project,
+      workflow: { id: 'library-fixture', name: 'Library fixture', version: 1 },
+      graph: { nodes: [], edges: [] },
+      envelope: { nodes: 2, attemptSeconds: 120 },
+      taskIds: [],
+      at: new Date().toISOString(),
+    }),
+  );
+  const excluded = await c.request(`/api/projects/project-legacy/runs/${runId}/library`, {
+    projectId: project,
+    leftOut: [dropped.data.id],
+  });
+  assert.equal(excluded.status, 200, JSON.stringify(excluded.data));
+  const work = await runTask(c, 'Use the large library', { runReference: { runId } });
+  assert.equal((await c.request(`/api/tasks/${work.taskId}/accept`)).status, 200);
+  const producer = store.attempt(store.task(work.taskId).acceptedAttemptId),
+    leftOut = [{ entryId: dropped.data.id, name: 'Old brand' }];
+  assert.deepEqual(producer.libraryReferences, references);
+  assert.deepEqual(producer.libraryLeftOut, leftOut);
+  // Change both the current revision and exclusions before the consumer is claimed.
+  const revised = await c.request(`/api/projects/project-legacy/library/${references[0].entryId}/revisions`, {
+    projectId: project,
+    file: upload('data-1.csv', 'Updated data\n'),
+  });
+  assert.equal(revised.status, 201, JSON.stringify(revised.data));
+  assert.equal(
+    (await c.request(`/api/projects/project-legacy/runs/${runId}/library`, { projectId: project, leftOut: [] })).status,
+    200,
+  );
+  const review = await runTask(c, 'Consume the original large library', {
+    kind: 'library-fixture:consumer',
+    dependencies: [producer.taskId],
+    runReference: { runId },
+  });
+  const storedReview = store.attempt(review.id);
+  assert.equal(storedReview.status, 'review');
+  assert.equal(storedReview.inputReferences[0].attemptId, producer.id);
+  assert.deepEqual(
+    storedReview.libraryReferences,
+    references,
+    'Revisions, hashes, paths and delivery flags stay pinned.',
+  );
+  assert.deepEqual(storedReview.libraryLeftOut, leftOut);
+  for (const reference of storedReview.libraryReferences) {
+    const staged = path.resolve(storedReview.outputFolder, reference.path);
+    assert.equal(fs.existsSync(staged), reference.delivered);
+    if (reference.delivered) assert.equal(hash(fs.readFileSync(staged)), reference.sha256);
+  }
+  assert.match(storedReview.instructions.layers.find(layer => layer.title === 'Project library').text, /Old brand/);
+  assert.deepEqual(store.attempt(producer.id).libraryReferences, references);
+  // Without same-as-inputs, even a review-named task still gets the current library.
+  const inputs = [{ taskId: producer.taskId, attemptId: producer.id }];
+  const current = libraryFor(store, { projectId: project, kind: 'studio-development:change-review' }, inputs);
+  assert.equal(current.references[0].revision, 2);
+  assert.ok(current.references.some(item => item.entryId === dropped.data.id));
+  assert.deepEqual(libraryFor(store, { projectId: project, kind: 'general' }, inputs, { delivery: 'none' }), {
+    references: [],
+    leftOut: [],
+  });
 });
 
 test("the director leaves named files out of an idea's work, and each attempt records what it left out", async t => {

@@ -3,12 +3,26 @@
 // turn just before their test process starts and give it back when it ends. A story's visual check (1.2 step 8)
 // starts its project's app and photographs it; two at once could meet at one address, and one would photograph the
 // other's app, so the visual check has a turn of its own (October 29, when a project's stories began to build two at
-// a time). Editors, reviewers and installs take none. A turn is a persisted lease on one resource, claimed through the
+// a time). An editor's own run of the whole suite on its edits takes the test turn too (waitForTurn, November 2);
+// its runs of named test files, editors, reviewers and installs take none. A turn is a persisted lease on one resource, claimed through the
 // store as every other reservation is, so a restart keeps it held until an interrupted holder is reconciled. Waiters
 // queue in memory, first come, first served, one queue for each turn, and are tried again whenever leases change;
 // there is no polling. A waiting attempt's record says what it waits for (`testTurn`, whichever turn it is).
+import { live } from '../adapters/process.mjs';
+
 export const testTurnResource = 'computer:test-suite',
   visualTurnResource = 'computer:visual-check';
+
+// Whether the test run a journal recorded under the test turn (journal.testProcess { pid, startedAt }, the install,
+// build or test step of a verification, connectors/source-integration.mjs) is confirmed gone, by the process identity
+// every caller shares (live, adapters/process.mjs: its ID with when it started, so a later process handed the ID is not
+// taken for it). False when it recorded none. An integration (connectors/source-changes.mjs) and a carry or release
+// (connectors/source-carries.mjs) the controller's stop cut off give the turn back with it.
+export const testRunEnded = journal =>
+  !!journal.testProcess?.pid && !live({ pid: journal.testProcess.pid, pidStartedAt: journal.testProcess.startedAt });
+// Whether an owner holds the test turn. A store without leases (a stand-in) holds none.
+export const holdsTestTurn = (store, owner) =>
+  (store.leases?.() || []).some(lease => lease.resource === testTurnResource && lease.attemptId === owner);
 
 // Each store's waiters for each turn: one store per controller, shared by every project.
 const queues = new WeakMap();
@@ -72,21 +86,69 @@ function conflictFor(store, resource, queue) {
 }
 
 function wait(store, resource, queue, waiter) {
-  const { entry } = waiter,
-    a = entry.attempt,
-    conflict = conflictFor(store, resource, queue);
-  queue.waiting.push(waiter);
+  const { entry } = waiter;
   entry.cleanup.push(() => leave(store, resource, queue, waiter));
   // No process runs while it waits, so a stop finishes the attempt at once (Runner.stop), and its limit waits too.
   clearTimeout(entry.timer);
   entry.timer = null;
   entry.child = null;
-  a.pid = null;
+  entry.attempt.pid = null;
+  delete entry.attempt.pidStartedAt;
+  enqueue(store, resource, queue, waiter);
+}
+
+// Joins the queue, and records what the waiter waits for with one event.
+function enqueue(store, resource, queue, waiter) {
+  const a = waiter.entry.attempt,
+    conflict = conflictFor(store, resource, queue);
+  queue.waiting.push(waiter);
   a.testTurn = { reason: conflict.reason, since: new Date().toISOString(), holder: conflict.ownerAttemptId };
   store.updateAttempt(a);
   store.event('test_turn', a.taskId, a.id, conflict.reason);
   retry(store, resource, queue);
 }
+
+// An editor's own run of the whole suite (connectors/employee-tests.mjs) waits in the same queue while its editor
+// keeps running: the editor's process, pid and time limit are left as they are, and a wait that ends without the
+// turn finishes nothing. Resolves { taken, waitedMs } once the attempt holds the turn, which the caller gives back
+// (releaseTurn), or once it has left the queue without it: at boundMs, with what it waited for ({ bounded, reason,
+// holder }); when signal aborts (the request closing, the editor stopping); or when the attempt finishes.
+export function waitForTurn(runtime, entry, { resource = testTurnResource, boundMs = Infinity, signal } = {}) {
+  const store = runtime.store,
+    began = Date.now();
+  if (signal?.aborted) return Promise.resolve({ taken: false, waitedMs: 0 });
+  if (!queues.get(store)?.get(resource)?.waiting.length && !claim(store, resource, entry.attempt.id))
+    return Promise.resolve({ taken: true, waitedMs: 0 });
+  const queue = queueOf(store, resource);
+  return new Promise(resolve => {
+    let timer = null,
+      done = false;
+    const settle = (taken, details = {}) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
+        resolve({ taken, waitedMs: Date.now() - began, ...details });
+      },
+      waiter = { runtime, entry, take: () => settle(true), drop: () => cancel() },
+      cancel = () => {
+        if (done) return;
+        leave(store, resource, queue, waiter);
+        settle(false);
+      };
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (Number.isFinite(boundMs))
+      timer = setTimeout(() => {
+        if (done) return;
+        const { reason = null, holder = null } = entry.attempt.testTurn || {};
+        leave(store, resource, queue, waiter);
+        settle(false, { bounded: true, reason, holder });
+      }, boundMs);
+    enqueue(store, resource, queue, waiter);
+  });
+}
+export const waitForTestTurn = (runtime, entry, options) =>
+  waitForTurn(runtime, entry, { ...options, resource: testTurnResource });
 
 // A waiter that finished without the turn (stopped or cancelled) leaves the queue and its record.
 function leave(store, resource, queue, waiter) {
@@ -106,6 +168,7 @@ function serve(store, resource, queue) {
       { runtime, entry } = waiter;
     if (entry.cancelled || runtime.active.get(entry.attempt.id) !== entry) {
       queue.waiting.shift();
+      waiter.drop?.();
       continue;
     }
     let conflict;
@@ -129,12 +192,13 @@ function serve(store, resource, queue) {
   }
 }
 
-function begin({ runtime, entry, limitMs, start, timed }) {
+function begin({ runtime, entry, limitMs, start, timed, take }) {
   const a = entry.attempt;
   if (a.testTurn) {
     delete a.testTurn;
     runtime.store.updateAttempt(a);
   }
+  if (take) return take();
   if (timed) {
     clearTimeout(entry.timer);
     entry.timer = setTimeout(() => {

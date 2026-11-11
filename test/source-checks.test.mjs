@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -11,6 +12,8 @@ import { EventEmitter } from 'node:events';
 import { fixtureNpm } from './model-free-studio.mjs';
 import { studioDeskProfile } from '../src/connectors/source-profile.mjs';
 import { sourceChecksAdapter } from '../src/adapters/source-checks.mjs';
+import { builtInSandboxRunner, builtInSandboxRunArguments } from '../src/adapters/built-in-sandbox.mjs';
+import { runBuiltInSandbox } from '../src/adapters/built-in-sandbox-run.mjs';
 import { Store } from '../src/core/store.mjs';
 import { Runner } from '../src/core/orchestrator.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
@@ -22,6 +25,7 @@ import {
   sourcePlan,
   sourceTestArgs,
   sourceTestTimeoutMs,
+  suiteConcurrency,
   testOutput,
   testTotals,
   testPhaseEvidence,
@@ -47,12 +51,14 @@ test('a hung test or a file that never exits ends the measured suite with a repo
     path.join(directory, 'test/open.test.mjs'),
     "import test from 'node:test';\nsetInterval(() => {}, 1000);\ntest('passes but leaves a timer running', () => {});\n",
   );
-  // Every measured run bounds each test and exits once every test has finished.
+  // Every measured run bounds each test, runs about half of this computer's threads' worth of files at
+  // once and exits once every test has finished.
   const plan = sourcePlan(directory);
   assert.deepEqual(plan.command.args, [
     '--test',
     '--test-reporter=tap',
     `--test-timeout=${sourceTestTimeoutMs}`,
+    `--test-concurrency=${Math.max(1, Math.floor(os.availableParallelism() / 2))}`,
     '--test-force-exit',
     'test/hang.test.mjs',
     'test/open.test.mjs',
@@ -114,16 +120,42 @@ test('a hung test or a file that never exits ends the measured suite with a repo
   );
 });
 
+test("a suite runs about half of the computer's threads' worth of test files at once, and at least one", () => {
+  // The thread count is injectable, so a one-thread computer is modelled rather than needed.
+  assert.equal(suiteConcurrency(1), 1);
+  assert.equal(suiteConcurrency(2), 1);
+  assert.equal(suiteConcurrency(3), 1);
+  assert.equal(suiteConcurrency(4), 2);
+  assert.equal(suiteConcurrency(7), 3);
+  assert.equal(suiteConcurrency(32), 16);
+  // Without an argument it measures this computer.
+  assert.equal(suiteConcurrency(), Math.max(1, Math.floor(os.availableParallelism() / 2)));
+  // Every call has the same leading options, '--test' first, so an agent's own test runs still find
+  // the suite's files after sourceTestArgs([]).length (src/connectors/employee-tests.mjs).
+  const files = ['test/a.test.mjs', 'test/b.test.mjs'],
+    leading = sourceTestArgs([]);
+  assert.equal(leading[0], '--test');
+  assert.ok(leading.includes(`--test-concurrency=${suiteConcurrency()}`));
+  assert.ok(leading.every(arg => arg.startsWith('--')));
+  for (const args of [sourceTestArgs(files), sourceTestArgs(files, 1000)]) {
+    assert.equal(args.length, leading.length + files.length);
+    assert.equal(args[0], '--test');
+    assert.deepEqual(args.slice(leading.length), files);
+  }
+});
+
 // Exercise the adapter's actual fixed Node command on a tiny committed repository.
 // The process supervisor is represented by a local harness, with no models or HTTP.
-function measuredConsumer(t, mode, partial) {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-check-'))),
+function measuredConsumer(t, mode, partial, budget, changeSelection = false) {
+  let clock = 1000000;
+  if (budget) t.mock.method(Date, 'now', () => clock);
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-check-'))),
     root = path.join(directory, 'r'),
     job = path.join(directory, 'job'),
     output = path.join(job, 'output');
   t.after(() => {
     phaseStore.close();
-    assert.ok(path.resolve(directory).startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+    assert.ok(path.resolve(directory).startsWith(realPath(os.tmpdir()) + path.sep));
     fs.rmSync(directory, { recursive: true, force: true });
   });
   ensureSourceDirectories(root);
@@ -153,7 +185,11 @@ function measuredConsumer(t, mode, partial) {
   const original = sourcePlan(root),
     base = { commit: git(root, ['rev-parse', 'HEAD']), branch: 'main' },
     attempt = { id: 'attempt-12345678', taskId: 'T-check-consumer', pid: 123, sourceCheck: { ...original, base } },
-    entry = { attempt, job, output };
+    entry = { attempt, job, output, cleanup: [] };
+  if (budget) {
+    attempt.assignment = { maxSeconds: 5 };
+    attempt.configuration = { testSandbox: 'built-in' };
+  }
   fs.mkdirSync(output, { recursive: true });
   let invocation, recorded, installed;
   const phaseStore = new Store(path.join(directory, 'events'), () => ({ organization: {}, tasks: [] }));
@@ -175,13 +211,14 @@ function measuredConsumer(t, mode, partial) {
     },
     runNative(entry, executable, args, input, complete, options) {
       entry.child = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+      if (args[0] === builtInSandboxRunner) {
+        invocation = { executable, args, input, complete, options };
+        return;
+      }
       // The steps around the tests run for real: the snapshot, and its check once the tests close, in a process of
       // their own (src/adapters/source-snapshot.mjs), and the install step (MP-026) with the stand-in for npm. The
       // test itself runs the tests.
-      if (
-        executable !== original.command.executable ||
-        JSON.stringify(args) !== JSON.stringify(original.command.args)
-      ) {
+      if (args[0]?.endsWith('source-snapshot.mjs') || args[0]?.endsWith('package-installs.mjs')) {
         const ran = spawnSync(executable, args, {
           cwd: options.cwd,
           input,
@@ -189,34 +226,54 @@ function measuredConsumer(t, mode, partial) {
           windowsHide: true,
           timeout: 30000,
         });
-        if (!args.some(arg => arg.endsWith('source-snapshot.mjs'))) installed = ran;
+        if (!args.some(arg => arg.endsWith('source-snapshot.mjs'))) {
+          installed = ran;
+          if (budget) clock += budget.installElapsedMs;
+          if (changeSelection)
+            runtime.sourceCheckCommand = { executable: process.execPath, args: ['--eval', 'process.exit(1)'] };
+        }
         return options.onComplete(complete(ran.status, ran.signal), ran.status, ran.signal);
       }
       invocation = { executable, args, input, complete, options };
     },
   };
+  // Another dispatch can change the trusted process fixture while this run installs its packages.
+  if (changeSelection && !budget) runtime.sourceCheckCommand = original.command;
   sourceChecksAdapter.start(runtime, entry);
   assert.deepEqual(recorded.sourceCheck, { ...original, base });
   assert.equal(installed?.status, 0, installed?.stderr);
   assert.equal(
-    fs.existsSync(path.join(job, 'source', 'node_modules')),
+    fs.existsSync(path.join(recorded.sourceCheckFolder.path, 'node_modules')),
     false,
     'The copy holds no packages of its own.',
   );
   assert.ok(fs.existsSync(path.join(directory, 'node_modules', 'fixture-tool')), 'It finds the install above it.');
   assert.equal(invocation.executable, original.command.executable);
-  assert.deepEqual(invocation.args, original.command.args);
+  if (budget) {
+    const parsed = builtInSandboxRunArguments(invocation.args.slice(1));
+    assert.equal(parsed.deadlineMs, 1005000, 'the deadline begins before installation');
+    assert.equal(parsed.deadlineMs - clock, 5000 - budget.installElapsedMs);
+    assert.deepEqual(parsed.args, original.command.args);
+  } else assert.deepEqual(invocation.args, original.command.args);
   assert.equal(invocation.input, '');
-  assert.equal(invocation.options.cwd, path.join(job, 'source'));
+  // The tests run on the recorded copy, a short folder beside the candidates' worktrees, not in the job folder.
+  assert.equal(recorded.sourceCheckFolder.path, path.join(realPath(runtime.sourceWorktreeRoot), '12345678'));
+  assert.equal(invocation.options.cwd, recorded.sourceCheckFolder.path);
+  assert.equal(fs.existsSync(path.join(job, 'source')), false);
   assert.equal(invocation.options.resultOnFailure, true);
   assert.equal(
     Object.keys(invocation.options.environment).some(key => /^STUDIO_/i.test(key)),
-    false,
+    !!budget,
   );
-  assert.deepEqual(fs.readdirSync(runtime.sourceWorktreeRoot), [], 'The worktree is gone before tests start.');
+  assert.deepEqual(
+    fs.readdirSync(runtime.sourceWorktreeRoot),
+    [path.basename(recorded.sourceCheckFolder.path)],
+    "The worktree is gone before tests start; only the checks' own copy is there.",
+  );
   const environment = { ...invocation.options.environment };
   delete environment.NODE_TEST_CONTEXT;
-  const run = spawnSync(invocation.executable, invocation.args, {
+  // For budget fixtures, replace the process only after capturing the real wrapper the adapter selected.
+  const run = spawnSync(invocation.executable, budget ? original.command.args : invocation.args, {
     cwd: invocation.options.cwd,
     env: environment,
     encoding: 'utf8',
@@ -235,6 +292,8 @@ function measuredConsumer(t, mode, partial) {
     phaseStore,
     runtime,
     entry,
+    invocation,
+    clock: () => clock,
     // The tests close: their copy is checked in its own process, and the attempt finishes with the report.
     finish: () => {
       let finished;
@@ -244,6 +303,41 @@ function measuredConsumer(t, mode, partial) {
     },
   };
 }
+
+for (const sandboxed of [false, true])
+  test(`checks preserve their selected ${sandboxed ? 'sandbox wrapper' : 'trusted command'} across installation`, t => {
+    const c = measuredConsumer(t, 'pass', undefined, sandboxed ? { installElapsedMs: 3000 } : undefined, true);
+    assert.deepEqual(c.runtime.sourceCheckCommand.args, ['--eval', 'process.exit(1)']);
+    assert.equal(c.finish().checks[0].status, 'pass');
+    assert.deepEqual(c.phaseStore.leases(), []);
+  });
+
+for (const installElapsedMs of [3000, 5000])
+  test(`checks charge ${installElapsedMs} ms of installation to their recorded deadline`, async t => {
+    const c = measuredConsumer(t, 'pass', undefined, { installElapsedMs });
+    let acquired = false,
+      bound;
+    const messages = [],
+      code = await runBuiltInSandbox(c.invocation.args.slice(1), {
+        platform: 'win32',
+        now: c.clock,
+        prepareWindows: () => {},
+        runSync: () => {},
+        takeSession: async (folder, options) => {
+          acquired = true;
+          bound = options.waitBoundMs;
+          throw new Error('Model-free occupied sessions');
+        },
+        run: () => assert.fail('The installed sandbox must never start.'),
+        log: message => messages.push(message),
+      });
+    assert.equal(code, 1);
+    assert.equal(acquired, installElapsedMs < 5000);
+    if (acquired) assert.equal(bound, 1000, 'half the allowance remaining after installation');
+    else assert.match(messages.at(-1), /allowance was exhausted/);
+    c.finish();
+    assert.deepEqual(c.phaseStore.leases(), []);
+  });
 
 for (const mode of ['pass', 'fail'])
   test(`the checks adapter retains measured ${mode} reports when using the shared snapshot helper`, t => {

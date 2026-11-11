@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import { realPath } from '../core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runGit } from '../git.mjs';
 import { subscriptionEnvironment } from './process.mjs';
 import { artifactPath, validateProtectedFiles } from '../core/artifacts.mjs';
 import { hash } from '../core/contracts.mjs';
@@ -16,7 +17,15 @@ import {
   testOutputLimit,
   testPhaseEvidence,
 } from '../connectors/source-checks.mjs';
-import { scopeDocument, scopeRequest, stagedChanges, sourceChangesConnector } from '../connectors/source-changes.mjs';
+import {
+  checkScopeRequest,
+  measureStorySources,
+  scopeDocument,
+  scopeRequest,
+  stagedChanges,
+  sourceChangesConnector,
+} from '../connectors/source-changes.mjs';
+import { sourceRoot } from '../connectors/source-projects.mjs';
 import { sourceDiff, sourceDiffFormat, sourceDiffLimit, sourceDiffStat } from '../connectors/source-diff.mjs';
 import { TEXT_DELIVERY_FILES } from './text-delivery.mjs';
 import {
@@ -27,6 +36,7 @@ import {
   worktreeName,
 } from '../connectors/source-worktrees.mjs';
 import { runSourceSetup } from '../connectors/source-setup.mjs';
+import { measureSources } from '../connectors/source-measure.mjs';
 import { candidateTestCommand, chosenTestSandbox, sandboxLabel, sandboxRecord } from './source-test-sandbox.mjs';
 import { builtInSandboxCommand, builtInSandboxReady, noBuiltInSandbox } from './built-in-sandbox.mjs';
 import { installsPackages, profileOf } from '../connectors/source-profile.mjs';
@@ -42,6 +52,13 @@ import {
   changedByBuild,
 } from '../connectors/source-build.mjs';
 import { continuationFile, prepareSourceContinuation } from '../core/attempt-continuation.mjs';
+import {
+  causeText,
+  randomTestCause,
+  randomTestFailures,
+  sandboxCause,
+  sandboxNeverStarted,
+} from '../core/attempt-cause.mjs';
 import { closeEmployeeTests, employeeTestsCommand, openEmployeeTests } from '../connectors/employee-tests.mjs';
 import { releaseTestTurn, releaseTurn, takeTestTurn, takeTurn, visualTurnResource } from '../core/test-turn.mjs';
 import { notRunRecord, visualPlan } from '../connectors/visual-check.mjs';
@@ -71,15 +88,35 @@ export const sourceChangeAdapter = {
   modelFor: (runtime, worker) => modelAdapter(runtime.adapters, worker),
   quotaKey: worker => worker.provider,
   initialize(runtime, options) {
-    runtime.sourceChangeRoot = fs.realpathSync(options.sourceChangeRoot || studioSourceRoot);
+    // Both by their real spelling, a Windows short name expanded too, as project repositories are kept.
+    runtime.sourceChangeRoot = realPath(options.sourceChangeRoot || studioSourceRoot);
     // When the controller develops its own installed source, integrations need a restart.
-    runtime.selfHosted = runtime.sourceChangeRoot === fs.realpathSync(studioSourceRoot);
+    runtime.selfHosted = runtime.sourceChangeRoot === realPath(studioSourceRoot);
     runtime.sourceChangeFixture = !!options.sourceChangeFixture;
     runtime.sourceFormatCommand = options.sourceFormatCommand; // trusted model-free test seam, never exposed by HTTP
     runtime.packageInstallCommand = options.packageInstallCommand; // trusted model-free stand-in for npm ci, never exposed by HTTP
     runtime.sourceWorktreeRoot = options.sourceWorktreeRoot; // defaults to <data>/wt, a short path
     runtime.sourceSetupHold = options.sourceSetupHold; // trusted model-free test seam, never exposed by HTTP
+    runtime.sourceMeasureHold = options.sourceMeasureHold; // trusted model-free test seam, never exposed by HTTP
     runtime.builtInSandbox = options.builtInSandbox || noBuiltInSandbox; // the controller's start probes this computer
+  },
+  // The lines a dispatch pass's source stories would measure, measured in a process of its own
+  // (src/connectors/source-measure.mjs) before the pass, so its checks hash nothing on the controller's thread. Resolves
+  // what the pass is seeded with (measuringPass), or is null when none of these stories reads a line.
+  measureSources(runtime, tasks) {
+    const store = runtime.store,
+      measuring = measureStorySources(store, tasks, task => sourceRoot(store, task, runtime), {
+        hold: runtime.sourceMeasureHold || null,
+      });
+    if (!measuring) return null;
+    const began = performance.now();
+    return measureSources(measuring.request, runtime).then(measured =>
+      measuring.seed(measured, performance.now() - began),
+    );
+  },
+  // The controller's close ends a measuring process that still runs.
+  shutdown(runtime) {
+    runtime.sourceMeasuring?.kill();
   },
   status: () => ({ available: true, label: 'Isolated source edit by the employee’s model; measured candidate tests' }),
   blockReason(runtime, verifyAuth, task, worker) {
@@ -165,11 +202,12 @@ function prepareSourceJob(runtime, entry, edit) {
   // measured), from the story's base commit (MP-016), and removed when the attempt finishes. Worktrees left by settled
   // attempts are listed before this one is recorded; its path and removal are recorded before the setup process
   // starts, so a stop or failure during setup still removes it.
+  fs.mkdirSync(sourceWorktreeRoot(runtime), { recursive: true });
+  // The worktrees' folder by its real spelling, so the candidate's recorded path is the one git and the setup use.
   const repository = scope.source.root,
-    parent = sourceWorktreeRoot(runtime),
+    parent = realPath(sourceWorktreeRoot(runtime)),
     leftovers = leftoverWorktrees(runtime, parent);
-  fs.mkdirSync(parent, { recursive: true });
-  const candidate = path.join(fs.realpathSync(parent), worktreeName(a.id));
+  const candidate = path.join(parent, worktreeName(a.id));
   a.sourceWorktree = { path: candidate, baseCommit: scope.base.commit };
   runtime.store.updateAttempt(a);
   entry.cleanup.push(() => removeSourceWorktree(repository, candidate));
@@ -365,12 +403,8 @@ function mergeContinuedWork(store, previous, carried, worktree, output) {
 // git for building that commit: an index file of its own when given, input on stdin, and a fixed identity, since the
 // commit is never on a branch.
 function plumbing(cwd, args, { index, input } = {}) {
-  const result = spawnSync('git', ['--literal-pathspecs', '-c', 'core.longpaths=true', ...args], {
-    cwd,
+  return runGit(cwd, args, {
     input,
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 30000,
     env: {
       ...process.env,
       ...(index ? { GIT_INDEX_FILE: index } : {}),
@@ -380,9 +414,6 @@ function plumbing(cwd, args, { index, input } = {}) {
       GIT_COMMITTER_EMAIL: 'studio-desk@localhost',
     },
   });
-  if (result.error || result.status !== 0)
-    throw new Error(`git ${args[0]} failed: ${(result.stderr || result.error?.message || '').trim().slice(0, 500)}`);
-  return result.stdout.trim();
 }
 // The lines git writes around a part it could not combine.
 const conflictMarkers = /^(<{7}|>{7})( |$)/m;
@@ -432,7 +463,14 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         result?.outcome === 'blocked' &&
         Array.isArray(result.artifacts) &&
         scopeRequest(scope, result, name => fs.readFileSync(artifactPath(runtime.store, a, name)));
-      if (request) a.scopeRequest = request;
+      // The edit approving it is checked as Allow and continue would send it, and its refusal recorded as the problem.
+      if (request)
+        try {
+          const task = runtime.store.task(a.taskId);
+          a.scopeRequest = checkScopeRequest(runtime.store, task, request, sourceRoot(runtime.store, task, runtime));
+        } catch (error) {
+          a.scopeRequest = request.problem ? request : { ...request, problem: error.message };
+        }
       runtime.finish(entry, result);
       return;
     }
@@ -496,11 +534,16 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
     );
     runtime.store.finishPhase(commitPhase, 'succeeded', { commit });
     a.sourceCandidate = { ...sourcePlan(candidate, profileOf(scope.source)), commit, diffStat: sourceDiffStat(diff) };
-    a.sourceCandidate.command = candidateTestCommand(a.sourceCandidate, a.configuration);
+    // The runner is kept from the controller's own data folder, named to it, wherever the candidate is.
+    const data = runtime.store.directory;
+    a.sourceCandidate.command = candidateTestCommand({ ...a.sourceCandidate, data }, a.configuration);
     // The project's build, when its settings name one, runs before the tests and is wrapped as they are (1.1).
     const build = buildCommand(profileOf(scope.source));
     if (build)
-      a.sourceCandidate.build = candidateTestCommand({ root: a.sourceCandidate.root, command: build }, a.configuration);
+      a.sourceCandidate.build = candidateTestCommand(
+        { root: a.sourceCandidate.root, data, command: build },
+        a.configuration,
+      );
     a.sourceCandidate.sandbox = sandboxRecord(a.configuration);
     runtime.store.updateAttempt(a);
     const manifest = {
@@ -550,6 +593,9 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         return a.testEvidence;
       });
       const checkStarted = new Date().toISOString();
+      // A test run whose process could not start at all (the job wrapper could not start it, or it never spawned) ended
+      // with its sandbox, not the change (core/attempt-cause.mjs); Runner.finish records that.
+      entry.startFailureCause = sandboxCause();
       runtime.runNative(
         entry,
         command.executable,
@@ -557,6 +603,7 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         '',
         (code, checkSignal) => {
           // The test run has ended; a stop or a failed start releases the turn with the attempt's other leases.
+          delete entry.startFailureCause;
           releaseTestTurn(runtime.store, a.id);
           verifyCopy(a.sourceCandidate, candidate);
           if (Buffer.byteLength(stdout + stderr) > 192 * 1024)
@@ -571,6 +618,17 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
             signal: checkSignal,
             fixture: !!runtime.sourceCheckCommand,
           };
+          // A run whose sandbox could not start reported no tests: the studio's environment ended it, not the change,
+          // so it is not a failing candidate and does not use up one of the story's attempts.
+          if (sandboxNeverStarted({ exitCode: code, stdout, stderr })) {
+            runtime.store.finishPhase(testPhase, 'failed', testPhaseEvidence(stdout));
+            fs.writeFileSync(path.join(entry.output, 'test-output.txt'), stdout);
+            fs.writeFileSync(path.join(entry.output, 'test-errors.txt'), stderr);
+            entry.endCause = sandboxCause();
+            throw new Error(
+              `The candidate's test sandbox could not start (exit ${code ?? checkSignal}), so no tests ran. This is the studio's environment, not the change; the attempt does not count toward the attempt limit. See test-errors.txt.`,
+            );
+          }
           const report = checkReport(a.sourceCandidate, a.checkExecution, stdout, stderr, built),
             { totals } = report,
             testsPassed =
@@ -582,6 +640,20 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
               : '';
           runtime.store.finishPhase(testPhase, testsPassed ? 'succeeded' : 'failed', testPhaseEvidence(stdout));
           a.failedTests = failedTests(stdout);
+          // A negative candidate whose only failures are tests outside the story known to fail at random (they failed on
+          // other stories too) ended with the studio's environment: it stays negative and goes to review as any other,
+          // but does not use up one of the story's attempts (core/attempt-cause.mjs).
+          const random =
+            !testsPassed &&
+            randomTestFailures(runtime.store, a, {
+              failed: a.failedTests,
+              totals,
+              buildFailed: !!report.build && !report.build.passed,
+              signal: checkSignal,
+            });
+          if (random) entry.endCause = randomTestCause();
+          const randomSentence = random ? causeText({ endCause: randomTestCause() }) : '',
+            randomTests = random ? random.map(item => `${item.name}, in ${item.file}`).join('; ') : '';
           fs.writeFileSync(path.join(entry.output, 'test-output.txt'), stdout);
           fs.writeFileSync(path.join(entry.output, 'test-errors.txt'), stderr);
           fs.writeFileSync(path.join(entry.output, 'check-report.json'), JSON.stringify(report, null, 2));
@@ -619,11 +691,10 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
               {
                 name: 'Candidate Node test suite',
                 status: testsPassed ? 'pass' : 'fail',
-                evidence: `${a.checkExecution.fixture ? 'Protocol fixture' : `Measured candidate tests ${sandboxLabel(a.configuration)}`}: ${JSON.stringify(totals)}${totals.tests ? '' : '; no tests ran (the repository has none yet)'}`,
+                evidence: `${a.checkExecution.fixture ? 'Protocol fixture' : `Measured candidate tests ${sandboxLabel(a.configuration)}`}: ${JSON.stringify(totals)}${totals.tests ? '' : '; no tests ran (the repository has none yet)'}${random ? `; ${randomSentence} (${randomTests})` : ''}`,
               },
             ],
-            handoff:
-              'Accept this candidate as evidence, then approve its independent review. Integration requires passing measured checks, accepted review and a separate director action.',
+            handoff: `${random ? `Ended by the environment: ${randomSentence}. ` : ''}Accept this candidate as evidence, then approve its independent review. Integration requires passing measured checks, accepted review and a separate director action.`,
           };
         },
         { cwd: candidate, environment, resultOnFailure: true, onComplete: result => visualStep(result, environment) },
@@ -655,7 +726,11 @@ function candidatePhase(runtime, entry, { baseline, candidate, startedAt }, edit
         JSON.stringify({
           root: candidate,
           start: plan.start,
-          command: builtInSandboxCommand({ root: candidate, command: startCommand(plan.start) }),
+          command: builtInSandboxCommand({
+            root: candidate,
+            data: runtime.store.directory,
+            command: startCommand(plan.start),
+          }),
           place: 'built-in',
           environment,
           address: plan.address,

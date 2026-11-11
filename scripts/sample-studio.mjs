@@ -12,10 +12,14 @@ import { createProject } from '../src/core/project-creation.mjs';
 import { startIdeaIntake } from '../src/core/idea-intake.mjs';
 import { addLibraryEntry } from '../src/core/library.mjs';
 import { inspectRepository, recordProjectSource } from '../src/connectors/source-projects.mjs';
+import { addWaitingIdea, makeMilestone, useVersionLines } from '../src/connectors/source-milestones.mjs';
 import { repositoryOrganization } from '../src/organizations/studio-development/project.mjs';
 import { projectTemplate, templateFiles } from '../src/templates/index.mjs';
+import { isEntryPoint } from '../src/core/entry-point.mjs';
+import { runGit } from '../src/git.mjs';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,21 +97,22 @@ function buildDashboard(base) {
   if (built.status !== 0) throw new Error(`The dashboard did not build (exit code ${built.status}).`);
 }
 
-const git = (cwd, args) => {
-  const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
-  if (result.status !== 0) throw new Error(`git ${args[0]} failed: ${result.stderr.trim()}`);
-};
-
-// The To-do list sample's files as a repository of its own on main, as Studio desk's first-run sample makes it.
-function sampleRepository(directory) {
-  const folder = path.join(directory, 'repositories', 'todo-list');
+// The To-do list sample's files as a repository of its own on main, as Studio desk's first-run sample makes it. Its
+// three commands are the controller's git (November 9): each carries the controller's options, core.longpaths among
+// them, since a copy's sample folder can sit deep inside a job folder, where plain git on Windows refused the
+// repository's object files as too long. Long paths do not reach every depth there: on Git for Windows 2.49 no
+// repository folder past about 204 characters takes all three. None names a path, so none needs literal pathspecs.
+// A test may pass its own git, called as runGit is, to see the commands.
+export function sampleRepository(directory, git = runGit) {
+  const folder = path.join(directory, 'repositories', 'todo-list'),
+    options = { literal: false };
   for (const file of templateFiles(projectTemplate('code'))) {
     const target = path.join(folder, ...file.path.split('/'));
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, file.data);
   }
-  git(folder, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
-  git(folder, ['add', '-A']);
+  git(folder, ['-c', 'init.defaultBranch=main', 'init', '--quiet'], options);
+  git(folder, ['add', '-A'], options);
   const identity = [
     '-c',
     'user.name=Studio desk',
@@ -116,7 +121,7 @@ function sampleRepository(directory) {
     '-c',
     'commit.gpgsign=false',
   ];
-  git(folder, [...identity, 'commit', '--quiet', '-m', 'To-do list sample, made by Studio desk']);
+  git(folder, [...identity, 'commit', '--quiet', '-m', 'To-do list sample, made by Studio desk'], options);
   return folder;
 }
 
@@ -135,6 +140,14 @@ export async function seedSampleStudio({ store, runner, registries, directory })
   const repository = sampleRepository(directory),
     inspected = inspectRepository(store, repository, runner, undefined, sampleProjects.code);
   recordProjectSource(store, sampleProjects.code, { root: repository, profile: inspected.profile }, runner);
+  // An unshipped version with unfinished work for the Release dialog's visual check. These are sample records only:
+  // no integrated story, notes acceptance or real release is fabricated. The two intake runs still wait at checks.
+  const milestone = makeMilestone(store, sampleProjects.code, runner, { version: '1.1.0' });
+  useVersionLines(store, sampleProjects.code, runner, { shipsTo: 'main' });
+  addWaitingIdea(store, sampleProjects.code, {
+    milestoneId: milestone.id,
+    idea: 'Keep completed items out of the way until they are needed again.',
+  });
   await createProject(
     store,
     registries,
@@ -157,9 +170,11 @@ export async function seedSampleStudio({ store, runner, registries, directory })
 }
 
 export async function startSampleStudio({ base = root, port = samplePort, build = true } = {}) {
-  const directory = sampleDirectory(base);
-  fs.rmSync(directory, { recursive: true, force: true });
-  fs.mkdirSync(directory, { recursive: true });
+  const given = sampleDirectory(base);
+  fs.rmSync(given, { recursive: true, force: true });
+  fs.mkdirSync(given, { recursive: true });
+  // By its real spelling, as the studio keeps its data folder, so the sample repository made inside it is inside it.
+  const directory = realPath(given);
   if (build) buildDashboard(base);
   const registries = createRegistries(),
     studio = createStudio({
@@ -175,7 +190,7 @@ export async function startSampleStudio({ base = root, port = samplePort, build 
   return { ...studio, address, directory };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta)) {
   const at = process.argv.indexOf('--port'),
     port = at > 0 ? Number(process.argv[at + 1]) : samplePort;
   const studio = await startSampleStudio({ port });

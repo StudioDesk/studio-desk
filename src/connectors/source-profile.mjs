@@ -17,6 +17,12 @@ const contextFiles = Object.freeze([
   'src/core/workflows.mjs',
 ]);
 const limits = Object.freeze({ files: 500, fileBytes: 1024 * 1024, totalBytes: 16 * 1024 * 1024 });
+// Studio desk's own limits since November 3, 2026. Its source reached the 500 files the count allowed that day, so
+// every story that added a file stopped, and its 8 MB was half the 16 MB total. What a snapshot costs is copying it
+// for every attempt, which 64 MB still keeps cheap; the count stays only as a backstop against a runaway folder.
+// Another repository's proposed profile still starts from `limits`, the first revision's.
+const studioDeskLimits = Object.freeze({ ...limits, files: 5000, totalBytes: 64 * 1024 * 1024 });
+export const defaultSourceLimits = limits;
 
 // What every check, plan and candidate recorded without a profile was measured with. It never changes:
 // stories planned under it keep their exact snapshot after Studio desk's profile moves on.
@@ -57,7 +63,13 @@ export const studioDeskProfile = Object.freeze({
     'start-studio.cmd',
     'start-studio.sh',
   ]),
-  extensions: Object.freeze([...studioDeskProfileRevision1.extensions, 'ts', 'tsx']),
+  // PowerShell since November 8, 2026: the Windows job wrapper (src/adapters/windows-job.ps1) is source like any
+  // module, and two of 1.2's fixes need it changed, so a plan may list it (the director's choice). Plans and checks
+  // recorded before keep the profile they were measured with.
+  extensions: Object.freeze([...studioDeskProfileRevision1.extensions, 'ts', 'tsx', 'ps1']),
+  // Integration formats every changed file; a type the formatter has no parser for (the wrapper) is passed over
+  // rather than failing the merge.
+  formatter: Object.freeze({ package: 'prettier@3.3.3', args: Object.freeze(['--write', '--ignore-unknown']) }),
   protectedNames: Object.freeze([
     'AGENTS.md',
     'CLAUDE.md',
@@ -71,6 +83,7 @@ export const studioDeskProfile = Object.freeze({
     'tsconfig*',
   ]),
   install: 'npm-ci',
+  limits: studioDeskLimits,
 });
 
 // Whether a tested copy gets the packages installed from its lockfile: always for Studio desk, whose stories
@@ -83,6 +96,22 @@ export const profileOf = record => record?.profile || studioDeskProfileRevision1
 // What a plan or check records about its profile: nothing for Studio desk's first revision.
 export const recordedProfile = profile =>
   !profile || profile === studioDeskProfileRevision1 ? {} : { profile: structuredClone(profile) };
+
+// The limits a snapshot is measured with. They bound what measuring costs; they are not part of what a plan
+// promised. So a Studio desk record of any revision is measured with the larger of its own limits and the current
+// profile's, and a story planned before a limit was raised is never stranded when the source grows past its old
+// one (November 3, 2026). The record's profile, and with it the plan's identity, stays as it was recorded.
+// Another repository's profile keeps its own limits.
+export function measuringLimits(profile) {
+  if (profile.id !== studioDeskProfile.id) return profile.limits;
+  const current = studioDeskProfile.limits,
+    recorded = profile.limits;
+  return Object.freeze({
+    files: Math.max(recorded.files, current.files),
+    fileBytes: Math.max(recorded.fileBytes, current.fileBytes),
+    totalBytes: Math.max(recorded.totalBytes, current.totalBytes),
+  });
+}
 
 // Every path a snapshot covers, so git checks use the same allowlist.
 export const snapshotPaths = profile => [...profile.files, ...profile.directories];

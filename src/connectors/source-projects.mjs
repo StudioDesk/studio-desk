@@ -8,11 +8,12 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { recordProject } from '../core/projects.mjs';
+import { realPath, samePath } from '../core/real-path.mjs';
 import { subscriptionEnvironment } from '../adapters/process.mjs';
 import { snapshotCommit } from '../adapters/source-snapshot.mjs';
 import { failedTests, sourcePlan, testOutput, testTotals } from './source-checks.mjs';
 import { git, gitRefusal, repositoryState } from './source-integration.mjs';
-import { maxProfileEntries, studioDeskProfile, validateSourceProfile } from './source-profile.mjs';
+import { maxProfileEntries, studioDeskProfile, validateSourceProfile, defaultSourceLimits } from './source-profile.mjs';
 import { sourceWorktreeRoot } from './source-worktrees.mjs';
 
 // The resources a Studio desk story and its integration hold (MP-016's names, unchanged).
@@ -48,7 +49,7 @@ export function projectRepository(store, projectId, root, runtime) {
   if (typeof root !== 'string' || !path.isAbsolute(root)) throw new Error('The repository must be an absolute path.');
   let real;
   try {
-    real = fs.realpathSync.native(root);
+    real = realPath(root);
   } catch {
     throw new Error('The repository folder does not exist.');
   }
@@ -65,18 +66,22 @@ export function projectRepository(store, projectId, root, runtime) {
     );
   }
   const state = repositoryState(real, 'adding a project', { clean: false });
-  const same = other =>
-    other && (process.platform === 'win32' ? other.toLowerCase() === real.toLowerCase() : other === real);
+  // Each spelling is compared by its real one, so a short or differently cased spelling of a root is the same root.
+  const same = other => typeof other === 'string' && other !== '' && samePath(other, real);
   if (same(runtime?.sourceChangeRoot)) throw new Error("This repository is the controller's default source.");
   const taken = store.projects().find(project => project.id !== projectId && same(project.source?.root));
   if (taken) throw new Error(`Project ${taken.name || taken.id} already works on this repository.`);
   return { root: real, ...state };
 }
+// Studio desk's own profile id means its own checks, limits, root-file rules and package installs: only the
+// controller's own source, which records no project source, uses it.
+export const reservedProfile = `${studioDeskProfile.id} is Studio desk's own profile name; give this repository's profile another name.`;
 // Records a project's own repository with a valid profile. Adding a project from the dashboard
 // first checks that the tree is clean and its tests run (step 4b).
 export function recordProjectSource(store, projectId, { root, profile }, runtime) {
   const { root: real } = projectRepository(store, projectId, root, runtime);
   validateSourceProfile(profile);
+  if (profile.id === studioDeskProfile.id) throw new Error(reservedProfile);
   const project = store.project(projectId);
   project.source = { root: real, profile: structuredClone(profile) };
   store.putProject(project);
@@ -123,7 +128,7 @@ const testFolders = ['test', 'tests', '__tests__'],
 // tests/*.test.ts, or .test.mjs without TypeScript), no formatter, and totals sized from the repository.
 export function proposeSourceProfile(root) {
   const tracked = git(root, ['ls-files', '-z'], { raw: true }).split('\0').filter(Boolean),
-    { limits } = studioDeskProfile,
+    limits = defaultSourceLimits,
     folders = new Set(),
     files = [];
   for (const file of tracked) {
@@ -200,6 +205,12 @@ export function inspectRepository(store, root, runtime, profile, projectId = nul
     clean = !git(repository.root, ['status', '--porcelain', '--untracked-files=no']),
     problems = clean ? [] : [unclean];
   profile = profile ? validateSourceProfile(structuredClone(profile)) : proposeSourceProfile(repository.root);
+  // A project already recorded with Studio desk's own profile id keeps it as it is.
+  if (
+    profile.id === studioDeskProfile.id &&
+    !(projectId && store.project(projectId)?.source?.profile?.id === studioDeskProfile.id)
+  )
+    problems.push(reservedProfile);
   let plan = null;
   try {
     plan = sourcePlan(repository.root, profile);
@@ -286,8 +297,9 @@ export async function editProjectProfile(store, projectId, runtime, { expectedRe
   });
 }
 
-// How long adding a project waits for the repository's tests: as long as intake source checks may run.
-export const repositoryTestSeconds = 420;
+// How long adding a project waits for the repository's tests: as long as intake source checks may run (600 s since
+// November 3, 2026, the most a workflow step may run).
+export const repositoryTestSeconds = 600;
 // Runs the repository's tests once on a copy of its inspected commit, as intake source checks do, before a
 // project records it. They must run and pass; a repository with no tests yet passes with none run.
 // Resolves with the totals; rejects with a reason the director can act on.

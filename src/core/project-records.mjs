@@ -1,10 +1,11 @@
 // What a project's pages read without its whole history (Decision MP-026, v1.0 item 19b). The live set is
 // what Home, the board and the current runs show: every unsettled task, every task of a run that still has
-// open work, the direct prerequisites of those, their attempt summaries and those runs. Finished runs come
-// a page at a time, newest first, each with its tasks and attempt summaries, and any one run on its own.
+// open work, the direct prerequisites of those, their attempt summaries and those runs, a page at a time in record
+// order. Finished runs come a page at a time, newest first, each with its tasks and attempt summaries, and any one
+// run on its own. Every read says the store's change sequence it reflects (version), the point a reader resumes the
+// change stream from; reads are synchronous, so no write lands while one is built.
 import { directorInputsOf } from './idea-inputs.mjs';
 import { projectRuns } from './graph.mjs';
-import { recordProject } from './projects.mjs';
 
 // A settled task needs nothing more: closed, denied, or accepted with nothing left to integrate. A source story
 // is accepted while it waits for integration (public/runs.js integrationReview), and so is a passing review in
@@ -56,7 +57,23 @@ export function runMembership(tasks) {
 }
 
 const withInputs = record => ({ ...record, directorInputs: directorInputsOf(record) });
-const projectTasks = (store, projectId) => store.tasks().filter(task => recordProject(task) === projectId);
+// Each task served with the registries carries attemptCount, { used, allowed }: its automatic attempts used and its
+// current stage's limit, counted from the stored task as the scheduler counts them (WorkflowRegistry.attemptCount).
+// Reading it writes nothing. A record whose current stage cannot be read (a stage missing what its view needs) is
+// served without one rather than failing the whole read; a caller without the registries serves the records as before.
+export function servedAttemptCount(store, registries, task) {
+  try {
+    return { attemptCount: registries.workflows.attemptCount(store, task) };
+  } catch {
+    return {};
+  }
+}
+const served = (store, registries, shape) => task => {
+  const record = shape(task);
+  return registries ? { ...record, ...servedAttemptCount(store, registries, task) } : record;
+};
+// A project's tasks in record order, read through the project index (core/store.mjs).
+const projectTasks = (store, projectId) => store.projectTasks(projectId);
 
 // A finished run's records as its story reads them (public/runs.js): without each task's direction, brief,
 // acceptance text and accepted inputs, or each attempt's input references, files and review notes, which a
@@ -81,9 +98,15 @@ function ideasOf(runs, runOf, tasks) {
     .map(run => ({ id: run.id, brief: run.brief ?? '', createdAt: run.createdAt, taskIds: own.get(run.id) }));
 }
 
-export function liveRecords(store, projectId) {
+// The live set a page at a time (page-read-limits): limit tasks after the task before, in record order, with their
+// attempt summaries, the open runs they belong to and the finished ideas they name; next is the last task's ID while
+// more follow. The pages' union is the whole live set. A cursor that left the live set answers 404.
+export const liveLimit = 200,
+  liveMaxLimit = 500;
+export function liveRecords(store, projectId, { before = null, limit = liveLimit, registries = null } = {}) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId),
+  const version = store.version,
+    tasks = projectTasks(store, projectId),
     done = reviewReader(store, projectId, tasks),
     runOf = runMembership(tasks),
     openRuns = new Set(tasks.filter(task => !done(task) && runOf.has(task.id)).map(task => runOf.get(task.id))),
@@ -92,30 +115,39 @@ export function liveRecords(store, projectId) {
   const byId = new Map(tasks.map(task => [task.id, task]));
   for (const id of [...live]) for (const dependency of byId.get(id)?.dependencies || []) live.add(dependency);
   const chosen = tasks.filter(task => live.has(task.id)),
+    size = Math.min(Math.max(1, Math.trunc(limit)), liveMaxLimit),
+    from = before === null ? 0 : chosen.findIndex(task => task.id === before) + 1;
+  if (from === 0 && before !== null)
+    throw Object.assign(new Error('That page of open work no longer exists.'), { status: 404 });
+  const page = chosen.slice(from, from + size),
+    needed = new Set(page.map(task => runOf.get(task.id)).filter(Boolean)),
     runs = projectRuns(store, projectId, tasks);
   return {
-    tasks: chosen.map(withInputs),
-    attempts: chosen.length
+    tasks: page.map(served(store, registries, withInputs)),
+    attempts: page.length
       ? store.dashboardAttempts(
           projectId,
-          chosen.map(task => task.id),
+          page.map(task => task.id),
         )
       : [],
     runs: runs
-      .filter(run => openRuns.has(run.id))
+      .filter(run => openRuns.has(run.id) && needed.has(run.id))
       .map(run => ({ ...run, directorInputs: directorInputsOf(store.run(run.id)) })),
     // A prerequisite from a finished idea names that idea briefly; the runs above tell their own tasks.
     ideas: ideasOf(
       runs.filter(run => !openRuns.has(run.id)),
       runOf,
-      chosen,
+      page,
     ),
+    next: from + size < chosen.length ? page.at(-1).id : null,
+    version,
   };
 }
 
-export function finishedRuns(store, projectId, { before = null, limit = 10 } = {}) {
+export function finishedRuns(store, projectId, { before = null, limit = 10, registries = null } = {}) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId),
+  const version = store.version,
+    tasks = projectTasks(store, projectId),
     done = reviewReader(store, projectId, tasks),
     runOf = runMembership(tasks),
     members = new Map();
@@ -153,19 +185,21 @@ export function finishedRuns(store, projectId, { before = null, limit = 10 } = {
         finishedAt = ended.get(run.id)?.time;
       return {
         run: { ...run, directorInputs: directorInputsOf(store.run(run.id)), ...(finishedAt ? { finishedAt } : {}) },
-        tasks: members.get(run.id).map(storyTask),
+        tasks: members.get(run.id).map(served(store, registries, storyTask)),
         attempts: attempts.filter(attempt => own.has(attempt.taskId)).map(storyAttempt),
       };
     }),
     next: from + limit < finished.length ? page.at(-1).id : null,
+    version,
   };
 }
 
 // One run with its tasks and attempt summaries, open or finished, for a page that shows a run the loaded
 // pages have not reached.
-export function oneRun(store, projectId, runId) {
+export function oneRun(store, projectId, runId, { registries = null } = {}) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId),
+  const version = store.version,
+    tasks = projectTasks(store, projectId),
     runOf = runMembership(tasks),
     run = projectRuns(store, projectId, tasks).find(item => item.id === runId);
   if (!run) throw Object.assign(new Error('Run not found.'), { status: 404 });
@@ -180,8 +214,9 @@ export function oneRun(store, projectId, runId) {
       : [];
   return {
     run: { ...run, directorInputs: directorInputsOf(store.run(run.id)) },
-    tasks: members.map(finished ? storyTask : withInputs),
+    tasks: members.map(served(store, registries, finished ? storyTask : withInputs)),
     attempts: finished ? attempts.map(storyAttempt) : attempts,
+    version,
   };
 }
 
@@ -191,14 +226,20 @@ export const settledKinds = ['accepted', 'closed'];
 // Settled work of one kind, newest finished first, a page at a time; an employee's or a team's page reads only
 // its own (v1.0 item 19c). Each idea the page's work belongs to is named briefly, so the board keeps a finished
 // idea's work in its lane.
-export function settledTasks(store, projectId, { kind, before = null, limit = 12, workerId = null, team = null }) {
+export function settledTasks(
+  store,
+  projectId,
+  { kind, before = null, limit = 12, workerId = null, team = null, registries = null },
+) {
   store.project(projectId);
-  const all = projectTasks(store, projectId),
+  const version = store.version,
+    all = projectTasks(store, projectId),
     tasks = all.filter(
       task => (workerId === null || task.workerId === workerId) && (team === null || task.team === team),
     ),
     done = reviewReader(store, projectId, tasks),
-    finished = store.lastFinished(),
+    // When these tasks last finished, from their own attempts rather than every attempt of every project.
+    finished = store.lastFinished(tasks.map(task => task.id)),
     when = task => finished.get(task.id) || task.createdAt || '',
     groups = {
       accepted: tasks.filter(task => done(task) && task.status === 'done' && !task.closed),
@@ -210,7 +251,7 @@ export function settledTasks(store, projectId, { kind, before = null, limit = 12
     throw Object.assign(new Error('That page of tasks no longer exists.'), { status: 404 });
   const page = list.slice(from, from + limit);
   return {
-    tasks: page.map(withInputs),
+    tasks: page.map(served(store, registries, withInputs)),
     attempts: page.length
       ? store.dashboardAttempts(
           projectId,
@@ -222,6 +263,7 @@ export function settledTasks(store, projectId, { kind, before = null, limit = 12
     // Membership reads the project's every task, so a retry or a proposed story finds its idea through work
     // another employee or team did.
     ideas: page.length ? ideasOf(projectRuns(store, projectId, all), runMembership(all), page) : [],
+    version,
   };
 }
 
@@ -230,7 +272,8 @@ export function settledTasks(store, projectId, { kind, before = null, limit = 12
 // long ago.
 export function peopleSummary(store, projectId, goalIds = []) {
   store.project(projectId);
-  const tasks = projectTasks(store, projectId),
+  const version = store.version,
+    tasks = projectTasks(store, projectId),
     wanted = new Set(goalIds),
     accepted = { total: 0, workers: {}, teams: {} },
     goals = {};
@@ -250,5 +293,5 @@ export function peopleSummary(store, projectId, goalIds = []) {
         ...(task.sourceStage ? { sourceStage: task.sourceStage } : {}),
       };
   }
-  return { tasks: tasks.length, accepted, goals };
+  return { tasks: tasks.length, accepted, goals, version };
 }

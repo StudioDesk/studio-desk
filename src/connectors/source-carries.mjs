@@ -38,6 +38,7 @@ import { profileOf } from './source-profile.mjs';
 import { jobDirectory, recordProject } from '../core/projects.mjs';
 import { expandRun, runIdOf } from '../core/graph.mjs';
 import { runMembership } from '../core/project-records.mjs';
+import { holdsTestTurn, testRunEnded, testTurnResource } from '../core/test-turn.mjs';
 
 const settled = ['carried', 'skipped'],
   storyKind = 'studio-development:change';
@@ -138,6 +139,7 @@ const turn = (store, story, line) => {
 export function approveCarry(store, story, line, by = { type: 'director' }) {
   return store.tx(() => {
     const { review, carry } = turn(store, story, line);
+    reopenIfClosed(store, review, carry, { note: false });
     if (!['waiting', 'rejected', 'needs-reconciliation'].includes(carry.state))
       throw new Error(
         `The carry to ${carry.line} is ${carry.state === 'merging' ? `a story of its own, ${carry.storyId}` : carry.state}.`,
@@ -151,7 +153,12 @@ export function approveCarry(store, story, line, by = { type: 'director' }) {
         throw new Error(`Restore or commit ${edited.join(', ')} in the project's folder, then carry the fix again.`);
     }
     if (carry.state !== 'waiting')
-      carry.previous = { state: carry.state, error: carry.error, finishedAt: carry.finishedAt };
+      carry.previous = {
+        state: carry.state,
+        error: carry.error,
+        finishedAt: carry.finishedAt,
+        ...(carry.previous ? { previous: carry.previous } : {}),
+      };
     Object.assign(carry, { state: 'waiting', approvedBy: by, approvedAt: new Date().toISOString() });
     delete carry.error;
     store.updateAttempt(review);
@@ -164,6 +171,7 @@ export function skipCarry(store, story, line, reason, by = { type: 'director' })
     throw new Error('Say why the fix is not needed there, in at most 2000 characters.');
   return store.tx(() => {
     const { review, carry } = turn(store, story, line);
+    reopenIfClosed(store, review, carry, { note: false });
     if (!['waiting', 'rejected'].includes(carry.state))
       throw new Error(
         `The carry to ${carry.line} is ${carry.state === 'merging' ? `a story of its own, ${carry.storyId}; close it first` : carry.state}.`,
@@ -183,6 +191,79 @@ export function skipCarry(store, story, line, reason, by = { type: 'director' })
       recordProject(story),
     );
     return structuredClone(carry);
+  });
+}
+
+// A carry story the director closed or denied finishes nothing, so its carry, still merging with that story, would
+// wait for it forever and the carries after it with it. The carry is rejected instead, naming the closed story and its
+// reason, with the story kept under previous, so the original story offers Carry to <line> again and Not needed on
+// <line> (public/task-actions.js), and leaves the note a rejected carry leaves (Autonomy.carrySettled), unless the
+// director is acting on it now (note: false). The caller saves the review. Returns whether it was reopened.
+const closedStory = (store, carry) => {
+  if (carry?.state !== 'merging' || !carry.storyId) return null;
+  try {
+    const story = store.task(carry.storyId);
+    return story.status === 'denied' ? story : null;
+  } catch {
+    return null;
+  }
+};
+function reopenIfClosed(store, review, carry, { note = true } = {}) {
+  const story = closedStory(store, carry);
+  if (!story) return false;
+  const reason = (story.closed?.reason || story.reason || '').trim() || 'no reason was given.',
+    originalId = story.carryOf?.storyId || review.taskId,
+    projectId = recordProject(review);
+  Object.assign(carry, {
+    state: 'rejected',
+    error: `${carry.back ? 'Its story bringing the fix back' : 'Its carry story'}, ${story.id}, was closed: ${reason}`,
+    previous: {
+      state: 'merging',
+      storyId: carry.storyId,
+      error: carry.error,
+      finishedAt: carry.finishedAt,
+      ...(carry.previous ? { previous: carry.previous } : {}),
+    },
+    finishedAt: new Date().toISOString(),
+  });
+  delete carry.storyId;
+  store.event(
+    'carry_story_closed',
+    originalId,
+    review.id,
+    carry.back
+      ? `The story ${story.id} bringing the fix back to ${carry.line} was closed: bring the fix back again or mark it Not needed on ${carry.line}.`
+      : `The carry story ${story.id} to ${carry.line} was closed: carry the fix again or mark it Not needed on ${carry.line}.`,
+    projectId,
+  );
+  if (note) {
+    let original;
+    try {
+      original = store.task(originalId);
+    } catch {
+      original = null;
+    }
+    if (original) {
+      original.autonomyNote = `Carrying the fix to ${carry.line} did not complete. ${carry.error}`;
+      store.putTask(original);
+    }
+  }
+  return true;
+}
+// Called once a carry story (task.carryOf) is closed or denied and saved: its carry is reopened as above.
+export function carryStoryClosed(store, task) {
+  if (!task?.carryOf) return false;
+  return store.tx(() => {
+    let review;
+    try {
+      review = store.attempt(task.carryOf.reviewAttemptId);
+    } catch {
+      return false;
+    }
+    const carry = review.sourceCarries?.find(item => item.id === task.carryOf.carryId);
+    if (carry?.storyId !== task.id || !reopenIfClosed(store, review, carry)) return false;
+    store.updateAttempt(review);
+    return true;
   });
 }
 
@@ -386,8 +467,9 @@ export function ideaBringBackTargets(store, projectId, runId) {
   };
 }
 
-// Starts the next approved carry of a story. Refused (busy) while an integration or carry runs or the project's source
-// is held, so the caller tries again when they settle.
+// Starts the next approved carry of a story. Refused (busy) while an integration or carry runs, the project's source
+// is held or the carry still holds a lease of its own (the test turn its stopped run kept, keepStoppedTurn, which its
+// new run would wait on), so the caller tries again when they settle.
 export function runCarry(runtime, story, onSettled = () => {}) {
   const store = runtime.store,
     projectId = recordProject(story),
@@ -400,7 +482,10 @@ export function runCarry(runtime, story, onSettled = () => {}) {
       `The carry to ${carry.line} waits for ${carry.after.find(item => item.carryId === waiting.id).storyId}'s.`,
     );
   const resources = sourceResources(store, story);
-  if (runtime.sourceIntegrationRun || store.leases().some(lease => resources.includes(lease.resource)))
+  if (
+    runtime.sourceIntegrationRun ||
+    store.leases().some(lease => resources.includes(lease.resource) || lease.attemptId === carry.id)
+  )
     throw Object.assign(new Error('The project’s source is busy; the carry starts when it is free.'), { busy: true });
   const integration = review.sourceIntegration,
     root = integration.root,
@@ -640,17 +725,115 @@ function conflictedCarry(runtime, story, review, journal, close) {
   return result;
 }
 
+// A carry or release the controller's stop put back to wait holds its project's queue, as the restart holds a
+// project's queued work (Runner): the project is paused with the restart's mark, so the work waits for the director's
+// Resume and then runs again on its own, once. A pause the director chose stays theirs and is not marked. The project
+// is remembered on the runtime, so a planned restart does not lift this hold (Autonomy.resumePlan).
+export function holdInterrupted(runtime, projectId, what) {
+  const store = runtime.store,
+    project = store.project(projectId);
+  (runtime.interruptedHolds ||= new Set()).add(projectId);
+  if (project.dispatchPaused) return;
+  project.dispatchPaused = true;
+  project.restartPaused = true;
+  store.putProject(project);
+  store.event(
+    'pipeline_paused',
+    null,
+    null,
+    `Controller restarted while a ${what} was running. The project is held; the ${what} runs again on its own when you resume it.`,
+    projectId,
+  );
+}
+
+// The computer's test turn a carry or release held when the controller stopped (journal: its carry or release record).
+// Its other leases are released as before. Every other full suite waits for the turn, so it is given back now when the
+// test run the journal recorded under it (testProcess, source-integration.mjs) is confirmed gone, by the identity an
+// interrupted integration's turn is checked with (testRunEnded, core/test-turn.mjs), or when it recorded none, since
+// then nothing it started is running. Otherwise the turn is kept, with its recorded process, and remembered on the
+// runtime (runtime.keptTurns: its owner's ID, with the check that gives it back once that run has ended), which the
+// controller checks whenever it tries carries and releases and on a timer while one is kept (Autonomy.freeEndedTurns);
+// until then the carry or release does not start again (runCarry, runRelease: busy). A journal that kept the turn
+// through an earlier start (running: false) is found again the same way; it holds no other lease of its own.
+// event: [taskId, attemptId] of its test_turn event; locate(): the journal as now stored, with save(), or null.
+const checked = "Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";
+export function keepStoppedTurn(
+  runtime,
+  journal,
+  { what, event: [taskId, attemptId], projectId, locate, running = true },
+) {
+  const store = runtime.store;
+  if (!holdsTestTurn(store, journal.id)) {
+    if (running) store.release(journal.id);
+    return;
+  }
+  if (running)
+    for (const lease of store.leases())
+      if (lease.attemptId === journal.id && lease.resource !== testTurnResource)
+        store.releaseResource(lease.resource, journal.id);
+  const recorded = journal.testProcess,
+    freed = text => store.event('test_turn', taskId, attemptId, `The test turn was freed: ${text}`, projectId);
+  if (!recorded?.pid || testRunEnded(journal)) {
+    delete journal.testProcess;
+    store.releaseResource(testTurnResource, journal.id);
+    freed(
+      recorded?.pid
+        ? `the ${what}'s test run that held it had ended when the controller started again. ${checked}`
+        : `the ${what} had started no test run under it when the controller stopped, so nothing it started still runs.`,
+    );
+    return;
+  }
+  (runtime.keptTurns ||= new Map()).set(journal.id, () => {
+    if (!holdsTestTurn(store, journal.id)) return true;
+    if (!testRunEnded({ testProcess: recorded })) return false;
+    store.tx(() => {
+      const now = locate();
+      if (now?.journal.testProcess) {
+        delete now.journal.testProcess;
+        now.save();
+      }
+      store.releaseResource(testTurnResource, journal.id);
+      freed(`the ${what}'s test run that held it has ended. ${checked}`);
+    });
+    return true;
+  });
+}
 // Carries the controller's stop cut off: verification never writes the line, so the carry waits again with its
-// approval; one that was moving the line is carried if the line reached its commit, waits again when the line is not
-// checked out (its move is one compare-and-swap), and otherwise needs the director.
+// approval, holding its project until the director resumes it; one that was moving the line is carried if the line
+// reached its commit, waits again when the line is not checked out (its move is one compare-and-swap), and otherwise
+// needs the director. The test turn one held is kept while the test run it started may still go on (keepStoppedTurn).
+// A carry left merging with a carry story that was closed or denied is reopened (reopenIfClosed).
 export function interruptedCarries(runtime) {
   const store = runtime.store;
   for (const review of store.allAttempts()) {
     let changed = false;
     for (const carry of review.sourceCarries || []) {
-      if (!['verifying', 'committing'].includes(carry.state)) continue;
+      const turn = running =>
+        keepStoppedTurn(runtime, carry, {
+          what: 'carry',
+          event: [review.taskId, review.id],
+          projectId: recordProject(review),
+          running,
+          locate: () => {
+            const now = store.attempt(review.id),
+              journal = now.sourceCarries?.find(item => item.id === carry.id);
+            return journal && { journal, save: () => store.updateAttempt(now) };
+          },
+        });
+      // One whose carry story was closed or denied before closing reopened it (carryStoryClosed) is reopened now.
+      if (reopenIfClosed(store, review, carry)) {
+        changed = true;
+        continue;
+      }
+      if (!['verifying', 'committing'].includes(carry.state)) {
+        // One that kept the turn through an earlier start.
+        if (carry.testProcess && holdsTestTurn(store, carry.id)) {
+          changed = true;
+          turn(false);
+        }
+        continue;
+      }
       changed = true;
-      store.release(carry.id);
       const was = carry.state;
       if (was === 'committing' && carry.commit && lineReached(carry.root, carry)) carry.state = 'carried';
       else if (was === 'verifying' || carry.repository?.live === false) carry.state = 'waiting';
@@ -667,9 +850,12 @@ export function interruptedCarries(runtime) {
         carry.state === 'carried'
           ? `Reconciled: the carry to ${carry.line} had reached it as commit ${carry.commit.slice(0, 7)}.`
           : carry.state === 'waiting'
-            ? `The carry to ${carry.line} was stopped when the controller stopped (during ${was}); it waits to run again.`
+            ? `The carry to ${carry.line} was stopped when the controller stopped (during ${was}); it runs again on its own when the project is resumed.`
             : `The carry to ${carry.line} stopped part-way when the controller stopped; inspect the project's folder, then carry the fix again.`,
+        recordProject(review),
       );
+      turn(true);
+      if (carry.state === 'waiting') holdInterrupted(runtime, recordProject(review), 'carry');
     }
     if (changed) store.updateAttempt(review);
   }

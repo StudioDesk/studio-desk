@@ -8,11 +8,40 @@ import { directoryFor } from './project-agents.mjs';
 import { assertUnchangedDirectorInputs, directorInputsOf } from './idea-inputs.mjs';
 import { dashboardAttempt, dashboardOpenPhases, dashboardTimings } from './dashboard-state.mjs';
 import { testTurnResource, visualTurnResource } from './test-turn.mjs';
+import { runMembership, settled } from './project-records.mjs';
+import { messageChannelTypes, messageLimits } from './messages.mjs';
+
+// A chat message's channel as its row keeps it: the project's own channel has no ID, a run's or a task's names it.
+function messageChannel(channel) {
+  if (!messageChannelTypes.includes(channel?.type))
+    throw Object.assign(new Error("A message's channel is the project, a run or a task."), { status: 400 });
+  if (channel.type === 'project') return ['project', null];
+  if (typeof channel.id !== 'string' || !channel.id)
+    throw Object.assign(new Error("A run's or a task's channel names it."), { status: 400 });
+  return [channel.type, channel.id];
+}
+// A message as it reads back: its row's place, channel, reply and time, and what it holds.
+const messageOf = row => ({
+  ...JSON.parse(row.data),
+  seq: row.seq,
+  id: row.id,
+  projectId: row.project_id,
+  channel: { type: row.channel_type, id: row.channel_id },
+  replyTo: row.reply_to,
+  time: row.time,
+});
+function pageBound(name, value, minimum, maximum) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum)
+    throw Object.assign(new Error(`${name} must be an integer from ${minimum} to ${maximum}.`), { status: 400 });
+}
 
 const attemptChange = a => ({ type: 'attempt', id: a.id, taskId: a.taskId, projectId: recordProject(a) });
 // A setting's change names a run or workflow as its own record, and its project when the setting has one:
-// in its data, or after a colon in its key (project-organization:<id>, run-archive:<id>:<run>).
+// in its data, or after a colon in its key (project-organization:<id>, run-archive:<id>:<run>). A tool belongs to the
+// studio, not a project: its change names the tool and the revision it now has and never a project, so every tab hears
+// it whatever project it follows, and another device can follow the tool by its ID and revision.
 function settingChange(id, data) {
+  if (id.startsWith('tool:')) return { type: 'tool', id: id.slice('tool:'.length), revision: data?.revision ?? null };
   const type = id.startsWith('run:')
       ? 'run'
       : id.startsWith('workflow:')
@@ -54,6 +83,21 @@ const phaseNames = {
 // A few attempts' phase events are read through their attempts; more, such as a whole project's, through every phase
 // event, which one pass over the phase index reads faster than as many lookups.
 const phaseIdsPerQuery = 200;
+// The task IDs one query of lastFinished reads, well under SQLite's limit on a statement's parameters.
+const taskIdsPerQuery = 500;
+// The settled tasks the compact state holds beside the open work: the newest, so a long-running project's state
+// stops growing with its history. The full state and the export keep every task.
+const compactSettledTasks = 100;
+
+// A task's or an attempt's project as the projects' indexes read it, by recordProject's rule (core/projects.mjs): the
+// record's own projectId, or for the legacy project also a record that names none. json_type is NULL only when the
+// record has no projectId at all; a projectId of JSON null names no project. Both terms are read through the index on
+// json_extract(data, '$.projectId'), so a project's records are found without reading the others. Its one parameter
+// is the project's ID.
+const projectWhere = projectId =>
+  projectId === LEGACY_PROJECT
+    ? `(json_extract(data, '$.projectId') = ? OR (json_extract(data, '$.projectId') IS NULL AND json_type(data, '$.projectId') IS NULL))`
+    : `json_extract(data, '$.projectId') = ?`;
 
 // An attempt's own reservation (MP-033), held from its start until it ends or is reconciled, as its agent's was before
 // an agent could run several attempts at once. Its name is the attempt's alone, so it never makes other work wait; it
@@ -72,7 +116,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, snapshot TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS leases (resource TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, token INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS counters (resource TEXT PRIMARY KEY, value INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT, attempt_id TEXT, message TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT, attempt_id TEXT, message TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, channel_type TEXT NOT NULL, channel_id TEXT, reply_to TEXT, time TEXT NOT NULL, data TEXT NOT NULL);`);
     // Lookups for what the pages read most (October 27): an attempt's events and phases, a task's events, one kind of
     // event such as every phase, and a task's attempts. Without them every read scanned the whole history, log lines
     // included, and grew slower each day. Adding them changes no record; the first start after they arrive builds
@@ -80,12 +125,23 @@ export class Store {
     // Attempts by their status and by their integration's state (October 28): the scheduler counts the running
     // attempts on every pass and a code story's start reads what integrations committed, and parsing every recorded
     // attempt for that (a code story's record is about 190 KB) froze the controller for seconds as each story started.
+    // Tasks and attempts by their project (November 2): every page of a project parsed every task the studio ever had
+    // and filtered its attempts by an expression no index covered, so one project's pages slowed with every other's.
     this.db.exec(`CREATE INDEX IF NOT EXISTS events_by_attempt ON events (attempt_id, seq);
       CREATE INDEX IF NOT EXISTS events_by_task ON events (task_id, seq);
       CREATE INDEX IF NOT EXISTS events_by_kind ON events (kind, seq);
       CREATE INDEX IF NOT EXISTS attempts_by_task ON attempts (task_id);
       CREATE INDEX IF NOT EXISTS attempts_by_status ON attempts (json_extract(data, '$.status'));
-      CREATE INDEX IF NOT EXISTS attempts_by_integration ON attempts (json_extract(data, '$.sourceIntegration.state'));`);
+      CREATE INDEX IF NOT EXISTS attempts_by_integration ON attempts (json_extract(data, '$.sourceIntegration.state'));
+      CREATE INDEX IF NOT EXISTS attempts_by_project ON attempts (json_extract(data, '$.projectId'));
+      CREATE INDEX IF NOT EXISTS tasks_by_status ON tasks (json_extract(data, '$.status'));
+      CREATE INDEX IF NOT EXISTS tasks_by_queued ON tasks (json_extract(data, '$.queued'));
+      CREATE INDEX IF NOT EXISTS tasks_by_project ON tasks (json_extract(data, '$.projectId'));`);
+    // Chat messages (team chat, November 2): one channel's messages read in order, a page back from a sequence or
+    // onward from one. The table and its lookup are new beside the records above, which none of them moves.
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS messages_by_channel ON messages (project_id, channel_type, channel_id, seq);',
+    );
     // Every write raises the version and calls onChange with what changed (MP-026): the dashboard's
     // cache tags and change events follow it, and the scheduler runs on it. Each event also reaches
     // onEvent, so a tab watching an attempt receives its lines. A log line is not a change: the compact
@@ -177,8 +233,8 @@ export class Store {
     this.putSetting('projects', projects);
   }
   // Removes a project and every record kept under it (deleting a project, v1.0 item 24): its tasks and attempts, the
-  // events of either, its runs, workflows, teams, house rules and run archives, and its resource counters. The
-  // caller checks nothing of it runs and removes its folders after the commit.
+  // events of either, its runs, workflows, teams, house rules and run archives, its resource counters and its chat
+  // messages. The caller checks nothing of it runs and removes its folders after the commit.
   deleteProjectRecords(projectId, taskIds, attemptIds) {
     const each = (sql, ids) => {
       const statement = this.db.prepare(sql);
@@ -206,6 +262,7 @@ export class Store {
       this.db.prepare('DELETE FROM settings WHERE id=?').run(prefix + projectId);
     this.db.prepare('DELETE FROM settings WHERE id LIKE ?').run(`run-archive:${projectId}:%`);
     this.db.prepare('DELETE FROM counters WHERE resource LIKE ?').run(`source:${projectId}:%`);
+    this.db.prepare('DELETE FROM messages WHERE project_id=?').run(projectId);
     this.putSetting(
       'projects',
       this.projects().filter(project => project.id !== projectId),
@@ -226,6 +283,22 @@ export class Store {
   }
   putWorkflow(workflow) {
     this.putSetting('workflow:' + workflow.id, workflow);
+  }
+  // The studio's tools (core/tools.mjs): each a studio setting tool:<id> with no project, retired ones included, in
+  // the order they were added. A tool is kept once added; nothing here removes one.
+  tools() {
+    return this.db
+      .prepare('SELECT data FROM settings WHERE id LIKE ? ORDER BY rowid')
+      .all('tool:%')
+      .map(row => JSON.parse(row.data));
+  }
+  tool(id) {
+    const tool = typeof id === 'string' ? this.setting('tool:' + id) : null;
+    if (!tool) throw Object.assign(new Error('Tool not found.'), { status: 404 });
+    return tool;
+  }
+  putTool(tool) {
+    this.putSetting('tool:' + tool.id, tool);
   }
   // Run records (MP-015 G2): the graph each run executes, with numbered revisions.
   runs(projectId) {
@@ -254,16 +327,48 @@ export class Store {
       .all()
       .map(r => JSON.parse(r.data));
   }
-  // When each task's attempts last finished, read without parsing any attempt, to list settled work newest first.
-  lastFinished() {
-    return new Map(
-      this.db
+  // One project's tasks in record order, read through the project index: the same records tasks() filtered by
+  // recordProject gives, without parsing another project's.
+  projectTasks(projectId) {
+    return this.db
+      .prepare(`SELECT data FROM tasks WHERE ${projectWhere(projectId)} ORDER BY rowid`)
+      .all(projectId)
+      .map(r => JSON.parse(r.data));
+  }
+  // The tasks a scheduler pass weighs, read through the status and queued indexes (C-19): a pass after nearly every
+  // write parsed every task the project ever had, three times.
+  tasksWithStatus(...statuses) {
+    return this.db
+      .prepare(
+        `SELECT data FROM tasks WHERE json_extract(data, '$.status') IN (${statuses.map(() => '?').join(',')}) ORDER BY rowid`,
+      )
+      .all(...statuses)
+      .map(r => JSON.parse(r.data));
+  }
+  queuedTasks() {
+    return this.db
+      .prepare("SELECT data FROM tasks WHERE json_extract(data, '$.queued') = 1 ORDER BY rowid")
+      .all()
+      .map(r => JSON.parse(r.data));
+  }
+  anyQueued() {
+    return !!this.db.prepare("SELECT 1 FROM tasks WHERE json_extract(data, '$.queued') = 1 LIMIT 1").get();
+  }
+  // When each of these tasks' attempts last finished, read without parsing any attempt, to list settled work newest
+  // first. Only these tasks' attempts are read, through the attempts' task index; a task with no attempt is left out.
+  lastFinished(taskIds) {
+    const latest = new Map();
+    for (let start = 0; start < taskIds.length; start += taskIdsPerQuery) {
+      const chunk = taskIds.slice(start, start + taskIdsPerQuery);
+      for (const row of this.db
         .prepare(
-          "SELECT task_id AS taskId, MAX(json_extract(data, '$.finishedAt')) AS at FROM attempts GROUP BY task_id",
+          `SELECT task_id AS taskId, MAX(json_extract(data, '$.finishedAt')) AS at FROM attempts
+          WHERE task_id IN (${chunk.map(() => '?').join(',')}) GROUP BY task_id`,
         )
-        .all()
-        .map(row => [row.taskId, row.at]),
-    );
+        .all(...chunk))
+        latest.set(row.taskId, row.at);
+    }
+    return latest;
   }
   task(id) {
     const r = this.db.prepare('SELECT data FROM tasks WHERE id=?').get(id);
@@ -355,10 +460,11 @@ export class Store {
       .run(a.id, a.taskId, JSON.stringify(snapshot), JSON.stringify(a));
     this.changed(attemptChange(a));
   }
-  updateAttempt(a) {
+  // `trace` marks a write of what the attempt is saying or doing, which no task's readiness depends on (C-19).
+  updateAttempt(a, { trace = false } = {}) {
     const { instructions, ...data } = a;
     this.db.prepare('UPDATE attempts SET data=? WHERE id=?').run(JSON.stringify(data), a.id);
-    this.changed(attemptChange(a));
+    this.changed({ ...attemptChange(a), ...(trace ? { trace: true } : {}) });
   }
   leases() {
     return this.db.prepare('SELECT resource, attempt_id AS attemptId,token FROM leases ORDER BY resource').all();
@@ -547,11 +653,7 @@ export class Store {
   // event of the project's tasks, one tagged with the project, or an untagged one with no task, as the
   // compact state reads them. The sequence is the row ID, so each page reads only back from its cursor.
   activity(projectId, { before = null, limit = 50 } = {}) {
-    const ids = new Set(
-        this.tasks()
-          .filter(task => recordProject(task) === projectId)
-          .map(task => task.id),
-      ),
+    const ids = new Set(this.projectTasks(projectId).map(task => task.id)),
       read = this.db.prepare("SELECT * FROM events WHERE kind<>'log' AND seq<? ORDER BY seq DESC LIMIT 200"),
       events = [];
     let cursor = before ?? Number.MAX_SAFE_INTEGER,
@@ -629,13 +731,14 @@ export class Store {
     const tasks = taskId === undefined ? null : [taskId].flat();
     // Neither this query nor the timing query selects the snapshot column. Only
     // data is parsed, and no full attempt or phase history is constructed.
+    // A project's attempts are found through the project index; a few tasks' through their own, which the planner
+    // would otherwise pass over for the project's and read every attempt of the project to find them.
     const rows = this.db
       .prepare(
-        `SELECT data FROM attempts
-      WHERE CASE WHEN json_type(data, '$.projectId') IS NULL THEN ?
-        ELSE json_extract(data, '$.projectId') END = ?${tasks ? ` AND task_id IN (${tasks.map(() => '?').join(',')})` : ''} ORDER BY rowid`,
+        `SELECT data FROM attempts${tasks ? ' INDEXED BY attempts_by_task' : ''}
+      WHERE ${projectWhere(projectId)}${tasks ? ` AND task_id IN (${tasks.map(() => '?').join(',')})` : ''} ORDER BY rowid`,
       )
-      .all(LEGACY_PROJECT, projectId, ...(tasks || []))
+      .all(projectId, ...(tasks || []))
       .map(row => JSON.parse(row.data));
     // The same pass reads a working attempt's inner phases, so Today can say what it is doing. A few attempts'
     // phase events are read through their attempts and many through the phase index, rather than by scanning the
@@ -733,6 +836,95 @@ export class Store {
     const last = events.at(-1)?.seq;
     return { events, total: summary.total, snapshot, nextCursor: last < snapshot ? last : null };
   }
+  // Chat messages (team chat, November 2). core/messages.mjs checks what a message holds before it is inserted; the
+  // store keeps it in its channel (the project's own, a run's or a task's) under its sequence, which only grows and
+  // is the cursor a reader pages back from or resumes after. Each insert and outcome is a change of its own.
+  insertMessage({ id, projectId, channel, replyTo = null, time, ...data }) {
+    const [type, channelId] = messageChannel(channel);
+    this.db
+      .prepare(
+        'INSERT INTO messages (id, project_id, channel_type, channel_id, reply_to, time, data) VALUES (?,?,?,?,?,?,?)',
+      )
+      .run(id, projectId, type, channelId, replyTo, time, JSON.stringify(data));
+    this.changed({ type: 'message', id, projectId, channel: { type, id: channelId } });
+    return this.message(id);
+  }
+  // A message by its ID, or null when there is none.
+  message(id) {
+    const row = this.db.prepare('SELECT * FROM messages WHERE id=?').get(id);
+    return row ? messageOf(row) : null;
+  }
+  // At most `limit` of a channel's messages before a sequence (the newest when there is none), newest last, and
+  // whether older ones exist.
+  messagePage(projectId, channel, { before = null, limit = messageLimits.page } = {}) {
+    const [type, channelId] = messageChannel(channel);
+    pageBound('limit', limit, 1, messageLimits.pageMax);
+    if (before !== null) pageBound('before', before, 0, Number.MAX_SAFE_INTEGER);
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM messages WHERE project_id=? AND channel_type=? AND channel_id IS ? AND seq<? ORDER BY seq DESC LIMIT ?',
+      )
+      .all(projectId, type, channelId, before ?? Number.MAX_SAFE_INTEGER, limit + 1);
+    return { messages: rows.slice(0, limit).reverse().map(messageOf), older: rows.length > limit };
+  }
+  // At most `limit` of a channel's messages after a sequence, oldest first, for a reader resuming where it stopped,
+  // and whether newer ones exist.
+  messagesAfter(projectId, channel, after = 0, { limit = messageLimits.page } = {}) {
+    const [type, channelId] = messageChannel(channel);
+    pageBound('after', after, 0, Number.MAX_SAFE_INTEGER);
+    pageBound('limit', limit, 1, messageLimits.pageMax);
+    const rows = this.db
+      .prepare(
+        'SELECT * FROM messages WHERE project_id=? AND channel_type=? AND channel_id IS ? AND seq>? ORDER BY seq LIMIT ?',
+      )
+      .all(projectId, type, channelId, after, limit + 1);
+    return { messages: rows.slice(0, limit).map(messageOf), newer: rows.length > limit };
+  }
+  // Every note on one task's thread that waits for the task's next attempt, oldest first: a director's message kept
+  // as { type: 'note', taskId, receivedBy: null } (postMessage). The attempt that receives them records itself as
+  // each one's receivedBy (setMessageOutcome), so receivedBy names the last attempt that received it. A note waits
+  // until an attempt that received it hands back a result: one whose receiving attempt ended without a result (cut
+  // off and reconciled, cancelled, or stopped at a limit) waits again for the next attempt, and one whose receiving
+  // attempt is live (liveAttempts' rule) does not, so two running attempts never hold it. A receivedBy naming no
+  // recorded attempt counts as received. Only the receiving attempt's data is read, not its instructions.
+  waitingNotes(projectId, taskId) {
+    const attemptData = this.db.prepare('SELECT data FROM attempts WHERE id=?'),
+      endedWithoutResult = attemptId => {
+        const row = attemptData.get(attemptId);
+        if (!row) return false;
+        const a = JSON.parse(row.data),
+          live =
+            ['running', 'stopping', 'quarantined'].includes(a.status) ||
+            (a.status === 'interrupted' && !a.reconciledAt);
+        return !live && !a.result;
+      };
+    return this.db
+      .prepare(
+        "SELECT * FROM messages WHERE project_id=? AND channel_type='task' AND channel_id=? AND json_extract(data, '$.outcome.type')='note' ORDER BY seq",
+      )
+      .all(projectId, taskId)
+      .map(messageOf)
+      .filter(
+        message =>
+          message.outcome?.taskId === taskId &&
+          (message.outcome.receivedBy === null || endedWithoutResult(message.outcome.receivedBy)),
+      );
+  }
+  // Records what a message led to; its words, sender and place stay as they were.
+  setMessageOutcome(id, outcome) {
+    const row = this.db.prepare('SELECT * FROM messages WHERE id=?').get(id);
+    if (!row) throw Object.assign(new Error('Message not found.'), { status: 404 });
+    this.db
+      .prepare('UPDATE messages SET data=? WHERE id=?')
+      .run(JSON.stringify({ ...JSON.parse(row.data), outcome }), id);
+    this.changed({
+      type: 'message',
+      id,
+      projectId: row.project_id,
+      channel: { type: row.channel_type, id: row.channel_id },
+    });
+    return this.message(id);
+  }
   // What every page of a project shares (MP-026): no tasks, attempts, events or instruction text.
   shell(projectId = LEGACY_PROJECT) {
     const project = this.project(projectId),
@@ -756,13 +948,57 @@ export class Store {
       leases: this.leases(),
     };
   }
+  // The compact state's tasks: the project's live set in full, chosen by liveRecords' rule (core/project-records.mjs)
+  // without reading its attempt summaries twice, and the newest settled tasks up to compactSettledTasks, newest by
+  // record order, all listed in record order. Attempts are those of the tasks it holds; when it leaves nothing out,
+  // the project's every attempt summary, as before it was bounded.
+  compactTasks(projectId) {
+    const all = this.projectTasks(projectId),
+      // An older-layout review settles by its accepted attempt's verdict and integration (settled()).
+      reviewIds = all
+        .filter(task => task.kind === 'studio-development:change-review' && task.status === 'done' && !task.sourceStage)
+        .map(task => task.acceptedAttemptId)
+        .filter(Boolean),
+      reviews = new Map(
+        reviewIds.length
+          ? this.db
+              .prepare(`SELECT id, data FROM attempts WHERE id IN (${reviewIds.map(() => '?').join(',')})`)
+              .all(...reviewIds)
+              .map(row => [row.id, JSON.parse(row.data)])
+          : [],
+      ),
+      done = task => settled(task, id => reviews.get(id) ?? null),
+      runOf = runMembership(all),
+      openRuns = new Set(all.filter(task => !done(task) && runOf.has(task.id)).map(task => runOf.get(task.id))),
+      live = new Set(all.filter(task => !done(task) || openRuns.has(runOf.get(task.id))).map(task => task.id)),
+      byId = new Map(all.map(task => [task.id, task]));
+    // Direct prerequisites only, as liveRecords keeps them.
+    for (const id of [...live]) for (const dependency of byId.get(id)?.dependencies || []) live.add(dependency);
+    const finished = all.filter(task => !live.has(task.id)),
+      kept = new Set(finished.slice(-compactSettledTasks).map(task => task.id)),
+      tasks = all.filter(task => live.has(task.id) || kept.has(task.id)),
+      left = finished.length - kept.size;
+    return {
+      all,
+      tasks,
+      attempts: left
+        ? this.dashboardAttempts(
+            projectId,
+            tasks.map(task => task.id),
+          )
+        : this.dashboardAttempts(projectId),
+      more: { tasks: left > 0, settled: left },
+    };
+  }
   state(projectId = LEGACY_PROJECT, { mode = 'full' } = {}) {
     if (!['full', 'dashboard'].includes(mode)) throw new Error('State mode must be full or dashboard.');
-    const project = this.project(projectId),
-      tasks = this.tasks()
-        .filter(task => recordProject(task) === projectId)
-        .map(task => ({ ...task, directorInputs: directorInputsOf(task) })),
-      ids = new Set(tasks.map(task => task.id)),
+    // The change sequence this answer reflects: state reads synchronously, so no write lands while it is built.
+    const version = this.version,
+      project = this.project(projectId),
+      compact = mode === 'dashboard' ? this.compactTasks(projectId) : null,
+      all = compact ? compact.all : this.tasks().filter(task => recordProject(task) === projectId),
+      tasks = (compact ? compact.tasks : all).map(task => ({ ...task, directorInputs: directorInputsOf(task) })),
+      ids = new Set(all.map(task => task.id)),
       org = projectOrganization(this, projectId);
     // The compact state leaves agent output out (MP-026); an attempt's lines stream to a tab watching it.
     const events = this.events(null, { logs: mode !== 'dashboard' }).filter(event =>
@@ -780,14 +1016,15 @@ export class Store {
       project,
       workflows: this.workflows(projectId),
       tasks,
-      attempts:
-        mode === 'dashboard'
-          ? this.dashboardAttempts(projectId)
-          : this.allAttempts()
-              .filter(attempt => recordProject(attempt) === projectId)
-              .map(attempt => ({ ...attempt, phaseEvents: phases.get(attempt.id) || [] })),
+      attempts: compact
+        ? compact.attempts
+        : this.allAttempts()
+            .filter(attempt => recordProject(attempt) === projectId)
+            .map(attempt => ({ ...attempt, phaseEvents: phases.get(attempt.id) || [] })),
       leases: this.leases(),
       events,
+      // What the compact state left out, and the change sequence to resume the change stream from (/api/events after=).
+      ...(compact ? { more: compact.more, version } : {}),
     };
   }
   close() {

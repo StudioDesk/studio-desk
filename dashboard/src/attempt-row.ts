@@ -5,7 +5,7 @@
 // with attemptName ("Build, attempt 1 of 3"), which this row no longer uses.
 import type { AttemptSummary, Task } from './api';
 import { plural, reviewOf, totalsOf } from './evidence';
-import { countsTowardLimit, isSourceStory, type Stage } from './story';
+import { countsTowardLimit, earlierCounted, isSourceStory, workLimit, type Stage } from './story';
 
 const kindOf = (attempt?: AttemptSummary) => (attempt?.assignment as { kind?: string } | undefined)?.kind;
 // A review of the work, a code story's or other work's independent review, as on the Agents page.
@@ -15,8 +15,10 @@ export const isReview = (attempt?: AttemptSummary) =>
 export type Tone = '' | 'ok' | 'bad' | 'you' | 'live';
 export interface Chip {
   attempt: AttemptSummary;
-  // A build's number among the attempts that count toward the limit; none for one that used none of it.
+  // A build's number among the attempts that count toward the limit, as the controller counts them; none for one that
+  // used none of it, or for one of a flow's earlier rounds (earlier).
   number?: number;
+  earlier?: true;
   // A review's: the number of the build it reviewed, when its record names that build.
   of?: number;
   // A build your send-back started: the number of the build whose review you overruled.
@@ -159,7 +161,7 @@ const listed = (items: string[]) =>
 // after the second, which started the third."
 export function limitLine(task: Task, builds: Chip[]) {
   const used = builds.filter(chip => chip.number).length,
-    max = task.maxAttempts;
+    max = workLimit(task);
   if (!max) return `${used} ${plural(used, 'attempt')} used.`;
   const allow = `The house rules allow ${max} automatic ${plural(max, 'attempt')}.`,
     past = builds.filter(chip => (chip.number ?? 0) > max);
@@ -189,7 +191,13 @@ export function attemptRow(task: Task, attempts: AttemptSummary[]): Row {
     stage = (task.sourceStage ?? {}) as StageRecord,
     work = attempts.filter(attempt => !isReview(attempt)),
     counted = work.filter(countsTowardLimit),
-    numberOf = (attempt?: AttemptSummary) => (attempt ? counted.indexOf(attempt) + 1 || undefined : undefined),
+    // Counted as the controller counts them (its served attemptCount): a flow's earlier rounds come before the first.
+    earlier = earlierCounted(task, counted.length),
+    numberOf = (attempt?: AttemptSummary) => {
+      const number = attempt ? counted.indexOf(attempt) + 1 - earlier : 0;
+      return number > 0 ? number : undefined;
+    },
+    earlierRound = (attempt: AttemptSummary) => counted.indexOf(attempt) > -1 && counted.indexOf(attempt) < earlier,
     yours = sentBack(task, attempts);
   const builds = work.map((attempt): Chip => {
     const [tone, words] = ending(attempt),
@@ -199,6 +207,7 @@ export function attemptRow(task: Task, attempts: AttemptSummary[]): Row {
     return {
       attempt,
       number: numberOf(attempt),
+      ...(earlierRound(attempt) ? { earlier: true as const } : {}),
       ...(after ? { after } : {}),
       tone,
       words: ended ? `You sent it back · ${lower(words)}` : words,
@@ -257,7 +266,9 @@ export function shownName(task: Task, chip: Chip) {
         : 'Review'
       : chip.number
         ? `${work} ${chip.number}`
-        : `${work}, not counted`,
+        : chip.earlier
+          ? `${work}, earlier round`
+          : `${work}, not counted`,
     words: upper(chip.words),
   };
 }

@@ -4,11 +4,25 @@ import { QueryClient } from '@tanstack/react-query';
 import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import type { BuiltInSandbox, TrySettings, TryView } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
 import { createStream, fakeController, latest, taskFixture, type Controller } from './test-controller';
+
+// Settings, Previews and the agents' pages these tests open load on demand (router.tsx). Their code is loaded
+// before the tests, so the router's load resolves at once and a test's one-second wait for a page measures only its
+// rendering, not fetching and preparing its code, which took more than a second on a busy computer.
+beforeAll(async () => {
+  await Promise.all([
+    import('./settings-page'),
+    import('./previews-page'),
+    import('./agents-page'),
+    import('./teams-page'),
+    import('./instructions-page'),
+    import('./activity-log-page'),
+  ]);
+});
 
 let controller: Controller;
 beforeEach(() => {
@@ -165,11 +179,13 @@ test('Settings links the records it keeps elsewhere and changes where candidate 
       { url: '/api/control', method: 'POST', body: { projectId: 'project-x', testSandbox: 'none' } },
     ]),
   );
-  // Settings reads the shell and the live set: no instructions or history. The rail reads Project Y's once for its
-  // count.
+  // Settings reads the shell and the live set: no instructions or history. The frame reads each project's list of
+  // calls for the sidebar and the rail, and the rail reads Project Y's shell and live set once.
   expect([...new Set(controller.reads())].sort()).toEqual([
+    '/api/projects/project-x/calls',
     '/api/projects/project-x/live',
     '/api/projects/project-x/shell',
+    '/api/projects/project-y/calls',
     '/api/projects/project-y/live',
     '/api/projects/project-y/shell',
   ]);
@@ -492,6 +508,37 @@ test('Settings lists Previews last in its sections nav, a page of its own that t
   expect(commands()).toEqual([]);
 });
 
+test("a code project's sections nav lists Releases after Repository, and a general-work project's does not", async () => {
+  const nav = () =>
+    within(screen.getByRole('navigation', { name: 'Settings sections' }))
+      .getAllByRole('link')
+      .map(link => link.textContent);
+  controller.shell.organizationConfiguration = {
+    ...controller.shell.organizationConfiguration!,
+    taskKinds: ['studio-development:change'],
+  };
+  open('/p/project-x/settings');
+  expect(await screen.findByRole('region', { name: 'Releases' })).toBeTruthy();
+  expect(nav().slice(0, 4)).toEqual(['General', 'Repository', 'Releases', 'Visual check']);
+  expect(
+    within(screen.getByRole('navigation', { name: 'Settings sections' }))
+      .getByRole('link', { name: 'Releases' })
+      .getAttribute('href'),
+  ).toBe('#releases');
+  cleanup();
+  controller.requests = [];
+  controller.shell.organizationConfiguration = {
+    ...controller.shell.organizationConfiguration!,
+    taskKinds: ['general:plan'],
+  };
+  open('/p/project-x/settings');
+  await screen.findByRole('region', { name: 'Repository' });
+  expect(nav()).not.toContain('Releases');
+  expect(nav().slice(0, 3)).toEqual(['General', 'Repository', 'Visual check']);
+  expect(screen.queryByRole('region', { name: 'Releases' })).toBeNull();
+  expect(controller.reads()).not.toContain('/api/projects/project-x/releases');
+});
+
 test('the house rules switch a gate between you and the studio, and save against the revision they read', async () => {
   const user = userEvent.setup();
   open('/p/project-x/settings');
@@ -521,8 +568,88 @@ test('the house rules switch a gate between you and the studio, and save against
         general: { approve: 'auto', accept: 'auto' },
       },
       cycle: { enabled: false },
+      sendWaiting: false,
     },
   });
+});
+
+const sendWaiting = 'Send waiting ideas when their line is free';
+
+test('house rules show the send-waiting rule as one labelled switch beside When something fails, off as recorded', async () => {
+  open('/p/project-x/settings');
+  const region = await screen.findByRole('region', { name: 'House rules' }),
+    rules = within(region),
+    toggle = rules.getByRole('switch', { name: sendWaiting });
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  expect(rules.queryByRole('button', { name: 'Save house rules' })).toBeNull();
+  // It sits in the same line as the other studio-wide rule.
+  const line = rules.getByRole('group', { name: 'When something fails' }).closest('.sd-meta')!;
+  expect(line.contains(toggle)).toBe(true);
+  // Its label is the only text it adds: no note or hint explains it.
+  const mentions = rules.getAllByText(/waiting ideas/);
+  expect(mentions).toHaveLength(1);
+  expect(mentions[0]!.textContent).toBe(sendWaiting);
+  expect(mentions[0]!.tagName).toBe('B');
+});
+
+test('turning the send-waiting switch on saves it with the rest of the house rules against the revision read', async () => {
+  const user = userEvent.setup();
+  open('/p/project-x/settings');
+  const rules = within(await screen.findByRole('region', { name: 'House rules' }));
+  await user.click(rules.getByRole('switch', { name: sendWaiting }));
+  expect(rules.getByRole('switch', { name: sendWaiting }).getAttribute('aria-checked')).toBe('true');
+  await user.click(rules.getByRole('button', { name: 'Save house rules' }));
+  await waitFor(() => expect(commands()).toHaveLength(1));
+  expect(commands()[0]).toEqual({
+    url: '/api/projects/project-x/autonomy',
+    method: 'POST',
+    body: {
+      projectId: 'project-x',
+      expectedRevision: 6,
+      enabled: false,
+      retries: 0,
+      kinds: {
+        'studio-development:change': {
+          approve: 'director',
+          accept: 'director',
+          scope: 'director',
+          integrate: 'director',
+        },
+        general: { approve: 'director', accept: 'director' },
+      },
+      cycle: { enabled: false },
+      sendWaiting: true,
+    },
+  });
+});
+
+test('a recorded send-waiting rule shows on, is kept when other rules are saved, and Use recommended leaves it', async () => {
+  const user = userEvent.setup();
+  controller.shell = {
+    ...controller.shell,
+    autonomy: {
+      ...controller.shell.autonomy,
+      policy: { enabled: false, revision: 6, retries: 0, kinds: {}, cycle: { enabled: false }, sendWaiting: true },
+    },
+  };
+  open('/p/project-x/settings');
+  const rules = within(await screen.findByRole('region', { name: 'House rules' }));
+  expect(rules.getByRole('switch', { name: sendWaiting }).getAttribute('aria-checked')).toBe('true');
+  await user.click(rules.getByRole('button', { name: 'Use recommended' }));
+  expect(rules.getByRole('switch', { name: sendWaiting }).getAttribute('aria-checked')).toBe('true');
+  await user.click(rules.getByRole('button', { name: 'Discard changes' }));
+  await user.click(rules.getByRole('button', { name: 'Retry once with the failure details, then ask you' }));
+  await user.click(rules.getByRole('button', { name: 'Save house rules' }));
+  await waitFor(() => expect(commands()).toHaveLength(1));
+  expect(commands()[0]!.body).toMatchObject({ expectedRevision: 6, enabled: false, retries: 1, sendWaiting: true });
+});
+
+test('Use recommended leaves the send-waiting switch off when it is off', async () => {
+  const user = userEvent.setup();
+  open('/p/project-x/settings');
+  const rules = within(await screen.findByRole('region', { name: 'House rules' }));
+  await user.click(rules.getByRole('button', { name: 'Use recommended' }));
+  expect(rules.getByRole('switch', { name: sendWaiting }).getAttribute('aria-checked')).toBe('false');
 });
 
 test('under the house rules table, a quiet line names each kind the project does not take yet, linking to the Agents page', async () => {
@@ -1056,6 +1183,9 @@ test('Repository shows how a story is tried yourself, and that the next Run runs
   expect(unset.queryByText(/^The next Run runs on this computer/)).toBeNull();
 });
 
+// A longer time limit for genuinely slow work: this test types about fifty characters one key at a time, and each key
+// renders the dialog again. With every CPU thread kept busy it took just over Vitest's five seconds (5013-5062 ms, in
+// three of four runs), with its pages' code already loaded; unslowed it passes within them.
 test('the try settings save the start command as a program and its arguments, the address, the folder and Run in', async () => {
   const user = userEvent.setup();
   codeProject();
@@ -1106,7 +1236,7 @@ test('the try settings save the start command as a program and its arguments, th
   expect(await trying.findByText('This computer')).toBeTruthy();
   expect(trying.getByText('D:/tries/site')).toBeTruthy();
   expect(controller.reads().filter(url => url === '/api/projects/project-x/try')).toHaveLength(2);
-});
+}, 15_000);
 
 test('an empty address and folder are sent as null, which reads the address from the output and keeps the default folder', async () => {
   const user = userEvent.setup();

@@ -2,10 +2,12 @@
 // its shell and its live set. A change to one task fetches that task alone and patches it into whatever holds
 // it; the live set reloads only when work joins or leaves it, and finished runs reload when a run finishes or
 // changes. Nothing is fetched for a task no page holds. A command's answer carries the pages of the tasks it
-// changed, which go in at once without a read.
+// changed, which go in at once without a read. The controller answers the live set a page at a time; the records
+// read every page and hold them as one set (readLive).
 import { useInfiniteQuery, useQuery, type InfiniteData, type QueryClient } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import {
+  callsUrl,
   finishedUrl,
   getJSON,
   liveUrl,
@@ -16,10 +18,15 @@ import {
   type Change,
   type ChangeMessage,
   type CommandRecords,
+  type DirectorCall,
+  type DirectorCalls,
+  type DirectorTaskCall,
   type FinishedPage,
+  type IdeaName,
   type Live,
   type PeopleSummary,
   type ReleaseOverview,
+  type RunRecord,
   type SettledKind,
   type SettledFilter,
   type SettledPage,
@@ -28,7 +35,17 @@ import {
   type TestRecordRun,
 } from './api';
 import { useStreamReady } from './stream-context';
-import { settled, type StudioState } from './studio-runs';
+import {
+  explain,
+  isCarry,
+  isRelease,
+  isResume,
+  settled,
+  type HomeItem,
+  type NeedsItem,
+  type RunStory,
+  type StudioState,
+} from './studio-runs';
 
 // Query names start with the project, so a reload refreshes only that project's records.
 export const queryKeys = {
@@ -52,9 +69,14 @@ export const queryKeys = {
   settledCounts: (projectId: string) => [projectId, 'settled', 'counts'] as const,
   // The project's release lines and milestones, for the Releases page and every release chip.
   releases: (projectId: string) => [projectId, 'releases'] as const,
+  // What needs the director now, as the controller lists it (GET /api/projects/<id>/calls).
+  calls: (projectId: string) => [projectId, 'calls'] as const,
 };
 
 const taskTypes = new Set(['task', 'attempt', 'event']);
+// The least time between two reads of the project's list of calls that its stream's changes start: the gap the rail
+// keeps between two reads of another project's list (rail-calls.ts railGap).
+export const callsGap = 1000;
 export type RunItem = FinishedPage['runs'][number];
 
 // The tasks the project's releases name: each milestone's stories, those moved in or out of it, and its release notes.
@@ -96,6 +118,9 @@ export class RecordSync {
   private counter = 0;
   private reloading: Promise<void> | null = null;
   private again = false;
+  // The list of calls' gap after its last read began, and whether a change that counts came during it.
+  private callsHeld: ReturnType<typeof setTimeout> | null = null;
+  private callsAgain = false;
 
   constructor(client: QueryClient, projectId: string, fetchJSON: typeof getJSON = getJSON) {
     this.client = client;
@@ -105,7 +130,38 @@ export class RecordSync {
 
   async apply(message: ChangeMessage) {
     if (message.reload) return void (await this.client.invalidateQueries({ queryKey: [this.projectId] }));
-    await this.changed(message.changes ?? []);
+    const changes = message.changes ?? [];
+    // The controller works the list of calls out from the shell, the live records (tasks, attempts, runs and ideas)
+    // and the settings, never from events, so a message of events alone (each phase or line a running attempt logs)
+    // leaves it. Any other change reads it again: the first at once, those within the gap after it as one more read
+    // when the gap ends, so the last change is always read. A command's answer leaves it to the page that sent the
+    // command and to the stream's message for the same change.
+    await Promise.all([
+      changes.some(change => change.type !== 'event') ? this.readCalls() : null,
+      this.changed(changes),
+    ]);
+  }
+
+  // Stops the read of the list of calls still waiting for its gap to end, for a project whose pages have closed.
+  stop() {
+    if (this.callsHeld !== null) clearTimeout(this.callsHeld);
+    this.callsHeld = null;
+    this.callsAgain = false;
+  }
+
+  // Reads the list of calls again now, or once its gap ends when a read began less than the gap ago.
+  private readCalls() {
+    if (this.callsHeld !== null) {
+      this.callsAgain = true;
+      return null;
+    }
+    this.callsHeld = setTimeout(() => {
+      this.callsHeld = null;
+      if (!this.callsAgain) return;
+      this.callsAgain = false;
+      void this.readCalls();
+    }, callsGap);
+    return this.client.invalidateQueries({ queryKey: queryKeys.calls(this.projectId) });
   }
 
   // A command's answer names what it changed as the stream's message for it will, with the page of each task it
@@ -300,11 +356,212 @@ export function useShell(projectId: string) {
   });
 }
 
+// Newest first by when it was made, as the controller lists runs and ideas (src/core/graph.mjs projectRuns); equal
+// times keep the order they were read in.
+const newestFirst = <T extends { createdAt?: string }>(items: T[]) =>
+  items.sort((a, b) => {
+    const one = a.createdAt ?? '',
+      other = b.createdAt ?? '';
+    return one < other ? 1 : one > other ? -1 : 0;
+  });
+
+// The live set's pages held as one, as the controller answered it whole before it came in pages: every page's tasks
+// and attempts in the order read, each open run once, and each finished idea once with its tasks from every page. It
+// reflects the change sequence of its first page, the earliest, so a reader resumes from there and misses nothing.
+export function joinLive(pages: Live[]): Live {
+  if (pages.length === 1) return pages[0]!;
+  const runs = new Map<string, RunRecord>(),
+    ideas = new Map<string, IdeaName>();
+  for (const page of pages) {
+    for (const run of page.runs) if (!runs.has(run.id)) runs.set(run.id, run);
+    for (const idea of page.ideas ?? []) {
+      const held = ideas.get(idea.id);
+      ideas.set(idea.id, held ? { ...held, taskIds: [...held.taskIds, ...idea.taskIds] } : idea);
+    }
+  }
+  const versions = pages.map(page => page.version).filter((version): version is number => version !== undefined);
+  return {
+    tasks: pages.flatMap(page => page.tasks),
+    attempts: pages.flatMap(page => page.attempts),
+    runs: newestFirst([...runs.values()]),
+    ideas: newestFirst([...ideas.values()]),
+    next: null,
+    ...(versions.length ? { version: Math.min(...versions) } : {}),
+  };
+}
+
+// Reads the live set a page at a time, the next page while one says next, and holds them as one. A page whose cursor
+// settled out of the set while the pages were read is refused (404); the set is read again from its first page, twice
+// at most.
+export async function readLive(projectId: string, signal?: AbortSignal, fetchJSON: typeof getJSON = getJSON) {
+  for (let tries = 0; ; tries++) {
+    const pages: Live[] = [],
+      seen = new Set<string>();
+    let before: string | null = null;
+    try {
+      do {
+        const page: Live = await fetchJSON<Live>(liveUrl(projectId, before), signal);
+        pages.push(page);
+        before = page.next ?? null;
+        if (before !== null && seen.has(before)) throw new Error('The open work repeated a page.');
+        if (before !== null) seen.add(before);
+      } while (before !== null);
+    } catch (error) {
+      if (pages.length && tries < 2 && !signal?.aborted) continue;
+      throw error;
+    }
+    return joinLive(pages);
+  }
+}
+
 export function useLive(projectId: string) {
   return useQuery({
     enabled: useStreamReady(),
     queryKey: queryKeys.live(projectId),
-    queryFn: ({ signal }) => getJSON<Live>(liveUrl(projectId), signal),
+    queryFn: ({ signal }) => readLive(projectId, signal),
+  });
+}
+
+// What needs the director now in the project, as the controller lists it (GET /api/projects/<id>/calls), in its
+// order. It is read again with the project's stream's changes other than events alone, at most once a second with the
+// last change always read, and with every command's answer (RecordSync).
+export function useCalls(projectId: string) {
+  return useQuery({
+    enabled: useStreamReady(),
+    queryKey: queryKeys.calls(projectId),
+    queryFn: ({ signal }) => getJSON<DirectorCalls>(callsUrl(projectId), signal),
+  });
+}
+
+// A call's name on a page, served or worked out from the records: its task, its idea's cleanup, its CLI's hold, its
+// project's resume, its milestone's stopped release or its story's stopped carry.
+export function callKey(call: DirectorCall | HomeItem) {
+  if ('type' in call)
+    return call.type === 'hold'
+      ? `hold:${call.provider}`
+      : call.type === 'resume'
+        ? `resume:${call.projectId}`
+        : call.type === 'cleanup'
+          ? `cleanup:${call.runId}`
+          : call.type === 'release'
+            ? `release:${call.milestoneId}`
+            : call.type === 'carry'
+              ? `carry:${call.taskId}`
+              : call.taskId;
+  if ('members' in call) return `cleanup:${call.run.id}`;
+  if (isResume(call)) return `resume:${call.projectId}`;
+  if (isRelease(call)) return `release:${call.milestoneId}`;
+  if (isCarry(call)) return `carry:${call.taskId}`;
+  return 'provider' in call ? `hold:${call.provider}` : call.taskId;
+}
+
+// A served task's call as the pages' cards read it: the served words and attempt, with the refused commands and the
+// idea the page's own records hold.
+function needsItem(call: DirectorTaskCall, state: StudioState, stories: RunStory[], cleanup = false) {
+  const task = state.tasks.find(record => record.id === call.taskId),
+    commands = task && call.kind === 'command-request' ? explain(task, state).commands : undefined,
+    run = !cleanup && call.runId ? stories.find(story => story.id === call.runId) : undefined;
+  const item: NeedsItem & { run?: RunStory } = {
+    taskId: call.taskId,
+    kind: call.kind,
+    reason: call.reason,
+    details: call.details,
+    next: call.next,
+    action: call.action,
+    requiresDirector: true,
+    text: call.reason,
+    cleanup,
+    canClose: call.canClose,
+    ...(call.attemptId ? { attemptId: call.attemptId } : {}),
+    ...(commands ? { commands } : {}),
+    ...(run ? { run } : {}),
+  };
+  return item;
+}
+
+// The served calls, in the served order, as the items the pages draw: each task's call joined with the task, attempts
+// and idea the records hold, a cleanup with its members and its idea, a hold with its CLI, a project's resume with
+// the work waiting only for it, and a milestone's stopped release and a story's stopped carry, each with its served
+// actions. A cleanup whose idea
+// the records do not hold has nothing to draw it by and is left out.
+export function servedItems(calls: DirectorCall[], state: StudioState, stories: RunStory[]): HomeItem[] {
+  return calls.flatMap((call): HomeItem[] => {
+    if (call.type === 'hold')
+      return [
+        {
+          kind: 'subscription-hold',
+          provider: call.provider,
+          label: call.label,
+          resetAt: null,
+          resetTime: null,
+          taskIds: call.taskIds,
+          reason: call.reason,
+          next: call.next,
+          action: call.action,
+          requiresDirector: true,
+        },
+      ];
+    if (call.type === 'resume')
+      return [
+        {
+          kind: 'project-resume',
+          projectId: call.projectId,
+          taskIds: call.taskIds,
+          reason: call.reason,
+          next: call.next,
+          action: call.action,
+          requiresDirector: true,
+        },
+      ];
+    if (call.type === 'release')
+      return [
+        {
+          kind: 'release-stopped',
+          projectId: call.projectId,
+          milestoneId: call.milestoneId,
+          version: call.version,
+          state: call.state,
+          taskIds: call.taskIds,
+          reason: call.reason,
+          next: call.next,
+          action: call.action,
+          details: call.details,
+          actions: call.actions,
+          requiresDirector: true,
+        },
+      ];
+    if (call.type === 'carry')
+      return [
+        {
+          kind: 'carry-stopped',
+          projectId: call.projectId,
+          taskId: call.taskId,
+          taskIds: call.taskIds,
+          title: call.title,
+          line: call.line,
+          back: call.back,
+          state: call.state,
+          reason: call.reason,
+          next: call.next,
+          action: call.action,
+          details: call.details,
+          actions: call.actions,
+          requiresDirector: true,
+        },
+      ];
+    if (call.type === 'cleanup') {
+      const run = stories.find(story => story.id === call.runId);
+      if (!run) return [];
+      return [
+        {
+          run,
+          members: call.members.map(member => needsItem(member, state, stories, true)),
+          taskIds: call.taskIds,
+          requiresDirector: true,
+        },
+      ];
+    }
+    return [needsItem(call, state, stories)];
   });
 }
 

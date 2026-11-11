@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { copySource, verifyCopy } from './source-checks.mjs';
-import { createSourceWorktree, removeWorktrees } from './source-worktrees.mjs';
+import { createSourceWorktree, matchMeasuredFolder, removeWorktrees } from './source-worktrees.mjs';
 import { lastLine } from './package-installs.mjs';
 
 const self = fileURLToPath(import.meta.url),
@@ -17,19 +17,58 @@ const self = fileURLToPath(import.meta.url),
 
 export const snapshotMismatch = 'The base commit does not match the approved source snapshot. Start a new attempt.';
 
+// What each setup step is doing, in the words a setup that ended without a reason uses.
+const stepWords = {
+  'setup.worktree': 'making the working copy',
+  'setup.snapshot': 'checking the snapshot',
+  'setup.copy': 'copying the source',
+};
+
+// How a setup process that reported no failed step and wrote no error line ended, so it was stopped or crashed from
+// outside without a word: the exit code (with its hexadecimal form when it is a large Windows status, such as
+// 0xC0000142) or the signal that ended it, the step that had started and not finished (`step`), else the last step
+// that finished (`finished`), else that no step was reported, and the last line it wrote (`output`).
+export function setupEndedMessage({ code = null, signal = null, step = '', finished = '', output = '' } = {}) {
+  const status = Number.isInteger(code) && Math.abs(code) > 0xffff ? ` (0x${hex(code)})` : '',
+    how = signal
+      ? `was stopped by the signal ${signal}`
+      : Number.isInteger(code)
+        ? `ended with exit code ${code}${status}`
+        : 'ended without an exit code',
+    when = step
+      ? `while ${stepWords[step] || step}`
+      : finished
+        ? `after ${stepWords[finished] || finished}`
+        : 'before reporting any step',
+    last = String(output || '').trim();
+  return `Setting up the attempt failed: the setup process ${how} ${when}.${last ? ` Its last output line was: ${last}` : ''}`;
+}
+
+// A 32-bit exit status in hexadecimal, as Windows names its statuses (3221225794 is C0000142).
+const hex = code => (code >>> 0).toString(16).toUpperCase().padStart(8, '0');
+
 // Runs the setup process as a step of the attempt, records each step it reports as a setup phase, then calls `next`.
-// A failed step stops the attempt with the step's error.
+// A failed step stops the attempt with the step's error, else the last line the process wrote to stderr, else how the
+// process ended (setupEndedMessage).
 export function runSourceSetup(runtime, entry, request, next) {
   const phases = new Map();
   let pending = '',
     failure = '',
-    errors = '';
+    errors = '',
+    // The step that has started and not finished, the last step that finished and the last line on stdout.
+    open = '',
+    finished = '',
+    output = '';
   runtime.runNative(entry, process.execPath, [self], JSON.stringify(request), () => null, {
     cwd: entry.job,
     resultOnFailure: true,
-    onComplete: (result, code) => {
+    onComplete: (result, code, signal) => {
       if (code !== 0)
-        throw new Error(failure || lastLine(errors) || 'Setting up the attempt failed. See the attempt log.');
+        throw new Error(
+          failure ||
+            lastLine(errors) ||
+            setupEndedMessage({ code, signal, step: open, finished, output: pending.trim() || output }),
+        );
       next();
     },
   });
@@ -37,6 +76,7 @@ export function runSourceSetup(runtime, entry, request, next) {
     const lines = (pending + chunk).split('\n');
     pending = lines.pop();
     for (const line of lines) {
+      if (line.trim()) output = line.trim();
       let progress;
       try {
         progress = JSON.parse(line);
@@ -44,13 +84,17 @@ export function runSourceSetup(runtime, entry, request, next) {
         continue;
       }
       if (!steps.includes(progress?.phase)) continue;
-      if (progress.boundary === 'start') phases.set(progress.phase, runtime.startPhase(entry, progress.phase));
-      else if (phases.has(progress.phase) && ['succeeded', 'failed'].includes(progress.outcome)) {
+      if (progress.boundary === 'start') {
+        phases.set(progress.phase, runtime.startPhase(entry, progress.phase));
+        open = progress.phase;
+      } else if (phases.has(progress.phase) && ['succeeded', 'failed'].includes(progress.outcome)) {
         const phase = phases.get(progress.phase);
         // The phase takes the time the step measured, not the time its lines took to arrive.
         if (Number.isFinite(progress.durationMs)) phase.clock = performance.now() - Math.max(0, progress.durationMs);
         runtime.store.finishPhase(phase, progress.outcome, progress.error ? { error: progress.error } : {});
         if (progress.error) failure = String(progress.error);
+        if (open === progress.phase) open = '';
+        finished = progress.phase;
       }
     }
   });
@@ -83,10 +127,13 @@ export function prepareSource(request, report) {
     if (request.leftovers) removeWorktrees(request.leftovers);
     worktree = createSourceWorktree(request.repository, request.parent, request.name, request.commit, request.profile);
   });
-  // The base commit holds exactly the snapshot the story's scope approved.
+  // The base commit holds exactly the snapshot the story's scope approved. A file git checked out with other line
+  // endings than the measured folder holds it, the same committed file, takes the folder's bytes first
+  // (matchMeasuredFolder), so the working copy and its snapshot agree byte for byte whatever git's settings are.
   step('setup.snapshot', () => {
     holdWhile(request.hold);
     try {
+      matchMeasuredFolder(worktree, request.snapshot, request.commit);
       verifyCopy(request.snapshot, worktree);
     } catch {
       throw new Error(snapshotMismatch);

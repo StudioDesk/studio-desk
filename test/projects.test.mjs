@@ -1,17 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import http from 'node:http';
 import { Readable, Writable } from 'node:stream';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createStudio } from './model-free-studio.mjs';
+import { createStudio, directorCredentials } from './model-free-studio.mjs';
 import { sourceRepository } from './source-repository.mjs';
 import { waitForTask } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 import { worktreeName } from '../src/connectors/source-worktrees.mjs';
-import { sourcePlan, testTotals, validateCheckReport } from '../src/connectors/source-checks.mjs';
+import {
+  ensureSourceDirectories,
+  sourcePlan,
+  testTotals,
+  validateCheckReport,
+} from '../src/connectors/source-checks.mjs';
+import { studioDeskProfile } from '../src/connectors/source-profile.mjs';
 import { hash } from '../src/core/contracts.mjs';
 import { studioDevelopmentPack } from '../src/packs/studio-development/index.mjs';
 import { developmentOrganization } from '../src/organizations/studio-development/project.mjs';
@@ -21,9 +28,102 @@ import { codexAdapter } from '../src/adapters/codex.mjs';
 import { acceptedReference } from '../src/core/artifacts.mjs';
 import { newRun, setRunArchived, projectRuns } from '../src/core/graph.mjs';
 import { ideaInputLimits } from '../src/core/idea-inputs.mjs';
+import {
+  builtInSandboxRunArguments,
+  builtInSandboxRunner,
+  builtInSandboxSessionWaitMs,
+} from '../src/adapters/built-in-sandbox.mjs';
 
 const fixture = fileURLToPath(new URL('./fixture-source-check.mjs', import.meta.url));
 const cliFixture = fileURLToPath(new URL('./fixture-cli.mjs', import.meta.url));
+
+test('standalone checks carry their recorded route allowance through the adapter to the sandbox runner', async t => {
+  const c = await setup(t),
+    root = path.join(c.directory, 'small-source'),
+    runtime = c.app.runner,
+    selected = [],
+    native = runtime.runNative;
+  // Keep the five-second case independent of copying this whole repository or installed tools.
+  ensureSourceDirectories(root);
+  for (const file of new Set([...studioDeskProfile.files, ...studioDeskProfile.contextFiles])) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), file.endsWith('.json') ? '{}' : 'Fixture source\n');
+  }
+  fs.writeFileSync(path.join(root, 'test/quick.test.mjs'), "import test from 'node:test'; test('quick', () => {});\n");
+  git(root, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  git(root, ['config', 'user.name', 'Fixture director']);
+  git(root, ['config', 'user.email', 'fixture@example.invalid']);
+  git(root, ['config', 'commit.gpgsign', 'false']);
+  git(root, ['add', '-A']);
+  git(root, ['commit', '--quiet', '-m', 'Small checks fixture']);
+  runtime.sourceChangeRoot = root;
+  const { project } = await c.development();
+  runtime.sourceCheckCommand = undefined;
+  runtime.builtInSandbox = { status: () => ({ state: 'ready' }) };
+  t.mock.method(runtime, 'runNative', function (entry, executable, args, ...rest) {
+    if (args[0] === builtInSandboxRunner) {
+      selected.push({
+        command: { executable, args },
+        attempt: structuredClone(entry.attempt),
+        at: Date.now(),
+      });
+      // Stand in only at the process boundary, after the adapter selected the real wrapper.
+      return native.call(this, entry, process.execPath, [fixture, 'pass'], ...rest);
+    }
+    return native.call(this, entry, executable, args, ...rest);
+  });
+  for (const [limits, expected] of [
+    [{}, 120],
+    [{ maxSeconds: 5 }, 5],
+    [{ maxSeconds: 120 }, 120],
+    [{ maxSeconds: 600 }, 600],
+    [{ complexity: 2, maxSeconds: 5 }, 900],
+  ]) {
+    const created = await c.request('/api/tasks', {
+      projectId: project.id,
+      workerId: 'W-07',
+      kind: 'studio-development:checks',
+      title: 'Session wait budget',
+      brief: 'Measure a bounded model-free check.',
+      ...limits,
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const task = c.app.store.task(created.data.id);
+    assert.equal(task.maxSeconds, expected);
+    assert.equal((await c.request(`/api/tasks/${task.id}/start`, { projectId: project.id })).status, 202);
+    await c.wait(task.id);
+    const { command, attempt, at } = selected.at(-1),
+      parsed = builtInSandboxRunArguments(command.args.slice(1)),
+      effectiveMs = attempt.assignment.maxSeconds * 1000,
+      availableMs = parsed.deadlineMs === undefined ? effectiveMs : parsed.deadlineMs - at,
+      waitMs =
+        parsed.deadlineMs === undefined
+          ? builtInSandboxSessionWaitMs
+          : Math.min(builtInSandboxSessionWaitMs, availableMs / 2);
+    assert.equal(attempt.taskId, task.id);
+    assert.equal(attempt.assignment.maxSeconds, task.maxSeconds);
+    assert.ok(waitMs > 0);
+    assert.ok(waitMs <= effectiveMs / 2, `${waitMs} ms wait exceeds half the recorded ${effectiveMs} ms allowance`);
+    assert.ok(waitMs <= builtInSandboxSessionWaitMs);
+    assert.ok(availableMs <= effectiveMs, 'installation and startup do not renew the allowance');
+    const { runBuiltInSandbox } = await import('../src/adapters/built-in-sandbox-run.mjs');
+    let consumed;
+    const code = await runBuiltInSandbox(command.args.slice(1), {
+      platform: 'win32',
+      now: () => at,
+      prepareWindows: () => {},
+      runSync: () => {},
+      log: () => {},
+      takeSession: async (folder, options) => {
+        consumed = options.waitBoundMs;
+        throw new Error('Model-free acquisition boundary');
+      },
+      run: () => assert.fail('The installed sandbox must never start.'),
+    });
+    assert.equal(code, 1);
+    assert.equal(consumed, waitMs, 'the real runner passes this bound to session acquisition');
+  }
+});
 
 test('new Studio desk defaults add product-owner breakdown while configured projects retain their catalog and history', async t => {
   const c = await setup(t, 'pass', true),
@@ -181,8 +281,8 @@ async function attemptLogFixture(t, count = 1007, transport = 'store') {
               url: parsed.pathname + parsed.search,
               headers: {
                 host: '127.0.0.1:0',
-                // Requests reach the server directly, as the director's own tool would send them (C-01).
-                'x-studio-key': c.app.directorKey,
+                // Requests reach the server directly, as the dashboard or the director's own tool would send them (C-01).
+                ...directorCredentials(c.app.directorKey, headers),
                 ...Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value])),
               },
             });
@@ -925,10 +1025,11 @@ test('source checks measure the current commit in their own worktree while a sto
   const report = JSON.parse(fs.readFileSync(path.join(attempt.outputFolder, 'check-report.json'), 'utf8'));
   assert.equal(report.source.commit, head);
   assert.equal(report.source.root, root);
-  assert.deepEqual(
-    fs.readFileSync(path.join(path.dirname(attempt.outputFolder), 'source', 'src/core/projects.mjs')),
-    committed,
-  );
+  // The checks copied the commit into their own short folder under wt, not the job folder, and
+  // removed it when they ended; the measured hash above still pins the committed bytes.
+  assert.equal(fs.existsSync(path.join(path.dirname(attempt.outputFolder), 'source')), false);
+  assert.ok(attempt.sourceCheckFolder?.path, 'the checks record their copy folder');
+  assert.equal(fs.existsSync(attempt.sourceCheckFolder.path), false);
   // The worktree was removed before the tests ran, and the held locks were never touched.
   assert.equal(fs.existsSync(path.join(store.directory, 'wt', 'c-' + worktreeName(attempt.id))), false);
   assert.equal(git(root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 1);
@@ -941,7 +1042,7 @@ test('source checks measure the current commit in their own worktree while a sto
   // candidate's worktree (the sandboxed suite) this folder sits within that repository instead.
   const plain = path.join(c.directory, 'plain-source');
   fs.cpSync(root, plain, { recursive: true, filter: source => path.basename(source) !== '.git' });
-  c.app.runner.sourceChangeRoot = fs.realpathSync(plain);
+  c.app.runner.sourceChangeRoot = realPath(plain);
   const again = (
     await c.request('/api/tasks', {
       projectId: project.id,
@@ -1177,7 +1278,8 @@ test('project-scoped archive actions are protected, reversible and leave settled
       body: JSON.stringify({ projectId: project.id }),
     });
     assert.equal(foreignOrigin.status, 403);
-    assert.equal((await fetch(c.origin + url + '/' + action)).status, 403);
+    // A command asked for with GET is no read route.
+    assert.equal((await fetch(c.origin + url + '/' + action)).status, 404);
     assert.equal((await c.request(url + '/' + action, { projectId: 'project-legacy' })).status, 400);
     const crossProject = await c.request(`/api/projects/project-legacy/runs/${run.runId}/${action}`);
     assert.equal(crossProject.status, 400);
@@ -1336,7 +1438,7 @@ async function fileIntakeProject(t) {
       Object.assign(req, {
         url,
         method,
-        headers: { host: '127.0.0.1:0', 'x-studio-key': c.app.directorKey, ...headers },
+        headers: { host: '127.0.0.1:0', ...directorCredentials(c.app.directorKey, headers, method), ...headers },
       });
       c.app.server.emit('request', req, res);
     });
@@ -1687,7 +1789,7 @@ function measuredIntakeSource(c, t) {
   git(root, ['config', 'commit.gpgsign', 'false']);
   git(root, ['add', '-A']);
   git(root, ['commit', '--quiet', '-m', 'Fixture source']);
-  c.app.runner.sourceChangeRoot = fs.realpathSync(root);
+  c.app.runner.sourceChangeRoot = realPath(root);
   c.app.runner.sourceCheckCommand = undefined;
   // A measured suite runs without a sandbox, as an idea's checks did before 1.0.1: the suite never runs the real
   // built-in sandbox, which the test studios only report as set up.
@@ -1756,7 +1858,7 @@ test('idea intake queues only current-project planning, gates on fresh accepted 
   assert.equal(taskIds.length, 2);
   assert.equal(new Set(taskIds).size, 2);
   assert.match(runId, /^run-/);
-  assert.deepEqual(budget, { steps: 2, totalAttemptSeconds: 1620 });
+  assert.deepEqual(budget, { steps: 2, totalAttemptSeconds: 1800 });
   assert.equal(
     budget.totalAttemptSeconds,
     tasks.reduce((sum, task) => sum + task.maxSeconds * task.maxAttempts, 0),
@@ -2043,7 +2145,7 @@ test('idea intake rejects untrusted fields, invalid ideas, protected requests an
   assert.equal(forgedHostStatus, 403);
   assert.deepEqual(intakeRecords(store), before);
   assert.equal(c.app.runner.active.size, 0);
-  assert.equal((await fetch(c.origin + intakeUrl, { headers: { 'X-Studio-Token': c.token } })).status, 403);
+  assert.equal((await fetch(c.origin + intakeUrl, { headers: { 'X-Studio-Token': c.token } })).status, 404);
   assert.equal((await c.request(intakeUrl, valid, 'PATCH')).status, 404);
   assert.deepEqual(intakeRecords(store), before);
 });
@@ -2268,7 +2370,7 @@ test('a project with its own repository checks it with its own profile and sourc
     /already works on this repository/,
   );
   const source = projectSource(store, project.id, runner);
-  assert.equal(source.root, fs.realpathSync.native(root));
+  assert.equal(source.root, realPath(root));
   assert.deepEqual(source.resources, [`source:${project.id}:integration`, `source:${project.id}:tests`]);
   // A story builds in its own worktree and holds no source resources (October 29: two build at once); its integration
   // holds this repository's, and Studio desk's stay its own.
@@ -2378,7 +2480,7 @@ test('adding a project for a git repository checks the repository and its tests 
   assert.equal(created.data.tests.tests, 1);
   assert.equal(created.data.tests.pass, 1);
   const project = store.project(created.data.id);
-  assert.equal(project.source.root, fs.realpathSync.native(root));
+  assert.equal(project.source.root, realPath(root));
   assert.deepEqual(project.source.profile, {
     ...inspected.data.profile,
     tests: { directory: 'tests', suffix: '.test.mjs' },
@@ -2418,6 +2520,54 @@ test('adding a project for a git repository checks the repository and its tests 
   );
 });
 
+// Studio desk's own profile name is refused for another project's repository before its tests run or anything is
+// recorded.
+test("adding a project whose repository profile uses Studio desk's own name is refused before its tests run", async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    root = path.join(c.directory, 'desk-like'),
+    marker = path.join(c.directory, 'repository-tests-ran.txt'),
+    write = (file, text) => {
+      fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+      fs.writeFileSync(path.join(root, file), text);
+    };
+  write('README.md', '# A repository\n');
+  write('lib/index.mjs', 'export {};\n');
+  // Its one test leaves a file behind if it ever runs.
+  write(
+    'tests/ran.test.mjs',
+    "import test from 'node:test';\nimport fs from 'node:fs';\n" +
+      `test('leaves a mark', () => fs.writeFileSync(${JSON.stringify(marker)}, 'ran'));\n`,
+  );
+  git(root, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  git(root, ['config', 'core.autocrlf', 'false']);
+  git(root, ['config', 'user.name', 'Fixture director']);
+  git(root, ['config', 'user.email', 'fixture@example.invalid']);
+  git(root, ['config', 'commit.gpgsign', 'false']);
+  git(root, ['add', '-A']);
+  git(root, ['commit', '--quiet', '-m', 'A repository']);
+  const inspected = await c.request('/api/projects/inspect-repository', { root });
+  assert.equal(inspected.status, 200, JSON.stringify(inspected.data));
+  const profile = { ...inspected.data.profile, id: 'studio-desk' },
+    before = store.projects().length,
+    events = store.events().length,
+    refused = await c.request('/api/projects', { name: 'Desk like', repository: { root, profile } });
+  assert.equal(refused.status, 400);
+  assert.equal(
+    refused.data.error,
+    "studio-desk is Studio desk's own profile name; give this repository's profile another name.",
+  );
+  assert.equal(store.projects().length, before);
+  assert.ok(!store.projects().some(project => project.name === 'Desk like'));
+  assert.ok(
+    !store
+      .events()
+      .slice(events)
+      .some(event => event.kind === 'project_created'),
+  );
+  assert.equal(fs.existsSync(marker), false);
+});
+
 // The dashboard's folder browser reads folder names only through the protected API: a POST with the request
 // token, so a page without the dashboard's token cannot read them.
 test('the folder list answers the dashboard with its request token and nothing else', async t => {
@@ -2427,7 +2577,7 @@ test('the folder list answers the dashboard with its request token and nothing e
   fs.mkdirSync(path.join(folder, 'Notes'));
   fs.mkdirSync(path.join(folder, '.cache'));
   fs.writeFileSync(path.join(folder, 'readme.txt'), 'A file is never listed.\n');
-  const real = fs.realpathSync.native(folder),
+  const real = realPath(folder),
     listed = await c.request('/api/folders', { path: folder });
   assert.equal(listed.status, 200, JSON.stringify(listed.data));
   assert.equal(listed.data.path, real);
@@ -2469,6 +2619,6 @@ test('the folder list answers the dashboard with its request token and nothing e
   const read = await fetch(c.origin + '/api/folders?path=' + encodeURIComponent(folder), {
     headers: { 'X-Studio-Token': c.token },
   });
-  assert.equal(read.status, 403);
+  assert.equal(read.status, 404);
   assert.equal((await read.json()).folders, undefined);
 });

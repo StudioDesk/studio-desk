@@ -76,6 +76,7 @@ export const gameProductionPack = {
     {
       ...common,
       kind: 'general',
+      step: { kind: 'work' },
       version: 'general-v1',
       label: 'General staged files',
       cardLabel: 'Files',
@@ -87,6 +88,7 @@ export const gameProductionPack = {
     {
       ...common,
       kind: 'layout',
+      step: { kind: 'work' },
       version: 'layout-v1',
       label: 'Three-room layout JSON',
       cardLabel: 'Layout',
@@ -98,6 +100,7 @@ export const gameProductionPack = {
     {
       ...common,
       kind: 'review',
+      step: { kind: 'review' },
       version: 'review-v1',
       label: 'Review report JSON',
       cardLabel: 'Review',
@@ -110,6 +113,7 @@ export const gameProductionPack = {
     {
       ...common,
       kind: 'plan',
+      step: { kind: 'plan', acceptance: { acceptOver: false } },
       version: 'plan-v1',
       label: 'Bounded plan proposal',
       cardLabel: 'Plan',
@@ -144,6 +148,7 @@ export const gameProductionPack = {
     },
     {
       kind: 'unreal-integration',
+      step: { kind: 'operation' },
       version: 'unreal-integration-fixture-v1',
       label: 'Controller-owned Unreal fixture',
       cardLabel: 'Integration fixture',

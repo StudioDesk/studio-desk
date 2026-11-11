@@ -7,8 +7,82 @@
 export const MAX_APPROVED_COMMANDS = 50;
 const WORD = /^[A-Za-z0-9._/:=@+-]+$/;
 
+// Shells and programs that run scripts, each with the options that run what follows them on the command line
+// ('' when the program runs the command that follows it directly). Approved alone, or with only such an option,
+// one lets an agent run anything, including reading the director's key. The dashboard keeps the same list
+// (dashboard/src/permissions.tsx).
+const node = ['-e', '--eval', '-p', '--print'],
+  python = ['-c'],
+  shell = ['-c'],
+  powershell = ['-c', '-command', '-e', '-ec', '-enc', '-encodedcommand'];
+const SCRIPT_RUNNERS = {
+  node,
+  nodejs: node,
+  npm: ['exec', 'x'],
+  npx: [''],
+  pnpm: ['exec', 'dlx'],
+  pnpx: [''],
+  yarn: ['exec', 'dlx'],
+  bun: [...node, 'x', 'exec'],
+  bunx: [''],
+  deno: ['eval'],
+  python,
+  python3: python,
+  py: python,
+  pip: [],
+  perl: ['-e'],
+  ruby: ['-e'],
+  php: ['-r'],
+  powershell,
+  pwsh: powershell,
+  cmd: ['/c', '/k'],
+  bash: shell,
+  sh: shell,
+  zsh: shell,
+  dash: shell,
+  fish: shell,
+  ksh: shell,
+  wsl: ['', '-e', '--exec'],
+  env: [''],
+  cscript: [],
+  wscript: [],
+  mshta: [],
+};
+
+// A program's name without its folder, case or Windows ending: C:/Program Files/nodejs/node.exe is node.
+const programName = path =>
+  path
+    .slice(path.lastIndexOf('/') + 1)
+    .toLowerCase()
+    .replace(/\.(exe|cmd|bat|ps1)$/, '')
+    .replace(/^(python|pip)\d+(\.\d+)*$/, '$1');
+
+// Whether a rule's words name a shell or script runner and nothing else that bounds it. A folder path may hold
+// spaces, so the program may end in a later word when the first holds a /.
+function unbounded(words) {
+  for (let end = 1; end <= (words[0].includes('/') ? words.length : 1); end++) {
+    const name = programName(words.slice(0, end).join(' '));
+    if (!Object.hasOwn(SCRIPT_RUNNERS, name)) continue;
+    const runs = SCRIPT_RUNNERS[name];
+    let rest = words.slice(end).filter(word => word !== '--');
+    // env runs what follows its options and settings.
+    if (name === 'env') {
+      const command = rest.findIndex(word => !word.startsWith('-') && !word.includes('='));
+      rest = command < 0 ? [] : rest.slice(command);
+    }
+    if (!rest.length) return true;
+    if (runs.includes('') && unbounded(rest)) return true;
+    return runs.includes(rest[0].toLowerCase()) && (rest.length === 1 || unbounded(rest.slice(1)));
+  }
+  return false;
+}
+
+const refusal = text =>
+  `${text} cannot be approved on its own: approving a shell or a program that runs scripts lets an agent run anything with it, including reading the director's key. Approve a narrower command, such as node --test.`;
+
 // An approved command is a prefix: it allows the command alone or followed by more arguments. Words are
-// plain, so no rule can carry shell operators, quotes, variables or wildcards.
+// plain, so no rule can carry shell operators, quotes, variables or wildcards, and a shell or script runner
+// needs more words that bound what it runs.
 export function commandRule(value) {
   const words = typeof value === 'string' ? value.trim().split(/\s+/) : [],
     text = words.join(' ');
@@ -16,12 +90,23 @@ export function commandRule(value) {
     throw new Error(
       `${JSON.stringify(String(value ?? '').slice(0, 80))} cannot be an approved command. Use 1 to 200 characters of letters, digits, spaces and . _ / : = @ + -, not starting with -.`,
     );
+  if (unbounded(words)) throw new Error(refusal(text));
   return text;
 }
 
+const refused = rule => {
+  try {
+    commandRule(rule);
+    return false;
+  } catch {
+    return true;
+  }
+};
+
+// A stored rule this check now refuses, approved before it, never reaches an attempt.
 export function agentPermissions(org) {
   const value = org?.agentPermissions || {};
-  return { auto: value.auto === true, commands: [...(value.commands || [])] };
+  return { auto: value.auto === true, commands: (value.commands || []).filter(rule => !refused(rule)) };
 }
 
 // A director edit of the Settings: either field may be left out.
@@ -40,7 +125,11 @@ export function applyAgentPermissions(org, value) {
   }
   if (value.commands !== undefined) {
     if (!Array.isArray(value.commands)) throw new Error('Approved commands are a list.');
-    next.commands = [...new Set(value.commands.map(commandRule))];
+    // A save that sends back a stored rule this check now refuses drops it instead of failing.
+    const stored = org?.agentPermissions?.commands || [];
+    next.commands = [
+      ...new Set(value.commands.filter(rule => !(stored.includes(rule) && refused(rule))).map(commandRule)),
+    ];
   }
   if (next.commands.length > MAX_APPROVED_COMMANDS)
     throw new Error(`Approve at most ${MAX_APPROVED_COMMANDS} commands.`);
@@ -50,7 +139,8 @@ export function applyAgentPermissions(org, value) {
 
 export function approveCommands(org, commands) {
   if (!Array.isArray(commands) || !commands.length) throw new Error('Name at least one command to approve.');
-  return applyAgentPermissions(org, { commands: [...agentPermissions(org).commands, ...commands] });
+  // Each new rule is checked on its own, so one stored before this check was refused is never approved again.
+  return applyAgentPermissions(org, { commands: [...agentPermissions(org).commands, ...commands.map(commandRule)] });
 }
 
 // A task's own choice: true or false overrides the Settings, null follows them.
@@ -86,7 +176,7 @@ export function permissionsPrompt(permissions) {
   // A code-editing employee's test command (connectors/employee-tests.mjs).
   const tests = (permissions.tools || []).map(
     tool =>
-      ` To run the project's tests on your edits, run \`${tool}\` for the whole suite, or add test file paths as they are in the source (for example test/a.test.mjs) to run only those, which is faster. The controller copies the source with your edits under changes/ applied and runs the tests where candidate tests run; run it in the foreground with a timeout of 600000 ms, and hand off your result only after it finishes. Your candidate is tested again after you finish.`,
+      ` To run the project's tests on your edits, run \`${tool}\` for the whole suite, or add test file paths as they are in the source (for example test/a.test.mjs) to run only those. The whole suite waits for this computer's one test turn, which other full test suites share, and answers without running if it waits more than five minutes; named test files start at once and are faster. The controller copies the source with your edits under changes/ applied and runs the tests where candidate tests run; run it in the foreground with a timeout of 600000 ms, and hand off your result only after it finishes. Your candidate is tested again after you finish.`,
   );
   return `${mode}${tests.join('')} If your work needs a command that is refused, do not try to get around it: return outcome blocked and say in your summary which command you need and why. The director sees the commands Claude Code refused and can approve them, and the work then starts again from what you leave here.`;
 }

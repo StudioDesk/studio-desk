@@ -6,6 +6,11 @@ import type {
   ActivityPage,
   AttemptSummary,
   CommandRecords,
+  DirectorCall,
+  DirectorCalls,
+  DirectorCarryCall,
+  DirectorReleaseCall,
+  DirectorTaskCall,
   FinishedPage,
   FirstRunTemplates,
   IdeaName,
@@ -26,6 +31,7 @@ import type {
   StoryActivity,
   StoryPagesView,
   Task,
+  TaskAction,
   TestRecordSummary,
   ToldLayer,
   ToldView,
@@ -33,7 +39,24 @@ import type {
   VisualView,
 } from './api';
 import type { BringBackTargets } from './bring-back';
-import { settled } from './studio-runs';
+import {
+  bringBackable,
+  isCarry,
+  isCleanup,
+  isHold,
+  isRelease,
+  isResume,
+  needsYouItems,
+  runStories,
+  settled,
+  taskActions,
+  type CarryItem,
+  type HomeItem,
+  type NeedsItem,
+  type ReleaseItem,
+  type RunStory,
+  type StudioState,
+} from './studio-runs';
 
 export class FakeSource {
   static all: FakeSource[] = [];
@@ -222,7 +245,12 @@ export interface Controller {
   snapshots: Snapshot[];
   // The release an idea's words name, by the words; words not listed name none.
   requests: { url: string; method: string; body?: unknown }[];
-  // Answers a command; the default accepts it, and one that throws refuses it with the error's message, with the
+  // Calls the test supplies beyond those worked out from the records, listed last as the controller lists a stopped
+  // release or carry, each in the list of the project it names (this one or another the test names); none supplies
+  // none.
+  servedCalls?: (DirectorReleaseCall | DirectorCarryCall)[];
+  // Answers a command; the default accepts it (moving a release released again or a carry carried again or not
+  // needed, as the controller does), and one that throws refuses it with the error's message, with the
   // error's `status` (400 without one) and its `fields` beside the message, as src/server.mjs answers a refusal. A
   // promise holds the answer until the test resolves it, or refuses the command when the test rejects it.
   command(url: string, method: string, body: unknown): unknown;
@@ -241,6 +269,258 @@ const respond = (body: unknown, ok = true, status = ok ? 200 : 400) => ({
   text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
   arrayBuffer: async () => new TextEncoder().encode(typeof body === 'string' ? body : JSON.stringify(body)).buffer,
 });
+
+// The records the pages hold for the stand-in's project: its shell and its live records.
+const studioOf = (controller: Controller): StudioState => ({
+  ...controller.shell,
+  tasks: controller.tasks,
+  attempts: controller.attempts,
+  runs: controller.runs,
+});
+
+// The actions a task's read answers, as the controller lists them (src/core/task-actions.mjs taskActionsFor): the
+// shared rules over the project's records, with the task's bring-back read for a source story that landed only.
+export function actionsOf(controller: Controller, task: Task) {
+  const state = studioOf(controller);
+  return taskActions(
+    task,
+    state,
+    bringBackable(task, state) ? { bringBack: controller.bringBack[task.id] ?? { lines: [] } } : {},
+  );
+}
+
+// The stops only the director moves on, as the controller words them (src/core/director-calls.mjs): a release or a
+// carry that was turned down or stopped part-way. The stand-in holds no test turn, so none waits for one.
+const stoppedStates = ['rejected', 'needs-reconciliation'],
+  stoppedWith = (text: string, error?: string) => (error ? `${text}: ${error}` : `${text}.`);
+
+// The release call's one action, Release again, as the controller serves it (director-calls.mjs releaseAgainAction).
+export const releaseAgainAction = (projectId: string, milestoneId: string): TaskAction => ({
+  key: 'release-again',
+  label: 'Release again',
+  emphasis: 'primary',
+  closing: false,
+  method: 'POST',
+  path: `/api/projects/${encodeURIComponent(projectId)}/milestones/${encodeURIComponent(milestoneId)}/release/again`,
+  fields: [{ name: 'projectId', required: true, kind: 'id', value: projectId }],
+});
+
+// Each milestone's stopped release the Releases page's records hold, in milestone order (director-calls.mjs
+// releaseCall).
+function releaseCalls(controller: Controller, projectId: string): DirectorReleaseCall[] {
+  return (controller.releases?.milestones ?? []).flatMap((milestone): DirectorReleaseCall[] => {
+    const release = milestone.release;
+    if (!release || !stoppedStates.includes(release.state)) return [];
+    const partWay = release.state === 'needs-reconciliation';
+    return [
+      {
+        type: 'release',
+        projectId,
+        milestoneId: milestone.id,
+        version: milestone.version,
+        state: release.state,
+        taskIds: release.notesTaskId ? [release.notesTaskId] : [],
+        runId: null,
+        kind: 'release-stopped',
+        reason: stoppedWith(
+          `The release of ${milestone.version} ${partWay ? 'stopped part-way' : 'stopped'}`,
+          release.error,
+        ),
+        next: partWay
+          ? "Restore or commit any of the release's files left changed in the project's folder, then release it again; it is tagged once."
+          : 'Release it again; it is tagged once.',
+        action: 'Release again',
+        details: release.error ? [release.error] : [],
+        actions: [releaseAgainAction(projectId, milestone.id)],
+      },
+    ];
+  });
+}
+
+// The attempt a source story records as its review.
+const reviewOf = (task?: Task) => (task?.sourceStage?.review as { attemptId?: string } | undefined)?.attemptId;
+
+// Each story whose next carry on its accepted review was turned down or stopped part-way, in record order, unless
+// the story is already listed, and only while the story's own actions offer to move it on (director-calls.mjs
+// stoppedCarry and carryCall).
+function carryCalls(controller: Controller, projectId: string, listed: Set<string>): DirectorCarryCall[] {
+  return controller.attempts.flatMap((review): DirectorCarryCall[] => {
+    const story = controller.tasks.find(task => task.id === review.taskId);
+    if (!story || listed.has(story.id) || reviewOf(story) !== review.id) return [];
+    const carry = review.sourceCarries?.find(item => !['carried', 'skipped'].includes(item.state));
+    if (!carry || !stoppedStates.includes(carry.state)) return [];
+    const actions = actionsOf(controller, story).filter(action => ['carry', 'carry-skip'].includes(action.key));
+    if (!actions.length) return [];
+    listed.add(story.id);
+    const back = !!carry.back,
+      partWay = carry.state === 'needs-reconciliation',
+      moving = back ? `Bringing this fix back to ${carry.line}` : `Carrying this fix to ${carry.line}`,
+      again = back ? 'bring it back again' : 'carry it again';
+    return [
+      {
+        type: 'carry',
+        projectId,
+        taskId: story.id,
+        taskIds: [story.id],
+        title: story.title,
+        line: carry.line,
+        back,
+        state: carry.state,
+        runId: null,
+        kind: 'carry-stopped',
+        reason: stoppedWith(`${moving} ${partWay ? 'stopped part-way' : 'was turned down'}`, carry.error),
+        next: partWay
+          ? `Restore or commit any of its files left changed in the project's folder, then ${again}.`
+          : `${again[0]!.toUpperCase()}${again.slice(1)}, or say it is not needed there.`,
+        action: actions[0]!.label,
+        details: carry.error ? [carry.error] : [],
+        actions,
+      },
+    ];
+  });
+}
+
+// The stand-in's answer to the release-again and carry routes, as the controller moves the records: a release is
+// ready again, a carry waits again with the director's approval, and a carry not needed is skipped with its reason. A
+// call the test supplied for the same release or story leaves the list with it. Other commands are accepted as they
+// are.
+function standInCommand(controller: Controller, url: string, body: unknown) {
+  const path = url.split('?')[0]!,
+    again = path.match(/^\/api\/projects\/[^/]+\/milestones\/([^/]+)\/release\/again$/)?.[1];
+  if (again) {
+    const milestoneId = decodeURIComponent(again);
+    if (controller.releases?.milestones)
+      controller.releases = {
+        ...controller.releases,
+        milestones: controller.releases.milestones.map(milestone => {
+          if (milestone.id !== milestoneId || !milestone.release) return milestone;
+          const release = { ...milestone.release, state: 'ready' };
+          delete release.error;
+          return { ...milestone, release };
+        }),
+      };
+    controller.servedCalls = controller.servedCalls?.filter(
+      call => !(call.type === 'release' && call.milestoneId === milestoneId),
+    );
+    return { state: 'ready' };
+  }
+  const [, task, step] = path.match(/^\/api\/tasks\/([^/]+)\/(carry|carry-skip)$/) ?? [];
+  if (task) {
+    const taskId = decodeURIComponent(task),
+      { line, reason } = (body ?? {}) as { line?: string; reason?: string },
+      reviewId = reviewOf(controller.tasks.find(item => item.id === taskId)),
+      state = step === 'carry' ? 'waiting' : 'skipped';
+    controller.attempts = controller.attempts.map(attempt =>
+      attempt.id === reviewId && attempt.taskId === taskId && attempt.sourceCarries
+        ? {
+            ...attempt,
+            sourceCarries: attempt.sourceCarries.map(carry => {
+              if (carry.line !== line) return carry;
+              const moved = step === 'carry' ? { ...carry, state, approved: true } : { ...carry, state, reason };
+              delete moved.error;
+              return moved;
+            }),
+          }
+        : attempt,
+    );
+    controller.servedCalls = controller.servedCalls?.filter(call => !(call.type === 'carry' && call.taskId === taskId));
+    return { state };
+  }
+  return {};
+}
+
+// The project's list of calls, as the controller answers it (src/core/director-calls.mjs directorCalls): the shared
+// needsYouItems kept to the director's, each task's call with the actions its task read answers, then each stopped
+// release the Releases page's records hold and each stopped carry the records hold, then the calls the test supplied
+// (servedCalls).
+export function callsOf(controller: Controller, projectId: string): DirectorCalls {
+  const state = studioOf(controller),
+    actions = (taskId: string) => {
+      const task = controller.tasks.find(item => item.id === taskId);
+      return task ? actionsOf(controller, task) : [];
+    },
+    taskCall = (item: NeedsItem & { run?: RunStory }): DirectorTaskCall => ({
+      type: 'task',
+      taskId: item.taskId,
+      runId: item.run?.id ?? null,
+      kind: item.kind,
+      reason: item.reason,
+      next: item.next,
+      action: item.action ?? null,
+      details: item.details || [],
+      attemptId: item.attemptId ?? null,
+      canClose: !!item.canClose,
+      actions: actions(item.taskId),
+    }),
+    items = needsYouItems(state, runStories(state))
+      // The shared rules list no stopped release or carry: those are the controller's own, listed after them.
+      .filter(
+        (item): item is Exclude<HomeItem, ReleaseItem | CarryItem> =>
+          !!item.requiresDirector && !isRelease(item) && !isCarry(item),
+      )
+      .map((item): DirectorCall => {
+        if (isHold(item))
+          return {
+            type: 'hold',
+            provider: item.provider,
+            label: item.label,
+            taskIds: item.taskIds || [],
+            runId: null,
+            kind: item.kind,
+            reason: item.reason,
+            next: item.next,
+            action: item.action ?? null,
+            details: [],
+            actions: [],
+          };
+        if (isResume(item))
+          return {
+            type: 'resume',
+            projectId,
+            taskIds: item.taskIds || [],
+            runId: null,
+            kind: item.kind,
+            reason: item.reason,
+            next: item.next,
+            action: item.action ?? null,
+            details: [],
+            // The project's resume step, as the controller offers it (src/core/director-calls.mjs resumeAction).
+            actions: [
+              {
+                key: 'resume',
+                label: 'Resume this project',
+                emphasis: 'primary',
+                closing: false,
+                method: 'POST',
+                path: '/api/pipeline',
+                fields: [
+                  { name: 'projectId', required: true, kind: 'id', value: projectId },
+                  { name: 'action', required: true, kind: 'text', value: 'resume' },
+                ],
+              },
+            ],
+          };
+        if (isCleanup(item))
+          return {
+            type: 'cleanup',
+            runId: item.run.id,
+            taskIds: item.taskIds,
+            members: item.members.map(member => taskCall({ ...member, run: item.run })),
+          };
+        return taskCall(item);
+      });
+  const listed = new Set(
+    items.flatMap(item =>
+      item.type === 'task' ? [item.taskId] : item.type === 'cleanup' ? item.members.map(member => member.taskId) : [],
+    ),
+  );
+  items.push(
+    ...releaseCalls(controller, projectId),
+    ...carryCalls(controller, projectId, listed),
+    ...(controller.servedCalls ?? []).filter(call => call.projectId === projectId),
+  );
+  return { projectId, items, count: items.length, version: FakeSource.hello?.version ?? 1 };
+}
 
 // Installs the stand-in as fetch. Every route answers from the controller's current records, so a test changes
 // a record and then emits the change that names it.
@@ -296,7 +576,7 @@ export function fakeController(projectId = 'project-x'): Controller {
     libraryTexts: {},
     snapshots: [],
     requests: [],
-    command: () => ({}),
+    command: (url, _method, body) => standInCommand(controller, url, body),
     records: taskIds => {
       const changes = taskIds.map(id => ({ seq: ++version, type: 'task', id, projectId }));
       return {
@@ -327,17 +607,37 @@ export function fakeController(projectId = 'project-x'): Controller {
       }
       const path = url.split('?')[0]!;
       if (path === '/api/projects') return respond({ projects: controller.shell.projects });
+      // What needs the director now, as the controller lists it (src/core/director-calls.mjs).
+      if (path === `/api/projects/${projectId}/calls`) return respond(callsOf(controller, projectId));
       if (path === '/api/templates')
         return controller.templates
           ? respond(controller.templates)
           : respond({ error: 'Unknown controller route.' }, false);
-      // Another project the test names reads its shell, the live set the test gives it, and no other records.
+      // Another project the test names reads its shell, the live set the test gives it, its list of calls worked out
+      // over those, and no other records.
       const [, other, page] = path.match(/^\/api\/projects\/([^/]+)\/([a-z]+)$/) ?? [],
-        otherShell = other && other !== projectId ? controller.shells[decodeURIComponent(other)] : undefined;
+        otherId = other ? decodeURIComponent(other) : undefined,
+        otherShell = otherId && otherId !== projectId ? controller.shells[otherId] : undefined;
       if (otherShell && page) {
+        const live = controller.lives[otherId!] ?? { tasks: [], attempts: [], runs: [] };
+        if (page === 'calls')
+          return respond(
+            callsOf(
+              {
+                ...controller,
+                shell: otherShell,
+                tasks: live.tasks,
+                attempts: live.attempts,
+                runs: live.runs,
+                // The Releases page's records are the test's own project's.
+                releases: undefined,
+              },
+              otherId!,
+            ),
+          );
         const records: Record<string, unknown> = {
           shell: otherShell,
-          live: controller.lives[decodeURIComponent(other!)] ?? { tasks: [], attempts: [], runs: [] },
+          live,
           runs: { runs: [], next: null },
           settled: { tasks: [], attempts: [], next: null, counts: { accepted: 0, closed: 0 } },
           people: { tasks: 0, accepted: { total: 0, workers: {}, teams: {} }, goals: {} },
@@ -441,7 +741,11 @@ export function fakeController(projectId = 'project-x'): Controller {
       if (task) {
         const record = controller.tasks.find(item => item.id === decodeURIComponent(task));
         return record
-          ? respond({ task: record, attempts: controller.attempts.filter(attempt => attempt.taskId === record.id) })
+          ? respond({
+              task: record,
+              attempts: controller.attempts.filter(attempt => attempt.taskId === record.id),
+              actions: actionsOf(controller, record),
+            })
           : respond({ error: 'Task not found.' }, false);
       }
       const artifact = path.match(/^\/api\/attempts\/([^/]+)\/artifact$/)?.[1];
@@ -503,3 +807,366 @@ export function fakeController(projectId = 'project-x'): Controller {
   );
   return controller;
 }
+
+// The story page's decision states as dashboard/src/task-decisions.test.tsx lays them out, shared so another test can
+// open the page in each (task-actions.test.ts). Each puts its attempts, and any other record it needs, on the stand-in
+// and returns the story T-1 to open.
+const passedPin = {
+  taskId: 'T-1',
+  attemptId: 'attempt-edit',
+  workerId: 'W-1',
+  path: 'source-change.json',
+  hash: 'change-hash',
+  candidateHash: 'candidate-hash',
+};
+// A story ready to integrate: its edit accepted, and its independent review accepted and passing.
+function passedStory(controller: Controller) {
+  controller.attempts = [
+    {
+      id: 'attempt-edit',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change' },
+      result: { outcome: 'completed' },
+      sourceCandidate: { sourceHash: 'candidate-hash' },
+      artifacts: [{ path: 'source-change.json', hash: 'change-hash', kind: 'source-change' }],
+    },
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-2',
+      assignment: { kind: 'studio-development:change-review' },
+      result: { outcome: 'completed' },
+      candidateReviewVerdict: 'pass',
+      candidateReviewNotes: [],
+      candidateReview: { ...passedPin, passed: true },
+      inputReferences: [
+        { taskId: 'T-1', attemptId: 'attempt-edit', artifacts: [{ kind: 'source-change', hash: 'change-hash' }] },
+      ],
+      artifacts: [{ path: 'source-change-review.json', hash: 'review-hash', kind: 'source-change-review' }],
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'done',
+    acceptedAttemptId: 'attempt-review',
+    lastAttemptId: 'attempt-review',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'candidate-review',
+      current: 'waiting-for-integration',
+      candidate: passedPin,
+      review: {
+        taskId: 'T-1',
+        attemptId: 'attempt-review',
+        workerId: 'W-2',
+        path: 'source-change-review.json',
+        hash: 'review-hash',
+        verdict: 'pass',
+      },
+    },
+  });
+}
+// A story whose accepted review asked for changes, failed at that review; `passed` is whether the reviewed change
+// passed its own tests, as the review records it.
+function changesRequested(controller: Controller, passed: boolean) {
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      candidateReviewVerdict: 'needs-work',
+      candidateReview: { ...passedPin, passed },
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'done',
+    acceptedAttemptId: 'attempt-review',
+    lastAttemptId: 'attempt-review',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'candidate-review',
+      current: 'failed',
+      review: { attemptId: 'attempt-review', verdict: 'needs-work', hash: 'review-hash' },
+    },
+  });
+}
+// A story whose passing review's integration stopped, with what its verification recorded.
+function stoppedStory(
+  controller: Controller,
+  verification: NonNullable<AttemptSummary['sourceIntegration']>['verification'],
+) {
+  const story = passedStory(controller);
+  controller.attempts[1]!.sourceIntegration = { state: 'rejected', verification };
+  return { ...story, sourceStage: { ...story.sourceStage, phase: 'integration', current: 'failed' } };
+}
+// A story that landed, with any carries its review records.
+function landedStory(controller: Controller, sourceCarries?: AttemptSummary['sourceCarries']) {
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change-review' },
+      candidateReviewVerdict: 'pass',
+      sourceIntegration: { state: 'integrated' },
+      ...(sourceCarries ? { sourceCarries } : {}),
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'done',
+    acceptedAttemptId: 'attempt-review',
+    lastAttemptId: 'attempt-review',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'integration',
+      current: 'integrated',
+      review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+    },
+  });
+}
+// A story whose attempt the controller's stop cut off, as the controller leaves it after a restart.
+const cutOff = (controller: Controller, status: string, fields: Partial<AttemptSummary> = {}) => {
+  controller.attempts = [
+    { id: 'attempt-1', taskId: 'T-1', status, workerId: 'W-1', error: 'Controller restarted.', ...fields },
+  ];
+  return taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' });
+};
+const blockedStop = (fields: Partial<AttemptSummary> = {}): AttemptSummary => ({
+  id: 'attempt-1',
+  taskId: 'T-1',
+  status: 'blocked',
+  workerId: 'W-1',
+  result: { outcome: 'blocked', summary: 'I need a call on the old route.' },
+  ...fields,
+});
+
+// The plain reason the controller notes on a story whose plan the code moved past, and the problem it records on a
+// file request it would refuse as asked.
+export const outdatedReason =
+  'A file this story was to create already exists, so the code moved on since it was planned.';
+export const outsideMeasured = 'One of the files it asked for is outside the list of files the tests measure.';
+// A story the code moved past: its attempt failed, and the controller noted the plan out of date when it refused
+// the next Start.
+export function outdatedStory(controller: Controller, fields: Partial<Task> = {}) {
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'failed',
+      workerId: 'W-1',
+      assignment: { kind: 'studio-development:change' },
+      result: { outcome: 'failed', summary: 'A test failed.' },
+    },
+  ];
+  return taskFixture('T-1', {
+    kind: 'studio-development:change',
+    status: 'failed',
+    lastAttemptId: 'attempt-1',
+    sourceStage: {
+      version: 'source-story-stages-v1',
+      phase: 'implementation',
+      current: 'failed',
+      outdated: { reason: outdatedReason, at: '2026-10-21T21:00:00Z' },
+    },
+    ...fields,
+  });
+}
+
+export const decisionStates: Record<string, (controller: Controller) => Task> = {
+  'ready work': () => taskFixture('T-1'),
+  'a waiting question': controller => {
+    controller.attempts = [
+      blockedStop({
+        question: {
+          ask: 'Keep the old route for one release?',
+          why: 'Two pages still call it.',
+          options: [{ label: 'Keep it' }, { label: 'Remove it' }],
+          recommended: 0,
+          choice: 'director',
+          topics: [],
+        },
+      }),
+    ];
+    return taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' });
+  },
+  'a stop without a question': controller => {
+    controller.attempts = [blockedStop()];
+    return taskFixture('T-1', { status: 'blocked', lastAttemptId: 'attempt-1' });
+  },
+  'an interrupted attempt': controller => cutOff(controller, 'interrupted'),
+  'a quarantined attempt': controller => cutOff(controller, 'quarantined'),
+  'an interrupted attempt after reconciling': controller =>
+    cutOff(controller, 'interrupted', {
+      reconciledAt: '2026-10-21T21:00:00Z',
+      // Why it ended, as the controller records it (src/core/attempt-cause.mjs), and the count it serves.
+      endCause: { cause: 'environment', detail: 'controller-stop' },
+    }),
+  'a result in review': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-1',
+        taskId: 'T-1',
+        status: 'review',
+        workerId: 'W-1',
+        result: { outcome: 'completed', summary: 'Ready.' },
+      },
+    ];
+    return taskFixture('T-1', { status: 'review', lastAttemptId: 'attempt-1', direction: 'Recorded direction.' });
+  },
+  'past the attempt limit': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-1',
+        taskId: 'T-1',
+        status: 'failed',
+        workerId: 'W-1',
+        assignment: { kind: 'studio-development:change' },
+        result: { outcome: 'failed', summary: 'A test failed.' },
+        endCause: { cause: 'work' },
+      },
+    ];
+    return taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'failed',
+      maxAttempts: 1,
+      // The count the controller serves with the task (WorkflowRegistry.attemptCount): its one attempt is used.
+      attemptCount: { used: 1, allowed: 1 },
+      lastAttemptId: 'attempt-1',
+      direction: 'Recorded direction.',
+    });
+  },
+  'proposed work': () => taskFixture('T-1', { status: 'backlog', approval: { status: 'pending' } }),
+  'running work': controller => {
+    controller.attempts = [
+      { id: 'attempt-1', taskId: 'T-1', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+    ];
+    return taskFixture('T-1', { status: 'running', lastAttemptId: 'attempt-1' });
+  },
+  'a passing review': passedStory,
+  'a review in progress': controller => {
+    const story = passedStory(controller);
+    controller.attempts = [
+      controller.attempts[0]!,
+      {
+        id: 'attempt-review',
+        taskId: 'T-1',
+        status: 'running',
+        workerId: 'W-2',
+        startedAt: new Date().toISOString(),
+        assignment: { kind: 'studio-development:change-review' },
+      },
+    ];
+    return {
+      ...story,
+      status: 'running',
+      acceptedAttemptId: 'attempt-edit',
+      sourceStage: {
+        ...story.sourceStage,
+        current: 'candidate-review',
+        review: { taskId: 'T-1', attemptId: 'attempt-review', workerId: 'W-2' },
+      },
+    };
+  },
+  'a review that asked for changes': controller => changesRequested(controller, true),
+  // The change's own tests failed: integrating over the review would be refused, so only Send back and Close.
+  'a review that asked for changes of a change whose tests failed': controller => changesRequested(controller, false),
+  // An integration over the review that was refused after it moved the story to wait for integration, with no
+  // journal and no request waiting: the story goes back with the review's findings.
+  'a review that asked for changes, left waiting by a refused integration': controller => {
+    const story = changesRequested(controller, false);
+    return {
+      ...story,
+      sourceStage: { ...story.sourceStage, phase: 'integration', current: 'waiting-for-integration' },
+    };
+  },
+  'a conflict': controller => stoppedStory(controller, { conflicts: ['src/core/store.mjs'] }),
+  'landed since': controller => {
+    controller.tasks = [taskFixture('T-2', { title: 'Name the stage in plain words' })];
+    return stoppedStory(controller, { landedSince: { commits: 2, stories: ['T-2'] } });
+  },
+  'failed with nothing landed': controller => stoppedStory(controller, { conflicts: [] }),
+  'a carry waiting': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-review',
+        taskId: 'T-1',
+        status: 'accepted',
+        workerId: 'W-1',
+        assignment: { kind: 'studio-development:change-review' },
+        candidateReviewVerdict: 'pass',
+        sourceIntegration: { state: 'integrated' },
+        sourceCarries: [{ line: 'main', state: 'waiting' }],
+      },
+    ];
+    return taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'integration',
+        current: 'done',
+        review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+      },
+    });
+  },
+  'a landed story with bring-back lines': controller => {
+    controller.bringBack['T-1'] = {
+      lines: [
+        { line: 'release/1.1', through: ['release/1.1'] },
+        { line: 'release/1.0', through: ['release/1.1', 'release/1.0'] },
+        { line: 'release/0.9', reason: 'release/0.9 already has it.' },
+      ],
+    };
+    return landedStory(controller);
+  },
+  'a landed story on a project with one line': controller => landedStory(controller),
+  'a landed carry story': controller => ({
+    ...landedStory(controller),
+    carryOf: { storyId: 'T-0', line: 'release/1.1', reviewAttemptId: 'attempt-0', carryId: 'carry-0' },
+  }),
+  'a stopped bring-back': controller =>
+    landedStory(controller, [{ line: 'release/1.0', state: 'rejected', back: true, approved: true }]),
+  'a story the code moved past': controller => outdatedStory(controller),
+  'a file request outside the measured list': controller => {
+    controller.attempts = [
+      blockedStop({
+        assignment: { kind: 'studio-development:change' },
+        finishedAt: '2026-10-21T21:00:00Z',
+        scopeRequest: {
+          files: ['src/core/old-route.mjs'],
+          newFiles: [],
+          deleteFiles: [],
+          reason: 'The route moved into its own file.',
+          problem: outsideMeasured,
+        },
+      }),
+    ];
+    return taskFixture('T-1', {
+      kind: 'studio-development:change',
+      status: 'blocked',
+      lastAttemptId: 'attempt-1',
+      brief: 'Files: src/server.mjs',
+    });
+  },
+  'a closed story': controller => {
+    controller.attempts = [
+      {
+        id: 'attempt-1',
+        taskId: 'T-1',
+        status: 'failed',
+        workerId: 'W-1',
+        result: { outcome: 'failed', summary: 'A test failed.' },
+      },
+    ];
+    return taskFixture('T-1', { status: 'failed', lastAttemptId: 'attempt-1', closed: true });
+  },
+};

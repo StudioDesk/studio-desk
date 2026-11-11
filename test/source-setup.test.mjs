@@ -1,20 +1,26 @@
 // A code story's setup runs in a process of its own (src/connectors/source-setup.mjs): the controller keeps answering
 // while the working copy is made, checked and copied, a stop ends that process and removes the working copy, and a
-// base commit other than the approved snapshot still fails the attempt with the same message.
+// base commit other than the approved snapshot still fails the attempt with the same message, which a test's wait for
+// the task then repeats with the end of the attempt's log. A setup process that ends without a failed step or an error
+// line says how it ended, in which step and with its last output line.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
-import { waitFor } from './wait-for.mjs';
+import { waitFor, waitForTask } from './wait-for.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
+import { runSourceSetup, setupEndedMessage } from '../src/connectors/source-setup.mjs';
 import {
   createSourceWorktree,
   leftoverWorktrees,
+  matchMeasuredFolder,
   removeSourceWorktree,
   removeWorktrees,
 } from '../src/connectors/source-worktrees.mjs';
+import { hash } from '../src/core/contracts.mjs';
 import { jobDirectory } from '../src/core/projects.mjs';
 
 const snapshotMismatch = 'The base commit does not match the approved source snapshot. Start a new attempt.',
@@ -185,6 +191,15 @@ test('a base commit that does not match the snapshot fails the attempt in its se
   assert.equal(fs.existsSync(a.sourceWorktree.path), false);
   assert.deepEqual(fs.readdirSync(path.join(store.directory, 'wt')), []);
   assert.equal(store.leases().length, 0);
+  // A wait for a status the failed task never reaches says why from the attempt's own records: its setup error (here
+  // also the task's reason) and the end of its log, which holds the lines the setup process wrote.
+  await assert.rejects(waitForTask(store, c.taskId, 'review', { limit: 50 }), error => {
+    const [status, log] = error.message.split('its log ends:');
+    assert.ok(status.includes(snapshotMismatch), error.message);
+    assert.ok(log?.includes('stdout: {"phase":"setup.snapshot"'), error.message);
+    assert.ok(log.includes(`stderr: ${snapshotMismatch}`), error.message);
+    return true;
+  });
 });
 
 test('the setup process leaves a listed worktree that was made again under its name since the controller listed it', async t => {
@@ -215,4 +230,231 @@ test('the setup process leaves a listed worktree that was made again under its n
   assert.deepEqual(fs.readdirSync(parent), ['i-retried']);
   assert.equal(git(c.root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm).length, 2);
   removeSourceWorktree(c.root, path.join(parent, 'i-retried'));
+});
+
+// The message for a setup process that ended without a failed step or an error line, which never points at the log.
+function ended(fields) {
+  const message = setupEndedMessage(fields);
+  assert.ok(!message.includes('See the attempt log'), message);
+  return message;
+}
+
+test('a setup that ended without a reason names its exit code', () => {
+  assert.equal(
+    ended({ code: 1 }),
+    'Setting up the attempt failed: the setup process ended with exit code 1 before reporting any step.',
+  );
+  assert.ok(!ended({ code: 255 }).includes('0x'));
+});
+
+test('a setup that ended with a large Windows status names it in hexadecimal too', () => {
+  assert.ok(ended({ code: 3221225794 }).includes('ended with exit code 3221225794 (0xC0000142)'));
+  assert.ok(ended({ code: 3221225477 }).includes('exit code 3221225477 (0xC0000005)'));
+});
+
+test('a setup stopped by a signal names the signal', () => {
+  const message = ended({ code: null, signal: 'SIGKILL' });
+  assert.ok(message.includes('the setup process was stopped by the signal SIGKILL'), message);
+  assert.ok(!message.includes('exit code'), message);
+});
+
+test('a setup that ended inside a step names the step in plain words, or the last step that finished', () => {
+  assert.ok(ended({ code: 1, step: 'setup.worktree' }).includes(' while making the working copy.'));
+  assert.ok(ended({ code: 1, step: 'setup.snapshot' }).includes(' while checking the snapshot.'));
+  assert.ok(ended({ code: 1, step: 'setup.copy' }).includes(' while copying the source.'));
+  const between = ended({ code: 1, finished: 'setup.copy' });
+  assert.ok(between.includes(' after copying the source.'), between);
+  assert.ok(!between.includes('setup.copy'), between);
+});
+
+test('a setup that ended before reporting any step says so', () => {
+  const message = ended({ code: 1, signal: null, step: '', finished: '' });
+  assert.ok(message.endsWith(' before reporting any step.'), message);
+});
+
+test('a setup that ended without a reason ends its message with the last line it wrote', () => {
+  const line = '{"phase":"setup.snapshot","boundary":"start"}',
+    message = ended({ code: 1, step: 'setup.snapshot', output: `${line}\n` });
+  assert.equal(
+    message,
+    `Setting up the attempt failed: the setup process ended with exit code 1 while checking the snapshot. Its last output line was: ${line}`,
+  );
+  assert.ok(!ended({ code: 1, output: '  ' }).includes('last output line'));
+});
+
+// runSourceSetup on a runtime that starts no process: the test writes the setup's output lines and ends it.
+function fakeSetup() {
+  const entry = {},
+    finished = [];
+  let complete,
+    nexts = 0;
+  const runtime = {
+    runNative(target, binary, args, prompt, readResult, options) {
+      target.child = { stdout: new EventEmitter(), stderr: new EventEmitter() };
+      complete = options.onComplete;
+    },
+    startPhase: (target, phaseId) => ({ phaseId }),
+    store: { finishPhase: (phase, outcome, details) => finished.push([phase.phaseId, outcome, details.error]) },
+  };
+  runSourceSetup(runtime, entry, {}, () => nexts++);
+  return {
+    say: progress => entry.child.stdout.emit('data', JSON.stringify(progress) + '\n'),
+    stderr: text => entry.child.stderr.emit('data', text),
+    end: (code, signal = null) => complete(null, code, signal),
+    finished,
+    nexts: () => nexts,
+  };
+}
+
+test('a setup process that ends non-zero without a failed step or an error line fails with how it ended', () => {
+  const s = fakeSetup();
+  s.say({ phase: 'setup.worktree', boundary: 'start' });
+  assert.throws(
+    () => s.end(3221225794),
+    error => {
+      assert.ok(error.message.includes('exit code 3221225794'), error.message);
+      assert.ok(error.message.includes('0xC0000142'), error.message);
+      assert.ok(error.message.includes('while making the working copy'), error.message);
+      assert.ok(error.message.endsWith('Its last output line was: {"phase":"setup.worktree","boundary":"start"}'));
+      assert.ok(!error.message.includes('See the attempt log'), error.message);
+      return true;
+    },
+  );
+  assert.equal(s.nexts(), 0);
+  // Ended by a signal between steps: the last finished step is named, and no step is left open.
+  const between = fakeSetup();
+  between.say({ phase: 'setup.worktree', boundary: 'start' });
+  between.say({ phase: 'setup.worktree', boundary: 'finish', outcome: 'succeeded', durationMs: 3 });
+  assert.throws(() => between.end(null, 'SIGTERM'), {
+    message:
+      'Setting up the attempt failed: the setup process was stopped by the signal SIGTERM after making the working copy. ' +
+      'Its last output line was: {"phase":"setup.worktree","boundary":"finish","outcome":"succeeded","durationMs":3}',
+  });
+  assert.deepEqual(between.finished, [['setup.worktree', 'succeeded', undefined]]);
+});
+
+test('a setup step’s own failure comes before the last error line, which comes before how the process ended', () => {
+  const snapshotFailed = fakeSetup();
+  snapshotFailed.say({ phase: 'setup.worktree', boundary: 'start' });
+  snapshotFailed.say({ phase: 'setup.worktree', boundary: 'finish', outcome: 'succeeded', durationMs: 3 });
+  snapshotFailed.say({ phase: 'setup.snapshot', boundary: 'start' });
+  snapshotFailed.say({
+    phase: 'setup.snapshot',
+    boundary: 'finish',
+    outcome: 'failed',
+    durationMs: 2,
+    error: snapshotMismatch,
+  });
+  snapshotFailed.stderr('A later error line.\n');
+  assert.throws(() => snapshotFailed.end(1), { message: snapshotMismatch });
+  assert.deepEqual(snapshotFailed.finished.at(-1), ['setup.snapshot', 'failed', snapshotMismatch]);
+  const wrote = fakeSetup();
+  wrote.say({ phase: 'setup.copy', boundary: 'start' });
+  wrote.stderr('An earlier line.\n');
+  wrote.stderr('ENOSPC: no space left on device\n');
+  assert.throws(() => wrote.end(3221225794), { message: 'ENOSPC: no space left on device' });
+  // A setup that ends with code 0 goes on to the editor.
+  const done = fakeSetup();
+  for (const phase of ['setup.worktree', 'setup.snapshot', 'setup.copy']) {
+    done.say({ phase, boundary: 'start' });
+    done.say({ phase, boundary: 'finish', outcome: 'succeeded', durationMs: 1 });
+  }
+  done.end(0);
+  assert.equal(done.nexts(), 1);
+  assert.equal(done.finished.length, 3);
+});
+
+// The suite pins git's line endings in the environment (test/model-free-studio.mjs), which outranks a repository's own
+// settings; a test of a project set to its own line endings takes them out for its duration, as a director's git has
+// none of them.
+function repositoryLineEndings(t) {
+  const names = Object.keys(process.env).filter(name => /^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(name)),
+    saved = Object.fromEntries(names.map(name => [name, process.env[name]])),
+    count = Number.parseInt(saved.GIT_CONFIG_COUNT ?? '', 10) || 0,
+    kept = [];
+  for (let index = 0; index < count; index++) {
+    const key = saved[`GIT_CONFIG_KEY_${index}`];
+    if (key !== undefined && !['core.autocrlf', 'core.eol'].includes(key.toLowerCase()))
+      kept.push([key, saved[`GIT_CONFIG_VALUE_${index}`] ?? '']);
+  }
+  for (const name of names) delete process.env[name];
+  if (kept.length) {
+    kept.forEach(([key, value], index) => {
+      process.env[`GIT_CONFIG_KEY_${index}`] = key;
+      process.env[`GIT_CONFIG_VALUE_${index}`] = value;
+    });
+    process.env.GIT_CONFIG_COUNT = String(kept.length);
+  }
+  t.after(() => {
+    for (const name of Object.keys(process.env))
+      if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/.test(name)) delete process.env[name];
+    Object.assign(process.env, saved);
+  });
+}
+
+// A story on a project whose repository rewrites line endings (core.autocrlf=true in its own settings, as Git for
+// Windows sets for every repository), set up end to end: its base verifies against the approved snapshot and the
+// story reaches review with its edit.
+async function lineEndingStory(t, workingCopy) {
+  repositoryLineEndings(t);
+  const c = await setup(t),
+    { store } = c.app,
+    file = path.join(c.root, 'src/core/workflows.mjs');
+  git(c.root, ['config', 'core.autocrlf', 'true']);
+  assert.equal(git(c.root, ['config', 'core.autocrlf']), 'true');
+  if (workingCopy === 'crlf') {
+    // A normal checkout with that setting: every text file is written again with CRLF.
+    for (const tracked of git(c.root, ['ls-files']).split('\n')) fs.rmSync(path.join(c.root, tracked));
+    git(c.root, ['checkout', '--', '.']);
+    assert.ok(fs.readFileSync(file, 'utf8').endsWith('\r\n'));
+  } else assert.ok(!fs.readFileSync(file, 'utf8').includes('\r'));
+  // Either way the folder holds exactly its commit, as git sees it.
+  assert.equal(git(c.root, ['status', '--porcelain']), '');
+  await c.start();
+  const a = await c.wait(c.taskId),
+    recorded = phases(store, a.id);
+  assert.notEqual(a.error, snapshotMismatch);
+  assert.equal(recorded.find(p => p.phaseId === 'setup.snapshot' && p.boundary === 'finish').outcome, 'succeeded');
+  assert.ok(a.artifacts.some(item => item.path === 'changes/src/core/workflows.mjs' && item.kind === 'source-file'));
+  // The editor read the file with the bytes the director's folder holds.
+  assert.deepEqual(
+    fs.readFileSync(path.join(jobDirectory(store, a), 'source/src/core/workflows.mjs')),
+    fs.readFileSync(file),
+  );
+  // The director's folder and its settings are as they were.
+  assert.equal(git(c.root, ['config', 'core.autocrlf']), 'true');
+  assert.equal(git(c.root, ['status', '--porcelain']), '');
+  assert.equal(fs.readFileSync(file, 'utf8').includes('\r\n'), workingCopy === 'crlf');
+}
+
+test('a story on a repository set to core.autocrlf=true, whose file was committed with LF and never checked out again, verifies its base', async t => {
+  await lineEndingStory(t, 'lf');
+});
+
+test('a story on a normal core.autocrlf=true checkout, whose files are CRLF, verifies its base', async t => {
+  await lineEndingStory(t, 'crlf');
+});
+
+test('a working copy takes a measured file only when git stores it as the commit holds it', async t => {
+  repositoryLineEndings(t);
+  const c = await setup(t, 'pass', undefined, {}, true),
+    parent = path.join(c.directory, 'wt'),
+    head = git(c.root, ['rev-parse', 'HEAD']),
+    measured = file => ({ path: file, hash: hash(fs.readFileSync(path.join(c.root, file))) });
+  git(c.root, ['config', 'core.autocrlf', 'true']);
+  // Committed with LF and never checked out again, and an edit not committed.
+  fs.writeFileSync(path.join(c.root, 'src/core/projects.mjs'), '// An edit the commit does not hold.\n');
+  const plan = { root: c.root, files: ['src/core/workflows.mjs', 'src/core/projects.mjs'].map(measured) },
+    worktree = createSourceWorktree(c.root, parent, 'm', head),
+    read = file => fs.readFileSync(path.join(worktree, file), 'utf8');
+  // git wrote both with CRLF; only the file the folder holds as committed takes the folder's bytes.
+  assert.equal(read('src/core/workflows.mjs'), '// Fixture source: src/core/workflows.mjs\r\n');
+  assert.deepEqual(matchMeasuredFolder(worktree, plan, head), ['src/core/workflows.mjs']);
+  assert.equal(read('src/core/workflows.mjs'), '// Fixture source: src/core/workflows.mjs\n');
+  assert.equal(read('src/core/projects.mjs'), '// Fixture source: src/core/projects.mjs\r\n');
+  // The working copy still holds its commit, and the folder was only read.
+  assert.equal(git(worktree, ['status', '--porcelain']), '');
+  assert.equal(git(c.root, ['status', '--porcelain']), 'M src/core/projects.mjs');
+  assert.deepEqual(matchMeasuredFolder(worktree, plan, head), []);
+  removeSourceWorktree(c.root, worktree);
 });

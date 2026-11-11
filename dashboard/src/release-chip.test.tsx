@@ -14,10 +14,11 @@ import { createStream, fakeController, taskFixture, type Controller } from './te
 
 let controller: Controller;
 const change = 'studio-development:change';
-const milestone = (version: string, line: string | null): Milestone => ({
+const milestone = (version: string, line: string, next?: boolean): Milestone => ({
   id: `milestone-${version}`,
   version,
   line,
+  ...(next ? { next } : {}),
   goal: '',
   state: 'open',
   waiting: [],
@@ -25,6 +26,7 @@ const milestone = (version: string, line: string | null): Milestone => ({
   movedIn: [],
   counts: { ideas: 0, waiting: 0, stories: 0, integrated: 0, started: 0 },
 });
+// The overview as the controller sends it: every open milestone names its line, and the next release is marked.
 const overview = (): ReleaseOverview => ({
   available: true,
   copy: { branch: 'main', clean: true },
@@ -50,7 +52,7 @@ const overview = (): ReleaseOverview => ({
       onRemote: null,
     },
   ],
-  milestones: [milestone('1.0.1', 'release/1.0'), milestone('1.1.0', null), milestone('1.2.0', null)],
+  milestones: [milestone('1.0.1', 'release/1.0'), milestone('1.1.0', 'main', true), milestone('1.2.0', 'main')],
   tags: ['v1.0.0'],
 });
 const story = (id: string, title: string, runId: string, extra: Partial<Task> = {}) =>
@@ -192,6 +194,44 @@ test('the New idea box keeps the next release whatever the words say, and sends 
       milestone: 'milestone-1.2.0',
     }),
   );
+});
+
+test('the New idea box’s picker marks the release the controller names next', async () => {
+  const user = userEvent.setup();
+  open('/p/project-x');
+  const [box] = await screen.findAllByRole('form', { name: 'New idea for Project X' });
+  const form = within(box!);
+  await user.click(await form.findByRole('button', { name: 'Release: 1.1.0, next release. Change' }));
+  const picker = within(form.getByRole('dialog', { name: 'Release for this idea' })),
+    note = (name: RegExp) => picker.getByRole('button', { name }).querySelector('.sd-meta')?.textContent;
+  expect(note(/^1\.1\.0/)).toBe('Minor · main · the next release');
+  expect(note(/^1\.0\.1/)).toBe('Patch · release/1.0');
+  expect(note(/^1\.2\.0/)).toBe('Minor · main');
+  expect(note(/^The next release/)).toBe('1.1.0, or whichever is next when you send it');
+});
+
+test('the New idea box names an older line when the next release is on it', async () => {
+  const releases = overview();
+  releases.milestones = releases.milestones!.map(item => ({ ...item, next: item.version === '1.0.1' }));
+  controller.releases = releases;
+  open('/p/project-x');
+  const [box] = await screen.findAllByRole('form', { name: 'New idea for Project X' });
+  expect(
+    await within(box!).findByRole('button', { name: 'Release: 1.0.1 on release/1.0, next release. Change' }),
+  ).toBeTruthy();
+});
+
+test('without a milestone marked next, the New idea box shows no release chip', async () => {
+  const releases = overview();
+  releases.milestones = [milestone('1.0.1', 'release/1.0'), milestone('1.1.0', 'main'), milestone('1.2.0', 'main')];
+  controller.releases = releases;
+  open('/p/project-x');
+  const [box] = await screen.findAllByRole('form', { name: 'New idea for Project X' });
+  await waitFor(() => expect(controller.reads()).toContain('/api/projects/project-x/releases'));
+  // The overview has arrived; give the page a turn to show what it holds.
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(within(box!).queryByRole('button', { name: /^Release: / })).toBeNull();
+  expect(within(box!).getByRole('button', { name: /Send to Project X/ })).toBeTruthy();
 });
 
 test('the Board shows each story’s release, filters by it and lanes by it', async () => {

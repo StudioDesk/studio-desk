@@ -8,12 +8,13 @@
 // Ubuntu lets only the system's bubblewrap make sandboxes. The same setup installs them through the
 // system's own password prompt, or the director copies the command.
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { directorKeyName } from '../director-access.mjs';
+import { directorKeyName, directorSecretNames } from '../director-access.mjs';
+import { processEnded } from './process.mjs';
 
 export const builtInSandboxVersion = '0.0.81';
 const studioRoot = fileURLToPath(new URL('../../', import.meta.url));
@@ -198,16 +199,45 @@ export function builtInSandboxPackages(root) {
   return packages;
 }
 
-// The director's key of the data folder a copy sits in (C-01, src/director-access.mjs), found the way the packages
-// are: in a folder above the copy. On macOS and Linux it is denied by name, so a data folder kept outside the home
-// folder still hides it. On Windows the sandbox account cannot read a data folder inside the director's profile;
-// one outside the profile is the open question C-40 records.
+// The files of the data folder a copy sits in that let a program act as the director (C-01, src/director-access.mjs):
+// the key, the launch link, whose code sets the session cookie, and the tools' keys. They are found the way the
+// packages are, in a folder above the copy. On macOS and Linux they are denied by name, so a data folder kept outside
+// the home folder still hides them. On Windows the sandbox account cannot read a data folder inside the director's
+// profile; one outside the profile gets them denied before each run (below).
 export function builtInSandboxSecrets(root) {
   const secrets = [];
   for (let folder = path.dirname(root); folder !== path.dirname(folder); folder = path.dirname(folder))
-    if (fs.existsSync(path.join(folder, directorKeyName))) secrets.push(path.join(folder, directorKeyName));
+    for (const name of directorSecretNames)
+      if (fs.existsSync(path.join(folder, name))) secrets.push(path.join(folder, name));
   return secrets;
 }
+// The data folder a copy sits in: the nearest folder above it that holds the director's key; null for a copy outside
+// any data folder.
+export function builtInSandboxDataFolder(root) {
+  for (let folder = path.dirname(root); folder !== path.dirname(folder); folder = path.dirname(folder))
+    if (fs.existsSync(path.join(folder, directorKeyName))) return folder;
+  return null;
+}
+// The controller's own data folder, named to the run (--data), so it is hidden wherever the copy is: npm run verify's
+// worktrees beside the source, a copy in a temporary folder or a data folder moved with STUDIO_DATA_DIR sit outside it.
+// Null when none is named or the folder is not there (a source whose controller never ran has no data folder yet).
+export function builtInSandboxNamedData(data) {
+  if (!data) return null;
+  const folder = path.resolve(data);
+  return fs.statSync(folder, { throwIfNoEntry: false })?.isDirectory() ? folder : null;
+}
+// The files of a named data folder that let a program act as the director, as builtInSandboxSecrets finds them above
+// a copy: the key, the launch link and the tools' keys.
+export function builtInSandboxDataSecrets(data) {
+  const folder = builtInSandboxNamedData(data);
+  return folder ? directorSecretNames.map(name => path.join(folder, name)).filter(secret => fs.existsSync(secret)) : [];
+}
+// Every data folder a run is kept from: the one above the copy, as before, and the named one; and their secrets.
+const unique = paths => [...new Set(paths)];
+export const builtInSandboxDataFolders = (root, data) =>
+  unique([builtInSandboxDataFolder(root), builtInSandboxNamedData(data)].filter(Boolean));
+export const builtInSandboxAllSecrets = (root, data) =>
+  unique([...builtInSandboxSecrets(root), ...builtInSandboxDataSecrets(data)]);
 
 // What one test run may touch. It writes only the copy it runs on; it reads Node, the packages installed for
 // the copy, the launcher and the run's own instructions; it reaches no network beyond this computer. Git for
@@ -219,9 +249,11 @@ export function builtInSandboxSecrets(root) {
 // they sit in the disposable copy or the run's temporary folder, and the project's own repository is outside
 // what a run may write. Every .git/hooks stays refused. npm and npx run from the npm package of the Node.js
 // install (<install>/lib/node_modules/npm beside its bin), which a home-folder install such as nvm's keeps out
-// of reach otherwise; only that folder is let back in, and only when it is there.
+// of reach otherwise; only that folder is let back in, and only when it is there. `data` is the controller's own data
+// folder, which is denied with its secrets wherever the copy is; a copy inside it keeps its own grants.
 export function builtInSandboxSettings({
   root,
+  data,
   nodeDirectory,
   launcherDirectory,
   runDirectory,
@@ -238,7 +270,10 @@ export function builtInSandboxSettings({
     return {
       network,
       filesystem: {
-        denyRead: [home, ...builtInSandboxSecrets(root)],
+        // The data folder too, for one kept outside the home folder: its database, its other projects' copies and
+        // records. The copy and its packages are let back in below, as on Windows (C-40). The controller's own data
+        // folder, when the run names it, is denied as well, wherever the copy is.
+        denyRead: [home, ...builtInSandboxDataFolders(root, data), ...builtInSandboxAllSecrets(root, data)],
         allowRead: [root, ...reads, seccomp, ...(fs.existsSync(npm) ? [npm] : [])],
         allowWrite: [root, temporary],
         denyWrite: [],
@@ -317,22 +352,351 @@ export function openBuiltInSandboxPassThrough(paths, files = builtInSandboxFiles
 
 // On Windows the sandbox account reads what every account may read, and a data folder outside the director's profile
 // (C:\StudioDesk, say) lets every signed-in account read it: a probe on November 1, 2026 read the director's key and
-// the database there (C-40). Before each run, the director's key above the copy is denied to the runtime's sandbox
-// group by an entry of its own, so the key stays the director's wherever the data folder is. A key that cannot be
-// denied stops the run rather than leaving it readable.
+// the database there (C-40), and on November 2 the launch link's file beside the key. Before each run, the director's
+// key, launch link and the tools' keys above the copy are denied to the runtime's sandbox group by an entry of their
+// own (a folder's reaching everything in it), so they stay the director's wherever the data folder is. A file that
+// cannot be denied stops the run rather than leaving it readable.
 export function denyBuiltInSandboxSecrets(secrets, run = spawnSync) {
   for (const secret of secrets) {
-    const result = run('icacls', [secret, '/deny', `${builtInSandboxGroup}:(R)`], {
+    const folder = fs.statSync(secret, { throwIfNoEntry: false })?.isDirectory();
+    const result = run('icacls', [secret, '/deny', `${builtInSandboxGroup}:${folder ? '(OI)(CI)(R)' : '(R)'}`], {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 30000,
     });
     if (result.status !== 0)
       throw new Error(
-        `The sandbox could not be kept from the director's key (${secret}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
+        `The sandbox could not be kept from the director's sign-in file (${secret}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
       );
   }
   return secrets;
+}
+// The rest of the data folder (C-40's second part, the director's "deny and grant back", November 2): its database,
+// its other projects' copies and records. The runtime's sandbox group is denied reading what any of it holds, the
+// folder's own listing included, by one entry everything in it inherits. Looking at a folder is still allowed, since
+// Node looks at each folder on the way to the copy. What a run uses is let back in by the runtime's own grants, which
+// it gives the copy and its packages explicitly and which therefore come before the inherited deny. Probed on a data
+// folder outside the profile: the database and the listing refused; the copy written, its packages read and loaded.
+//
+// Setting the entry makes Windows write it to everything already in the folder, which on a live data folder (job copies,
+// worktrees, packages) takes minutes: run before every test, it failed every run on November 3 at its 30-second limit.
+// So a data folder inside the director's profile gets none: the profile's own permissions keep the sandbox account out,
+// as nothing on the way grants it, or its Users group, a read. One outside the profile gets the entry once, under a
+// lock, with as long as the writing takes; a run that finds the lock waits for it. A file beside the lock records that
+// the writing finished, as one cut short leaves the folder's own entry without everything below it. With that file
+// there, a run reads only the folder's own list, which is quick.
+const dataDenyEntry = new RegExp(`${builtInSandboxGroup}:\\(OI\\)\\(CI\\)\\(DENY\\)\\(RD\\)`, 'i');
+export const dataDenyTimeoutMs = 30 * 60 * 1000;
+export const dataDenyLock = '.sandbox-data-deny.lock',
+  dataDenyDone = '.sandbox-data-denied';
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const readSandboxHolder = file => {
+  try {
+    const holder = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Number.isInteger(holder?.pid) && holder.pid > 0 ? holder : null;
+  } catch (error) {
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) return null;
+    throw error;
+  }
+};
+// A virus scanner briefly holds a just-closed file or folder on Windows, which refuses its rename or removal meanwhile.
+// As src/core/attempt-continuation.mjs and src/connectors/package-installs.mjs do, only those transient refusals are
+// tried again, for a moment; the operation stays the same atomic rename or removal.
+const lockedCodes = new Set(['EPERM', 'EACCES', 'EBUSY']);
+export const sandboxFileRetryMs = 2000;
+function whenFree(operation, waitMs = sandboxFileRetryMs) {
+  for (let delay = 10, until = Date.now() + waitMs; ; delay = Math.min(delay * 2, 250)) {
+    try {
+      return operation();
+    } catch (error) {
+      if (!lockedCodes.has(error.code) || Date.now() + delay > until) throw error;
+      sleepSync(delay);
+    }
+  }
+}
+// One wait's view of the processes it asks about. Reading a start time starts PowerShell on Windows, so a holder found
+// genuine is asked again by its ID alone, and by its start time at most every `recheckMs`; an ownership entry younger
+// than `youngOwnershipMs` is asked only by its ID, since an ID handed on within seconds of its claim is rare and such
+// an entry is judged by its time once it is older. Either way an ended ID frees at once, and a reused one at the next
+// full check: never a live owner early, only a dead one late, by a bounded time.
+export const identityRecheckMs = 30 * 1000,
+  youngOwnershipMs = 5 * 1000;
+function processIdentity(readStartTime, recheckMs = identityRecheckMs) {
+  const genuine = new Map();
+  return (pid, since, { youngMs = 0 } = {}) => {
+    const now = Date.now(),
+      key = `${pid}|${since instanceof Date ? since.toISOString() : since}`,
+      at = since instanceof Date ? since.getTime() : Date.parse(since);
+    if ((Number.isFinite(at) && now - at < youngMs) || now - (genuine.get(key) ?? -Infinity) < recheckMs) {
+      if (!processEnded(pid, null)) return false;
+      genuine.delete(key);
+      return true;
+    }
+    const ended = processEnded(pid, since, { readStartTime });
+    if (ended) genuine.delete(key);
+    else genuine.set(key, now);
+    return ended;
+  };
+}
+const lockHolderAlive = (holder, ended) => holder && !ended(holder.pid, holder.since);
+
+// A filesystem bakery lock. Each entrant atomically makes a unique directory whose NAME already holds its identity;
+// no crash between ownership and publication can leave an ownerless recovery lock. An empty directory means choosing
+// a ticket; mkdir publishes the complete ticket atomically. Entrants wait for choosing peers and then for smaller
+// (ticket, name) pairs. A failed try withdraws before yielding, so a synchronous release cannot block an async entrant
+// in this same process. All protected reads, reclaims, publications and releases are synchronous under this ownership.
+// Recovery removes only a dead entrant's unique directory, never a shared path a replacement could have acquired.
+// `ended` is the wait's process identity (processIdentity above). A peer that cannot be read or removed for a moment
+// (a scanner holding it) counts as still present: this entrant defers and tries again on its next pass.
+function trySandboxOwnership(folder, prefix, ended) {
+  const name = `${prefix}${process.pid}-${Date.now()}-${randomUUID()}`,
+    directory = path.join(folder, name);
+  fs.mkdirSync(directory);
+  const release = () => whenFree(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const peers = () => fs.readdirSync(folder).filter(peer => peer.startsWith(prefix) && peer !== name);
+  const ticketOf = peer => {
+    try {
+      const ticket = fs.readdirSync(path.join(folder, peer)).find(part => /^\d+$/.test(part));
+      return ticket ? Number(ticket) : 0;
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      if (lockedCodes.has(error.code)) return 0;
+      throw error;
+    }
+  };
+  try {
+    const ticket = 1 + Math.max(0, ...peers().map(peer => ticketOf(peer) || 0));
+    fs.mkdirSync(path.join(directory, String(ticket)));
+    for (const peer of peers()) {
+      const identity = /^(\d+)-(\d+)-[\da-f-]+$/.exec(peer.slice(prefix.length));
+      if (!identity) throw new Error('The sandbox found unreadable ownership metadata.');
+      if (ended(Number(identity[1]), new Date(Number(identity[2])), { youngMs: youngOwnershipMs })) {
+        try {
+          whenFree(() => fs.rmSync(path.join(folder, peer), { recursive: true, force: true }));
+          continue;
+        } catch (error) {
+          if (!lockedCodes.has(error.code)) throw error;
+          release();
+          return null;
+        }
+      }
+      const other = ticketOf(peer);
+      if (other !== null && (!other || other < ticket || (other === ticket && peer < name))) {
+        release();
+        return null;
+      }
+    }
+    return { directory, release };
+  } catch (error) {
+    try {
+      release();
+    } catch {
+      // The first error says what went wrong; a directory left behind is a dead entrant's once this process ends.
+    }
+    throw error;
+  }
+}
+// Called only under ownership: the temporary file may be torn by a killed publisher, but its shared name cannot be.
+function publishSandboxHolder(ownership, file, holder) {
+  const temporary = path.join(ownership.directory, 'publication');
+  fs.writeFileSync(temporary, JSON.stringify(holder));
+  whenFree(() => fs.renameSync(temporary, file));
+}
+const ownsSandboxHolder = (file, token) => readSandboxHolder(file)?.token === token;
+export const insideFolder = (parent, child) => {
+  const relative = path.relative(parent.toLowerCase(), child.toLowerCase());
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+};
+// Whether the folder's own access list holds the data deny, read without touching anything below it.
+export function builtInSandboxDataDenied(folder, run = spawnSync) {
+  const result = run('icacls', [folder], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  return result.status === 0 && dataDenyEntry.test(String(result.stdout || ''));
+}
+export function denyBuiltInSandboxData(
+  folder,
+  {
+    run = spawnSync,
+    profile = process.env.USERPROFILE || os.homedir(),
+    timeoutMs = dataDenyTimeoutMs,
+    waitMs = 1000,
+    readStartTime,
+    identityRecheck = identityRecheckMs,
+  } = {},
+) {
+  if (!folder || insideFolder(profile, folder)) return null;
+  const lock = path.join(folder, dataDenyLock),
+    done = path.join(folder, dataDenyDone),
+    denied = () => fs.existsSync(done) && builtInSandboxDataDenied(folder, run) && fs.existsSync(done);
+  if (denied()) return folder;
+  let ownership;
+  const holder = { pid: process.pid, since: new Date().toISOString(), token: randomUUID() },
+    ended = processIdentity(readStartTime, identityRecheck);
+  for (const until = Date.now() + timeoutMs; ; ) {
+    ownership = trySandboxOwnership(folder, '.sandbox-data-owner-', ended);
+    if (ownership) {
+      let keep = false;
+      try {
+        if (denied()) return folder;
+        if (!lockHolderAlive(readSandboxHolder(lock), ended)) {
+          publishSandboxHolder(ownership, lock, holder);
+          keep = true;
+          break;
+        }
+      } finally {
+        if (!keep) ownership.release();
+      }
+    }
+    if (Date.now() >= until)
+      throw new Error(
+        `The sandbox could not be kept from the data folder (${folder}): another run held its lock too long.`,
+      );
+    sleepSync(Math.min(waitMs, Math.max(0, until - Date.now())));
+  }
+  try {
+    if (denied()) return folder;
+    // The previous mark must be gone BEFORE even the root's ACL changes. A failed or killed propagation then stays
+    // incomplete for waiters and restarts, even though the root itself already holds the deny.
+    whenFree(() => fs.rmSync(done, { force: true }));
+    const result = run('icacls', [folder, '/deny', `${builtInSandboxGroup}:(OI)(CI)(RD)`], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: timeoutMs,
+    });
+    if (result.status !== 0)
+      throw new Error(
+        `The sandbox could not be kept from the data folder (${folder}): ${(result.stderr || result.stdout || result.error?.message || '').trim().slice(0, 500)}`,
+      );
+    if (!ownsSandboxHolder(lock, holder.token)) throw new Error('The sandbox data repair lost its ownership.');
+    const temporary = path.join(ownership.directory, 'completion');
+    fs.writeFileSync(temporary, `${new Date().toISOString()}\n`);
+    whenFree(() => fs.renameSync(temporary, done));
+    return folder;
+  } finally {
+    // Giving the lock back never replaces the repair's own outcome: a lock or directory left behind records this
+    // process, so it is a dead owner's, reclaimed, once the process ends, and a completed repair is read before them.
+    try {
+      if (ownsSandboxHolder(lock, holder.token)) whenFree(() => fs.rmSync(lock, { force: true }));
+    } catch {
+      // Left for reclamation, as above.
+    }
+    try {
+      ownership.release();
+    } catch {
+      // Left for reclamation, as above.
+    }
+  }
+}
+// What a Windows run does before it starts to keep the sandbox from the data folders: the secrets of the data folder
+// above the copy and of the controller's named one are denied, then each of those folders is (one inside the director's
+// profile gets no folder deny, as above). Without a named folder, only the one above the copy, as before --data.
+export function denyBuiltInSandboxDataFolders(root, data, { run = spawnSync, ...options } = {}) {
+  const secrets = denyBuiltInSandboxSecrets(builtInSandboxAllSecrets(root, data), run);
+  return {
+    secrets,
+    folders: builtInSandboxDataFolders(root, data).map(folder => denyBuiltInSandboxData(folder, { run, ...options })),
+  };
+}
+
+// How many built-in sandbox sessions run at once on this computer (C-43, November 2). On Windows the runtime's network
+// proxy binds inside the loopback range its install permitted, 60080-60089 by default, at two ports a session, so a
+// sixth session failed at setup ("EADDRINUSE 127.0.0.1:60089") whenever five were running: the pipeline's agents' own
+// test runs, its checks and integrations, and npm run verify all start one. Four leave a session spare.
+export const builtInSandboxSessionsAtOnce = 4;
+// Where the computer's session slots are kept: beside the helper's shared copy, which every copy of Studio desk on this
+// computer uses, so the controller and npm run verify share them.
+export const builtInSandboxSessionFolder = files => path.join(path.dirname(files.sharedSrtWin), 'sessions');
+
+// The default wait cap. Checks also supply their deadline, so shorter runs and time spent installing packages
+// or preparing the sandbox leave at least half their remaining allowance to report session exhaustion.
+export const builtInSandboxSessionWaitMs = 5 * 60 * 1000;
+export const builtInSandboxSessionWaitBudget = (deadlineMs, now = Date.now()) =>
+  deadlineMs === undefined
+    ? builtInSandboxSessionWaitMs
+    : Math.max(0, Math.min(builtInSandboxSessionWaitMs, (deadlineMs - now) / 2));
+const waitedFor = ms => {
+  const [count, unit] = ms >= 60000 ? [Math.round(ms / 60000), 'minute'] : [Number((ms / 1000).toFixed(1)), 'second'];
+  return `${count} ${unit}${count === 1 ? '' : 's'}`;
+};
+
+// Takes one of the computer's session slots, waiting in turn while all are taken, and answers the function that gives
+// it back. Claim, reclaim and release share interprocess ownership; a holder that ended frees its slot again. A
+// slot records its holder's ID and when it was taken, after the holder started, so a process that now has the ID but
+// started later is not the holder (Windows hands freed IDs on quickly), through the check every caller shares; a slot
+// without a readable time keeps the ID-only answer. Identity is revalidated on later passes, even with unchanged bytes:
+// by ID on each pass and by start time at most every `identityRecheck` (processIdentity above). A unique token also
+// keeps an old release from removing a new claim by the same PID. Publication is an atomic rename from the ownership
+// directory; malformed legacy files can be recovered under ownership without racing a publisher. `onWait` is told once,
+// when the run first finds every slot in use; a turn at the shared ownership that other runs keep for a moment is no
+// such wait. With no slot free after `waitBoundMs`, it stops with a plain reason, saying whether the slots were in use
+// or other runs kept it from looking, and changes no slot. Giving back is best-effort and never throws, within its own
+// bound (`releaseBoundMs`): a slot it could not give back records this process, so it is free once the process ends.
+export const builtInSandboxSessionReleaseMs = 10 * 1000;
+export async function takeBuiltInSandboxSession(
+  folder,
+  {
+    slots = builtInSandboxSessionsAtOnce,
+    pid = process.pid,
+    readStartTime,
+    identityRecheck = identityRecheckMs,
+    alive,
+    waitMs = 500,
+    waitBoundMs = builtInSandboxSessionWaitMs,
+    releaseBoundMs = builtInSandboxSessionReleaseMs,
+    onWait,
+  } = {},
+) {
+  fs.mkdirSync(folder, { recursive: true });
+  const started = Date.now(),
+    ended = processIdentity(readStartTime, identityRecheck),
+    holds = alive ?? ((holder, since) => !ended(holder, since));
+  let full = false;
+  for (;;) {
+    const ownership = trySandboxOwnership(folder, '.sandbox-session-owner-', ended);
+    if (ownership) {
+      try {
+        for (let slot = 0; slot < slots; slot++) {
+          const file = path.join(folder, `slot-${slot}.lock`),
+            holder = readSandboxHolder(file);
+          if (holder && holds(holder.pid, holder.since)) continue;
+          const token = randomUUID();
+          publishSandboxHolder(ownership, file, { pid, since: new Date().toISOString(), token });
+          let released = false;
+          return () => {
+            if (released) return;
+            try {
+              const until = Date.now() + releaseBoundMs,
+                giving = processIdentity(readStartTime, identityRecheck);
+              let releasing;
+              while (!(releasing = trySandboxOwnership(folder, '.sandbox-session-owner-', giving))) {
+                if (Date.now() >= until) return;
+                sleepSync(Math.min(waitMs, Math.max(0, until - Date.now())));
+              }
+              try {
+                if (ownsSandboxHolder(file, token)) whenFree(() => fs.rmSync(file, { force: true }));
+                released = true;
+              } finally {
+                releasing.release();
+              }
+            } catch {
+              // Left for reclamation once this process ends, as above; the run's own outcome stands.
+            }
+          };
+        }
+        if (!full) onWait?.(slots);
+        full = true;
+      } finally {
+        ownership.release();
+      }
+    }
+    const elapsed = Date.now() - started;
+    if (elapsed >= waitBoundMs)
+      throw new Error(
+        full
+          ? `All ${slots} of this computer's built-in sandbox sessions stayed in use by runs still going, so this run stopped after waiting ${waitedFor(elapsed)} for one.`
+          : `Other runs were taking or giving back this computer's built-in sandbox sessions the whole time, so this run stopped after waiting ${waitedFor(elapsed)} for its turn to look for a free one.`,
+      );
+    await new Promise(resolve => setTimeout(resolve, Math.min(waitMs, waitBoundMs - elapsed)));
+  }
 }
 
 // The command line the runtime runs inside the sandbox, through cmd.exe on Windows and sh elsewhere. The test
@@ -360,10 +724,49 @@ export const builtInSandboxGitConfiguration =
   '[user]\n\tname = Studio desk tests\n\temail = tests@studio-desk.invalid\n';
 
 // The test command run through the built-in sandbox: the runner gets the folder the tests may write
-// (the copy they run on) and the command itself.
+// (the copy they run on), the controller's own data folder it is kept from (plan.data), and the command itself.
 export function builtInSandboxCommand(plan) {
   return {
     executable: process.execPath,
-    args: [builtInSandboxRunner, '--root', plan.root, '--', plan.command.executable, ...plan.command.args],
+    args: [
+      builtInSandboxRunner,
+      '--root',
+      plan.root,
+      ...(plan.data ? ['--data', plan.data] : []),
+      ...(plan.deadlineMs === undefined ? [] : ['--deadline-ms', String(plan.deadlineMs)]),
+      '--',
+      plan.command.executable,
+      ...plan.command.args,
+    ],
+  };
+}
+// The runner's arguments, after the program's own: --root <folder>, then --data <folder> unless the command was recorded
+// before the controller named its data folder (such commands keep running, hiding only a data folder above the copy),
+// then an optional absolute deadline (--deadline-ms <ms since 1970>), then -- and the command. Null for any other list.
+export const builtInSandboxRunUsage =
+  'Usage: node built-in-sandbox-run.mjs --root <folder> [--data <folder>] [--deadline-ms <positive integer>] -- <executable> [args...]';
+export function builtInSandboxRunArguments(argv) {
+  if (argv[0] !== '--root' || !argv[1] || argv[1] === '--') return null;
+  let next = 2,
+    data = null;
+  if (argv[next] === '--data') {
+    if (!argv[next + 1] || argv[next + 1] === '--') return null;
+    data = argv[next + 1];
+    next += 2;
+  }
+  let deadlineMs;
+  if (argv[next] === '--deadline-ms') {
+    const value = argv[next + 1];
+    if (!/^\d+$/.test(value || '') || !Number.isSafeInteger(Number(value)) || Number(value) <= 0) return null;
+    deadlineMs = Number(value);
+    next += 2;
+  }
+  if (argv[next] !== '--' || argv.length < next + 2) return null;
+  return {
+    root: argv[1],
+    data,
+    ...(deadlineMs === undefined ? {} : { deadlineMs }),
+    executable: argv[next + 1],
+    args: argv.slice(next + 2),
   };
 }

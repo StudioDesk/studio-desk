@@ -197,7 +197,7 @@ test('Create the project only makes the sample under its chosen name without an 
   const router = open('/');
   await user.click(await screen.findByRole('button', { name: 'Try the code example' }));
   await waitFor(() => expect(router.state.location.search).toEqual({ template: 'code' }));
-  expect(screen.getByRole('heading', { level: 1, name: 'Here’s your sample project.' })).toBeTruthy();
+  expect(screen.getByRole('heading', { level: 1, name: 'Create your sample project.' })).toBeTruthy();
   const name = screen.getByLabelText('Name') as HTMLInputElement;
   expect(name.value).toBe('To-do list sample');
   // Nothing is sent without an idea: the box starts empty, so only creating the project alone is offered.
@@ -310,7 +310,7 @@ test('a refused sample keeps the page and says why', async () => {
   open('/?template=code');
   await user.click(await screen.findByRole('button', { name: 'Create the project only' }));
   expect(await screen.findByText('Choose a distinct project name.')).toBeTruthy();
-  expect(screen.getByRole('heading', { level: 1, name: 'Here’s your sample project.' })).toBeTruthy();
+  expect(screen.getByRole('heading', { level: 1, name: 'Create your sample project.' })).toBeTruthy();
 });
 
 test('Something else opens Create a project, as the rail’s Add a project does', async () => {

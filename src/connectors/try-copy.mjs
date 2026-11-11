@@ -14,9 +14,12 @@
 // the copy's record is the setting `try:<projectId>`, and its Run's output a file in the data folder.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../core/real-path.mjs';
 import path from 'node:path';
 import { recordProject } from '../core/projects.mjs';
 import { subscriptionEnvironment } from '../adapters/process.mjs';
+import { jobbedCommand } from '../adapters/process-job.mjs';
+import { measureProcessJobs } from '../adapters/native-process.mjs';
 import { builtInSandboxCommand, readBuiltInSandboxStatus } from '../adapters/built-in-sandbox.mjs';
 import { git } from './source-integration.mjs';
 import { lineRepository, projectLine } from './source-lines.mjs';
@@ -177,7 +180,7 @@ async function moveCopy(runtime, task, projectId, { discard = false, by = { type
   const existing = fs.existsSync(folder);
   if (existing) {
     const owner = worktreeRepository(folder);
-    if (!owner || !sameFolder(owner, fs.realpathSync.native(root)))
+    if (!owner || !sameFolder(owner, realPath(root)))
       throw failure(
         `${folder} holds something other than this project's try copy. Choose another folder in the project's settings.`,
         409,
@@ -233,7 +236,7 @@ async function moveCopy(runtime, task, projectId, { discard = false, by = { type
   const previous = tryCopy(store, projectId),
     record = {
       projectId,
-      folder: fs.realpathSync.native(folder),
+      folder: realPath(folder),
       taskId: task.id,
       title: task.title,
       candidateAttemptId: candidate.id,
@@ -312,7 +315,10 @@ export function runTry(runtime, projectId, { confirmOutside = false } = {}) {
   const environment = subscriptionEnvironment();
   for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
   const start = runtime.tryStartCommand?.(settings.start) || startCommand(settings.start),
-    command = place === 'built-in' ? builtInSandboxCommand({ root: copy.folder, command: start }) : start,
+    command =
+      place === 'built-in'
+        ? builtInSandboxCommand({ root: copy.folder, data: store.directory, command: start })
+        : start,
     key = copy.installs ? installKey(copy.folder) : null,
     install = key && key !== copy.packages,
     run = {
@@ -363,9 +369,15 @@ export function runTry(runtime, projectId, { confirmOutside = false } = {}) {
     entry.resolve();
   };
   const launch = (executable, args, onExit) => {
-    const child = spawn(executable, args, {
+    // On Windows the app runs in a job of its own (C-07): Stop and a controller restart end everything it started,
+    // detached or not. What it starts is kept while it runs, even past its first process, which a dev server's
+    // launcher may be (the director's exemption from ending leftovers).
+    // Asked of this computer once, shared with agents' attempts, which say so when the check ran and failed.
+    measureProcessJobs(runtime);
+    const started = jobbedCommand(executable, args, environment, { keep: true, enabled: !!runtime.processJobs });
+    const child = spawn(started.file, started.args, {
       cwd: copy.folder,
-      env: environment,
+      env: started.environment,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       // Elsewhere the app gets a process group of its own, so Stop ends everything it started.

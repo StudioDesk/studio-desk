@@ -403,10 +403,61 @@ export function houseRules(task: Task, studio: StudioState) {
   return [yoursText, ...automatic].filter(Boolean).join(' ').replace('Proposed stories is', 'Proposed stories are');
 }
 
-// As in the controller (countsTowardLimit): an attempt a usage limit stopped, one the controller's stop interrupted
-// and the director reconciled, or one that stopped to ask a question, doesn't use up one of a story's attempts.
-export const countsTowardLimit = (attempt: AttemptSummary) =>
-  !attempt.subscriptionHold && !(attempt.status === 'interrupted' && attempt.reconciledAt) && !attempt.question?.ask;
+// Why an attempt used up none of the work's attempts, as the controller records it (its endCause,
+// src/core/attempt-cause.mjs recordedCause), or null when the work itself ended it and it counts. A record from before
+// endCause is read by the rules that counted it then: a usage limit stopped it, it asked a question, or the
+// controller's stop interrupted it and the director reconciled it ('interrupted').
+export type Uncounted =
+  | 'usage-limit'
+  | 'question'
+  | 'interrupted'
+  | 'controller-stop'
+  | 'sandbox'
+  | 'random-test'
+  | 'environment'
+  | 'other';
+export function uncountedCause(attempt: AttemptSummary): Uncounted | null {
+  const recorded = attempt.endCause;
+  if (recorded?.cause) {
+    if (recorded.cause === 'work') return null;
+    if (recorded.cause === 'usage-limit' || recorded.cause === 'question') return recorded.cause;
+    if (recorded.cause !== 'environment') return 'other';
+    return recorded.detail === 'controller-stop' || recorded.detail === 'sandbox' || recorded.detail === 'random-test'
+      ? recorded.detail
+      : 'environment';
+  }
+  if (attempt.subscriptionHold) return 'usage-limit';
+  if (attempt.status === 'interrupted' && attempt.reconciledAt) return 'interrupted';
+  if (attempt.question?.ask) return 'question';
+  return null;
+}
+
+// As in the controller (countsTowardLimit): only an attempt the work itself ended uses up one of a story's attempts.
+export const countsTowardLimit = (attempt: AttemptSummary) => !uncountedCause(attempt);
+
+// The count the controller served for the work's own attempts (task.attemptCount), or undefined when it served none or
+// counted a later stage's: a code story's review, or other work's review stage, has its own attempts, while the story
+// page names the work's.
+export function servedWorkCount(task: Task) {
+  const served = task.attemptCount;
+  if (!served || !Number.isInteger(served.used)) return undefined;
+  const phase = (task.sourceStage as { phase?: string } | null | undefined)?.phase,
+    current = (task.stageState as { current?: string } | undefined)?.current;
+  if (phase && phase !== 'implementing') return undefined;
+  if (task.stageState && current && current !== 'work') return undefined;
+  return served;
+}
+
+// How many of the work's counted attempts on record came before the ones the controller counts now: a flow's earlier
+// rounds, whose attempts stay on record without using the current round's limit. Its counted attempts are numbered
+// from the first after them, so the current one reads "attempt 1 of 3" on a second round. None without a served count.
+export function earlierCounted(task: Task, counted: number) {
+  const served = servedWorkCount(task);
+  return served ? Math.max(0, counted - served.used) : 0;
+}
+
+// The work's limit: the served one when the controller counted the work's own stage, otherwise the task's.
+export const workLimit = (task: Task) => servedWorkCount(task)?.allowed ?? task.maxAttempts;
 
 // Whether integrating this project's stories replaces the running controller's source: a controller that develops
 // itself, on the project without a repository of its own. A repository project's story integrates into its own
@@ -414,9 +465,21 @@ export const countsTowardLimit = (attempt: AttemptSummary) =>
 export const integratesController = (studio: Pick<StudioState, 'autonomy' | 'project'>) =>
   !!studio.autonomy?.selfHosted && !studio.project?.source;
 
-// The attempts a story has used of the ones it may. As in the controller, a task with stages counts only its own
-// work's attempts: a review's attempts are not tries at the work.
-export const attemptsUsed = (task: Task, attempts: AttemptSummary[]) => {
+// The attempts a story has used of the ones it may: the count the controller served (task.attemptCount), which is the
+// one its Start refuses past, so the page, Today and the offered actions agree. A record served without one is counted
+// as before: a task with stages counts only its own work's attempts, since a review's attempts are not tries at the
+// work.
+export const attemptsUsed = (task: Task, attempts: AttemptSummary[]) => counts(task.attemptCount, task, attempts);
+// The work's own attempts as the story page names them (its stands line, attempt row and attempt names): the served
+// count while the controller counts the work's stage, and otherwise the work's attempts counted as before, so a code
+// story under review still reads its builds rather than its review's attempts.
+export const workAttemptsUsed = (task: Task, attempts: AttemptSummary[]) =>
+  counts(servedWorkCount(task), task, attempts);
+function counts(served: Task['attemptCount'], task: Task, attempts: AttemptSummary[]) {
+  if (served && Number.isInteger(served.used)) {
+    const allowed = served.allowed ?? task.maxAttempts ?? 0;
+    return { used: served.used, allowed, left: Math.max(0, allowed - served.used) };
+  }
   const builds = attempts.filter(
       attempt =>
         countsTowardLimit(attempt) &&
@@ -426,7 +489,7 @@ export const attemptsUsed = (task: Task, attempts: AttemptSummary[]) => {
     ).length,
     allowed = task.maxAttempts ?? 0;
   return { used: builds, allowed, left: Math.max(0, allowed - builds) };
-};
+}
 
 // The CLI an attempt ran on, by the name the director knows ("Codex", "Claude Code"). A code editor's attempt is
 // recorded under its wrapping adapter, so its configuration names the CLI; older records may not say.

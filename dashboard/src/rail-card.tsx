@@ -12,12 +12,22 @@ import {
   type PointerEventHandler,
   type Ref,
 } from 'react';
-import { getJSON, liveUrl, shellUrl, type Live, type Project, type Shell } from './api';
+import { getJSON, shellUrl, type Project, type Shell } from './api';
 import { decisionState } from './decisions';
 import { initials, projectColor } from './frame';
 import type { ProjectCalls } from './rail-calls';
-import { queryKeys } from './records';
-import { isCleanup, isHold, liveSummary, type HomeItem, type RunStory, type StudioState } from './studio-runs';
+import { queryKeys, readLive } from './records';
+import {
+  isCarry,
+  isCleanup,
+  isHold,
+  isRelease,
+  isResume,
+  liveSummary,
+  type HomeItem,
+  type RunStory,
+  type StudioState,
+} from './studio-runs';
 import { placeIn, quoted } from './today';
 
 const plural = (count: number, one: string, many = one + 's') => (count === 1 ? one : many);
@@ -34,8 +44,9 @@ export interface CallLine {
   verb: string;
   // Where: the idea in the director's words, or the task's title.
   where: string | null;
-  // The call's page, after the project's address (/p/<id>): its idea's page, the step's own page outside any idea, or
-  // Today at Your calls for a hold or a call with neither.
+  // The call's page, after the project's address (/p/<id>): its idea's page, the step's own page outside any idea, the
+  // Releases page for a stopped release, the story's page for a stopped carry, or Today at Your calls for a hold, a
+  // project's resume or a call with neither.
   to: string;
 }
 
@@ -52,6 +63,32 @@ export function callLine(item: HomeItem, state: StudioState, stories: RunStory[]
       to: '#calls',
     };
   }
+  // The project held after a restart, with the stories that wait only for its resume, links to Today at Your calls.
+  if (isResume(item)) {
+    const waiting = item.taskIds.length;
+    return {
+      key: `resume:${item.projectId}`,
+      verb: 'Resume this project',
+      where: waiting ? `${waiting} ${plural(waiting, 'story waits', 'stories wait')} on it` : null,
+      to: '#calls',
+    };
+  }
+  // A milestone's stopped release links to the Releases page, where it is released again.
+  if (isRelease(item))
+    return {
+      key: `release:${item.milestoneId}`,
+      verb: `Release ${item.version} again`,
+      where: null,
+      to: '/releases',
+    };
+  // A story's turned-down or stopped carry links to the story's own page.
+  if (isCarry(item))
+    return {
+      key: `carry:${item.taskId}`,
+      verb: `${item.back ? 'Bring back' : 'Carry'} to ${item.line} again`,
+      where: item.title,
+      to: `/tasks/${encodeURIComponent(item.taskId)}`,
+    };
   if (isCleanup(item)) {
     const count = item.members.length;
     return {
@@ -108,7 +145,7 @@ function useRead(projectId: string) {
     }),
     live = useQuery({
       queryKey: queryKeys.live(projectId),
-      queryFn: ({ signal }) => getJSON<Live>(liveUrl(projectId), signal),
+      queryFn: ({ signal }) => readLive(projectId, signal),
       enabled: false,
     });
   return useMemo<StudioState | null>(

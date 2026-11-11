@@ -1,10 +1,12 @@
 // A scheduler pass measures the live source at most once (measuringPass, src/connectors/source-changes.mjs): every
 // story it checks and the scope a start records reuse that measurement until a story starts, which measures again for
-// the checks after it. The next pass measures afresh, and a check outside a pass measures every time. Work that cannot
+// the checks after it. A dispatch pass measures in a process of its own before it (src/connectors/source-measure.mjs)
+// and starts at most one story on that measurement. The next pass measures afresh, and a check outside a pass measures every time. Work that cannot
 // start yet, with no free slot or one of its resources held, is not measured at all until it could start.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { setup } from './source-story-setup.mjs';
@@ -13,7 +15,7 @@ import { changeScope, measureAgain, measuringPass } from '../src/connectors/sour
 
 // How many times the live source was measured: each measurement visits every file of it once, package.json among them.
 function measurements(t, root) {
-  const marker = path.join(fs.realpathSync(root), 'package.json'),
+  const marker = path.join(realPath(root), 'package.json'),
     lstat = fs.lstatSync,
     counted = { count: 0 };
   t.mock.method(fs, 'lstatSync', (file, ...args) => {
@@ -68,20 +70,25 @@ test('one dispatch pass measures the live source once until a story starts, stor
     }
   });
   // The pass checks all three stories, then each queued one again before its start, and the start checks its scope
-  // twice more: one measurement until the first story starts. The stories after it have no slot, so nothing is
-  // measured for them (October 29: their git calls held the controller for seconds on each pass).
-  runner.dispatchQueued();
-  assert.deepEqual(startedAfter, [1], 'The first story started on the pass’s one measurement.');
-  assert.equal(measured.count, 1, 'The checks after the start measured nothing.');
+  // twice more, all on the one measurement its measuring process made before it (src/connectors/source-measure.mjs), so
+  // nothing is measured on the controller's thread. The pass starts that one story; in the pass after it the stories
+  // have no slot, so nothing is measured for them (October 29: their git calls held the controller for seconds on each
+  // pass).
+  await runner.dispatchQueued();
+  assert.deepEqual(startedAfter, [0], 'The first story started on the measuring process’s measurement.');
+  assert.equal(measured.count, 0, 'Nothing was measured on the controller’s thread.');
   const attempt = store.attempt(store.task(first).lastAttemptId);
   assert.equal(store.task(first).status, 'running');
   assert.deepEqual(attempt.sourceChange.allowedFiles, ['src/core/workflows.mjs']);
   // The second and third stories wait for the first to finish building, in a studio of one attempt at once; the second
   // stays queued.
-  for (const id of [second, third]) {
-    assert.equal(store.task(id).status, 'blocked');
+  await waitFor(
+    () => [second, third].every(id => store.task(id).status === 'blocked'),
+    'the pass after the start to weigh the other stories',
+  );
+  assert.equal(measured.count, 0, 'The pass after the start measured nothing.');
+  for (const id of [second, third])
     assert.match(store.task(id).reason, /to finish building: one source story builds at once/);
-  }
   assert.equal(store.task(second).queued, true);
   await waitFor(
     () =>
@@ -97,7 +104,7 @@ test('one dispatch pass measures the live source once until a story starts, stor
   runner.dispatchQueued();
   assert.equal(measured.count, 0, 'A pass with no free slot measured nothing.');
   assert.match(store.task(third).reason, /to finish building: one source story builds at once/);
-  assert.deepEqual(startedAfter, [1], 'Nothing else started.');
+  assert.deepEqual(startedAfter, [0], 'Nothing else started.');
   // Let the first story finish with nothing queued after it.
   runner.pipeline('remove', [second], 'project-legacy');
   fs.rmSync(hold);

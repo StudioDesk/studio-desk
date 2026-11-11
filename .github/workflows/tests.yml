@@ -1,0 +1,61 @@
+# The model-free suite (the controller's tests, and the dashboard's typecheck, lint, tests and build) on
+# Windows, macOS (Apple Silicon) and Linux. It makes no model calls and needs no secrets.
+name: Tests
+
+on:
+  push:
+    branches: [main, 'release/**', 'ci/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: Suite (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Git identity for the tests' own commits
+        run: |
+          git config --global user.name "Studio desk tests"
+          git config --global user.email "tests@users.noreply.github.com"
+          git config --global init.defaultBranch main
+
+      # The built-in sandbox on Linux needs bubblewrap and socat, and Ubuntu 24.04 restricts the
+      # unprivileged user namespaces bubblewrap uses.
+      - name: Linux sandbox tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat ripgrep
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install the development tools
+        run: npm ci
+
+      # One pass. A second spelling of a folder is covered inside it: test/linked-temp.test.mjs runs the link-sensitive
+      # files under a link, and every path the controller compares goes through src/core/real-path.mjs. The whole
+      # suite with its temporary folder reached through a link (STUDIO_TEST_LINKED_TEMP=1) runs once per release
+      # candidate, by hand.
+      - name: Run the suite
+        run: npm test

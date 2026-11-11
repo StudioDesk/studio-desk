@@ -1,5 +1,5 @@
 // Installed packages for the source pipeline (Decision MP-026, v1.0 item 19b). Every copy the pipeline tests
-// lives inside the controller's data folder (check copies under jobs/, worktrees under wt/), and Node,
+// lives inside the controller's data folder (check copies and worktrees under wt/), and Node,
 // TypeScript, ESLint and Vite find packages by walking up from a file to the nearest node_modules. So one
 // install at <data>/node_modules serves every tested copy, with no link or copy for git or the test
 // sandbox to trip over. Before tests run, the controller makes sure that install matches the copy's lockfile,
@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { realPath } from '../core/real-path.mjs';
 
 const self = fileURLToPath(import.meta.url),
   marker = '.studio-lockfile';
@@ -120,7 +121,7 @@ function renameWhenFree(from, to, { rename, wait, settled = () => false }) {
 export function ensureInstall(directory, data, npm, log = console.log, { rename = fs.renameSync, wait = 30000 } = {}) {
   const key = installKey(directory);
   if (!key) throw new Error('The copy holds no package.json and package-lock.json to install from.');
-  const relative = path.relative(fs.realpathSync(data), fs.realpathSync(directory));
+  const relative = path.relative(realPath(data), realPath(directory));
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative))
     throw new Error(
       "The tested copy is outside the controller's data folder, so it cannot use the installed packages.",

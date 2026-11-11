@@ -10,7 +10,7 @@
 // every function here takes `undefined` for that line.
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { runGit } from '../git.mjs';
 import { sourcePlan } from './source-checks.mjs';
 import {
   committedFiles,
@@ -20,20 +20,11 @@ import {
   sourceBase,
   sourceHead,
 } from './source-worktrees.mjs';
-import { fastForward, git, landed, repositoryState } from './source-integration.mjs';
+import { fastForward, git, gitAsync, landed, repositoryState } from './source-integration.mjs';
 import { projectSource } from './source-projects.mjs';
 import { projectCatalog } from '../core/project-organization.mjs';
 import { recordProject } from '../core/projects.mjs';
-
-const realpath = value => {
-  try {
-    return fs.realpathSync.native(value);
-  } catch {
-    return fs.realpathSync(value);
-  }
-};
-const samePath = (a, b) =>
-  process.platform === 'win32' ? realpath(a).toLowerCase() === realpath(b).toLowerCase() : realpath(a) === realpath(b);
+import { realPath as realpath, samePath } from '../core/real-path.mjs';
 
 // The branch a folder has checked out, or null when its HEAD is detached.
 export function checkedOut(root) {
@@ -51,6 +42,16 @@ export function branchCommit(root, branch) {
     throw new Error(`The branch ${branch} no longer exists in the repository.`);
   }
 }
+// The same two answers without holding the controller's thread (C-20).
+export const checkedOutAsync = root =>
+  gitAsync(root, ['symbolic-ref', '--quiet', '--short', 'HEAD']).then(
+    branch => branch || null,
+    () => null,
+  );
+export const branchCommitAsync = (root, branch) =>
+  gitAsync(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`]).catch(() => {
+    throw new Error(`The branch ${branch} no longer exists in the repository.`);
+  });
 // Another worktree of the repository that has the branch checked out, or null.
 export function checkedOutElsewhere(root, branch) {
   const blocks = git(root, ['worktree', 'list', '--porcelain'], { raw: true }).split(/\r?\n\r?\n/);
@@ -116,7 +117,7 @@ export function measureLine(root, line, profile, parent) {
       key,
       inCommit(root, commit, parent, profile, worktree => ({
         ...sourcePlan(worktree, profile),
-        root: fs.realpathSync(root),
+        root: realpath(root),
       })),
     );
   return structuredClone(plan);
@@ -125,14 +126,15 @@ export function measureLine(root, line, profile, parent) {
 const ignoredAt = new Map();
 // Reads a file at a commit as a checkout would write it (with its end-of-line and other filters).
 function readAt(root, commit, file) {
-  const result = spawnSync('git', ['-c', 'core.longpaths=true', 'cat-file', '--filters', `${commit}:${file}`], {
-    cwd: root,
-    windowsHide: true,
-    timeout: 30000,
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  if (result.error || result.status !== 0) throw new Error(`${file} could not be read from ${commit.slice(0, 7)}.`);
-  return result.stdout;
+  try {
+    return runGit(root, ['cat-file', '--filters', `${commit}:${file}`], {
+      encoding: null,
+      literal: false,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch {
+    throw new Error(`${file} could not be read from ${commit.slice(0, 7)}.`);
+  }
 }
 // How a story's scope reads the line it measured: a file's bytes, which changed files are committed, which missing
 // files a commit deleted, and which new paths git ignores. On the checked-out branch these are the folder's; on another line, its tip commit's, where every
@@ -174,6 +176,191 @@ export function lineFiles(root, line, profile, parent) {
   };
 }
 
+// A measurement's failure as the measuring process sends it, and the error a check then throws again: its message and
+// the fields a refusal is read by.
+const failure = error => ({
+  message: String(error?.message ?? error),
+  ...(error?.code !== undefined ? { code: error.code } : {}),
+  ...(error?.outdated ? { outdated: structuredClone(error.outdated) } : {}),
+});
+export const measuredError = ({ message, ...fields }) => Object.assign(new Error(message), fields);
+const answer = fn => {
+  try {
+    return { value: fn() };
+  } catch (error) {
+    return { error: failure(error) };
+  }
+};
+// The measurements this controller keeps of commits (measureLine, lineFiles), so the measuring process leaves out what
+// is already known.
+export const knownMeasurements = () => [...measured.keys(), ...ignoredAt.keys()];
+// What the checked-out folder holds beyond its commit: git's status of every changed, staged and untracked file
+// (ignored files left out, and without the index lock git would otherwise take to refresh it), with the content hash of
+// each file status lists, so a second edit to a file already changed counts too. It hashes only those files.
+function worktreeState(root) {
+  const status = runGit(root, ['--no-optional-locks', 'status', '--porcelain=v2', '-z', '--untracked-files=all'], {
+      raw: true,
+    }),
+    entries = status.split('\0'),
+    listed = [];
+  // Porcelain v2: `1 XY sub mH mI mW hH hI path`, `2 ... X score path` followed by the original path, `u ... path`,
+  // and `? path` for an untracked file.
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i],
+      fields = { 1: 8, 2: 9, u: 10 }[entry[0]];
+    if (entry.startsWith('? ')) listed.push(entry.slice(2));
+    else if (fields) listed.push(entry.split(' ').slice(fields).join(' '));
+    if (entry[0] === '2') i++;
+  }
+  const files = [],
+    other = [];
+  for (const file of listed) {
+    let stat;
+    try {
+      stat = fs.lstatSync(path.join(root, file));
+    } catch {
+      continue; // Deleted: status names it.
+    }
+    // git reads one path a line; a name holding a line break is told apart by its size and time instead.
+    if (stat.isFile() && !/[\r\n]/.test(file)) files.push(file);
+    else other.push([file, stat.isFile() ? stat.size : null, stat.mtimeMs]);
+  }
+  const hashes = files.length
+    ? runGit(root, ['hash-object', '--stdin-paths'], { input: files.join('\n') + '\n' }).split(/\r?\n/)
+    : [];
+  return { status, hashes: files.map((file, i) => [file, hashes[i]]), other };
+}
+// Where a line stands: the commit the folder has checked out and, for a named line, the branch checked out and the
+// line's tip; for the line checked out, also its uncommitted state (worktreeState). The measuring process records it
+// before it measures, and a pass reuses that measurement only while the line still stands there (an integration, a
+// director's commit, or an edit or new file in the checked-out folder since moves it), asking git and hashing only the
+// files status lists.
+export function lineTip(root, line) {
+  return JSON.stringify([
+    answer(() => git(root, ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'])),
+    ...(line === undefined ? [] : [answer(() => checkedOut(root)), answer(() => branchCommit(root, line))]),
+    ...(live(root, line) ? [answer(() => worktreeState(root))] : []),
+  ]);
+}
+// What a story's scope check asks of a line, measured at once, as the measuring process does for a dispatch pass
+// (src/connectors/source-measure.mjs): the line's plan (measureLine), the commit a story would start from (lineBase),
+// which files are committed and which HEAD holds, and which of each list of new files git ignores (lineFiles). Each
+// answer is a value or the failure measuring on the thread would have thrown. A commit's plan or ignore answer in
+// `known` is left out and named by its key.
+export function lineMeasurement(root, line, profile, parent, { ignored = [], known = [] } = {}) {
+  const tip = lineTip(root, line),
+    lists = ignored.filter(files => files.length),
+    base = answer(() => lineBase(root, line, profile));
+  if (live(root, line))
+    return {
+      tip,
+      live: true,
+      plan: answer(() => sourcePlan(root, profile)),
+      base,
+      committed: [...committedFiles(root)],
+      inHead: answer(() => git(root, ['ls-tree', '-r', '-z', '--name-only', 'HEAD'], { raw: true }).split('\0')),
+      ignored: lists.map(files => [JSON.stringify(files), { value: ignoredPaths(root, files) }]),
+    };
+  let commit;
+  try {
+    commit = branchCommit(root, line);
+  } catch (error) {
+    return { tip, live: false, plan: { error: failure(error) }, base };
+  }
+  const real = realpath(root),
+    planKey = JSON.stringify([real, commit, profile]),
+    listKey = files => JSON.stringify([real, commit, [...files].sort()]),
+    plan = known.includes(planKey) ? null : {},
+    asked = lists.filter(files => !known.includes(listKey(files))),
+    answers = new Map();
+  if (plan || asked.length) {
+    const measuredHere = answer(() =>
+      inCommit(root, commit, parent, profile, worktree => {
+        if (plan)
+          Object.assign(
+            plan,
+            answer(() => ({ ...sourcePlan(worktree, profile), root: realpath(root) })),
+          );
+        for (const files of asked)
+          answers.set(
+            JSON.stringify(files),
+            answer(() => ignoredPaths(worktree, files)),
+          );
+      }),
+    );
+    // A working copy that could not be made or removed fails each answer it was for, as it fails each on the thread.
+    if (measuredHere.error) {
+      if (plan) Object.assign(plan, { error: measuredHere.error });
+      for (const files of asked) answers.set(JSON.stringify(files), { error: measuredHere.error });
+    }
+  }
+  return {
+    tip,
+    live: false,
+    commit,
+    real,
+    plan: { key: planKey, ...(plan || {}) },
+    base,
+    ignored: lists.map(files => [
+      JSON.stringify(files),
+      { key: listKey(files), ...(answers.get(JSON.stringify(files)) || {}) },
+    ]),
+  };
+}
+// The plan and file answers a check reads from a line measured by the measuring process (lineMeasurement), as
+// measureLine and lineFiles would answer: a failure is thrown again with its message, a commit's measurement is kept as
+// the thread keeps its own, and a list the process was not asked about is answered on the thread.
+export function measuredLine(root, line, profile, parent, measurement) {
+  const asked = new Map(measurement.ignored || []);
+  if (measurement.plan.error) throw measuredError(measurement.plan.error);
+  if (measurement.live) {
+    const committed = new Set(measurement.committed),
+      inHead = measurement.inHead.value && new Set(measurement.inHead.value);
+    return {
+      current: measurement.plan.value,
+      files: {
+        read: file => fs.readFileSync(path.join(root, file)),
+        committed: files => (files.length ? files.filter(file => committed.has(file)) : []),
+        ignored: files => {
+          const known = asked.get(JSON.stringify(files));
+          return known ? [...known.value] : ignoredPaths(root, files);
+        },
+        gone: files => {
+          if (!files.length) return [];
+          if (measurement.inHead.error) throw measuredError(measurement.inHead.error);
+          return files.filter(file => !inHead.has(file));
+        },
+      },
+    };
+  }
+  const { commit } = measurement,
+    plan = measurement.plan.value
+      ? remember(measured, measurement.plan.key, measurement.plan.value)
+      : measured.get(measurement.plan.key);
+  return {
+    current: plan ? structuredClone(plan) : measureLine(root, line, profile, parent),
+    files: {
+      read: file => readAt(root, commit, file),
+      committed: files => [...files],
+      gone: files => [...files],
+      ignored: files => {
+        if (!files.length) return [];
+        const known = asked.get(JSON.stringify(files)),
+          key = JSON.stringify([measurement.real, commit, [...files].sort()]);
+        if (ignoredAt.has(key)) return [...ignoredAt.get(key)];
+        if (known?.error) throw measuredError(known.error);
+        return [
+          ...remember(
+            ignoredAt,
+            key,
+            known?.value || inCommit(root, commit, parent, profile, worktree => ignoredPaths(worktree, files)),
+          ),
+        ];
+      },
+    },
+  };
+}
+
 // What an integration records about where it lands: the checked-out branch and its tip, as before, or the line's
 // branch and tip with `live: false`.
 export function lineRepository(root, line) {
@@ -198,8 +385,13 @@ export function moveLine(root, journal) {
     );
   try {
     git(root, ['update-ref', '-m', 'Studio desk integration', `refs/heads/${branch}`, journal.commit, head]);
-  } catch {
-    throw new Error(`${branch} moved during verification. Approve integration again to merge onto the current tip.`);
+  } catch (error) {
+    // git can move the ref and then exit abnormally, as the November 10 recovery drill did: a line that already holds
+    // the commit counts as moved, and the caller records the landing once from the line.
+    if (lineReached(root, journal)) return;
+    throw new Error(`${branch} moved during verification. Approve integration again to merge onto the current tip.`, {
+      cause: error,
+    });
   }
 }
 // Whether an integration's commit has reached its line.
@@ -258,16 +450,15 @@ const sourceRoot = (store, projectId, runtime) => {
     throw new Error('Only a project on the source workflow keeps release lines.');
   return projectSource(store, projectId, runtime).root;
 };
-// Adds a line for an existing branch, or for a new branch made at `from` (a tag, branch or commit). The first line
-// added also records the branch the folder has checked out as the newest line; later lines go before the newest one,
-// release lines in version order and others in the order they were made.
-export function addProjectLine(store, projectId, runtime, { branch, from } = {}) {
-  const root = sourceRoot(store, projectId, runtime);
+// Prepares a branch and its ordered line records without publishing them. The caller can prepare several lines on
+// a draft project before saving the complete change in one transaction. Existing branches are never moved.
+export function prepareProjectLine(root, project, { branch, from } = {}) {
   branch = branchName(root, branch);
-  const project = store.project(projectId),
-    at = new Date().toISOString();
+  const at = new Date().toISOString();
   let lines = projectLines(project);
-  if (!lines.length) {
+  if (project.shipsTo && branch === project.shipsTo)
+    throw new Error(`Releases ship to ${branch}, so it is not a line work lands on.`);
+  if (!lines.length && !project.shipsTo) {
     const current = checkedOut(root);
     if (!current) throw new Error('Check out the branch new releases are made on before adding a line.');
     lines = [{ branch: current, state: 'maintained', at }];
@@ -308,20 +499,31 @@ export function addProjectLine(store, projectId, runtime, { branch, from } = {})
         })
       : -1,
     at_ = newer < 0 ? older.length : newer;
-  project.lines = [
-    ...older.slice(0, at_),
-    { branch, state: 'maintained', at, ...(from !== undefined ? { from } : {}) },
-    ...older.slice(at_),
-    lines.at(-1),
-  ];
+  const added = { branch, state: 'maintained', at, ...(from !== undefined ? { from } : {}) };
+  // A project on version lines keeps every line in version order, so the newest version's line is the newest line;
+  // a branch that is not a version's line goes before them.
+  const prepared = project.shipsTo
+    ? [...lines, added].sort((a, b) => {
+        const left = series(a.branch),
+          right = series(b.branch);
+        return !left || !right ? (left ? 1 : 0) - (right ? 1 : 0) : left[0] - right[0] || left[1] - right[1];
+      })
+    : [...older.slice(0, at_), added, ...older.slice(at_), lines.at(-1)];
+  return {
+    lines: prepared,
+    message: `Line ${branch} added${from !== undefined ? ` from ${from}` : ''} at ${commit.slice(0, 7)}; ideas can now land on it.`,
+  };
+}
+// Adds a line for an existing branch, or for a new branch made at `from` (a tag, branch or commit). The first line
+// added also records the branch the folder has checked out as the newest line; later lines go before the newest one,
+// release lines in version order and others in the order they were made.
+export function addProjectLine(store, projectId, runtime, options = {}) {
+  const root = sourceRoot(store, projectId, runtime),
+    project = store.project(projectId),
+    prepared = prepareProjectLine(root, project, options);
+  project.lines = prepared.lines;
   store.putProject(project);
-  store.event(
-    'project_line',
-    null,
-    null,
-    `Line ${branch} added${from !== undefined ? ` from ${from}` : ''} at ${commit.slice(0, 7)}; ideas can now land on it.`,
-    projectId,
-  );
+  store.event('project_line', null, null, prepared.message, projectId);
   return project.lines;
 }
 // Retires a line, so no new idea lands on it, or keeps it again. Work already on it finishes. The newest line cannot

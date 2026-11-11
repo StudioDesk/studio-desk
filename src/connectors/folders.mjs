@@ -2,6 +2,7 @@
 // only, never file contents, and spawns no git process: a folder holding a .git entry (a repository's
 // folder, or a worktree's file) is marked as a repository.
 import fs from 'node:fs';
+import { realPath } from '../core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -33,7 +34,7 @@ function opens(folder) {
 function read(folder, home, nearest) {
   let real, refusal;
   try {
-    real = fs.realpathSync.native(folder);
+    real = realPath(folder);
     return { real, entries: fs.readdirSync(real, { withFileTypes: true }) };
   } catch (error) {
     if (real !== undefined && error.code !== 'ENOTDIR') throw new Error('The folder cannot be opened.');

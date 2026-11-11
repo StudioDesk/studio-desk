@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import path from 'node:path';
 import { setup } from './studio-setup.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
@@ -58,7 +59,7 @@ async function studio(t) {
   git(root, ['config', 'commit.gpgsign', 'false']);
   git(root, ['add', '-A']);
   git(root, ['commit', '--quiet', '-m', 'Try fixture']);
-  const project = { id: 'project-try', name: 'Try fixture', source: { root: fs.realpathSync(root), profile } };
+  const project = { id: 'project-try', name: 'Try fixture', source: { root: realPath(root), profile } };
   store.putProject(project);
   // The suite never runs the real sandbox: Run runs on this computer once confirmed.
   runner.tryLetsPortsThrough = false;
@@ -102,12 +103,12 @@ async function studio(t) {
     fs.writeFileSync(path.join(root, file), text);
     git(root, ['commit', '--quiet', '-am', `Landed ${file}`]);
   };
-  const folder = `${fs.realpathSync(root)}-try`;
+  const folder = `${realPath(root)}-try`;
   t.after(async () => {
     for (const entry of runner.tryRuns?.values() || []) entry.child?.kill('SIGKILL');
     fs.rmSync(folder, { recursive: true, force: true });
   });
-  return { c, store, runner, root: fs.realpathSync(root), project, story, land, folder };
+  return { c, store, runner, root: realPath(root), project, story, land, folder };
 }
 
 const read = (folder, file) => fs.readFileSync(path.join(folder, file), 'utf8');

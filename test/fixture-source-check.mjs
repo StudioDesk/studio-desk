@@ -8,6 +8,33 @@ if (mode === 'slower') await new Promise(resolve => setTimeout(resolve, 4000));
 if (mode === 'outlast') await new Promise(resolve => setTimeout(resolve, 9000));
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'malformed') console.log('No test totals');
+// A run that stops before any test: only an error on its error output, and exit 1.
+else if (mode === 'missing-module') {
+  process.stderr.write('Error: Cannot find module fixture-missing\n');
+  process.exitCode = 1;
+}
+// A run whose error output is longer than a merge keeps of it: 6,000 characters, then its last line.
+else if (mode === 'long-errors') {
+  process.stderr.write('x'.repeat(6000) + '\nError: the end of a long error output\n');
+  process.exitCode = 1;
+}
+// The given number of passing tests (the next argument); 'count 0' reports a run of no tests.
+else if (mode === 'count') {
+  const count = Number(process.argv[3]);
+  console.log(
+    [
+      'TAP version 13',
+      ...Array.from({ length: count }, (_, index) => `ok ${index + 1} - counted fixture test ${index + 1}`),
+      `1..${count}`,
+      `# tests ${count}`,
+      `# pass ${count}`,
+      '# fail 0',
+      '# cancelled 0',
+      '# skipped 0',
+      '# todo 0',
+    ].join('\n'),
+  );
+}
 // One failure first, with its location and a block error, then more passing output (over 200 KB) than an
 // employee's test run keeps of it, then consistent totals.
 else if (mode === 'early-failure') {

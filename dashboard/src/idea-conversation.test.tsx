@@ -505,6 +505,54 @@ test('an idea on a general project reads Step cards and no checks line, with the
 });
 
 // The idea's stories once the plan is official, waiting for the director's approval.
+test("a plan's summaries name the roles its planner wrote as IDs, in the bubble, the cards and What happened", async () => {
+  controller.shell.roles!.push({ id: 'markets-researcher', label: 'Markets researcher' });
+  const said = 'The markets-researcher compares prices, then the engineer shows a well-known list.',
+    named = 'The markets researcher compares prices, then the engineer shows a well-known list.';
+  planAttempt(
+    'a-plan',
+    4,
+    7,
+    breakdown([
+      story('prices', { role: 'markets-researcher', summary: 'The markets-researcher compares prices.' }),
+      story('page', { dependencies: ['prices'], summary: 'The engineer shows a well-known list.' }),
+    ]),
+    { result: { summary: said } },
+  );
+  open([checksStep(), planStep('review', { dependencies: ['T-checks'] })]);
+  const region = await talk(),
+    plan = (await entries(region))[2]!;
+  expect(plan.querySelector('.sd-bubble__words')?.textContent).toBe(named);
+  // The cards' summaries read the role's name; who builds them reads as before.
+  expect(await cards(plan)).toEqual([
+    {
+      number: 'Story 1',
+      title: 'Title of prices',
+      does: 'The markets researcher compares prices.',
+      foot: ['Built by a markets researcher · reviewed by Morgan'],
+      changed: false,
+    },
+    {
+      number: 'Story 2',
+      title: 'Title of page',
+      does: 'The engineer shows a well-known list.',
+      foot: ['Built by Eli · reviewed by Morgan', 'Builds on 1'],
+      changed: false,
+    },
+  ]);
+  // What happened quotes the plan's summary the same way, and the page shows the role's ID nowhere but in the
+  // recorded plan file, which its viewer reads as it was written.
+  const happened = screen.getByRole('region', { name: 'What happened' });
+  await waitFor(() => expect(happened.querySelector('.sd-timeline__quote')?.textContent).toBe(named));
+  await waitFor(() => expect(document.querySelector('.sd-viewer')?.textContent).toContain('"markets-researcher"'));
+  const page = document.body.cloneNode(true) as HTMLElement;
+  page.querySelectorAll('.sd-viewer').forEach(viewer => viewer.remove());
+  expect(page.textContent).not.toContain('markets-researcher');
+  // The recorded plan is read as it was written, not rewritten.
+  expect(posted()).toEqual([]);
+  expect(controller.attempts.find(item => item.id === 'a-plan')?.result?.summary).toBe(said);
+});
+
 const proposed = (id: string, title: string, extra: Partial<Task> = {}) =>
   taskFixture(id, {
     title,

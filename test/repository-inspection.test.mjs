@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -10,11 +11,11 @@ import { spawnSync } from 'node:child_process';
 import './model-free-studio.mjs';
 import { inspectRepository, proposeSourceProfile, recordProjectSource } from '../src/connectors/source-projects.mjs';
 import { sourcePlan, testTotals } from '../src/connectors/source-checks.mjs';
-import { studioDeskProfile } from '../src/connectors/source-profile.mjs';
+import { studioDeskProfile, studioDeskProfileRevision1 } from '../src/connectors/source-profile.mjs';
 import { git } from '../src/connectors/source-integration.mjs';
 
 function repository(t, files) {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-inspect-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-inspect-'))),
     root = path.join(directory, 'site');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   for (const [file, contents] of Object.entries(files)) {
@@ -69,9 +70,10 @@ test('a proposed profile covers what the repository tracks, minus dot, dependenc
     tests: { directory: 'tests', suffix: '.test.ts' },
     formatter: null,
     limits: {
-      files: studioDeskProfile.limits.files,
-      fileBytes: studioDeskProfile.limits.fileBytes,
-      totalBytes: studioDeskProfile.limits.totalBytes,
+      // A new repository starts from the first revision's limits, not Studio desk's own (raised November 3, 2026).
+      files: studioDeskProfileRevision1.limits.files,
+      fileBytes: studioDeskProfileRevision1.limits.fileBytes,
+      totalBytes: studioDeskProfileRevision1.limits.totalBytes,
     },
   });
   // A repository that already keeps Node tests in a test folder gets that folder and suffix. A tracked bin holds
@@ -141,7 +143,7 @@ test('inspection lists problems instead of recording, and a repository may have 
 });
 
 test('a folder that is not a git repository is refused in plain words', t => {
-  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-plain-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-plain-'))),
     folder = path.join(directory, 'notes'),
     ceiling = process.env.GIT_CEILING_DIRECTORIES;
   fs.mkdirSync(folder);
@@ -168,7 +170,7 @@ test('a folder that is not a git repository is refused in plain words', t => {
 // 1.1 (MP-028): a repository git refuses for another reason, such as another user's repository without
 // safe.directory or a broken configuration, is refused in git's own words rather than as no repository.
 test("a repository git refuses for another reason is refused in git's own words", t => {
-  const directory = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-refused-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-refused-'))),
     folder = path.join(directory, 'broken');
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.mkdirSync(folder);
@@ -177,4 +179,63 @@ test("a repository git refuses for another reason is refused in git's own words"
   assert.throws(() => inspectRepository({ projects: () => [] }, folder, runtime(folder)), {
     message: /^Git refused this folder: bad config line \d+ in file /,
   });
+});
+
+// Studio desk's own profile id means its own checks, limits and package installs: another repository may not take it.
+test("a repository's profile may not use Studio desk's own profile name", t => {
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-reserved-'))),
+    root = path.join(directory, 'studio-desk'),
+    sentence = "studio-desk is Studio desk's own profile name; give this repository's profile another name.";
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'README.md'), '# A repository named like Studio desk\n');
+  fs.writeFileSync(path.join(root, 'lib/index.mjs'), 'export {};\n');
+  git(root, ['-c', 'init.defaultBranch=main', 'init', '--quiet']);
+  git(root, ['config', 'core.autocrlf', 'false']);
+  git(root, ['config', 'user.name', 'Fixture director']);
+  git(root, ['config', 'user.email', 'fixture@example.invalid']);
+  git(root, ['config', 'commit.gpgsign', 'false']);
+  git(root, ['add', '-A']);
+  git(root, ['commit', '--quiet', '-m', 'Fixture baseline']);
+  const store = { projects: () => [] },
+    proposed = inspectRepository(store, root, runtime(root));
+  // A folder named studio-desk is still proposed under another name, with no problem.
+  assert.equal(proposed.profile.id, 'repository');
+  assert.deepEqual(proposed.problems, []);
+  // The director's own profile with Studio desk's id is listed among the problems, in plain words, before what
+  // that id would otherwise bring (Studio desk's own registered tests).
+  const reserved = { ...proposed.profile, id: studioDeskProfile.id };
+  assert.deepEqual(inspectRepository(store, root, runtime(root), reserved).problems, [
+    sentence,
+    'No registered source tests were found.',
+  ]);
+  // Alongside the others: an uncommitted edit is listed too.
+  fs.writeFileSync(path.join(root, 'lib/index.mjs'), 'export const edited = true;\n');
+  assert.deepEqual(inspectRepository(store, root, runtime(root), reserved).problems.slice(0, 2), [
+    'Commit or stash the tracked changes first: stories start from a clean tree.',
+    sentence,
+  ]);
+  git(root, ['checkout', '--', 'lib/index.mjs']);
+  // Another name is no problem.
+  assert.deepEqual(inspectRepository(store, root, runtime(root), { ...reserved, id: 'my-desk' }).problems, []);
+
+  // Recording refuses the same id with the same sentence and records nothing.
+  const project = { id: 'project-desk', name: 'Desk' },
+    put = [],
+    projects = { projects: () => [project], project: () => project, putProject: value => put.push(value) };
+  assert.throws(() => recordProjectSource(projects, project.id, { root, profile: reserved }, runtime(root)), {
+    message: sentence,
+  });
+  assert.equal(project.source, undefined);
+  assert.deepEqual(put, []);
+  assert.equal(
+    recordProjectSource(projects, project.id, { root, profile: proposed.profile }, runtime(root)).profile.id,
+    'repository',
+  );
+
+  // A project already recorded with that id (none is expected) is left as it is: inspecting it again lists no
+  // problem for its name.
+  const legacy = { id: 'project-legacy', name: 'Legacy', source: { root, profile: reserved } },
+    recorded = { projects: () => [legacy], project: () => legacy };
+  assert.ok(!inspectRepository(recorded, root, runtime(root), reserved, legacy.id).problems.includes(sentence));
 });

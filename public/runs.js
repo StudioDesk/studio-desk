@@ -40,6 +40,9 @@
     return source && !['done', 'failed', 'cancelled', 'denied'].includes(source.status) ? source : null;
   };
 
+  // What a story whose plan the code moved past says when its note records no reason of its own.
+  const outdatedReason =
+    'The code moved on since this story was planned. Close it and send its remaining work as a new idea.';
   // source-story-stages-v1 is additive task metadata. Attempts remain separate,
   // immutable records under the same task ID, with the execution kind in assignment.
   const sourceStage = task =>
@@ -91,36 +94,58 @@
   }
   // Presentation eligibility mirrors the serialized controller references. The
   // protected endpoint still validates bytes, baseline, reservations and dispatch.
+  // Only a waiting request for this same story refuses it; a story behind another
+  // story's request keeps its review and waits its turn.
   function integrationReview(task, attempts, pending, tasks = []) {
-    const stage = sourceStage(task);
+    return integrationCheck(task, attempts, pending, tasks).review || null;
+  }
+  // The same checks, returning the review or the first one that fails in the director's words: no file, record ID
+  // or internal kind, so the catch-all for a finished story can say what is missing or doesn't match.
+  function integrationCheck(task, attempts, pending, tasks = []) {
+    const stage = sourceStage(task),
+      own = pending?.taskId === task.id,
+      first = checks => ({ missing: checks.find(([failed]) => failed)?.[1] || '' }),
+      running = 'An integration of this story is already under way.';
     // Legacy reviews are separate tasks. Resolve their current accepted candidate,
     // then use the same identity/check predicates as a staged source story.
     if (!stage) {
-      if (task.kind !== 'studio-development:change-review' || task.closed || pending || task.status !== 'done')
-        return null;
+      // Cheap refusals first, so the record lookups below run only for a finished review.
+      const early = first([
+        [task.kind !== 'studio-development:change-review', 'This work is not a review of a change.'],
+        [task.closed, 'The review was closed.'],
+        [own, running],
+        [task.status !== 'done', 'The review is not finished.'],
+      ]);
+      if (early.missing) return early;
       const review = attempts.find(a => a.taskId === task.id && a.id === task.acceptedAttemptId),
         source = review?.candidateReview,
         owner = tasks.find(t => t.id === source?.taskId),
         candidate = attempts.find(a => a.id === source?.attemptId && a.taskId === owner?.id),
-        item = review?.artifacts?.find(a => a.kind === 'source-change-review');
-      if (
-        !review ||
-        !candidate ||
-        !owner ||
-        !source ||
-        !item ||
-        owner.closed ||
-        review.workerId !== task.workerId ||
-        candidate.workerId !== owner.workerId ||
-        owner.kind !== 'studio-development:change' ||
-        owner.status !== 'done' ||
-        owner.acceptedAttemptId !== candidate.id ||
-        owner.lastAttemptId !== candidate.id ||
-        task.lastAttemptId !== review.id ||
-        task.dependencies?.length !== 1 ||
-        task.dependencies[0] !== owner.id
-      )
-        return null;
+        item = review?.artifacts?.find(a => a.kind === 'source-change-review'),
+        refused = first([
+          [!review, 'The accepted review is not in the records.'],
+          [!source, 'The review does not record which change it checked.'],
+          [!owner, 'The story whose change it checked is not in the records.'],
+          [!candidate, 'The change it checked is not in the records.'],
+          [!item, "The review's report is not in the records."],
+          [owner?.closed, 'The story whose change it checked was closed.'],
+          [
+            review?.workerId !== task.workerId || candidate?.workerId !== owner?.workerId,
+            'The agent recorded for the review or the change is not the one who did it.',
+          ],
+          [owner?.kind !== 'studio-development:change', 'The work it checked is not a change to the source.'],
+          [owner?.status !== 'done', 'The change it checked is not finished.'],
+          [
+            owner?.acceptedAttemptId !== candidate?.id || owner?.lastAttemptId !== candidate?.id,
+            "The change it checked is no longer that story's current one.",
+          ],
+          [task.lastAttemptId !== review?.id, "The review's latest attempt is not its accepted one."],
+          [
+            task.dependencies?.length !== 1 || task.dependencies?.[0] !== owner?.id,
+            'The review does not follow only the change it checked.',
+          ],
+        ]);
+      if (refused.missing) return refused;
       const projected = {
         ...task,
         kind: 'studio-development:change',
@@ -150,27 +175,34 @@
           ),
         };
       projected.sourceStage.candidate.taskId = task.id;
-      return integrationReview(projected, [candidateView, reviewView], pending) ? review : null;
+      const projectedCheck = integrationCheck(projected, [candidateView, reviewView], pending);
+      return projectedCheck.review ? { review } : projectedCheck;
     }
-    if (task.closed) return null;
+    if (task.closed) return { missing: 'The story is closed.' };
     const progress = sourceProgress(task, attempts, pending),
       ref = stage.review,
-      pin = stage.candidate;
-    if (
-      task.status !== 'done' ||
-      !ref ||
-      !pin ||
-      ref.verdict !== 'pass' ||
-      task.acceptedAttemptId !== ref.attemptId ||
-      task.lastAttemptId !== ref.attemptId ||
-      !['waiting-for-integration', 'failed', 'blocked'].includes(stage.current) ||
-      !['candidate-review', 'integration'].includes(stage.phase) ||
-      progress.busy ||
-      pending ||
-      (progress.journal && !['rejected', 'abandoned'].includes(progress.journal.state)) ||
-      (stage.integration && !['rejected', 'abandoned'].includes(stage.integration.state))
-    )
-      return null;
+      pin = stage.candidate,
+      refused = first([
+        [task.status !== 'done', 'The story is not finished.'],
+        [!ref, 'No passing review is recorded for the story.'],
+        [!pin, 'The change the review checked is not recorded.'],
+        [ref?.verdict !== 'pass', "The story's recorded review did not pass the change."],
+        [task.acceptedAttemptId !== ref?.attemptId, "The story's accepted result is not its passing review."],
+        [task.lastAttemptId !== ref?.attemptId, "The story's latest attempt is not the one whose review passed."],
+        [
+          !['waiting-for-integration', 'failed', 'blocked'].includes(stage.current) ||
+            !['candidate-review', 'integration'].includes(stage.phase),
+          'The story is not at the point where it waits for integration.',
+        ],
+        [
+          progress.busy ||
+            own ||
+            (progress.journal && !['rejected', 'abandoned'].includes(progress.journal.state)) ||
+            (stage.integration && !['rejected', 'abandoned'].includes(stage.integration.state)),
+          running,
+        ],
+      ]);
+    if (refused.missing) return refused;
     const review = progress.review,
       candidate = attempts.find(item => item.id === pin.attemptId),
       item = review?.artifacts?.find(
@@ -179,45 +211,55 @@
       manifest = candidate?.artifacts?.find(
         item => item.path === pin.path && item.hash === pin.hash && item.kind === 'source-change',
       ),
-      source = review?.candidateReview;
-    if (
-      !review ||
-      !candidate ||
-      !item ||
-      !manifest ||
-      ref.taskId !== task.id ||
-      pin.taskId !== task.id ||
-      candidate.taskId !== task.id ||
-      review.status !== 'accepted' ||
-      candidate.status !== 'accepted' ||
-      review.assignment?.kind !== 'studio-development:change-review' ||
-      candidate.assignment?.kind !== 'studio-development:change' ||
-      review.result?.outcome !== 'completed' ||
-      candidate.result?.outcome !== 'completed' ||
-      review.candidateReviewVerdict !== 'pass' ||
-      !source?.passed ||
-      review.workerId !== ref.workerId ||
-      candidate.workerId !== pin.workerId ||
-      review.workerId === candidate.workerId ||
-      source.taskId !== task.id ||
-      source.attemptId !== pin.attemptId ||
-      source.path !== pin.path ||
-      source.hash !== pin.hash ||
-      source.candidateHash !== pin.candidateHash ||
-      candidate.sourceCandidate?.sourceHash !== pin.candidateHash ||
-      [review, candidate].some(a =>
-        [...(a.result?.checks || []), ...(a.controllerChecks || [])].some(c => c.status === 'fail'),
-      ) ||
-      !review.inputReferences?.some(
-        input =>
-          input.taskId === task.id &&
-          input.attemptId === pin.attemptId &&
-          // Recorded inputs are job-relative copies, so match the manifest by kind and hash.
-          input.artifacts?.some(item => item.kind === 'source-change' && item.hash === pin.hash),
-      )
-    )
-      return null;
-    return review;
+      source = review?.candidateReview,
+      failed = a => [...(a?.result?.checks || []), ...(a?.controllerChecks || [])].some(c => c.status === 'fail'),
+      checked = first([
+        [!review, 'The passing review is not in the records.'],
+        [!candidate, 'The reviewed change is not in the records.'],
+        [!item, "The review's report does not match the one recorded for the story."],
+        [!manifest, 'The reviewed change does not match the change recorded for the story.'],
+        [
+          ref.taskId !== task.id || pin.taskId !== task.id || candidate?.taskId !== task.id,
+          'The review or the change belongs to another story.',
+        ],
+        [review?.status !== 'accepted', 'The review was not accepted.'],
+        [candidate?.status !== 'accepted', 'The change was not accepted.'],
+        [review?.assignment?.kind !== 'studio-development:change-review', 'The review was not a review of a change.'],
+        [candidate?.assignment?.kind !== 'studio-development:change', 'The change was not a change to the source.'],
+        [review?.result?.outcome !== 'completed', 'The review did not complete.'],
+        [candidate?.result?.outcome !== 'completed', 'The change did not complete.'],
+        [review?.candidateReviewVerdict !== 'pass' || !source?.passed, 'The review did not pass the change.'],
+        [
+          review?.workerId !== ref.workerId || candidate?.workerId !== pin.workerId,
+          'The agent recorded for the review or the change is not the one who did it.',
+        ],
+        [review?.workerId === candidate?.workerId, 'The reviewer is the same agent as the editor.'],
+        [
+          source?.taskId !== task.id ||
+            source?.attemptId !== pin.attemptId ||
+            source?.path !== pin.path ||
+            source?.hash !== pin.hash ||
+            source?.candidateHash !== pin.candidateHash,
+          "The review checked a different change than the story's current one.",
+        ],
+        [
+          candidate?.sourceCandidate?.sourceHash !== pin.candidateHash,
+          "The story's current change is not the one its editor built and tested.",
+        ],
+        [failed(candidate), "The change's own checks failed."],
+        [failed(review), "The review's own checks failed."],
+        [
+          !review?.inputReferences?.some(
+            input =>
+              input.taskId === task.id &&
+              input.attemptId === pin.attemptId &&
+              // Recorded inputs are job-relative copies, so match the manifest by kind and hash.
+              input.artifacts?.some(item => item.kind === 'source-change' && item.hash === pin.hash),
+          ),
+          "The review's inputs do not include the change.",
+        ],
+      ]);
+    return checked.missing ? checked : { review };
   }
 
   // A run is every task its workflow created, plus work later proposed from those tasks
@@ -712,10 +754,13 @@
     const integrable = integrationReview(task, all, pending, state.tasks || []);
     if (integrable) {
       const stopped = !!journal || !!stageJournal,
+        // The policy's earlier note that an integration was already waiting is no refusal: the controller still
+        // takes the story in its turn (src/core/autonomy-runtime.mjs integrateWaiting).
+        turnNote = /An integration is already waiting\.$/.test(note),
         refused =
           (stage?.phase === 'integration' && stage.current === 'failed') ||
           !!reason ||
-          /could not request integration|approve it yourself/i.test(note),
+          (!turnNote && /could not request integration|approve it yourself/i.test(note)),
         automatic =
           !!stage &&
           policy.enabled &&
@@ -733,6 +778,20 @@
             : stopped || refused
               ? 'Approve integration again'
               : 'Approve integration';
+      // Another story holds the studio's one integration request. While it waits, the controller refuses a second
+      // request (src/core/autonomy-runtime.mjs requestIntegration), so a story the policy would integrate, or one
+      // never tried that needs the director's approval, waits its turn without a call for the director.
+      const ahead = pending?.taskId && pending.taskId !== task.id ? pending : null;
+      if (ahead && (automatic || (policy.enabled && !stopped && !refused))) {
+        const title = (state.tasks || []).find(item => item.id === ahead.taskId)?.title;
+        return passive(
+          'integration-queued',
+          `Waiting to integrate behind “${title || ahead.taskId}”.`,
+          automatic
+            ? 'The studio integrates it when its turn comes.'
+            : 'Once that story starts integrating, this one is ready for your approval.',
+        );
+      }
       if (automatic)
         return passive(
           'integration-auto',
@@ -744,18 +803,42 @@
         recovery = `Use ${approvalAction} to request controller-owned integration.`,
         action = approvalAction;
       if (stopped || refused) {
+        // The controller's own messages name the line (src/connectors/source-integration.mjs fastForward,
+        // src/connectors/source-lines.mjs moveLine); the journal's recorded line comes first.
+        const text = error || '',
+          moved = text.match(/(\S+) moved during verification/),
+          here = text.match(/(\S+) was checked out in the project's folder during verification/),
+          elsewhere = text.match(/(\S+) is checked out in (.+?)(?:\. Studio desk moves\b|\.?$)/),
+          line = journal?.repository?.branch || (here || elsewhere || moved)?.[1],
+          conflicts = journal?.verification?.conflicts || [];
         kind = 'integration-stopped';
         why = 'The last integration did not complete.';
-        recovery = `Inspect the recorded failure and resolve it before using ${approvalAction}.`;
-        if (/conflict|could not be merged/i.test(error)) {
+        recovery = `What stopped it is in the details. Once that is resolved, use ${approvalAction}.`;
+        if (/conflict|could not be merged/i.test(text) || conflicts.length) {
           kind = 'integration-conflict';
-          why = 'The candidate conflicts with the current source.';
-          recovery =
-            'Request a fresh candidate on the current source and a new independent review before approving integration.';
-        } else if (phase === 'integration.format' || /formatter/i.test(error)) {
+          why = 'The change could not be combined with the current source.';
+          if (journal?.state === 'rejected' && conflicts.length) {
+            // The controller sends it back to its editor merged onto the current source (mergeSourceStory).
+            action = 'Merge onto the current source';
+            recovery = `Use ${action} so its editor combines the change with the current source; it is then tested and reviewed again.`;
+          } else
+            recovery = `Ask for a fresh candidate on the current source and a new independent review, then use ${approvalAction}.`;
+        } else if (here || elsewhere) {
+          kind = 'integration-line-checked-out';
+          why = here
+            ? `“${line}” was checked out in the project's folder while the change was being tested.`
+            : `“${line}” was checked out in another folder, ${elsewhere[2]}, while the change was being tested.`;
+          recovery = here
+            ? `Use ${approvalAction} to merge the change onto “${line}” there.`
+            : `Check out another branch in ${elsewhere[2]}, then use ${approvalAction}. Studio desk moves a line only in the project's folder or where nothing has it checked out.`;
+        } else if (moved) {
+          kind = 'integration-line-moved';
+          why = `“${line}” moved while the change was being tested.`;
+          recovery = `Use ${approvalAction}; it merges the change onto the line as it is now.`;
+        } else if (phase === 'integration.format' || /formatter/i.test(text)) {
           kind = 'integration-formatter';
           why = 'Integration stopped while formatting the reviewed files.';
-          recovery = `Resolve the formatter failure or request a corrected candidate, then use ${approvalAction}.`;
+          recovery = `Fix the formatter failure in the details or ask for a corrected candidate, then use ${approvalAction}.`;
         } else if (journal?.verification?.landedSince) {
           // It passed its own tests and fails only merged onto work that landed after it was tested (October 27).
           kind = 'integration-landed';
@@ -767,16 +850,39 @@
           (phase === 'integration.verification' || journal?.verification?.passed === false)
         ) {
           kind = 'integration-tests';
-          why = 'The integrated candidate did not pass verification tests.';
-          recovery = `Inspect the failing tests and request a corrected candidate when needed, then use ${approvalAction}.`;
-        } else if (/branch|local edits|local changes|working tree|moved|tip|fast.forward/i.test(error)) {
+          why = 'The formatted change failed a test when it was tested on the line.';
+          recovery = `Use ${approvalAction} to test it again, or send it back if the failure is the change's own. The failing tests are in the details.`;
+        } else if (/branch|local edits|local changes|working tree|moved|tip|fast.forward/i.test(text)) {
           kind = 'integration-source-moved';
-          why = 'The source branch or local edits changed before integration could finish.';
-          recovery = `Inspect the branch and preserve local edits. Resolve the source mismatch before using ${approvalAction}.`;
+          why = 'The line or the development copy changed before the integration could finish.';
+          recovery = `If the development copy has local edits, commit or stash them, then use ${approvalAction}. It merges the change onto the line as it is now.`;
+        }
+        // Another story holds the studio's one integration request; with the policy on the controller takes no
+        // second one until that story starts integrating (src/core/autonomy-runtime.mjs requestIntegration). The
+        // story stays the director's call. Merge onto the current source is not held by that request.
+        if (ahead && policy.enabled) {
+          const title = (state.tasks || []).find(item => item.id === ahead.taskId)?.title || ahead.taskId;
+          recovery +=
+            action === approvalAction
+              ? ` ${approvalAction} is accepted once “${title}” starts integrating.`
+              : ` ${action} does not wait for “${title}”, which holds the integration request; ${approvalAction} is accepted once it starts integrating.`;
         }
       }
       return result(kind, why, recovery, action, [error]);
     }
+    // A source story whose plan the code moved past (sourceStage.outdated, noted when the controller refused its Start
+    // or an edit of its files for that reason): neither starting it again nor editing its files can work, so it reads
+    // the recorded plain reason, not the refusal naming files, and asks the director to send its work as a new idea.
+    if (stage?.outdated && !['running', 'stopping'].includes(task.status))
+      return {
+        ...result(
+          'outdated',
+          (typeof stage.outdated.reason === 'string' && stage.outdated.reason.trim()) || outdatedReason,
+          'Use Close and send as a new idea. Its remaining work gets fresh checks and a new plan, and the story closes once the new idea is taken in.',
+          'Close and send as a new idea',
+        ),
+        details: [],
+      };
     if (task.status === 'done') {
       if (stage?.current === 'failed' && stage.review?.verdict === 'needs-work' && currentReview)
         return result(
@@ -786,12 +892,17 @@
           'Send back to implementation',
           explanationDetails(review),
         );
+      // Evidence that is really missing or doesn't match: say which, and offer what the story page has. A finished
+      // story that will not be integrated may be closed (decisionState's closable).
+      const missing = () =>
+        integrationCheck(task, all, pending, state.tasks || []).missing ||
+        "The records do not show a passing review of the story's current change.";
       if (stage && stage.current !== 'integrated')
         return result(
           'integration-ineligible',
-          'The recorded evidence does not identify an eligible current passing candidate review.',
-          'Inspect the candidate and review identities; obtain valid current evidence before approving integration.',
-          'Inspect stage',
+          missing(),
+          'It can be integrated only once a passing review of its current change is recorded. If you no longer want it, use Close without integrating.',
+          'Close without integrating',
           [reason],
         );
       if (task.kind === 'studio-development:change-review') {
@@ -803,11 +914,12 @@
             'The independent review requested changes.',
             'If you still want this change, create newly scoped work from its findings.',
           );
+        // The older layout offers no close; the story page shows the review and what it recorded.
         return result(
           'integration-ineligible',
-          'The accepted review does not identify an eligible current passing candidate.',
-          'Inspect the accepted candidate and review identities before requesting integration.',
-          'Inspect stage',
+          missing(),
+          'Open the story to see the review. The change can be integrated only once an accepted passing review records the change it checked, as that change stands now.',
+          'Open the story',
         );
       }
       if (task.kind === 'review' && ['revise', 'blocked'].includes(verdict))
@@ -1226,6 +1338,24 @@
             'Start assignment',
           );
     }
+    // A restart holds the project's queue until the director resumes it (the Runner's constructor marks the project
+    // restartPaused). Queued work whose own prerequisites are met waits only for that, before any slot, resource or
+    // integration it would wait for next, as the controller orders it (refreshReadiness). The project's one resume
+    // call lists it (resumeItems), so it is no call of its own; its page keeps Resume pipeline (the kind). A project
+    // the director paused keeps its words below.
+    if (
+      task.queued &&
+      state.project?.restartPaused &&
+      state.pipelineEnabled === false &&
+      (task.status === 'ready' || task.controllerWait) &&
+      (!blocker || /^Waiting for the project to resume/i.test(blocker)) &&
+      !((exhausted || limitNote) && !task.directorStart)
+    )
+      return result(
+        'pipeline-paused',
+        'Waits only for this project to be resumed.',
+        'It starts by itself once you resume the project, here or from Your calls.',
+      );
     // The work's own resources: an agent at work elsewhere is no reason to wait, since it runs several attempts at
     // once (MP-033).
     const resources = new Set([...(view.resources || []), ...(state.taskKinds?.[view.kind]?.requiredResources || [])]),
@@ -1406,6 +1536,110 @@
         requiresDirector: !resetAt,
       };
     });
+  }
+  // One item for the project while a restart holds its queue (state.project.restartPaused), with the queued work that
+  // waits only for the director to resume it (taskExplanation's restart wait). A project the director paused has none:
+  // its queued work keeps its own calls.
+  function resumeItems(state, explain = taskExplanation) {
+    if (!state.project?.restartPaused) return [];
+    const taskIds = (state.tasks || [])
+      .filter(task => {
+        const explanation = explain(task, state);
+        return explanation.kind === 'pipeline-paused' && !explanation.requiresDirector;
+      })
+      .map(task => task.id);
+    return [
+      {
+        kind: 'project-resume',
+        projectId: state.project.id,
+        taskIds,
+        reason:
+          "The controller restarted, so this project's work is held until you have looked at what the restart interrupted.",
+        next: 'Resume the project when you are ready; queued stories, carries and releases then go on by themselves.',
+        action: 'Resume this project',
+        requiresDirector: true,
+      },
+    ];
+  }
+  // The attempt a task records under the name given, from this project's summaries.
+  const recordedAttempt = (state, task, id = task.lastAttemptId) =>
+    (state.attempts || []).find(
+      attempt =>
+        attempt.id === id &&
+        attempt.taskId === task.id &&
+        (!attempt.projectId || attempt.projectId === state.project.id),
+    );
+  // The words of the integration action a passing review in the older two-task layout offers: approving it under the
+  // house rules or on a staged story, integrating it otherwise, and again after an integration that did not complete.
+  function integrationAction(state, task, attempt) {
+    const retry =
+      ['rejected', 'abandoned'].includes(attempt.sourceIntegration?.state ?? '') ||
+      (task.sourceStage?.phase === 'integration' && task.sourceStage.current === 'failed') ||
+      !!(task.sourceStage?.reason || task.reason) ||
+      /could not request integration|approve it yourself/i.test(String(task.autonomyNote ?? ''));
+    if (state.autonomy?.policy?.enabled || task.sourceStage)
+      return retry ? 'Approve integration again' : 'Approve integration';
+    return retry ? 'Integrate again' : 'Integrate reviewed source';
+  }
+  // The director's explanation of a task (the dashboard's explain): the shared taskExplanation, with a denied task's
+  // reason as its detail, plus a passing review in the older two-task layout that waits for integration.
+  function directorExplanation(task, state) {
+    const explanation = taskExplanation(task, state),
+      accepted = recordedAttempt(state, task, task.acceptedAttemptId),
+      journal = accepted?.sourceIntegration;
+    if (explanation.kind === 'denied' && task.reason) return { ...explanation, details: [String(task.reason)] };
+    if (
+      !task.sourceStage &&
+      !task.closed &&
+      task.kind === 'studio-development:change-review' &&
+      task.status === 'done' &&
+      accepted &&
+      (!journal || ['rejected', 'abandoned'].includes(journal.state ?? '')) &&
+      accepted.candidateReviewVerdict === 'pass'
+    ) {
+      const action = integrationAction(state, task, accepted);
+      return {
+        ...explanation,
+        kind: journal ? 'integration-stopped' : 'integration-approval',
+        reason: journal
+          ? 'The last integration did not complete.'
+          : 'The current independent review passed and awaits integration approval.',
+        next: journal
+          ? `Inspect the recorded failure and resolve it before using ${action}.`
+          : `Use ${action} to request controller-owned integration.`,
+        action,
+        requiresDirector: true,
+      };
+    }
+    return explanation;
+  }
+  // What Today lists as the project's calls, from the run stories given (each told by buildRunStories): each run's
+  // items, its unstarted steps waiting on stopped work as one cleanup, then work outside any run, then each CLI's
+  // usage hold with no known reset, once, then the project's resume while a restart holds it, with the work waiting
+  // only for that. Items whose requiresDirector is false only wait; the controller's list of
+  // what needs the director now (src/core/director-calls.mjs) keeps the others.
+  function needsYouItems(state, runs) {
+    const runOf = runMembership(state.tasks || []),
+      seen = new Set(),
+      items = [];
+    for (const run of runs) {
+      const rows = run.needsYou.filter(item => !seen.has(item.taskId));
+      rows.forEach(item => seen.add(item.taskId));
+      const cleanup = rows.filter(item => item.cleanup);
+      rows.filter(item => !item.cleanup).forEach(item => items.push({ ...item, run }));
+      if (cleanup.length)
+        items.push({
+          run,
+          members: cleanup,
+          taskIds: cleanup.map(item => item.taskId),
+          requiresDirector: cleanup.some(item => item.requiresDirector),
+        });
+    }
+    const standalone = (state.tasks || []).filter(task => !runOf.has(task.id) && !seen.has(task.id));
+    items.push(...needsYou(state, standalone, directorExplanation));
+    items.push(...holdItems(state, directorExplanation).filter(hold => hold.requiresDirector));
+    items.push(...resumeItems(state, directorExplanation));
+    return items;
   }
   // Every commit a run's integrations made, in the order they finished.
   function committed(journals) {
@@ -1645,5 +1879,9 @@
     taskExplanation,
     needsYou,
     holdItems,
+    resumeItems,
+    integrationAction,
+    directorExplanation,
+    needsYouItems,
   });
 })();

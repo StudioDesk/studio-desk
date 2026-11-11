@@ -6,14 +6,27 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary, CommandRecords, LibraryProposal, Live, Task } from './api';
+import type {
+  AttemptSummary,
+  CommandRecords,
+  DirectorCalls,
+  LibraryProposal,
+  Live,
+  Milestone,
+  MilestoneRelease,
+  Task,
+} from './api';
 import { App } from './app';
 import type { Answer, Question } from './questions';
 import { createAppRouter } from './router';
 import {
+  callsOf,
   createStream,
+  decisionStates,
   fakeController,
   latest,
+  outdatedReason,
+  outsideMeasured,
   shellFixture,
   taskFixture,
   whenShown,
@@ -22,8 +35,34 @@ import {
 import { when } from './today';
 
 let controller: Controller;
+// Each project's list of calls as the controller lists them over that project's records (test-controller.ts callsOf),
+// changed where a test changes it: Project X's from the stand-in's own answer, another project's over the shell and
+// live set the test gives it. A change may hold the answer back by answering with a promise.
+let served: Record<string, (list: DirectorCalls) => DirectorCalls | Promise<DirectorCalls>>;
 beforeEach(() => {
   controller = fakeController();
+  served = {};
+  const standIn = globalThis.fetch;
+  vi.stubGlobal('fetch', async (input: string, options: RequestInit = {}) => {
+    const [, id] = /^\/api\/projects\/([^/?]+)\/calls$/.exec(String(input)) ?? [];
+    if (!id || (id === 'project-x' && !served[id]) || (options.method ?? 'GET') !== 'GET')
+      return standIn(input, options);
+    controller.requests.push({ url: String(input), method: 'GET' });
+    const live = controller.lives[id] ?? { tasks: [], attempts: [], runs: [] },
+      records =
+        id === 'project-x'
+          ? controller
+          : {
+              ...controller,
+              shell: controller.shells[id]!,
+              tasks: live.tasks,
+              attempts: live.attempts,
+              runs: live.runs,
+            },
+      rule = callsOf(records, id),
+      list = await (served[id] ? served[id](rule) : rule);
+    return { ok: true, status: 200, json: async () => structuredClone(list) };
+  });
 });
 afterEach(() => {
   cleanup();
@@ -149,7 +188,8 @@ test('a story whose review asked for changes is sent back, or integrated over th
 });
 
 // A staged story whose passing review's integration stopped, with what its verification recorded.
-const stoppedStory = (verification: NonNullable<AttemptSummary['sourceIntegration']>['verification']) => {
+type Integration = NonNullable<AttemptSummary['sourceIntegration']>;
+const stoppedStory = (verification: Integration['verification'], journal: Partial<Integration> = {}) => {
   const pin = {
     taskId: 'T-1',
     attemptId: 'attempt-edit',
@@ -187,7 +227,7 @@ const stoppedStory = (verification: NonNullable<AttemptSummary['sourceIntegratio
         { taskId: 'T-1', attemptId: 'attempt-edit', artifacts: [{ kind: 'source-change', hash: 'change-hash' }] },
       ],
       artifacts: [{ path: 'source-change-review.json', hash: 'review-hash', kind: 'source-change-review' }],
-      sourceIntegration: { state: 'rejected', verification },
+      sourceIntegration: { state: 'rejected', verification, ...journal },
     },
   ];
   controller.tasks = [
@@ -297,7 +337,11 @@ test('an integration that failed with nothing landed and no conflict offers Inte
   stoppedStory({ conflicts: [] });
   open();
   const card = await storyCall();
-  expect(card.getByText('Ready to integrate again')).toBeTruthy();
+  expect(card.getByText('Integration stopped')).toBeTruthy();
+  expect(card.queryByText(/Ready to integrate/)).toBeNull();
+  expect(card.getByText(/^The last integration did not complete\./).textContent).toBe(
+    'The last integration did not complete. What stopped it is in the details. Once that is resolved, use Integrate again.',
+  );
   expect(buttons(card)).toEqual(['Integrate again (primary)', 'Close without integrating']);
   expect(card.queryByRole('button', { name: 'Merge onto the current source' })).toBeNull();
   expect(card.queryByText(/It passed on its own/)).toBeNull();
@@ -309,6 +353,168 @@ test('an integration that failed with nothing landed and no conflict offers Inte
       body: { projectId: 'project-x', attemptId: 'attempt-review', reviewHash: 'review-hash' },
     }),
   );
+});
+
+// A stopped integration's card says why it stopped in the shared rules' words, above the same buttons, and never the
+// catch-all's Inspect stage.
+test('a story whose line moved while it was tested says so on its Integration stopped card', async () => {
+  stoppedStory(
+    {},
+    { error: 'release/1.2 moved during verification. Approve integration again to merge onto the current tip.' },
+  );
+  open();
+  const card = await storyCall(),
+    region = within(await calls());
+  expect(card.getByText('Integration stopped')).toBeTruthy();
+  expect(card.getByText(/release\/1\.2/).textContent).toBe(
+    '“release/1.2” moved while the change was being tested. Use Integrate again; it merges the change onto the line as it is now.',
+  );
+  expect(card.getByText(/release\/1\.2/).tagName).toBe('P');
+  expect(buttons(card)).toEqual(['Integrate again (primary)', 'Close without integrating']);
+  expect(card.getByRole('link', { name: 'See the change' }).getAttribute('href')).toBe('/p/project-x/tasks/T-1');
+  expect(region.queryAllByRole('button', { name: /Inspect stage/ })).toHaveLength(0);
+  expect(region.queryAllByText(/Inspect stage|Approve integration|source-change|attempt-review|T-1\b/)).toHaveLength(0);
+  expect(card.queryByText(/Ready to integrate/)).toBeNull();
+});
+
+// Evidence that is really missing or doesn't match: the call says what, in plain words, and its button is one the
+// story page has, never the catch-all's Inspect stage.
+test('a review from before stories had stages that records no change offers Open the story and says what is missing', async () => {
+  controller.attempts = [
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      finishedAt: '2026-10-27T19:02:00.000Z',
+      result: { outcome: 'completed' },
+      // No candidate verdict, so the dashboard's own older-layout integration call does not take it; its run is
+      // still open, so the live set holds it.
+      reviewVerdict: 'pass',
+    },
+  ];
+  controller.tasks = [
+    taskFixture('T-1', {
+      title: 'An older review',
+      kind: 'studio-development:change-review',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      workflowReference: { runId: 'run-1', key: 'review' },
+    }),
+  ];
+  controller.runs = [
+    {
+      id: 'run-1',
+      createdAt: '2026-10-27T18:00:00.000Z',
+      brief: 'Review the change.',
+      workflow: { id: 'workflow-1', name: 'Source checks and review', version: 3 },
+      revisions: [{ revision: 1, at: '2026-10-27T18:00:00.000Z', reason: 'created' }],
+      nodes: [
+        {
+          taskId: 'T-1',
+          key: 'review',
+          kind: 'studio-development:change-review',
+          title: 'An older review',
+          workerId: 'W-1',
+          dependencies: [],
+          revision: 1,
+        },
+      ],
+      archive: { archived: false },
+    },
+  ];
+  open();
+  const region = within(await calls()),
+    card = within((await region.findByRole('heading', { name: 'An older review' })).closest('article')!);
+  expect(card.getByText(/^The review does not record which change it checked\./)).toBeTruthy();
+  const opens = card.getAllByRole('link', { name: 'Open the story' });
+  expect(opens).toHaveLength(1);
+  expect(opens[0]!.className).toContain('sd-btn');
+  expect(opens[0]!.getAttribute('href')).toBe('/p/project-x/tasks/T-1');
+  expect(card.queryAllByText(/Open to use/)).toHaveLength(0);
+  expect(region.queryAllByRole('button', { name: /Inspect stage/ })).toHaveLength(0);
+  expect(region.queryAllByText(/Inspect|attempt-review|studio-development/)).toHaveLength(0);
+});
+
+test('a staged story whose review checked a different change says so and offers Close without integrating', async () => {
+  stoppedStory({});
+  const review = controller.attempts[1] as AttemptSummary & { candidateReview: { candidateHash: string } };
+  review.candidateReview = { ...review.candidateReview, candidateHash: 'stale' };
+  open();
+  const card = await storyCall(),
+    region = within(await calls());
+  expect(card.getByText(/^The review checked a different change than the story's current one\./)).toBeTruthy();
+  expect(card.getByRole('link', { name: 'Open to use Close without integrating' })).toBeTruthy();
+  expect(card.queryByText('Integration stopped')).toBeNull();
+  expect(region.queryAllByRole('button', { name: /Inspect stage/ })).toHaveLength(0);
+  expect(region.queryAllByText(/Inspect|attempt-review|source-change|candidate-hash|T-1\b/)).toHaveLength(0);
+});
+
+test('a story whose formatted change failed a test names that failure and offers Integrate again', async () => {
+  stoppedStory({ passed: false, phaseId: 'integration.verification' } as Integration['verification'], {
+    error: 'npm test exited with code 1.',
+  });
+  open();
+  const card = await storyCall();
+  expect(card.getByText('Integration stopped')).toBeTruthy();
+  expect(card.getByText(/failed a test/).textContent).toBe(
+    "The formatted change failed a test when it was tested on the line. Use Integrate again to test it again, or send it back if the failure is the change's own. The failing tests are in the details.",
+  );
+  expect(buttons(card)).toEqual(['Integrate again (primary)', 'Close without integrating']);
+});
+
+// A staged story with a passing review that was never tried.
+const readyStory = () => {
+  stoppedStory({});
+  const review = controller.attempts.find(attempt => attempt.id === 'attempt-review')!;
+  delete review.sourceIntegration;
+  const task = controller.tasks[0]!;
+  task.sourceStage = { ...task.sourceStage!, phase: 'candidate-review', current: 'waiting-for-integration' };
+};
+
+test('a story ready to integrate for the first time keeps Ready to integrate and has no stop paragraph', async () => {
+  readyStory();
+  open();
+  const card = await storyCall();
+  expect(card.getByText('Ready to integrate')).toBeTruthy();
+  expect(card.queryByText('Integration stopped')).toBeNull();
+  expect(card.queryByText(/did not complete|while the change was being tested|failed a test/)).toBeNull();
+  expect(card.queryByText(/It passed on its own/)).toBeNull();
+  expect(buttons(card)).toEqual(['Integrate (primary)', 'Close without integrating']);
+});
+
+test("a story waiting behind another story's integration is not a call and names that story as it moves on", async () => {
+  readyStory();
+  // The story ahead holds the studio's one integration request and is still in the live set, waiting its turn.
+  controller.tasks.push(
+    taskFixture('T-2', {
+      title: 'Name the line on Releases',
+      kind: 'studio-development:change',
+      status: 'done',
+      sourceStage: { version: 'source-story-stages-v1', phase: 'candidate-review', current: 'waiting-for-integration' },
+    }),
+  );
+  controller.shell.autonomy = {
+    policy: {
+      enabled: true,
+      revision: 2,
+      kinds: { 'studio-development:change': { approve: 'auto', accept: 'auto', integrate: 'auto' } },
+    },
+    pendingIntegration: { taskId: 'T-2' },
+  };
+  open();
+  const region = within(await calls()),
+    moving = () => screen.queryByText('Moving on their own, nothing to do')?.closest('details') ?? null;
+  await waitFor(() => expect(moving()).toBeTruthy());
+  expect(region.queryByRole('heading', { name: 'Explain a change that fails with what landed' })).toBeNull();
+  const row = within(moving()!)
+    .getByRole('link', { name: 'Explain a change that fails with what landed' })
+    .closest('li')!;
+  expect(row.textContent).toBe(
+    'Explain a change that fails with what landedWaiting to integrate behind “Name the line on Releases”. The studio integrates it when its turn comes.',
+  );
+  expect(region.queryByRole('heading', { name: 'Name the line on Releases' })).toBeNull();
 });
 
 test("a blocked editor's file request is approved as asked, with the attempt that asked", async () => {
@@ -524,7 +730,7 @@ test('Today with nobody working sets no running-time clock', async () => {
   expect(interval.mock.calls.map(call => call[1]).filter(period => period === 1000 || period === 30000)).toEqual([]);
 });
 
-test('a change to running work fetches that task alone and updates Today in place', async () => {
+test('a change to running work fetches that task alone with the list of calls, and updates Today in place', async () => {
   controller.tasks = [taskFixture('T-2', { title: 'Build the board', status: 'running', lastAttemptId: 'attempt-2' })];
   controller.attempts = [
     { id: 'attempt-2', taskId: 'T-2', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
@@ -539,7 +745,10 @@ test('a change to running work fetches that task alone and updates Today in plac
     changes: [{ seq: 5, type: 'task', id: 'T-2', projectId: 'project-x' }],
   });
   expect(await screen.findByRole('link', { name: 'Build the work board' })).toBeTruthy();
-  expect(controller.reads().slice(before)).toEqual(['/api/tasks/T-2?projectId=project-x']);
+  expect(controller.reads().slice(before).sort()).toEqual([
+    '/api/projects/project-x/calls',
+    '/api/tasks/T-2?projectId=project-x',
+  ]);
 });
 
 test('Today reads the first page of finished runs once, for what shipped today', async () => {
@@ -715,6 +924,53 @@ test('a usage hold with a known reset clears itself and stays off the calls', as
   await waitFor(() => expect(within(region).getByText(/Nothing is waiting on you\./)).toBeTruthy());
 });
 
+test('a project held after a restart is one call to resume it, with the stories waiting only for it', async () => {
+  const user = userEvent.setup();
+  // The controller restarted with work queued: it holds the project until the director resumes it.
+  controller.shell = {
+    ...controller.shell,
+    pipelineEnabled: false,
+    project: { ...controller.shell.project, dispatchPaused: true, restartPaused: true },
+  };
+  controller.tasks = [
+    taskFixture('T-1', { title: 'First queued story', status: 'ready', queued: true }),
+    taskFixture('T-2', { title: 'Second queued story', status: 'ready', queued: true }),
+  ];
+  controller.command = url => {
+    if (url === '/api/pipeline')
+      controller.shell = {
+        ...controller.shell,
+        pipelineEnabled: true,
+        project: { ...controller.shell.project, dispatchPaused: false, restartPaused: false },
+      };
+    return {};
+  };
+  open();
+  const region = await calls(),
+    title = await within(region).findByRole('heading', { name: 'This project is held after a restart' }),
+    card = within(title.closest('article')!);
+  // One card, counted once; the queued stories are listed on it, not as calls or waits of their own.
+  expect(within(region).getAllByRole('heading', { level: 3 })).toHaveLength(1);
+  expect(within(region).getByText('1 waiting on you')).toBeTruthy();
+  expect(card.getByText('Held after restart')).toBeTruthy();
+  expect(card.getByText(/The controller restarted, so this project's work is held/)).toBeTruthy();
+  expect(card.getByRole('link', { name: 'First queued story' }).getAttribute('href')).toBe('/p/project-x/tasks/T-1');
+  expect(card.getByRole('link', { name: 'Second queued story' }).getAttribute('href')).toBe('/p/project-x/tasks/T-2');
+  expect(screen.queryByText('Moving on their own, nothing to do')).toBeNull();
+
+  await user.click(card.getByRole('button', { name: 'Resume this project' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/pipeline', method: 'POST', body: { projectId: 'project-x', action: 'resume' } },
+    ]),
+  );
+  expect(await screen.findByText('Project resumed.')).toBeTruthy();
+  // The list read again holds no resume, and the card is gone.
+  await waitFor(() =>
+    expect(within(region).queryByRole('heading', { name: 'This project is held after a restart' })).toBeNull(),
+  );
+});
+
 // A command's answer carries the records it changed (records.ts RecordSync.answer), so Today shows the effect with
 // the command's toast, before the stream's change event for it, which changes nothing more.
 const proposed = () => [
@@ -751,13 +1007,22 @@ test("Approve takes the call off Today and lowers the calls' count with its toas
   );
   const card = within(within(region).getByRole('heading', { name: 'Add the board' }).closest('article')!),
     seen = whenShown('Approved “Add the board”.', () => callsShown(region));
+  // The list read again after the command has not answered yet: the call leaves at once all the same.
+  served['project-x'] = () => new Promise<DirectorCalls>(() => {});
+  const asked = controller.reads().length;
   await user.click(card.getByRole('button', { name: 'Approve work' }));
   expect(await seen).toEqual({ cards: ['Add the list'], count: '1 waiting on you' });
   expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('One call is yours to make.');
-  // The stream's change for the same command reads the task again and leaves Today as it is.
+  expect(controller.reads().slice(asked)).toEqual(['/api/projects/project-x/calls']);
+  // The stream's change for the same command reads the task and the list again and leaves Today as it is.
   const before = controller.reads().length;
   latest().emit('change', { version: answer!.version, start: answer!.start, changes: answer!.changes });
-  await waitFor(() => expect(controller.reads().slice(before)).toEqual(['/api/tasks/T-1?projectId=project-x']));
+  await waitFor(() =>
+    expect(controller.reads().slice(before).sort()).toEqual([
+      '/api/projects/project-x/calls',
+      '/api/tasks/T-1?projectId=project-x',
+    ]),
+  );
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(callsShown(region)).toEqual({ cards: ['Add the list'], count: '1 waiting on you' });
   expect(screen.getByText('Approved “Add the board”.')).toBeTruthy();
@@ -782,6 +1047,36 @@ test("a refused Approve leaves Today's calls and their count as they were and sh
   expect(callsShown(region)).toEqual({ cards: ['Add the board', 'Add the list'], count: '2 waiting on you' });
   expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
   expect(posted().map(request => request.url)).toEqual(['/api/tasks/T-1/approve-work']);
+});
+
+test("Your calls lists the controller's calls in its order, and its count and the title's are the served count", async () => {
+  controller.tasks = proposed();
+  // The controller lists the two plans the other way round from the page's own records.
+  served['project-x'] = list => ({ ...list, items: [...list.items].reverse() });
+  open();
+  const region = await calls();
+  await waitFor(() =>
+    expect(callsShown(region)).toEqual({ cards: ['Add the list', 'Add the board'], count: '2 waiting on you' }),
+  );
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
+  // Then one fewer than the records give: the stream reports a change and the list read again leaves the board out,
+  // though the page's own records still hold it waiting for approval.
+  served['project-x'] = list => ({
+    ...list,
+    items: list.items.filter(item => item.type !== 'task' || item.taskId !== 'T-1'),
+    count: 1,
+  });
+  latest().emit('change', {
+    version: 2,
+    start: 'start-a',
+    changes: [{ seq: 2, type: 'task', id: 'T-1', projectId: 'project-x' }],
+  });
+  await waitFor(() => expect(callsShown(region)).toEqual({ cards: ['Add the list'], count: '1 waiting on you' }));
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('One call is yours to make.');
+  expect(document.title).toBe('(1) Studio desk');
+  expect(screen.getAllByLabelText('1 call for you').length).toBeGreaterThan(0);
+  // Nothing of the plan left out moves on its own: it is not a wait.
+  expect(screen.queryByText('Moving on their own, nothing to do')).toBeNull();
 });
 
 // An agent's question (1.2 step 2) as the controller records it (src/core/questions.mjs readQuestion): the attempt
@@ -1291,4 +1586,324 @@ test('other-project calls stay out of the heading while rail badges and the tab 
     }
     cleanup();
   }
+});
+
+// The code moved past a story's plan: Today's card reads the plain reason and offers Close and send as a new idea,
+// not Start or Allow and continue, and sends the idea text the director edited.
+test('a story the code moved past reads the plain reason on Today and sends its work as a new idea', async () => {
+  const user = userEvent.setup();
+  const task = decisionStates['a story the code moved past']!(controller);
+  controller.tasks = [task];
+  open();
+  const region = within(await calls()),
+    card = within((await region.findByRole('heading', { level: 3, name: task.title })).closest('article')!);
+  expect(card.getByText(outdatedReason)).toBeTruthy();
+  expect(card.queryByRole('button', { name: 'Start assignment' })).toBeNull();
+  expect(card.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
+  const send = card.getByRole('button', { name: 'Close and send as a new idea' });
+  expect(send.className).toContain('sd-btn--primary');
+  await user.click(send);
+  const dialog = within(await screen.findByRole('dialog', { name: 'Close and send as a new idea?' })),
+    idea = dialog.getByLabelText('The new idea') as HTMLTextAreaElement;
+  expect(idea.value.startsWith(task.title)).toBe(true);
+  await user.clear(idea);
+  await user.type(idea, 'Show the route in plain words.');
+  await user.click(dialog.getByRole('button', { name: 'Close and send as a new idea' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/send-as-idea',
+      method: 'POST',
+      body: { projectId: 'project-x', idea: 'Show the route in plain words.' },
+    }),
+  );
+});
+
+// A file request the controller would refuse as asked: the card says why, with no Allow and continue.
+test('a file request with a problem shows the problem on Today and offers no Allow and continue', async () => {
+  controller.tasks = [decisionStates['a file request outside the measured list']!(controller)];
+  open();
+  const region = within(await calls());
+  expect(await region.findByText(new RegExp(`cannot be allowed as asked: ${outsideMeasured}`))).toBeTruthy();
+  expect(region.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
+});
+
+// The floor names the running attempt as the controller counted it (its served attemptCount): a flow's second round
+// reads its first attempt, however many earlier rounds are on record.
+test('a flow story on its second round reads Attempt 1 of 3 on the floor, as the controller served it', async () => {
+  controller.tasks = [
+    taskFixture('T-2', {
+      title: 'Build the board',
+      status: 'running',
+      lastAttemptId: 'attempt-3',
+      attemptCount: { used: 1, allowed: 3 },
+    }),
+  ];
+  controller.attempts = [
+    { id: 'attempt-1', taskId: 'T-2', status: 'failed', workerId: 'W-1' },
+    { id: 'attempt-2', taskId: 'T-2', status: 'accepted', workerId: 'W-1' },
+    { id: 'attempt-3', taskId: 'T-2', status: 'running', workerId: 'W-1', startedAt: new Date().toISOString() },
+  ];
+  open();
+  const live = await screen.findByRole('region', { name: 'Eli is working' });
+  expect(within(live).getByText('Attempt 1 of 3 · doing the work')).toBeTruthy();
+});
+
+// The two stops only the director moves on, as the controller lists them after the shared calls
+// (src/core/director-calls.mjs): a milestone's release that stopped, and a story whose carry to a line was turned down.
+const stoppedRelease = (release: MilestoneRelease): Milestone => ({
+  id: 'm-120',
+  version: '1.2.0',
+  line: 'release/1.2',
+  goal: '',
+  state: 'open',
+  waiting: [],
+  release,
+  ideas: [],
+  movedIn: [],
+  counts: { ideas: 0, waiting: 0, stories: 0, integrated: 0, started: 0 },
+});
+const releaseStopped = () => {
+  controller.releases = {
+    available: true,
+    milestones: [
+      stoppedRelease({
+        state: 'needs-reconciliation',
+        error: 'The controller stopped while this release moved its line.',
+        notesTaskId: 'T-notes',
+      }),
+    ],
+  };
+};
+// A fix that landed, whose carry (or bring-back) to a line was turned down.
+const landedFix = (carry: NonNullable<AttemptSummary['sourceCarries']>[number]) => {
+  controller.attempts.push({
+    id: 'attempt-review',
+    taskId: 'T-fix',
+    status: 'accepted',
+    workerId: 'W-1',
+    assignment: { kind: 'studio-development:change-review' },
+    candidateReviewVerdict: 'pass',
+    sourceIntegration: { state: 'integrated' },
+    sourceCarries: [carry],
+  });
+  controller.tasks.push(
+    taskFixture('T-fix', {
+      title: 'Keep the board when a filter is empty',
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'integration',
+        current: 'integrated',
+        review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+      },
+    }),
+  );
+};
+// The release notes story, waiting on running work: on its own a wait under Moving on their own.
+const notesWaiting = () => {
+  controller.tasks.push(
+    taskFixture('T-2', { title: 'Build the board', status: 'running', lastAttemptId: 'attempt-2' }),
+    taskFixture('T-notes', { title: 'Write the notes', status: 'blocked', queued: true, dependencies: ['T-2'] }),
+  );
+  controller.attempts.push({
+    id: 'attempt-2',
+    taskId: 'T-2',
+    status: 'running',
+    workerId: 'W-1',
+    startedAt: new Date().toISOString(),
+  });
+};
+const cardOf = async (region: HTMLElement, title: string) =>
+  within((await within(region).findByRole('heading', { level: 3, name: title })).closest('article')!);
+// Words the director reads carry no file name, record ID or internal key.
+const plainWords =
+  /m-120|T-notes|T-fix|attempt-|needs-reconciliation|release-stopped|carry-stopped|\.(mjs|json|tsx?)\b/;
+
+test('a stopped release is one call titled for its release, and Release again sends only the project and leaves', async () => {
+  const user = userEvent.setup();
+  releaseStopped();
+  notesWaiting();
+  open();
+  const region = await calls(),
+    card = await cardOf(region, 'Release 1.2.0 stopped');
+  expect(callsShown(region)).toEqual({ cards: ['Release 1.2.0 stopped'], count: '1 waiting on you' });
+  expect(card.getByText('Release stopped')).toBeTruthy();
+  expect(
+    card.getByText(
+      /^The release of 1\.2\.0 stopped part-way: The controller stopped while this release moved its line\. Restore or commit/,
+    ),
+  ).toBeTruthy();
+  expect(card.getByRole('link', { name: 'Open releases' }).getAttribute('href')).toBe('/p/project-x/releases');
+  expect(card.getByRole('button', { name: 'Release again' }).className).toMatch(/sd-btn--primary/);
+  expect(region.textContent).not.toMatch(plainWords);
+  // The notes story it stands for is on the call, not also moving on its own.
+  expect(fold()).toBeNull();
+
+  await user.click(card.getByRole('button', { name: 'Release again' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/projects/project-x/milestones/m-120/release/again',
+        method: 'POST',
+        body: { projectId: 'project-x' },
+      },
+    ]),
+  );
+  expect(await screen.findByText('Releasing 1.2.0 again.')).toBeTruthy();
+  // The list read again holds no release, and the card is gone.
+  await waitFor(() => expect(within(region).queryByRole('heading', { name: 'Release 1.2.0 stopped' })).toBeNull());
+  expect(controller.releases?.milestones?.[0]?.release?.state).toBe('ready');
+});
+
+test('a turned-down carry is one call titled with its story, and Carry again sends the served carry with its line', async () => {
+  const user = userEvent.setup();
+  landedFix({ line: 'main', state: 'rejected', error: 'The conflict needs a different approach.' });
+  open();
+  const region = await calls(),
+    card = await cardOf(region, 'Keep the board when a filter is empty');
+  expect(callsShown(region)).toEqual({ cards: ['Keep the board when a filter is empty'], count: '1 waiting on you' });
+  expect(card.getByText('Carry stopped')).toBeTruthy();
+  expect(card.getByText('Carrying the fix to main')).toBeTruthy();
+  expect(
+    card.getByText(
+      'Carrying this fix to main was turned down: The conflict needs a different approach. Carry it again, or say it is not needed there.',
+    ),
+  ).toBeTruthy();
+  expect(card.getAllByRole('button').map(button => button.textContent)).toEqual([
+    'Carry to main again',
+    'Not needed on main…',
+  ]);
+  expect(card.getByRole('link', { name: 'Open the story' }).getAttribute('href')).toBe('/p/project-x/tasks/T-fix');
+  expect(region.textContent).not.toMatch(plainWords);
+
+  await user.click(card.getByRole('button', { name: 'Carry to main again' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/tasks/T-fix/carry', method: 'POST', body: { projectId: 'project-x', line: 'main' } },
+    ]),
+  );
+  expect(await screen.findByText('Carrying the fix to main.')).toBeTruthy();
+  await waitFor(() =>
+    expect(within(region).queryByRole('heading', { name: 'Keep the board when a filter is empty' })).toBeNull(),
+  );
+});
+
+test('Not needed on a turned-down carry asks for the reason, then sends the served carry-skip with line and reason', async () => {
+  const user = userEvent.setup();
+  landedFix({ line: 'main', state: 'rejected' });
+  open();
+  const card = await cardOf(await calls(), 'Keep the board when a filter is empty');
+  await user.click(card.getByRole('button', { name: 'Not needed on main…' }));
+  const skip = within(await screen.findByRole('dialog', { name: 'Not needed on main?' }));
+  // Nothing is sent without a reason.
+  expect((skip.getByRole('button', { name: 'Skip it' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(posted()).toEqual([]);
+  await user.type(skip.getByLabelText('Why'), 'main replaced this code.');
+  await user.click(skip.getByRole('button', { name: 'Skip it' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-fix/carry-skip',
+        method: 'POST',
+        body: { projectId: 'project-x', line: 'main', reason: 'main replaced this code.' },
+      },
+    ]),
+  );
+  expect(await screen.findByText('Not needed on main.')).toBeTruthy();
+  await waitFor(() =>
+    expect(screen.queryByRole('heading', { name: 'Keep the board when a filter is empty' })).toBeNull(),
+  );
+});
+
+test('a turned-down bring-back is worded as bringing the fix back', async () => {
+  const user = userEvent.setup();
+  landedFix({ line: 'release/1.0', state: 'rejected', back: true, approved: true });
+  open();
+  const card = await cardOf(await calls(), 'Keep the board when a filter is empty');
+  expect(card.getByText('Bring back stopped')).toBeTruthy();
+  expect(card.getByText('Bringing the fix back to release/1.0')).toBeTruthy();
+  expect(
+    card.getByText(
+      'Bringing this fix back to release/1.0 was turned down. Bring it back again, or say it is not needed there.',
+    ),
+  ).toBeTruthy();
+  expect(card.getAllByRole('button').map(button => button.textContent)).toEqual([
+    'Bring back to release/1.0 again',
+    'Not needed on release/1.0…',
+  ]);
+  await user.click(card.getByRole('button', { name: 'Not needed on release/1.0…' }));
+  const skip = within(await screen.findByRole('dialog', { name: 'Not needed on release/1.0?' }));
+  expect(skip.getByText(/^release\/1\.0 won't get the fix brought back\./)).toBeTruthy();
+  await user.click(skip.getByRole('button', { name: 'Cancel' }));
+  await user.click(card.getByRole('button', { name: 'Bring back to release/1.0 again' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/tasks/T-fix/carry', method: 'POST', body: { projectId: 'project-x', line: 'release/1.0' } },
+    ]),
+  );
+  expect(await screen.findByText('Bringing the fix back to release/1.0.')).toBeTruthy();
+});
+
+test('a stopped release and a turned-down carry count in Your calls and the rail, and neither moves on its own', async () => {
+  releaseStopped();
+  notesWaiting();
+  landedFix({ line: 'main', state: 'rejected' });
+  open();
+  const region = await calls();
+  await waitFor(() =>
+    expect(callsShown(region)).toEqual({
+      cards: ['Release 1.2.0 stopped', 'Keep the board when a filter is empty'],
+      count: '2 waiting on you',
+    }),
+  );
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Two calls are yours to make.');
+  expect(screen.getAllByLabelText('2 calls for you').length).toBeGreaterThan(0);
+  expect(fold()).toBeNull();
+  expect(region.textContent).not.toMatch(plainWords);
+});
+
+test('a release call the controller serves is drawn from its words and sends the action as served', async () => {
+  const user = userEvent.setup();
+  controller.servedCalls = [
+    {
+      type: 'release',
+      projectId: 'project-x',
+      milestoneId: 'm-9',
+      version: '0.9.0',
+      state: 'rejected',
+      taskIds: [],
+      runId: null,
+      kind: 'release-stopped',
+      reason: 'The release of 0.9.0 stopped: Its tests failed.',
+      next: 'Release it again; it is tagged once.',
+      action: 'Release again',
+      details: ['Its tests failed.', 'The tag was not made.'],
+      actions: [
+        {
+          key: 'release-again',
+          label: 'Release again',
+          emphasis: 'primary',
+          closing: false,
+          method: 'POST',
+          path: '/api/projects/project-x/milestones/m-9/release/again',
+          fields: [{ name: 'projectId', required: true, kind: 'id', value: 'project-x' }],
+        },
+      ],
+    },
+  ];
+  open();
+  const card = await cardOf(await calls(), 'Release 0.9.0 stopped');
+  // The recorded error is said once, with the reason; a detail the reason does not hold is said on its own.
+  expect(card.getAllByText(/Its tests failed\./)).toHaveLength(1);
+  expect(card.getByText('The tag was not made.')).toBeTruthy();
+  await user.click(card.getByRole('button', { name: 'Release again' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/projects/project-x/milestones/m-9/release/again', method: 'POST', body: { projectId: 'project-x' } },
+    ]),
+  );
+  await waitFor(() => expect(screen.queryByRole('heading', { name: 'Release 0.9.0 stopped' })).toBeNull());
 });

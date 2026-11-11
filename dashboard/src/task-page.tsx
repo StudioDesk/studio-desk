@@ -26,6 +26,7 @@ import {
   type LogEvent,
   type StoryActivity as StoryActivityRecord,
   type Task,
+  type TaskAction,
   type TaskPage,
 } from './api';
 import { carriedOf, continuation, openPhase, useAttemptDetail } from './attempt-record';
@@ -50,7 +51,6 @@ import { StoryReleaseChip } from './release-chip';
 import { SourceDiff } from './source-story';
 import { factsLine, storyFacts } from './stands';
 import {
-  attemptsUsed,
   cliName,
   houseRules,
   isSourceStory,
@@ -64,6 +64,7 @@ import {
   testingPhases,
   type Stage,
   type Step,
+  workAttemptsUsed,
 } from './story';
 import {
   attemptChip,
@@ -86,7 +87,7 @@ import {
 } from './story-tabs';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { active, explain, liveSummary, statusOf, type RunStory, type StudioState } from './studio-runs';
-import { DecisionNotes, NextAttemptTools, OwnerForm, TaskDecisions } from './task-decisions';
+import { DecisionNotes, NextAttemptTools, offeredActions, OwnerForm, TaskDecisions } from './task-decisions';
 import { agentLooks, placeIn, quoted, when } from './today';
 import { useToast } from './toast';
 import type { AttemptTrace } from './trace';
@@ -145,6 +146,7 @@ export function TaskView({ projectId, taskId, tab }: { projectId: string; taskId
       studio={studio}
       live={state}
       initialTab={tab}
+      served={data.actions}
     />
   );
 }
@@ -203,6 +205,7 @@ function Story({
   studio,
   live: liveState,
   initialTab,
+  served,
 }: {
   projectId: string;
   task: Task;
@@ -210,6 +213,8 @@ function Story({
   studio: StudioState;
   live: StudioState;
   initialTab?: TabId;
+  // The actions the task read served, which the page draws; a page the records of a command placed has none yet.
+  served?: TaskAction[];
 }) {
   const narrow = useNarrow(),
     [draft, setDraft] = useState<string | null>(null),
@@ -233,6 +238,11 @@ function Story({
   const latest = attempts.find(attempt => attempt.id === task.lastAttemptId) ?? attempts.at(-1),
     // An agent's question waiting for an answer, and auto mode's answer the director may still change.
     asking = waitingQuestion(task, attempts),
+    // What the director may do now, as the controller serves it: the question card's send button and the Allow
+    // commands form show only where it lists them, and are sent to the route it names.
+    offered = offeredActions(served, task, studio),
+    answering = offered.find(action => action.key === 'answer'),
+    allowing = offered.find(action => action.key === 'allow-commands'),
     autoAnswer = changeableAnswer(task),
     // The attempt chosen in the strip, which every view shows, or else the latest.
     choice = attempts.find(attempt => attempt.id === chosen),
@@ -283,7 +293,7 @@ function Story({
     liveLabel = active(task)
       ? isReview(latest)
         ? 'Reviewing'
-        : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^A/, 'a')}` : ''}`
+        : `${phase ? (testingPhases.includes(phase) ? 'Testing' : 'Editing') : 'Working'}${latest ? ` · ${attemptName(task, attempts, latest, true).replace(/^./, first => first.toLowerCase())}` : ''}`
       : null;
   // The attempts are the strip above the tabs, not a tab of their own, and everything recorded about the one shown is
   // its own page, linked from Details. Pages follows Checks when it shows, and Try it follows them once the story's
@@ -331,6 +341,9 @@ function Story({
           dirty={draft !== null}
           onChange={setDraft}
           status={task.status}
+          // Finished work has no next attempt: a code story once integrated, as the journey counts it, other work
+          // once accepted.
+          done={source ? task.sourceStage?.current === 'integrated' : task.status === 'done'}
         />
       </BriefCard>
       <People task={task} studio={studio} looks={looks} />
@@ -523,15 +536,19 @@ function Story({
       {/* The question an agent stopped to ask comes first, with the box that answers it. */}
       {asking && (
         <QuestionCard key={asking.id} projectId={projectId} state={studio} task={task} attempt={asking}>
-          <AnswerBox
-            projectId={projectId}
-            state={studio}
-            task={task}
-            attempt={asking}
-            onSent={() =>
-              toast(`Answered. ${workerName(studio, asking.workerId ?? task.workerId)} continues from its saved work.`)
-            }
-          />
+          {answering && (
+            <AnswerBox
+              projectId={projectId}
+              state={studio}
+              task={task}
+              attempt={asking}
+              onSent={() =>
+                toast(
+                  `Answered. ${workerName(studio, asking.workerId ?? task.workerId)} continues from its saved work.`,
+                )
+              }
+            />
+          )}
         </QuestionCard>
       )}
       {autoAnswer && (
@@ -553,6 +570,7 @@ function Story({
         looks={looks}
         narrow={narrow}
         direction={direction}
+        actions={offered}
         onEditFiles={editFiles}
         onRevised={() => setDraft(null)}
         onReadInFull={readInFull}
@@ -567,7 +585,7 @@ function Story({
             Open Candidate tests in Settings
           </Link>
         )}
-        {explanation.kind === 'command-request' && (
+        {explanation.kind === 'command-request' && allowing && (
           <CommandRequest key={explanation.attemptId} projectId={projectId} task={task} explanation={explanation} />
         )}
         <AskedFiles task={task} studio={studio} />
@@ -664,6 +682,7 @@ function Stands({
   looks,
   narrow,
   direction,
+  actions,
   onEditFiles,
   onRevised,
   onReadInFull,
@@ -677,6 +696,8 @@ function Stands({
   looks: Map<string, AgentLook>;
   narrow: boolean;
   direction: string;
+  // The actions the controller serves for the task (offeredActions), which the decisions draw.
+  actions: TaskAction[];
   onEditFiles: () => void;
   onRevised: () => void;
   onReadInFull: () => void;
@@ -743,6 +764,7 @@ function Stands({
         task={task}
         studio={studio}
         direction={direction}
+        actions={actions}
         onEditFiles={onEditFiles}
         onRevised={onRevised}
       />
@@ -1029,7 +1051,8 @@ function Details({
       mode: override?.mode || (switched ? '' : owner?.mode),
     },
     last = [...attempts].reverse().find(attempt => !isReview(attempt)),
-    { used, allowed } = attemptsUsed(task, attempts),
+    // The work's attempts as the controller counts them (workAttemptsUsed), as the stands line reads them.
+    { used, allowed } = workAttemptsUsed(task, attempts),
     dependencies = task.dependencies ?? [];
   return (
     <section className="sd-card sd-sidecard" aria-label="Details" style={{ gap: 'var(--space-14)' }}>
@@ -1188,7 +1211,8 @@ function TaskExecution({ projectId, task, studio }: { projectId: string; task: T
 
 // The draft is the page's own state: it starts from the recorded direction and survives every refresh. A
 // revision request's note starts from it; once the controller records that request, the draft is dropped and the
-// field shows the direction it recorded.
+// field shows the direction it recorded. Finished work shows none: there is no next attempt, and the task and each
+// attempt keep the direction they recorded.
 function Direction({
   projectId,
   taskId,
@@ -1196,6 +1220,7 @@ function Direction({
   dirty,
   onChange,
   status,
+  done,
 }: {
   projectId: string;
   taskId: string;
@@ -1203,6 +1228,7 @@ function Direction({
   dirty: boolean;
   onChange: (value: string | null) => void;
   status: string;
+  done: boolean;
 }) {
   const editable = !running(status) && !['done', 'denied'].includes(status);
   const save = useMutation({
@@ -1210,7 +1236,7 @@ function Direction({
       send(`/api/tasks/${encodeURIComponent(taskId)}`, { projectId, direction }, 'PATCH'),
     onSuccess: () => onChange(null),
   });
-  if (!editable && !value.trim()) return null;
+  if (done || (!editable && !value.trim())) return null;
   return (
     <div className="sd-field" aria-label="Direction">
       <label className="sd-eyebrow" htmlFor="task-direction">

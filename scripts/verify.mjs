@@ -4,7 +4,8 @@
 // installs them, and the plan's fixed test command in a candidate's environment. It makes no model call.
 //   --as candidate (the default): as candidate tests and the check before merging run, in a worktree and in
 //     the test sandbox that Settings → Candidate tests names (--sandbox built-in, the default, or none).
-//   --as checks: as an idea's first checks run, on a copy of the commit at a job's depth, in the same place.
+//   --as checks: as an idea's first checks run, in the same place, on a copy of the commit in the worktrees' folder
+//     under this data folder (.studio-verify/wt), with a candidate's name length, removed afterwards.
 // Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|none] [commit]
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -18,9 +19,10 @@ import { sourcePlan, studioSourceRoot, testPhaseEvidence, verifyCopy } from '../
 import { git, installTimeoutMs, testTimeoutMs } from '../src/connectors/source-integration.mjs';
 import { installsPackages, snapshotPaths, studioDeskProfile } from '../src/connectors/source-profile.mjs';
 import { installStep, packageBoundary } from '../src/connectors/package-installs.mjs';
-import { createSourceWorktree, removeSourceWorktree, worktreeName } from '../src/connectors/source-worktrees.mjs';
-import { snapshotCommit } from '../src/adapters/source-snapshot.mjs';
 import { builtInSandboxCommand, readBuiltInSandboxStatus } from '../src/adapters/built-in-sandbox.mjs';
+// Only its rules for the data folder: importing the server starts no controller.
+import { localConfiguration } from '../src/server.mjs';
+import { makeTestedCopy } from './verify-copy.mjs';
 
 const usage = 'Usage: npm run verify -- [--as candidate|checks] [--sandbox built-in|none] [commit]';
 const options = { as: 'candidate', sandbox: undefined, commit: 'HEAD' };
@@ -41,6 +43,15 @@ const root = studioSourceRoot,
   profile = studioDeskProfile,
   data = path.join(root, '.studio-verify'),
   id = 'attempt-' + randomUUID();
+// The data folder this source's controller uses (STUDIO_DATA_DIR, studio.local.json's dataDirectory, else <source>/data),
+// which the built-in sandbox keeps the tests from, as the pipeline's runs are kept from theirs: the worktree tested
+// here sits outside it.
+let controllerData;
+try {
+  controllerData = localConfiguration(root).dataDirectory;
+} catch (error) {
+  fail(error.message);
+}
 let commit;
 try {
   commit = git(root, ['rev-parse', '--verify', `${options.commit}^{commit}`]);
@@ -58,20 +69,15 @@ packageBoundary(data);
 const environment = subscriptionEnvironment();
 for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
 
-let copy, plan, cleanup;
+const { copy, plan, cleanup } = makeTestedCopy({ root, data, id, commit, as: options.as, profile });
 if (options.as === 'checks') {
-  // An idea's checks measure the commit in a worktree and test a copy of it in the job folder; only in the
-  // built-in sandbox do they set the marker, as candidates do.
-  copy = path.join(data, 'projects', 'project-studio-desk', 'jobs', id, 'source');
-  plan = snapshotCommit(root, path.join(data, 'wt'), 'c-' + worktreeName(id), { commit }, copy, undefined, profile);
+  // An idea's checks measure the commit in a worktree and test a copy of it in a short folder beside the
+  // candidates' working copies (<data>/wt/<name>), which is removed afterwards; only in the built-in sandbox
+  // do they set the marker, as candidates do.
   if (configuration.testSandbox === 'built-in') environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-  cleanup = () => fs.rmSync(path.join(data, 'projects'), { recursive: true, force: true });
 } else {
   // A candidate and the check before merging test a worktree, and only the copied test harness reads the marker.
-  copy = createSourceWorktree(root, path.join(data, 'wt'), 'v-' + worktreeName(id), commit, profile);
-  plan = sourcePlan(copy, profile);
   environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
-  cleanup = () => removeSourceWorktree(root, copy);
 }
 
 let child = null;
@@ -85,9 +91,9 @@ try {
     throw new Error('Installing the packages failed, so no tests ran.');
   const test =
       options.as !== 'checks'
-        ? candidateTestCommand(plan, configuration)
+        ? candidateTestCommand({ ...plan, data: controllerData }, configuration)
         : configuration.testSandbox === 'built-in'
-          ? builtInSandboxCommand({ root: copy, command: plan.command })
+          ? builtInSandboxCommand({ root: copy, data: controllerData, command: plan.command })
           : plan.command,
     where = `${sandboxLabel(configuration)}, as ${options.as === 'checks' ? "an idea's checks run" : 'candidate tests run'}`,
     started = Date.now();

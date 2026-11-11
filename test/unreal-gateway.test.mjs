@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { createStudio } from './model-free-studio.mjs';
@@ -37,7 +38,7 @@ async function setup(t, { timeoutMs = 500, disabled = false } = {}) {
   const sources = roles.map((role, i) => {
     const file = path.join(project, i === 0 ? 'fixture.uproject' : `source-${i}.json`);
     fs.writeFileSync(file, JSON.stringify({ fixture: true, role }));
-    return { role, path: fs.realpathSync(file), hash: hash(fs.readFileSync(file)) };
+    return { role, path: realPath(file), hash: hash(fs.readFileSync(file)) };
   });
   const pin = {
     endpoint: 'http://127.0.0.1:8000/mcp',

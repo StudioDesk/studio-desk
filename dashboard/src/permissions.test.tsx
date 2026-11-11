@@ -6,6 +6,7 @@ import { cleanup, render, screen, waitFor, within } from '@testing-library/react
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { App } from './app';
+import { commandProblem } from './permissions';
 import { createAppRouter } from './router';
 import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
 
@@ -135,4 +136,50 @@ test('a command request offers each refused command as a rule to approve or shor
       },
     ]),
   );
+});
+
+const onItsOwn = (name: string) =>
+  `${name} cannot be approved on its own: approving a shell or a program that runs scripts lets an agent run anything with it, including reading the director's key. Approve a narrower command, such as node --test.`;
+
+test('a shell or a program that runs scripts cannot be approved on its own', async () => {
+  expect(commandProblem('npm')).toBe(onItsOwn('npm'));
+  expect(commandProblem('bash -c')).toBe(onItsOwn('bash -c'));
+  expect(commandProblem('C:/Program Files/nodejs/node.exe')).toBe(onItsOwn('C:/Program Files/nodejs/node.exe'));
+  expect(commandProblem('npm run lint')).toBeNull();
+  expect(commandProblem('node --test')).toBeNull();
+
+  const user = userEvent.setup();
+  open('/p/project-x/settings');
+  await screen.findByRole('list', { name: 'Approved commands' });
+  await user.type(screen.getByLabelText('Approve a command'), 'node');
+  expect(screen.getByText(onItsOwn('node'))).toBeTruthy();
+  expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+  await user.keyboard('{Enter}');
+  expect(commands()).toEqual([]);
+});
+
+test('a refused command whose rule would be a program on its own keeps Allow commands disabled', async () => {
+  const user = userEvent.setup();
+  controller.tasks = [
+    taskFixture('T-blocked', { title: 'Blocked work', status: 'blocked', lastAttemptId: 'attempt-1' }),
+  ];
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-blocked',
+      status: 'blocked',
+      workerId: 'W-1',
+      provider: 'claude',
+      result: { summary: 'I need to run a script.' },
+      commandDenials: [{ tool: 'Bash', command: 'node "$HOME/x.js"', reason: 'not approved' }],
+    },
+  ];
+  open('/p/project-x/tasks/T-blocked');
+  const rule = (await screen.findByLabelText('Rule to approve')) as HTMLInputElement;
+  expect(rule.value).toBe('node');
+  expect(screen.getByText(onItsOwn('node'))).toBeTruthy();
+  expect((screen.getByRole('button', { name: 'Allow commands' }) as HTMLButtonElement).disabled).toBe(true);
+  await user.type(rule, ' --test');
+  expect(screen.queryByText(onItsOwn('node'))).toBeNull();
+  expect((screen.getByRole('button', { name: 'Allow commands' }) as HTMLButtonElement).disabled).toBe(false);
 });

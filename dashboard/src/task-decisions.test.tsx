@@ -6,10 +6,18 @@ import { createMemoryHistory } from '@tanstack/react-router';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import type { AttemptSummary, Task } from './api';
+import type { AttemptSummary, Task, TaskAction, TaskActionField } from './api';
 import { App } from './app';
 import { createAppRouter } from './router';
-import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
+import {
+  createStream,
+  decisionStates,
+  fakeController,
+  outdatedReason,
+  outsideMeasured,
+  taskFixture,
+  type Controller,
+} from './test-controller';
 
 let controller: Controller;
 beforeEach(() => {
@@ -143,20 +151,134 @@ test('once the attempt is reconciled, Reconcile is gone and Start assignment is 
   expect(isPrimary(region.getByRole('button', { name: 'Start assignment' }))).toBe(true);
 });
 
-// A result in review, with the direction its task recorded.
-const inReview = () => {
+// A result in review, with the direction its task recorded and any checks its own report recorded.
+const inReview = (checks?: NonNullable<AttemptSummary['result']>['checks']) => {
   controller.attempts = [
     {
       id: 'attempt-1',
       taskId: 'T-1',
       status: 'review',
       workerId: 'W-1',
-      result: { outcome: 'completed', summary: 'Ready.' },
+      result: { outcome: 'completed', summary: 'Ready.', ...(checks ? { checks } : {}) },
     },
   ];
   open(taskFixture('T-1', { status: 'review', lastAttemptId: 'attempt-1', direction: 'Recorded direction.' }));
 };
 const revision = async () => within(await screen.findByRole('dialog', { name: 'Request a revision?' }));
+// A result whose own checks failed twice over, one named twice, beside a check that passed and one not run.
+const failedChecks = [
+  { name: 'Unit tests', status: 'fail', evidence: '2 of 40 failed.' },
+  { name: 'Lint', status: 'fail' },
+  { name: 'Unit tests', status: 'fail', evidence: 'Run again: 2 of 40 failed.' },
+  { name: 'Build', status: 'pass' },
+  { name: 'Visual check', status: 'not-run', evidence: 'No browser.' },
+];
+const acceptOver = async () => within(await screen.findByRole('dialog', { name: 'Accept over a failed check?' }));
+
+test('a result whose own checks failed is accepted over them with a reason, with Request revision beside it', async () => {
+  const user = userEvent.setup();
+  inReview(failedChecks);
+  const region = await decisions(),
+    decided = row(region);
+  expect(names(decided)).toEqual(['Accept over a failed check…', 'Request revision', 'More actions']);
+  const accept = decided.getByRole('button', { name: 'Accept over a failed check…' });
+  expect(isPrimary(accept)).toBe(true);
+  expect(isPrimary(decided.getByRole('button', { name: 'Request revision' }))).toBe(false);
+  expect(region.queryByRole('button', { name: 'Accept result' })).toBeNull();
+  await user.click(accept);
+  // The acceptance waits for the director's reason, and the box names each failed check once.
+  const dialog = await acceptOver();
+  expect(posted()).toEqual([]);
+  expect(
+    dialog.getByText('Its own checks failed: Unit tests, Lint. Your reason is recorded with the acceptance.'),
+  ).toBeTruthy();
+  const reason = dialog.getByLabelText('Why accept it anyway') as HTMLTextAreaElement;
+  expect(reason.value).toBe('');
+  expect(reason.maxLength).toBe(2000);
+  // The controller needs a reason: an empty one, or only spaces, sends nothing.
+  const submit = dialog.getByRole('button', { name: 'Accept over a failed check' }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(true);
+  await user.click(submit);
+  await user.type(reason, '   ');
+  expect(submit.disabled).toBe(true);
+  await user.click(submit);
+  expect(posted()).toEqual([]);
+  await user.clear(reason);
+  await user.type(reason, 'The two failures are a known flaky test.');
+  await user.click(submit);
+  // The accept route takes only the project and the reason.
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-1/accept',
+        method: 'POST',
+        body: { projectId: 'project-x', overReason: 'The two failures are a known flaky test.' },
+      },
+    ]),
+  );
+  expect(screen.queryByRole('dialog', { name: 'Accept over a failed check?' })).toBeNull();
+  await waitFor(() => expect(toast().textContent).toBe('Accepted over a failed check.'));
+});
+
+test('one failed check is named on its own, and Cancel sends nothing', async () => {
+  const user = userEvent.setup();
+  inReview([{ name: 'Lint', status: 'fail' }]);
+  const region = await decisions();
+  await user.click(region.getByRole('button', { name: 'Accept over a failed check…' }));
+  const dialog = await acceptOver();
+  expect(dialog.getByText('Its own check failed: Lint. Your reason is recorded with the acceptance.')).toBeTruthy();
+  await user.click(dialog.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('dialog', { name: 'Accept over a failed check?' })).toBeNull();
+  expect(posted()).toEqual([]);
+});
+
+test('a result whose own checks all passed keeps Accept result, which sends no reason', async () => {
+  const user = userEvent.setup();
+  inReview(failedChecks.filter(check => check.status !== 'fail'));
+  const region = await decisions();
+  expect(names(row(region))).toEqual(['Accept result', 'Request revision', 'More actions']);
+  await user.click(region.getByRole('button', { name: 'Accept result' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([{ url: '/api/tasks/T-1/accept', method: 'POST', body: { projectId: 'project-x' } }]),
+  );
+  expect(screen.queryByRole('dialog', { name: 'Accept over a failed check?' })).toBeNull();
+  await waitFor(() => expect(toast().textContent).toBe('Result accepted.'));
+});
+
+test.each([
+  ['accepts failed checks plainly', { acceptsFailedChecks: true, acceptOver: true }],
+  ['takes no acceptance over a failed check', { acceptsFailedChecks: false, acceptOver: false }],
+])('a task type that %s keeps Accept result over a failed check, which sends no reason', async (_, facts) => {
+  const user = userEvent.setup();
+  controller.shell.taskKinds = { general: { label: 'General task', cardLabel: 'Task', ...facts } };
+  inReview(failedChecks);
+  const region = await decisions();
+  expect(names(row(region))).toEqual(['Accept result', 'Request revision', 'More actions']);
+  await user.click(region.getByRole('button', { name: 'Accept result' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([{ url: '/api/tasks/T-1/accept', method: 'POST', body: { projectId: 'project-x' } }]),
+  );
+});
+
+test('the type the attempt ran as decides, as the controller reads it for a stage', async () => {
+  // The story's own type would take an acceptance over the failed check; the step it ran as accepts it plainly.
+  controller.shell.taskKinds = {
+    general: { label: 'General task', acceptsFailedChecks: false, acceptOver: true },
+    'general:stage': { label: 'A stage', acceptsFailedChecks: true, acceptOver: true },
+  };
+  controller.attempts = [
+    {
+      id: 'attempt-1',
+      taskId: 'T-1',
+      status: 'review',
+      workerId: 'W-1',
+      assignment: { kind: 'general:stage' },
+      result: { outcome: 'completed', summary: 'Ready.', checks: failedChecks },
+    },
+  ];
+  open(taskFixture('T-1', { status: 'review', lastAttemptId: 'attempt-1' }));
+  expect(names(row(await decisions()))).toEqual(['Accept result', 'Request revision', 'More actions']);
+});
 
 test("a result in review is accepted, or sent for revision with a note that starts from the page's direction draft", async () => {
   const user = userEvent.setup();
@@ -516,7 +638,14 @@ test('while the review runs, the row says Integrate and Send back come when it i
 test('a story whose review asked for changes is sent back, or integrated over the review with a reason', async () => {
   const user = userEvent.setup();
   controller.attempts = [
-    { id: 'attempt-review', taskId: 'T-1', status: 'accepted', workerId: 'W-1', candidateReviewVerdict: 'needs-work' },
+    {
+      id: 'attempt-review',
+      taskId: 'T-1',
+      status: 'accepted',
+      workerId: 'W-1',
+      candidateReviewVerdict: 'needs-work',
+      candidateReview: { attemptId: 'attempt-edit', passed: true },
+    },
   ];
   open(
     taskFixture('T-1', {
@@ -851,4 +980,222 @@ test('a stopped bring-back offers Bring back again, and Not needed speaks of bri
     }),
   );
   await waitFor(() => expect(toast().textContent).toBe('Not bringing the fix back to release/1.0.'));
+});
+
+// The code moved past the story's plan: the page reads the controller's plain reason and offers only the step that
+// works, which sends the idea text the director edited.
+test('a story the code moved past offers Close and send as a new idea with the idea to edit, and no Start', async () => {
+  const user = userEvent.setup();
+  controller.command = url => (url.endsWith('/send-as-idea') ? { ok: true, closed: 'T-1', runId: 'run-9' } : {});
+  const task = decisionStates['a story the code moved past']!(controller);
+  open(task);
+  const region = await decisions();
+  expect(region.getByText(outdatedReason)).toBeTruthy();
+  const send = row(region).getByRole('button', { name: 'Close and send as a new idea' });
+  expect(isPrimary(send)).toBe(true);
+  expect(region.queryByRole('button', { name: 'Start assignment' })).toBeNull();
+  expect(region.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
+  expect(region.queryByRole('button', { name: 'Edit the file list' })).toBeNull();
+  // No file names or record names in what the director reads there.
+  expect(screen.getByRole('region', { name: 'Where it stands' }).textContent).not.toMatch(/outdated|sourceStage|\.mjs/);
+  await user.click(send);
+  const dialog = within(await screen.findByRole('dialog', { name: 'Close and send as a new idea?' })),
+    idea = dialog.getByLabelText('The new idea') as HTMLTextAreaElement;
+  expect(idea.value).toBe(
+    `${task.title}\n\nIt continues work an earlier story planned, which the code has since moved past.`,
+  );
+  await user.clear(idea);
+  await user.type(idea, 'Show the route in plain words.');
+  await user.click(dialog.getByRole('button', { name: 'Close and send as a new idea' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/send-as-idea',
+      method: 'POST',
+      body: { projectId: 'project-x', idea: 'Show the route in plain words.' },
+    }),
+  );
+  expect(await screen.findByText(`Closed “${task.title}” and sent its work as a new idea.`)).toBeTruthy();
+  expect((await screen.findByRole('link', { name: "Open the new idea's run" })).getAttribute('href')).toBe(
+    '/p/project-x/runs/run-9',
+  );
+});
+
+// Sent unchanged, the controller composes the idea itself, with the story's plain planned summary.
+test('a story the code moved past sent with its idea unchanged leaves the idea to the controller', async () => {
+  const user = userEvent.setup();
+  open(decisionStates['a story the code moved past']!(controller));
+  await user.click((await decisions()).getByRole('button', { name: 'Close and send as a new idea' }));
+  const dialog = within(await screen.findByRole('dialog', { name: 'Close and send as a new idea?' }));
+  await user.click(dialog.getByRole('button', { name: 'Close and send as a new idea' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/send-as-idea',
+      method: 'POST',
+      body: { projectId: 'project-x' },
+    }),
+  );
+});
+
+// A file request the controller would refuse as asked: its problem in plain words, and no Allow and continue.
+test('a file request with a problem shows the problem and offers no Allow and continue', async () => {
+  open(decisionStates['a file request outside the measured list']!(controller));
+  const region = await decisions();
+  expect(region.getByText(new RegExp(`cannot be allowed as asked: ${outsideMeasured}`))).toBeTruthy();
+  expect(region.queryByRole('button', { name: 'Allow and continue' })).toBeNull();
+  expect(region.queryByRole('button', { name: 'Edit the file list' })).toBeNull();
+  expect(row(region).getByRole('button', { name: 'Start assignment' })).toBeTruthy();
+});
+
+// The stand-in's read of T-1 serves the actions given, in place of the ones the controller's rules list for its records.
+const serve = (actions: TaskAction[]) => {
+  const inner = fetch;
+  vi.stubGlobal('fetch', async (url: string, options?: RequestInit) => {
+    const answer = await inner(url, options);
+    if ((options?.method ?? 'GET') !== 'GET' || url.split('?')[0] !== '/api/tasks/T-1') return answer;
+    const page = (await answer.json()) as object;
+    return { ...answer, json: async () => ({ ...page, actions }) };
+  });
+};
+// One served action on T-1, with the project and any other fields it takes.
+const served = (
+  key: string,
+  label: string,
+  emphasis: TaskAction['emphasis'],
+  path: string,
+  { fields = [], closing = false, method = 'POST' }: Partial<Pick<TaskAction, 'fields' | 'closing' | 'method'>> = {},
+): TaskAction => ({
+  key,
+  label,
+  emphasis,
+  closing,
+  method,
+  path,
+  fields: [{ name: 'projectId', required: true, kind: 'id', value: 'project-x' }, ...fields],
+});
+const note = (name: string, required = false): TaskActionField => ({ name, required, kind: 'note' });
+
+// The page draws what the controller serves, not what it would work out from its own records.
+test('the page draws exactly the served actions, in their order, with closing ones behind More actions', async () => {
+  // Ready work, which the page alone would offer Start for: served only its Close.
+  serve([
+    served('deny-Close this step', 'Close this step', 'quiet', '/api/tasks/T-1/deny-work', {
+      fields: [note('reason')],
+      closing: true,
+    }),
+  ]);
+  open(taskFixture('T-1'));
+  let region = await decisions();
+  await waitFor(() => expect(names(region)).toEqual(['More actions']));
+  expect(closing()).toEqual(['Close this step: It will not run; a note you add is kept with the decision.']);
+  expect(region.queryByRole('button', { name: 'Start assignment' })).toBeNull();
+  cleanup();
+  // A result in review served with Request revision before Accept result, and no Close.
+  serve([
+    served('revise', 'Request revision', 'default', '/api/tasks/T-1/revise', { fields: [note('direction', true)] }),
+    served('accept', 'Accept result', 'primary', '/api/tasks/T-1/accept'),
+  ]);
+  open(decisionStates['a result in review']!(controller));
+  region = await decisions();
+  await waitFor(() => expect(names(row(region))).toEqual(['Request revision', 'Accept result']));
+  expect(isPrimary(region.getByRole('button', { name: 'Accept result' }))).toBe(true);
+  expect(isPrimary(region.getByRole('button', { name: 'Request revision' }))).toBe(false);
+  expect(screen.queryByRole('button', { name: 'More actions' })).toBeNull();
+  expect(closing()).toEqual([]);
+});
+
+test('a served action that needs no words is sent exactly as served', async () => {
+  const user = userEvent.setup();
+  serve([
+    served('hold', 'Release hold', 'default', '/api/tasks/T-1', {
+      method: 'PATCH',
+      fields: [{ name: 'hold', required: true, kind: 'boolean', value: false }],
+    }),
+    // An action the page has no dialog for is a plain button sending its served request.
+    served('unknown-step', 'Reconcile source integration', 'default', '/api/tasks/T-1/restore-source', {
+      fields: [
+        { name: 'attemptId', required: true, kind: 'id', value: 'attempt-9' },
+        { name: 'note', required: false, kind: 'note' },
+      ],
+    }),
+  ]);
+  open(taskFixture('T-1'));
+  const region = await decisions();
+  await user.click(await region.findByRole('button', { name: 'Release hold' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      { url: '/api/tasks/T-1', method: 'PATCH', body: { projectId: 'project-x', hold: false } },
+    ]),
+  );
+  await user.click(region.getByRole('button', { name: 'Reconcile source integration' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/restore-source',
+      method: 'POST',
+      body: { projectId: 'project-x', attemptId: 'attempt-9' },
+    }),
+  );
+});
+
+test("a served action with a dialog opens it as before and sends the director's words to the served route", async () => {
+  const user = userEvent.setup();
+  // Past its limit as the controller counts it, which the page's own count of a fresh task would not be.
+  serve([
+    served('start-past-limit', 'Start assignment', 'primary', '/api/tasks/T-1/start', {
+      fields: [note('direction')],
+    }),
+    served('revise', 'Request revision', 'default', '/api/tasks/T-1/revise', { fields: [note('direction', true)] }),
+  ]);
+  open(taskFixture('T-1'));
+  const region = await decisions();
+  await user.click(await region.findByRole('button', { name: 'Start assignment' }));
+  let dialog = await again();
+  expect(posted()).toEqual([]);
+  await user.type(dialog.getByLabelText('Note for the next attempt (optional)'), 'Fix the failing test first.');
+  await user.click(dialog.getByRole('button', { name: 'Start assignment' }));
+  await waitFor(() =>
+    expect(posted()).toEqual([
+      {
+        url: '/api/tasks/T-1/start',
+        method: 'POST',
+        body: { projectId: 'project-x', direction: 'Fix the failing test first.' },
+      },
+    ]),
+  );
+  await user.click(region.getByRole('button', { name: 'Request revision' }));
+  dialog = await revision();
+  await user.type(dialog.getByLabelText('What to change'), 'Name the route.');
+  await user.click(dialog.getByRole('button', { name: 'Request revision' }));
+  await waitFor(() =>
+    expect(posted().at(-1)).toEqual({
+      url: '/api/tasks/T-1/revise',
+      method: 'POST',
+      body: { projectId: 'project-x', direction: 'Name the route.' },
+    }),
+  );
+});
+
+// The question card's box that answers it shows only where the controller serves Answer.
+test('a waiting question shows its answer box only where the served actions include it', async () => {
+  const task = decisionStates['a waiting question']!(controller);
+  serve([]);
+  open(task);
+  const card = await screen.findByRole('article', { name: /'s question$/ });
+  await decisions();
+  expect(
+    within(card)
+      .queryAllByRole('button')
+      .filter(button => (button as HTMLButtonElement).type === 'submit'),
+  ).toEqual([]);
+  cleanup();
+  controller = fakeController();
+  open(decisionStates['a waiting question']!(controller));
+  const asked = await screen.findByRole('article', { name: /'s question$/ });
+  await waitFor(() =>
+    expect(
+      within(asked)
+        .getAllByRole('button')
+        .filter(button => (button as HTMLButtonElement).type === 'submit')
+        .map(button => button.textContent?.trim()),
+    ).toEqual(['Send to Eli']),
+  );
 });

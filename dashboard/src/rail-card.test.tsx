@@ -659,6 +659,27 @@ test('callLine puts a hold and stopped work only the director can clear in their
   ]);
 });
 
+test('callLine puts a project held after a restart as its resume, with the stories that wait only for it', () => {
+  // A restart holds Project Y's queue: its two queued stories wait only for the resume, so the project's one resume is
+  // its only call, linking Today at Your calls.
+  const restarted: Partial<Shell> = {
+      pipelineEnabled: false,
+      project: { id: 'project-y', name: 'Project Y', dispatchPaused: true, restartPaused: true },
+    },
+    [, live] = held();
+  expect(linesOf(live, restarted)).toEqual([['Resume this project', '2 stories wait on it', '#calls']]);
+  expect(linesOf({ tasks: live.tasks.slice(0, 1) }, restarted)).toEqual([
+    ['Resume this project', '1 story waits on it', '#calls'],
+  ]);
+  // With no queued story it says only what to do.
+  expect(linesOf({}, restarted)).toEqual([['Resume this project', null, '#calls']]);
+  // Its key is the project's resume, as Today's calls name it.
+  const state: StudioState = { ...projectY(), ...restarted, ...live },
+    summary = liveSummary(state),
+    resume = summary.items.find(item => item.requiresDirector);
+  expect(resume && callLine(resume, state, summary.stories).key).toBe('resume:project-y');
+});
+
 test('callLine links a call with neither an idea nor a known step to Today at Your calls', () => {
   const state: StudioState = { ...projectY(), ...twoCalls() };
   expect(callLine(gone, state, liveSummary(state).stories)).toEqual({
@@ -667,4 +688,123 @@ test('callLine links a call with neither an idea nor a known step to Today at Yo
     where: 'T-gone',
     to: '#calls',
   });
+});
+
+// The two stops only the director moves on, as the controller serves them (src/core/director-calls.mjs) and the pages
+// draw them (records.ts servedItems): a milestone's stopped release and a story's turned-down carry.
+const releaseItem = (version = '1.2.0'): HomeItem => ({
+  kind: 'release-stopped',
+  projectId: 'project-y',
+  milestoneId: 'm-120',
+  version,
+  state: 'needs-reconciliation',
+  taskIds: [],
+  reason: `The release of ${version} stopped part-way.`,
+  next: 'Release it again; it is tagged once.',
+  action: 'Release again',
+  details: [],
+  actions: [],
+  requiresDirector: true,
+});
+const carryItem = (fields: { taskId?: string; line?: string; back?: boolean } = {}): HomeItem => ({
+  kind: 'carry-stopped',
+  projectId: 'project-y',
+  taskId: fields.taskId ?? 'T-fix',
+  taskIds: [fields.taskId ?? 'T-fix'],
+  title: 'Keep the board when a filter is empty',
+  line: fields.line ?? 'main',
+  back: !!fields.back,
+  state: 'rejected',
+  reason: 'Carrying this fix to main was turned down.',
+  next: 'Carry it again, or say it is not needed there.',
+  action: 'Carry to main again',
+  details: [],
+  actions: [],
+  requiresDirector: true,
+});
+
+test('callLine puts a stopped release on the Releases page and a turned-down carry on its story, in their own words', () => {
+  const state: StudioState = { ...projectY(), ...twoCalls() },
+    stories = liveSummary(state).stories;
+  expect(callLine(releaseItem(), state, stories)).toEqual({
+    key: 'release:m-120',
+    verb: 'Release 1.2.0 again',
+    where: null,
+    to: '/releases',
+  });
+  expect(callLine(carryItem(), state, stories)).toEqual({
+    key: 'carry:T-fix',
+    verb: 'Carry to main again',
+    where: 'Keep the board when a filter is empty',
+    to: '/tasks/T-fix',
+  });
+  // A bring-back is worded as bringing the fix back, and an ID that is no plain word is encoded in the address.
+  expect(callLine(carryItem({ taskId: 'T fix/2', line: 'release/1.0', back: true }), state, stories)).toEqual({
+    key: 'carry:T fix/2',
+    verb: 'Bring back to release/1.0 again',
+    where: 'Keep the board when a filter is empty',
+    to: '/tasks/T%20fix%2F2',
+  });
+});
+
+test("Project Y's stopped release and turned-down carry count on its tile and are lines of its card", async () => {
+  const live = twoCalls();
+  // A fix that landed in Project Y, whose carry to main was turned down: the controller lists it from the records.
+  live.attempts.push({
+    id: 'attempt-review',
+    taskId: 'T-fix',
+    status: 'accepted',
+    workerId: 'W-1',
+    assignment: { kind: 'studio-development:change-review' },
+    candidateReviewVerdict: 'pass',
+    sourceIntegration: { state: 'integrated' },
+    sourceCarries: [{ line: 'main', state: 'rejected' }],
+  });
+  live.tasks.push(
+    taskFixture('T-fix', {
+      title: 'Keep the board when a filter is empty',
+      kind: 'studio-development:change',
+      status: 'done',
+      acceptedAttemptId: 'attempt-review',
+      lastAttemptId: 'attempt-review',
+      sourceStage: {
+        version: 'source-story-stages-v1',
+        phase: 'integration',
+        current: 'integrated',
+        review: { attemptId: 'attempt-review', verdict: 'pass', hash: 'review-hash' },
+      },
+    }),
+  );
+  controller.shells['project-y'] = projectY();
+  controller.lives['project-y'] = live;
+  // Its stopped release, as the controller serves it.
+  controller.servedCalls = [
+    {
+      type: 'release',
+      projectId: 'project-y',
+      milestoneId: 'm-120',
+      version: '1.2.0',
+      state: 'needs-reconciliation',
+      taskIds: [],
+      runId: null,
+      kind: 'release-stopped',
+      reason: 'The release of 1.2.0 stopped part-way.',
+      next: 'Release it again; it is tagged once.',
+      action: 'Release again',
+      details: [],
+      actions: [],
+    },
+  ];
+  const router = open();
+  // The served count: the two calls the shared rules list, then the carry and the release.
+  fireEvent.pointerEnter(await tileY(4));
+  expect(within(card()).getByText('4 calls for you')).toBeTruthy();
+  expect(lines()).toEqual([
+    ...twoLines,
+    ['Carry to main again', 'Keep the board when a filter is empty', '/p/project-y/tasks/T-fix'],
+    ['Release 1.2.0 again', null, '/p/project-y/releases'],
+  ]);
+  expect(fireEvent.click(lineLink('Release 1.2.0 again'))).toBe(false);
+  expect(queryCard()).toBeNull();
+  await waitFor(() => expect(router.state.location.pathname).toBe('/p/project-y/releases'));
 });

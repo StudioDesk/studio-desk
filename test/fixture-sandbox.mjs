@@ -1,5 +1,6 @@
 // Model-free sandbox protocol fixture; this does not verify native isolation.
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 const args = process.argv.slice(2),
@@ -8,7 +9,7 @@ const args = process.argv.slice(2),
 // the working folder is reported by its real path.
 const real = file => {
   try {
-    return fs.realpathSync(file);
+    return realPath(file);
   } catch {
     return null;
   }
@@ -56,5 +57,14 @@ if (mode === 'misleading-report' || mode === 'invalid-report') {
       return write(file, ...rest);
     throw Object.assign(new Error('Fixture file denial'), { code: mode === 'wrong-error' ? 'ENOENT' : 'EACCES' });
   };
+  // The elevated sandbox's account group is denied the director's secrets (C-42); MXC runs as the director and reads
+  // them. 'secret-readable' stands for an elevated sandbox that a Codex update has opened to them.
+  const read = fs.readFileSync;
+  if (args.includes('windows.sandbox="elevated"') && mode !== 'secret-readable')
+    fs.readFileSync = (file, ...rest) => {
+      if (path.basename(String(file)) === 'secret-stand-in.txt')
+        throw Object.assign(new Error('Fixture secret denial'), { code: 'EPERM' });
+      return read(file, ...rest);
+    };
   await import(pathToFileURL(args.at(-1)).href);
 }

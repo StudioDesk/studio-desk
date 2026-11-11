@@ -1,5 +1,5 @@
 // Releasing a milestone and pushing it (1.1 step 5, Decision MP-028). Release is offered on a milestone whose ideas are
-// accepted; it offers to move ideas still open to the next milestone on its line, so nothing ships half-done. The
+// accepted; it offers to move ideas still open to the next release, so nothing ships half-done. The
 // project's planner (its breakdown owner) drafts the release notes from the milestone's integrated stories, in a task
 // the director accepts or sends back. Accepting it releases: the controller writes the version where the project keeps
 // one (package.json and its lockfile; otherwise the tag alone is the version) and the notes at the top of
@@ -10,8 +10,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { commitIntegration, git, integrationTrailer, stageFiles, verifyIntegration } from './source-integration.mjs';
+import {
+  commitIntegration,
+  git,
+  integrationTrailer,
+  landed,
+  stageFiles,
+  verifyIntegration,
+} from './source-integration.mjs';
 import { testsSentence } from './source-checks.mjs';
+import { holdInterrupted, keepStoppedTurn } from './source-carries.mjs';
+import { holdsTestTurn } from '../core/test-turn.mjs';
 import { createSourceWorktree, removeSourceWorktree, sourceWorktreeRoot } from './source-worktrees.mjs';
 import { lineReached, lineRepository, moveLine, projectLine } from './source-lines.mjs';
 import { compareVersions, makeMilestone, parseVersion, projectMilestones, releaseTags } from './source-milestones.mjs';
@@ -61,23 +70,40 @@ const settledTask = task =>
   task.kind === 'studio-development:change' && task.status === 'done'
     ? integrated(task) || task.sourceStage?.current === 'closed'
     : ['done', 'denied', 'cancelled'].includes(task.status);
-// The next milestone on the same line, made when there is none: the next patch of a patch, the next minor otherwise.
-function nextMilestone(store, projectId, runtime, milestone) {
+// Version-line minors and majors move on to the next open minor/major, on its own line. Patches and legacy releases
+// keep their same-line progression. Make the next patch or minor only when there is no open destination.
+// The open destination that already exists, if any: looked up apart from making one, so a release can check it first.
+function laterMilestone(store, projectId, milestone) {
   const version = parseVersion(milestone.version),
-    later = projectMilestones(store, projectId)
-      .filter(item => item.state === 'open' && item.line === milestone.line && item.id !== milestone.id)
-      .filter(item => compareVersions(parseVersion(item.version), version) > 0)
-      .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
+    versionLine = store.project(projectId).shipsTo && version[2] === 0;
+  return projectMilestones(store, projectId)
+    .filter(item => item.state === 'open' && item.id !== milestone.id)
+    .filter(item => (versionLine ? parseVersion(item.version)[2] === 0 : item.line === milestone.line))
+    .filter(item => compareVersions(parseVersion(item.version), version) > 0)
+    .sort((a, b) => compareVersions(parseVersion(a.version), parseVersion(b.version)))[0];
+}
+function nextMilestone(store, projectId, runtime, milestone) {
+  const later = laterMilestone(store, projectId, milestone);
   if (later) return later;
-  const next =
-    version[2] > 0 || milestone.line !== null
-      ? [version[0], version[1], version[2] + 1]
-      : [version[0], version[1] + 1, 0];
+  const version = parseVersion(milestone.version),
+    versionLine = store.project(projectId).shipsTo && version[2] === 0,
+    next =
+      !versionLine && (version[2] > 0 || milestone.line !== null)
+        ? [version[0], version[1], version[2] + 1]
+        : [version[0], version[1] + 1, 0];
   return makeMilestone(store, projectId, runtime, { version: next, by: { type: 'release', from: milestone.id } });
 }
 
-// Release on a milestone: refuses while its ideas are open unless moveOpen moves them to the next milestone on its line,
-// then asks the planner for the notes. Returns the notes task.
+// The project's planner, who drafts its release notes: its enabled breakdown owner, or null when it has none. Release
+// and the Releases page both ask here, so they name the same agent.
+export function releasePlanner(store, projectId, org = projectOrganization(store, projectId)) {
+  return (
+    org.workers.find(worker => worker.id === org.kindOwners?.['studio-development:breakdown'] && worker.enabled) ?? null
+  );
+}
+
+// Release on a milestone: refuses while its ideas are open or waiting unless moveOpen moves them, the open work and the
+// waiting ideas together, to the next release, then asks the planner for the notes. Returns the notes task.
 export function startRelease(store, runtime, projectId, milestoneId, { moveOpen = false } = {}) {
   const { milestone } = milestoneOf(store, projectId, milestoneId),
     root = projectSource(store, projectId, runtime).root;
@@ -87,43 +113,119 @@ export function startRelease(store, runtime, projectId, milestoneId, { moveOpen 
   const tag = tagFor(root, milestone.version);
   if (tagExists(root, tag)) throw new Error(`The repository already has a tag named ${tag}.`);
   const tasks = milestoneTasks(store, projectId, milestoneId),
-    open = tasks.filter(task => !settledTask(task));
-  if (open.length && !moveOpen)
+    open = tasks.filter(task => !settledTask(task)),
+    // Ideas still waiting in the milestone are open work too: a released milestone never sends them.
+    waiting = milestone.waiting ?? [];
+  if ((open.length || waiting.length) && !moveOpen) {
+    const list = (items, name) => items.slice(0, 5).map(name).join(', ') + (items.length > 5 ? ' and more' : ''),
+      start = text => {
+        const words = String(text ?? '').trim();
+        return words.length > 60 ? `${words.slice(0, 60).trimEnd()}…` : words;
+      },
+      parts = [
+        ...(open.length
+          ? [
+              `${open.length} ${open.length === 1 ? 'piece of work is' : 'pieces of work are'} still open on ${milestone.version}: ${list(open, task => `${task.id} (“${task.title}”)`)}`,
+            ]
+          : []),
+        ...(waiting.length
+          ? [
+              `${waiting.length} ${waiting.length === 1 ? 'idea still waits' : 'ideas still wait'} on ${milestone.version}: ${list(waiting, idea => `${idea.id} (“${start(idea.idea)}”)`)}`,
+            ]
+          : []),
+      ];
     throw Object.assign(
       new Error(
-        `${open.length} ${open.length === 1 ? 'piece of work is' : 'pieces of work are'} still open on ${milestone.version}: ${open
-          .slice(0, 5)
-          .map(task => `${task.id} (“${task.title}”)`)
-          .join(
-            ', ',
-          )}${open.length > 5 ? ' and more' : ''}. Release it after they settle, or move them to the next milestone.`,
+        `${parts.join('; ')}. ${
+          waiting.length
+            ? `Release it after ${open.length ? 'they settle and ' : ''}its waiting ideas are sent`
+            : 'Release it after they settle'
+        }, or move them to the next milestone.`,
       ),
-      { status: 409, open: open.map(task => task.id) },
+      { status: 409, open: open.map(task => task.id), waiting: waiting.map(idea => idea.id) },
     );
+  }
   const stories = tasks.filter(task => task.kind === 'studio-development:change' && integrated(task));
   if (!stories.length)
     throw new Error(`Nothing on ${milestone.version} has been integrated yet, so there is nothing to release.`);
-  if (open.length) {
+  if (open.length || waiting.length) {
+    // A later version line changes future routing, never the branch of work already executing. As with moveStory,
+    // source work that has started stays on its branch; it must settle or close before this release can move it on.
+    if (store.project(projectId).shipsTo && parseVersion(milestone.version)[2] === 0) {
+      const started = open.filter(
+        task =>
+          ['working', 'review'].includes(task.status) ||
+          (task.kind === 'studio-development:change' &&
+            store
+              .attempts(task.id)
+              .some(attempt => (attempt.assignment?.kind || task.kind) === 'studio-development:change')),
+      );
+      if (started.length)
+        throw Object.assign(
+          new Error(
+            `Finish or close started work before moving it to another release line: ${started.map(task => task.id).join(', ')}. Its work stays on its branch.`,
+          ),
+          { status: 409, open: started.map(task => task.id) },
+        );
+    }
+    // The waiting ideas follow those already waiting in an existing next milestone, within its limit; a milestone made
+    // for them starts empty. Checked before anything is made or moved.
+    const later = laterMilestone(store, projectId, milestone);
+    if (later && waiting.length && (later.waiting ?? []).length + waiting.length > 100)
+      throw Object.assign(new Error('A milestone holds at most 100 waiting ideas.'), {
+        status: 409,
+        waiting: waiting.map(idea => idea.id),
+      });
     const next = nextMilestone(store, projectId, runtime, milestone),
-      moved = { milestoneId: next.id, version: next.version };
-    for (const task of open)
-      if (task.release) store.putTask({ ...task, release: { ...task.release, ...moved } });
-      else {
-        const run = store.run(runIdOf(task));
-        if (run?.release?.milestoneId === milestoneId) store.putRun({ ...run, release: { ...run.release, ...moved } });
+      line = lineOf(store, projectId, next),
+      moved = { milestoneId: next.id, version: next.version, ...(line !== undefined ? { line } : {}) },
+      runs = new Set(open.filter(task => !task.release).map(runIdOf));
+    let ideas = [];
+    store.tx(() => {
+      for (const runId of runs) {
+        const run = store.run(runId);
+        if (run?.release?.milestoneId !== milestoneId) continue;
+        for (const task of tasks.filter(task => !task.release && runIdOf(task) === runId)) {
+          // A run can hold both finished and unfinished work. Pin its finished tasks to the original release before
+          // moving the run; source stories also need an explicit line override for their next source measurement.
+          if (settledTask(task))
+            store.putTask({
+              ...task,
+              release: { ...run.release, ...(run.line !== undefined ? { line: run.line } : {}) },
+            });
+          else if (task.kind === 'studio-development:change')
+            store.putTask({ ...task, release: { ...run.release, ...moved } });
+        }
+        store.putRun({ ...run, ...(line !== undefined ? { line } : {}), release: { ...run.release, ...moved } });
       }
+      for (const task of open) if (task.release) store.putTask({ ...task, release: { ...task.release, ...moved } });
+      // Making the next milestone saved the list, so it is read again. Each idea keeps its record, as moving one does.
+      const milestones = projectMilestones(store, projectId),
+        from = milestones.find(item => item.id === milestoneId),
+        to = milestones.find(item => item.id === next.id);
+      ideas = from?.waiting ?? [];
+      if (ideas.length && to) {
+        from.waiting = [];
+        to.waiting = [...(to.waiting ?? []), ...ideas];
+        store.putSetting(key(projectId), milestones);
+      } else ideas = [];
+    });
+    const named = [
+      ...(open.length ? [open.map(task => task.id).join(', ')] : []),
+      ...(ideas.length
+        ? [`waiting ${ideas.length === 1 ? 'idea' : 'ideas'} ${ideas.map(idea => idea.id).join(', ')}`]
+        : []),
+    ];
     store.event(
       'release_moved',
       null,
       null,
-      `Open work on ${milestone.version} moved to ${next.version}: ${open.map(task => task.id).join(', ')}.`,
+      `Open work on ${milestone.version} moved to ${next.version}: ${named.join('; ')}.`,
       projectId,
     );
   }
   const org = projectOrganization(store, projectId),
-    planner = org.workers.find(
-      worker => worker.id === org.kindOwners?.['studio-development:breakdown'] && worker.enabled,
-    );
+    planner = releasePlanner(store, projectId, org);
   if (!planner)
     throw new Error('Choose an enabled breakdown owner in Edit the teams; the planner drafts the release notes.');
   const line = lineOf(store, projectId, milestone),
@@ -279,7 +381,8 @@ function writeRelease(worktree, version, notes) {
 }
 
 // The release, once its notes are accepted: verified as an integration is, then the line moved and tagged. Busy while an
-// integration or carry runs or the project's source is held; the caller tries again when they settle.
+// integration or carry runs, the project's source is held or the release still holds a lease of its own (the test turn
+// its stopped run kept, keepStoppedTurn in source-carries.mjs); the caller tries again when they settle.
 export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}) {
   const store = runtime.store,
     { milestone, save } = milestoneOf(store, projectId, milestoneId),
@@ -289,8 +392,12 @@ export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}
   const notesTask = store.task(release.notesTaskId);
   if (notesTask.status !== 'done' || !notesTask.acceptedAttemptId)
     throw new Error(`Accept the ${milestone.version} release notes (${notesTask.id}) first.`);
-  const resources = sourceResources(store, notesTask);
-  if (runtime.sourceIntegrationRun || store.leases().some(lease => resources.includes(lease.resource)))
+  const resources = sourceResources(store, notesTask),
+    id = `source-release:${projectId}:${milestone.id}`;
+  if (
+    runtime.sourceIntegrationRun ||
+    store.leases().some(lease => resources.includes(lease.resource) || lease.attemptId === id)
+  )
     throw Object.assign(new Error('The project’s source is busy; the release starts when it is free.'), { busy: true });
   const root = projectSource(store, projectId, runtime).root,
     line = lineOf(store, projectId, milestone),
@@ -299,8 +406,7 @@ export function runRelease(runtime, projectId, milestoneId, onSettled = () => {}
     throw new Error(`${repository.branch} is the branch this controller runs from; release it by hand.`);
   if (tagExists(root, release.tag)) throw new Error(`The repository already has a tag named ${release.tag}.`);
   // The release's tests run where the next story's candidate tests would.
-  const id = `source-release:${projectId}:${milestone.id}`,
-    testSandbox = chosenTestSandbox(store.organization());
+  const testSandbox = chosenTestSandbox(store.organization());
   Object.assign(release, {
     id,
     state: 'verifying',
@@ -382,7 +488,7 @@ async function finishRelease(runtime, projectId, milestoneId, notes) {
     createSourceWorktree(root, path.dirname(draft), path.basename(draft), release.repository.head, profile);
     const files = writeRelease(draft, milestone.version, notes);
     stageFiles(draft, files);
-    git(draft, ['commit', '--quiet', '-m', `Release ${milestone.version} (draft)`, '--', ...files]);
+    git(draft, ['commit', '--quiet', '--no-verify', '-m', `Release ${milestone.version} (draft)`, '--', ...files]);
     release.candidateCommit = git(draft, ['rev-parse', 'HEAD']);
     git(draft, ['update-ref', `refs/studio/releases/${milestone.id}`, release.candidateCommit]);
     release.changes = files.map(file => ({ path: file, afterHash: 'release' }));
@@ -460,7 +566,9 @@ function tagRelease(store, projectId, milestoneId, release, close, discard = () 
   const { milestone } = milestoneOf(store, projectId, milestoneId);
   if (!tagExists(release.root, release.tag))
     git(release.root, ['tag', '-a', release.tag, '-m', `Release ${milestone.version}`, release.commit]);
-  const result = close('released');
+  const shipsTo = store.project(projectId).shipsTo;
+  if (shipsTo) release.shipped ??= pendingShipping(shipsTo);
+  close('released');
   discard();
   store.event(
     'release_done',
@@ -469,27 +577,184 @@ function tagRelease(store, projectId, milestoneId, release, close, discard = () 
     `Released ${milestone.version} on ${release.repository.branch} as commit ${release.commit.slice(0, 7)}, tagged ${release.tag}. Push it when you are ready.`,
     projectId,
   );
-  return result;
+  shipRelease(store, projectId, milestoneId);
+  return structuredClone(milestoneOf(store, projectId, milestoneId).milestone.release);
 }
 
-// Releases the controller's stop cut off: one in verification waits to run again; one moving its line is tagged if the
-// line reached its commit, waits again when the line is not checked out, and otherwise needs the director.
+// On version lines (decided by the director, November 2, 2026) a release ships: the branch releases ship to (main)
+// moves to it, so it always equals the newest release. A fast-forward when it is behind the release; otherwise a merge
+// commit whose content is exactly the release's, so shipping never conflicts. A release older than one already shipped
+// is not shipped (an older line's patch), and main never goes back. What happened is recorded on the release as
+// `shipped`: pending intent, then the commit, a skip with its reason, or the error that Ship again retries.
+const pendingShipping = branch => ({ branch, pending: true, at: new Date().toISOString() });
+// When the project switched to version lines: the time of its version_lines event, the switch's only record.
+function versionLinesSince(store, projectId) {
+  return (
+    store.db
+      .prepare(
+        "SELECT e.time FROM events e JOIN settings s ON s.id = 'event-project:' || e.seq WHERE e.kind = 'version_lines' AND s.data = ? ORDER BY e.seq DESC LIMIT 1",
+      )
+      .get(JSON.stringify(projectId))?.time ?? null
+  );
+}
+// Before pending shipping was recorded, a release finished on a version line could be saved without any shipping
+// evidence. Releases finished before the switch to version lines (on main or on an older line, such as a patch on
+// release/1.0) are history, not unfinished shipping: the switch never moves main, so restart leaves them alone.
+function unfinishedShipping(store, project, milestone) {
+  const release = milestone.release,
+    shipped = release?.shipped;
+  if (
+    !project.shipsTo ||
+    milestone.state !== 'released' ||
+    release?.state !== 'released' ||
+    shipped?.commit ||
+    shipped?.skipped ||
+    shipped?.error
+  )
+    return false;
+  if (shipped) return shipped.pending === true;
+  if (!release.repository?.branch || release.repository.branch === project.shipsTo || !release.finishedAt) return false;
+  const since = versionLinesSince(store, project.id);
+  return Boolean(since && release.finishedAt >= since);
+}
+export function shipRelease(store, projectId, milestoneId) {
+  const project = store.project(projectId),
+    shipsTo = project.shipsTo;
+  if (!shipsTo) return null;
+  const { milestone, save } = milestoneOf(store, projectId, milestoneId),
+    release = milestone.release;
+  if (milestone.state !== 'released' || release?.state !== 'released')
+    throw new Error(`Milestone ${milestone.version} has not been released yet.`);
+  if (release.shipped?.commit || release.shipped?.skipped) return structuredClone(release.shipped);
+  // Durable intent precedes any git mutation, including an explicit retry of a recorded error. A stop never leaves
+  // that retry without evidence; restart either observes its result in git or records a displayable error.
+  if (!release.shipped?.pending) {
+    release.shipped = pendingShipping(shipsTo);
+    save();
+  }
+  const root = release.root,
+    at = new Date().toISOString();
+  const record = (shipped, message) => {
+    release.shipped = shipped;
+    save();
+    store.event('release_shipped', release.reviewTaskId, null, message, projectId);
+    return structuredClone(shipped);
+  };
+  try {
+    const version = parseVersion(milestone.version),
+      newer = releaseTags(root).find(tag => compareVersions(tag.version, version) > 0);
+    if (newer)
+      return record(
+        { branch: shipsTo, skipped: `${newer.name} is newer, and ${shipsTo} holds the newest release.`, at },
+        `${milestone.version} stays on ${release.repository.branch}: ${newer.name} is newer, so ${shipsTo} does not move.`,
+      );
+    const head = git(root, ['rev-parse', `refs/heads/${shipsTo}`]);
+    let commit = release.commit;
+    if (head === release.commit || landed(root, release.commit, `refs/heads/${shipsTo}`))
+      return record(
+        { branch: shipsTo, commit: head, at, merged: head !== release.commit },
+        `${shipsTo} already holds ${milestone.version}.`,
+      );
+    if (!landed(root, head, release.commit)) {
+      const tree = git(root, ['rev-parse', `${release.commit}^{tree}`]);
+      commit = git(root, [
+        'commit-tree',
+        tree,
+        '-p',
+        head,
+        '-p',
+        release.commit,
+        '-m',
+        `Ship ${milestone.version} to ${shipsTo}\n\nStudio desk shipped release ${release.tag} to ${shipsTo}: its content is the release's.`,
+      ]);
+    }
+    const repository = lineRepository(root, shipsTo);
+    if (repository.live === false) {
+      if (repository.head !== head) throw new Error(`${shipsTo} moved while the release shipped. Ship again.`);
+    } else repository.head = head;
+    const changes = git(root, ['diff', '--name-only', head, commit])
+      .split('\n')
+      .filter(Boolean)
+      .map(file => ({ path: file }));
+    moveLine(root, { repository: { ...repository, branch: shipsTo }, commit, changes });
+    if (!landed(root, commit, `refs/heads/${shipsTo}`)) throw new Error(`${shipsTo} did not reach the shipped commit.`);
+    return record(
+      { branch: shipsTo, commit, at, merged: commit !== release.commit },
+      `Shipped ${milestone.version} to ${shipsTo} at ${commit.slice(0, 7)}${commit !== release.commit ? ', a merge whose content is the release' : ''}.`,
+    );
+  } catch (error) {
+    return record(
+      { branch: shipsTo, error: error.message, at },
+      `${milestone.version} is released on ${release.repository.branch}, but ${shipsTo} did not move: ${error.message}`,
+    );
+  }
+}
+// Ship again after an error, or finish a released version line whose shipping was interrupted.
+export function shipAgain(store, projectId, milestoneId) {
+  const { milestone } = milestoneOf(store, projectId, milestoneId),
+    project = store.project(projectId),
+    release = milestone.release;
+  if (!project.shipsTo) throw new Error('This project has no branch its releases ship to.');
+  if (milestone.state !== 'released' || release?.state !== 'released')
+    throw new Error(`Milestone ${milestone.version} has not been released yet.`);
+  if (
+    release.shipped?.commit ||
+    release.shipped?.skipped ||
+    (!release.shipped?.error && !unfinishedShipping(store, project, milestone))
+  )
+    throw new Error(`${milestone.version} has nothing to ship again.`);
+  return shipRelease(store, projectId, milestoneId);
+}
+
+// Releases the controller's stop cut off: one in verification waits to run again, holding its project until the
+// director resumes it (holdInterrupted); one moving its line is tagged if the line reached its commit, waits again when
+// the line is not checked out, and otherwise needs the director. The test turn one held is kept while the test run it
+// started may still go on (keepStoppedTurn, source-carries.mjs).
 export function interruptedReleases(runtime) {
-  const store = runtime.store;
+  const store = runtime.store,
+    shipped = [];
   for (const project of store.projects()) {
     const milestones = projectMilestones(store, project.id);
     let changed = false;
     for (const milestone of milestones) {
       const release = milestone.release;
-      if (!release || !['verifying', 'committing'].includes(release.state)) continue;
+      if (!release) continue;
+      const turn = running =>
+        keepStoppedTurn(runtime, release, {
+          what: 'release',
+          event: [release.reviewTaskId, null],
+          projectId: project.id,
+          running,
+          locate: () => {
+            const now = projectMilestones(store, project.id),
+              journal = now.find(item => item.id === milestone.id)?.release;
+            return journal?.id === release.id ? { journal, save: () => store.putSetting(key(project.id), now) } : null;
+          },
+        });
+      if (!['verifying', 'committing'].includes(release.state)) {
+        // One that kept the turn through an earlier start.
+        if (release.testProcess && holdsTestTurn(store, release.id)) {
+          changed = true;
+          turn(false);
+        }
+        if (unfinishedShipping(store, project, milestone)) {
+          if (!release.shipped) {
+            release.shipped = pendingShipping(project.shipsTo);
+            changed = true;
+          }
+          shipped.push(milestone.id);
+        }
+        continue;
+      }
       changed = true;
-      store.release(release.id);
       const was = release.state;
       if (was === 'committing' && release.commit && lineReached(release.root, release)) {
         if (!tagExists(release.root, release.tag))
           git(release.root, ['tag', '-a', release.tag, '-m', `Release ${milestone.version}`, release.commit]);
+        if (project.shipsTo) release.shipped ??= pendingShipping(project.shipsTo);
         Object.assign(release, { state: 'released', finishedAt: new Date().toISOString() });
         milestone.state = 'released';
+        shipped.push(milestone.id);
       } else if (was === 'verifying' || release.repository?.live === false) release.state = 'ready';
       else
         Object.assign(release, {
@@ -504,12 +769,16 @@ export function interruptedReleases(runtime) {
         release.state === 'released'
           ? `Reconciled: the release of ${milestone.version} had reached ${release.repository.branch}; tagged ${release.tag}.`
           : release.state === 'ready'
-            ? `The release of ${milestone.version} was stopped when the controller stopped (during ${was}); release it again.`
+            ? `The release of ${milestone.version} was stopped when the controller stopped (during ${was}); it runs again on its own when the project is resumed.`
             : `The release of ${milestone.version} stopped part-way when the controller stopped; inspect the project's folder, then release it again.`,
         project.id,
       );
+      turn(true);
+      if (release.state === 'ready') holdInterrupted(runtime, project.id, 'release');
     }
     if (changed) store.putSetting(key(project.id), milestones);
+    // Finish released milestones whose shipping was interrupted, observing git before moving anything.
+    for (const id of shipped.splice(0)) shipRelease(store, project.id, id);
   }
 }
 
@@ -535,7 +804,13 @@ export async function pushRelease(store, runtime, projectId, milestoneId, { conf
   const root = projectSource(store, projectId, runtime).root,
     remote = remoteOf(root),
     branch = release.repository.branch,
-    refs = [`refs/heads/${branch}:refs/heads/${branch}`, `refs/tags/${release.tag}:refs/tags/${release.tag}`],
+    // A release shipped to the project's ship branch (version lines) sends that branch too.
+    ship = release.shipped?.commit ? release.shipped.branch : null,
+    refs = [
+      `refs/heads/${branch}:refs/heads/${branch}`,
+      ...(ship && ship !== branch ? [`refs/heads/${ship}:refs/heads/${ship}`] : []),
+      `refs/tags/${release.tag}:refs/tags/${release.tag}`,
+    ],
     environment = {
       ...process.env,
       GIT_TERMINAL_PROMPT: '0',
@@ -543,6 +818,8 @@ export async function pushRelease(store, runtime, projectId, milestoneId, { conf
       ...(process.env.GIT_SSH_COMMAND ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' }),
     };
   const result = await new Promise(resolve => {
+    // The one git call that runs as the director's own git does, hooks included (src/git.mjs): the director confirms
+    // each Push, and pre-push hooks and Git LFS uploads need the repository's own setup.
     const child = spawn('git', ['push', '--porcelain', remote, ...refs], {
       cwd: root,
       env: environment,
@@ -569,7 +846,7 @@ export async function pushRelease(store, runtime, projectId, milestoneId, { conf
     'release_pushed',
     release.reviewTaskId,
     null,
-    `Pushed ${branch} and ${release.tag} to ${remote}.`,
+    `Pushed ${branch}${ship && ship !== branch ? `, ${ship}` : ''} and ${release.tag} to ${remote}.`,
     projectId,
   );
   return structuredClone(now.milestone.release);

@@ -24,6 +24,8 @@ const RESTART = 'planned-restart';
 const RESTART_WINDOW_MS = 10 * 60 * 1000;
 const bounded = (text, max = 24000) => (text.length > max ? text.slice(0, max - 1) + '…' : text);
 const stays = pending => (pending.paused === false ? '' : '; dispatch stays paused');
+// How often a test turn a stopped carry or release kept (runner.keptTurns) is checked again while one is kept.
+export const keptTurnChecks = { everyMs: 30 * 1000 };
 
 export class Autonomy {
   // options.integrate(runtime, task, attemptId, reviewHash) performs a reviewed integration.
@@ -33,7 +35,10 @@ export class Autonomy {
     this.store = runner.store;
     this.integrate = options.integrate;
     this.restart = options.restart;
+    this.keptTurnTimer = null;
     this.resumeAfterPlannedRestart();
+    // A test turn the restart's recovery kept for a carry or release is checked again on a timer until it is free.
+    this.freeEndedTurns();
     // An integration that was waiting when the controller stopped starts once the controller is running, unless
     // it closed first.
     setImmediate(() => {
@@ -108,6 +113,9 @@ export class Autonomy {
       this.accepted(task.id);
     } else if (verdict.retryUpstream && mode.accept === 'auto') {
       acceptAttempt(this.store, this.runner.registries, task, by(`Recorded as evidence. ${verdict.reason}`));
+      // A flow's own review that asks for changes is evidence only: its flow's edges decide where the work goes (1.2),
+      // so the policy sends nothing back. A later stage of a flow's task still sends its own work back as before.
+      if (task.flowReference && view.kind === task.kind) return this.accepted(task.id);
       this.retryUpstream(this.store.task(task.id), verdict.retryUpstream, policy);
     } else if (verdict.retry) this.retry(task, verdict.reason, policy);
     else this.attention(task, verdict.reason);
@@ -225,6 +233,13 @@ export class Autonomy {
   approved(taskId) {
     const task = this.store.task(taskId);
     if (this.policy(task).enabled && task.status === 'ready' && !task.queued) this.queue([task]);
+  }
+  // Called after Reconcile makes interrupted or quarantined work ready again: the policy queues it as it queues approved
+  // work. Work Reconcile already queued again, or whose approval is not granted, is left as it is.
+  reconciled(taskId) {
+    const task = this.store.task(taskId);
+    if (task.approval && task.approval.status !== 'approved') return;
+    this.approved(taskId);
   }
 
   retry(task, reason, policy) {
@@ -512,17 +527,16 @@ export class Autonomy {
   // Carries waiting their turn (1.1 step 4): the policy approves a carry when it integrates after a passing review,
   // as it would the integration, and an approved carry runs once no integration or carry runs, none is waiting and
   // the project's source is free. One at a time, oldest story first. A fix the director brings back is approved with
-  // the action, and a carry of a brought-back idea waits for the story before it on its line.
+  // the action, and a carry of a brought-back idea waits for the story before it on its line. A paused project's carries
+  // wait for its Resume, as its queued work does, whether the director or a restart paused it; the policy approves none
+  // meanwhile.
   tryCarries() {
-    if (
-      this.runner.closing ||
-      !this.store.db.isOpen ||
-      this.runner.sourceIntegrationRun ||
-      this.store.setting(INTEGRATION)
-    )
-      return;
+    if (this.runner.closing || !this.store.db.isOpen) return;
+    this.freeEndedTurns();
+    if (this.runner.sourceIntegrationRun || this.store.setting(INTEGRATION)) return;
     for (const story of this.store.tasks()) {
       if (story.kind !== 'studio-development:change' || story.status !== 'done' || !story.sourceStage?.review) continue;
+      if (this.store.project(recordProject(story)).dispatchPaused) continue;
       let review;
       try {
         review = this.store.attempt(story.sourceStage.review.attemptId);
@@ -560,16 +574,13 @@ export class Autonomy {
   }
 
   // Releases whose notes the director accepted (1.1 step 5) run once no integration, carry or release runs or waits
-  // and their project's source is free, one at a time.
+  // and their project's source is free, one at a time. A paused project's releases wait for its Resume.
   tryReleases() {
-    if (
-      this.runner.closing ||
-      !this.store.db.isOpen ||
-      this.runner.sourceIntegrationRun ||
-      this.store.setting(INTEGRATION)
-    )
-      return;
-    for (const project of this.store.projects())
+    if (this.runner.closing || !this.store.db.isOpen) return;
+    this.freeEndedTurns();
+    if (this.runner.sourceIntegrationRun || this.store.setting(INTEGRATION)) return;
+    for (const project of this.store.projects()) {
+      if (project.dispatchPaused) continue;
       for (const milestone of projectMilestones(this.store, project.id)) {
         if (milestone.state !== 'open' || milestone.release?.state !== 'ready') continue;
         try {
@@ -585,6 +596,7 @@ export class Autonomy {
           );
         }
       }
+    }
   }
   releaseSettled(projectId, milestone, result) {
     if (this.runner.closing) return;
@@ -596,6 +608,39 @@ export class Autonomy {
     this.tryIntegration();
     this.tryCarries();
     this.tryReleases();
+  }
+
+  // The test turns stopped carries and releases kept while the test run each started may still go on
+  // (runner.keptTurns, keepStoppedTurn in src/connectors/source-carries.mjs): each whose run has ended is given back,
+  // with its own event. Checked whenever carries and releases are tried, and on a timer that runs only while a turn is
+  // kept; it does not keep the controller's process alive and stops once the controller closes. Returns whether one was
+  // given back. A carry or release whose turn is kept is busy meanwhile (runCarry, runRelease), with no note for the
+  // director: it waits for its own run to end.
+  freeEndedTurns() {
+    const kept = this.runner.keptTurns,
+      open = !this.runner.closing && this.store.db.isOpen;
+    let freed = false;
+    if (open && kept?.size)
+      for (const [id, check] of [...kept])
+        if (check()) {
+          kept.delete(id);
+          freed = true;
+        }
+    if (open && kept?.size) {
+      if (!this.keptTurnTimer) {
+        this.keptTurnTimer = setInterval(() => {
+          if (this.freeEndedTurns()) {
+            this.tryCarries();
+            this.tryReleases();
+          }
+        }, keptTurnChecks.everyMs);
+        this.keptTurnTimer.unref();
+      }
+    } else {
+      clearInterval(this.keptTurnTimer);
+      this.keptTurnTimer = null;
+    }
+    return freed;
   }
 
   // A story whose integration stopped on a conflict, or failed its tests merged onto work that landed since it was
@@ -640,7 +685,8 @@ export class Autonomy {
 
   // A planned restart resumes the projects it paused and may start the next cycle.
   // A manual restart after "restart required" completes the same plan.
-  // Any interrupted attempt means the restart was not clean, so nothing resumes.
+  // Any interrupted attempt means the restart was not clean, so nothing resumes; a carry or release the stop cut off
+  // makes it not clean for its own project, which stays held (holdInterrupted, src/connectors/source-carries.mjs).
   resumeAfterPlannedRestart() {
     const marker = this.store.setting(RESTART);
     if (!marker) return;
@@ -654,11 +700,12 @@ export class Autonomy {
     this.resumePlan(marker, `Planned restart complete: ${marker.reason}`);
   }
   // Only the pause the controller made for itself at restart is lifted. A pause the director chose,
-  // or one recorded before restart pauses were marked, holds until they resume the project.
+  // or one recorded before restart pauses were marked, holds until they resume the project, as does the hold of a
+  // project whose carry or release the stop cut off (runner.interruptedHolds, until the director resumes it).
   resumePlan(plan, message) {
     for (const projectId of plan.resumeProjects || []) {
       const project = this.store.project(projectId);
-      if (!project.restartPaused) continue;
+      if (!project.restartPaused || this.runner.interruptedHolds?.has(projectId)) continue;
       project.dispatchPaused = false;
       delete project.restartPaused;
       this.store.putProject(project);
@@ -672,6 +719,9 @@ export class Autonomy {
       if (this.runner.closing || !this.store.db.isOpen) return;
       for (const projectId of plan.cycleProjects || []) this.startCycle(projectId);
       this.runner.schedule();
+      // A carry or release that waited for the resumed project runs now, once.
+      this.tryCarries();
+      this.tryReleases();
     });
   }
 

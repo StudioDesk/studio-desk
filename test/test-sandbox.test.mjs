@@ -32,10 +32,26 @@ test('the recorded choice names the test command and the sandbox record; earlier
   assert.deepEqual(testSandboxes, ['built-in', 'none']);
   assert.equal(testSandboxOf({}), 'codex', 'An attempt recorded before the choice existed used Codex.');
   assert.equal(testSandboxOf(undefined), 'codex');
-  const builtIn = candidateTestCommand(plan, { testSandbox: 'built-in' });
-  assert.deepEqual(builtIn, {
+  // A plan that names the controller's data folder has the sandbox kept from it; one without runs as before.
+  assert.deepEqual(candidateTestCommand(plan, { testSandbox: 'built-in' }), {
     executable: process.execPath,
     args: [builtInSandboxRunner, '--root', '/candidate', '--', process.execPath, '--test', 'test/a.test.mjs'],
+  });
+  const named = { ...plan, data: '/data' },
+    builtIn = candidateTestCommand(named, { testSandbox: 'built-in' });
+  assert.deepEqual(builtIn, {
+    executable: process.execPath,
+    args: [
+      builtInSandboxRunner,
+      '--root',
+      '/candidate',
+      '--data',
+      '/data',
+      '--',
+      process.execPath,
+      '--test',
+      'test/a.test.mjs',
+    ],
   });
   assert.deepEqual(sandboxRecord({ testSandbox: 'built-in' }), {
     provider: 'sandbox-runtime',
@@ -45,7 +61,7 @@ test('the recorded choice names the test command and the sandbox record; earlier
   assert.equal(sandboxLabel({ testSandbox: 'built-in' }), 'in the built-in sandbox');
   // An attempt recorded under the Codex sandbox has its tests run again in the built-in one.
   for (const codex of [{}, { testSandbox: 'codex', windowsSandbox: 'mxc' }]) {
-    assert.deepEqual(candidateTestCommand(plan, codex), builtIn);
+    assert.deepEqual(candidateTestCommand(named, codex), builtIn);
     assert.deepEqual(sandboxRecord(codex), sandboxRecord({ testSandbox: 'built-in' }));
     assert.equal(sandboxLabel(codex), 'in the built-in sandbox');
   }
@@ -59,6 +75,7 @@ test('the recorded choice names the test command and the sandbox record; earlier
   const plain = candidateTestCommand(plan, { testSandbox: 'none' });
   assert.deepEqual(plain, plan.command);
   assert.notEqual(plain, plan.command, 'The recorded command is a copy of the plan, never the plan itself.');
+  assert.deepEqual(candidateTestCommand(named, { testSandbox: 'none' }), plan.command, 'No sandbox, nothing named.');
   assert.deepEqual(sandboxRecord({ testSandbox: 'none' }), { provider: 'none', network: 'unrestricted' });
   assert.equal(sandboxLabel({ testSandbox: 'none' }), 'without a sandbox');
   // The next attempt's choice: the built-in sandbox, unless the director chose none; a saved Codex choice means it.
@@ -102,6 +119,8 @@ test('a story edited by Claude waits for the built-in sandbox to be set up, then
   // The protocol fixture stands in for the tests here; the recorded command is what the sandbox would run.
   assert.equal(attempt.sourceCandidate.command.args[0], builtInSandboxRunner);
   assert.equal(attempt.sourceCandidate.command.args[2], attempt.sourceCandidate.root);
+  // It names the studio's own data folder, which the sandbox keeps the tests from wherever the copy is.
+  assert.deepEqual(attempt.sourceCandidate.command.args.slice(3, 6), ['--data', store.directory, '--']);
   // The candidate is validated against the sandbox its attempt recorded.
   const read = name => fs.readFileSync(artifactPath(store, attempt, name));
   assert.doesNotThrow(() => validateSourceChange(attempt, read));

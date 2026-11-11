@@ -8,6 +8,7 @@ import { projectOrganization, projectCatalog, assertProjectKind } from './projec
 import { unmetConsumes, portMessage } from './formats.mjs';
 import { staffNodes } from './staffing.mjs';
 import { expandRun, runIdOf } from './graph.mjs';
+import { carryStoryClosed } from '../connectors/source-carries.mjs';
 
 function readProposal(store, registries, source, attempt, proposalKey) {
   const definition = registries.workflows.get(source.kind);
@@ -354,8 +355,15 @@ function denial(store, task) {
 export function denyWork(store, task, reason = '') {
   const allowed = denial(store, task);
   if (!allowed) throw new Error('Only Planned, approved or workflow work that has not started can be denied.');
-  const { unstarted, workflowStep } = allowed;
   if (typeof reason !== 'string' || reason.length > 2000) throw new Error('Denial reason must be bounded text.');
+  store.tx(() => store.putTask(denied(task, allowed, reason)));
+  store.event('work_denied', task.id, null, task.reason);
+  // A carry story set aside frees its carry for the director's next choice.
+  if (task.carryOf) carryStoryClosed(store, task);
+  return { ok: true };
+}
+// The task set aside with its reason, as Deny records it; nothing is written here.
+function denied(task, { unstarted, workflowStep }, reason) {
   task.approval = {
     status: 'denied',
     decidedAt: new Date().toISOString(),
@@ -367,9 +375,7 @@ export function denyWork(store, task, reason = '') {
   task.queued = false;
   task.reason = reason.trim() || 'Director denied this work.';
   delete task.autonomyNote;
-  store.tx(() => store.putTask(task));
-  store.event('work_denied', task.id, null, task.reason);
-  return { ok: true };
+  return task;
 }
 
 // A plan whose steps have not started is planned again with the director's reply (the chat box, October 30). Under
@@ -377,8 +383,9 @@ export function denyWork(store, task, reason = '') {
 // director, so a reply to it in the idea's conversation comes after its acceptance. Every step is checked before any
 // changes: each is set aside (denied, with the reply as its reason), and the plan step goes back to ready with the reply
 // as its direction, to be started as the director's Start would. Its accepted attempt stays recorded, marked as
-// planned again; the new plan's steps join the same idea.
-export function replanWork(store, registries, task, direction) {
+// planned again; the new plan's steps join the same idea. The steps, the plan and their events are one transaction, and
+// `record` (such as the message that asked for it) is written in it too.
+export function replanWork(store, registries, task, direction, { record } = {}) {
   if (typeof direction !== 'string' || !direction.trim() || direction.length > 24000)
     throw new Error('Say what to change in the plan.');
   const plan = store.task(task.id),
@@ -389,8 +396,11 @@ export function replanWork(store, registries, task, direction) {
     throw new Error("Some of this plan's steps have started; change them on their own pages instead.");
   const words = direction.trim(),
     reason = `Planned again with your reply: ${words.split('\n')[0].slice(0, 200)}`;
-  for (const step of steps) denyWork(store, step, reason);
-  store.tx(() => {
+  return store.tx(() => {
+    for (const step of steps) {
+      store.putTask(denied(step, denial(store, step), reason));
+      store.event('work_denied', step.id, null, step.reason);
+    }
     const accepted = store.attempt(plan.acceptedAttemptId),
       current = store.task(plan.id);
     accepted.replannedBy = { type: 'director', at: new Date().toISOString(), reason: words };
@@ -400,14 +410,16 @@ export function replanWork(store, registries, task, direction) {
     delete current.acceptedAttemptId;
     delete current.autonomyNote;
     store.putTask(current);
+    store.event(
+      'replanned',
+      plan.id,
+      null,
+      `Director replied to the plan: its ${steps.length} waiting step${steps.length === 1 ? ' was' : 's were'} set aside, and it is planned again with the reply.`,
+    );
+    const replanned = { ok: true, setAside: steps.map(step => step.id) };
+    record?.(current);
+    return replanned;
   });
-  store.event(
-    'replanned',
-    plan.id,
-    null,
-    `Director replied to the plan: its ${steps.length} waiting step${steps.length === 1 ? ' was' : 's were'} set aside, and it is planned again with the reply.`,
-  );
-  return { ok: true, setAside: steps.map(step => step.id) };
 }
 
 // Closes several unstarted tasks at once (for example, what is left of a stopped run).
@@ -430,23 +442,15 @@ export function closeWork(store, projectId, taskIds, reason = '') {
 // started work that is not live (in Review, failed, cancelled or blocked) keeps its recorded
 // attempts and is closed without accepting a result. Accepted work is final unless its stages
 // say it is still unfinished (for example, a candidate that will not be integrated).
-export function closeStartedWork(store, registries, task, reason = '') {
+// `sentAsIdea` (Close and send as a new idea) records on the closed task the run its remaining work was sent in as.
+export function closeStartedWork(store, registries, task, reason = '', { sentAsIdea } = {}) {
   if (typeof reason !== 'string' || reason.length > 2000) throw new Error('Closing reason must be bounded text.');
+  const refusal = closeRefusal(store, registries, task);
+  if (refusal) throw refusal;
+  if (sentAsIdea) task.sentAsIdea = { ...sentAsIdea };
   if (denial(store, task)) return denyWork(store, task, reason);
-  const attempts = store.attempts(task.id),
-    stages = registries.workflows.stagesOf(task);
-  if (task.status === 'denied') throw new Error('This work is already closed.');
-  if (['running', 'stopping'].includes(task.status))
-    throw new Error('Cancel the running attempt first; close the work once it has stopped.');
-  if (attempts.some(a => ['interrupted', 'quarantined', 'uncertain'].includes(a.status) && !a.reconciledAt))
-    throw new Error('Reconcile interrupted work before closing it.');
-  if (store.leases().some(lease => attempts.some(a => a.id === lease.attemptId)))
-    throw new Error('This work still holds a reservation. Wait for it to be released.');
-  if (task.status === 'done' && !stages?.closable?.(store, task))
-    throw new Error('Accepted work is final; it cannot be closed.');
-  if (!['review', 'failed', 'cancelled', 'blocked', 'ready', 'done'].includes(task.status))
-    throw new Error('Only stopped work can be closed.');
-  const at = new Date().toISOString(),
+  const stages = registries.workflows.stagesOf(task),
+    at = new Date().toISOString(),
     text = reason.trim() || 'Director closed this work without taking it further.',
     pending = task.status === 'review' ? store.attempt(task.lastAttemptId) : null;
   task.closed = { at, reason: text, status: task.status, by: { type: 'director' } };
@@ -462,7 +466,34 @@ export function closeStartedWork(store, registries, task, reason = '') {
     store.putTask(task);
   });
   store.event('work_closed', task.id, pending?.id || null, `Director closed this work: ${text}`);
+  if (task.carryOf) carryStoryClosed(store, task);
   return { ok: true };
+}
+// Why closeStartedWork would refuse this task now, as the error it would throw, or null when it may be closed. Nothing
+// is written, so a step that must do something else first (sending a story as a new idea) can ask before it starts.
+export function closeRefusal(store, registries, task) {
+  if (denial(store, task)) return null;
+  const attempts = store.attempts(task.id),
+    stages = registries.workflows.stagesOf(task);
+  if (task.status === 'denied') return new Error('This work is already closed.');
+  if (['running', 'stopping'].includes(task.status))
+    return new Error('Cancel the running attempt first; close the work once it has stopped.');
+  if (attempts.some(a => ['interrupted', 'quarantined', 'uncertain'].includes(a.status) && !a.reconciledAt))
+    return new Error('Reconcile interrupted work before closing it.');
+  if (store.leases().some(lease => attempts.some(a => a.id === lease.attemptId)))
+    return new Error('This work still holds a reservation. Wait for it to be released.');
+  if (task.status === 'done') {
+    let closable;
+    try {
+      closable = stages?.closable?.(store, task);
+    } catch (error) {
+      return error;
+    }
+    if (!closable) return new Error('Accepted work is final; it cannot be closed.');
+  }
+  if (!['review', 'failed', 'cancelled', 'blocked', 'ready', 'done'].includes(task.status))
+    return new Error('Only stopped work can be closed.');
+  return null;
 }
 
 // Sends accepted work back to an earlier stage when a later stage returned findings (for example,
@@ -473,8 +504,8 @@ export function closeStartedWork(store, registries, task, reason = '') {
 // Autonomy does the same within its retry budget; the director may always do it. The check and the
 // rewind are one transaction with the record read inside it, and `refuse` (the controller's own
 // refusal, such as an integration approved meanwhile) is asked there too, so nothing approved in
-// between is overtaken.
-export function sendBackWork(store, registries, task, note = '', { refuse } = {}) {
+// between is overtaken. `record` (such as the director's message that asked for it) is written in that transaction too.
+export function sendBackWork(store, registries, task, note = '', { refuse, record } = {}) {
   if (typeof note !== 'string' || note.length > 4000) throw new Error('A send-back note must be bounded text.');
   const stages = registries.workflows.stagesOf(task);
   return store.tx(() => {
@@ -503,6 +534,52 @@ export function sendBackWork(store, registries, task, note = '', { refuse } = {}
       current.acceptedAttemptId,
       `Director sent this work back for another attempt${returned.passed ? ' over a passing review' : ''}.${note.trim() ? ` Note: ${note.trim()}` : ''}`,
     );
-    return { ok: true, direction: current.direction };
+    const sent = { ok: true, direction: current.direction };
+    record?.(current);
+    return sent;
+  });
+}
+
+// Work awaiting review goes back to ready with the director's revision direction (the Revise button, and a message
+// that names the work's builder on its thread). Past the attempt limit the revised work waits for the director to
+// press Start, except where the task type's limit is a safety rule, which refuses the revision. The attempt, the task
+// and the event are one transaction, and `record` (such as the message that asked for it) is written in it too.
+export function reviseWork(store, registries, task, direction, { record } = {}) {
+  if (task.status !== 'review') throw new Error('Only work awaiting review can be revised.');
+  if (registries.workflows.get(task.kind).fixedAttemptLimit && store.attempts(task.id).length >= task.maxAttempts)
+    throw new Error('Attempt limit reached. Create a newly scoped assignment.');
+  if (typeof direction !== 'string' || direction.length > 24000 || !direction.trim())
+    throw new Error('Revision direction is missing or too long.');
+  const words = direction.trim();
+  return store.tx(() => {
+    registries.workflows.direct(task, words);
+    const a = store.attempt(task.lastAttemptId);
+    a.status = 'revision_requested';
+    a.revisionRequestedBy = { type: 'director', at: new Date().toISOString(), reason: words };
+    store.updateAttempt(a);
+    task.status = 'ready';
+    task.reason = '';
+    delete task.autonomyNote;
+    registries.workflows.stageProgress(store, task);
+    store.putTask(task);
+    store.event('revision', task.id, a.id, words);
+    record?.(task);
+    return { ok: true };
+  });
+}
+
+// Start's direction for the next attempt (a director's Start with a note, and a message that names the work's builder
+// on its thread): recorded as a PATCH direction is, before the work starts. Work Start refuses for its state keeps its
+// direction. Starting it is the caller's: the controller's queued Start.
+export function directStart(store, registries, task, direction, { record } = {}) {
+  if (typeof direction !== 'string' || direction.length > 24000) throw new Error('Direction is missing or too long.');
+  if (!['ready', 'failed', 'cancelled', 'blocked'].includes(task.status))
+    throw new Error('Only ready or stopped assignments can start.');
+  return store.tx(() => {
+    registries.workflows.direct(task, direction.trim());
+    store.putTask(task);
+    store.event('task_updated', task.id, null, 'Direction for the next attempt updated with Start.');
+    record?.(task);
+    return { ok: true };
   });
 }

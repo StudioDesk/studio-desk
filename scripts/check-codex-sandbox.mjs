@@ -1,20 +1,27 @@
 // Model-free file-isolation check. Keep evidence outside the generally writable
-// OS temporary directory so a sibling write is a meaningful boundary check.
+// OS temporary directory so a sandbox write is a meaningful boundary check. It also reads a stand-in for the director's
+// secrets, denied as the real ones are (C-42): in Codex's elevated Windows sandbox, the default, a readable one fails the
+// check, so a Codex update cannot quietly reopen them; in MXC and off Windows, where nothing can be denied, the check
+// reports it.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { locateCodex, subscriptionEnvironment } from '../src/runner.mjs';
+import { denyCodexPaths } from '../src/adapters/agent-secrets.mjs';
+import { isEntryPoint } from '../src/core/entry-point.mjs';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const insideText = 'STUDIO_INSIDE_OK\n',
-  inputText = 'STUDIO_ACCEPTED_INPUT\n';
+  inputText = 'STUDIO_ACCEPTED_INPUT\n',
+  secretText = 'STUDIO_STAND_IN_SECRET\n';
 
 export function checkCodexSandbox({
   binary = locateCodex(),
-  implementation = process.platform === 'win32' ? (process.env.STUDIO_CODEX_WINDOWS_SANDBOX ?? 'mxc') : undefined,
+  implementation = process.platform === 'win32' ? (process.env.STUDIO_CODEX_WINDOWS_SANDBOX ?? 'elevated') : undefined,
   parentDirectory = projectRoot,
   timeoutMs = 20000,
+  denySecret = denyCodexPaths,
 } = {}) {
   if (implementation !== undefined && !['elevated', 'mxc'].includes(implementation))
     throw new Error('Sandbox implementation must be elevated or mxc.');
@@ -26,6 +33,18 @@ export function checkCodexSandbox({
   fs.mkdirSync(inputs);
   const input = path.join(inputs, 'accepted.txt');
   fs.writeFileSync(input, inputText);
+  const secret = path.join(directory, 'secret-stand-in.txt'),
+    secretsDeniable = implementation === 'elevated';
+  fs.writeFileSync(secret, secretText);
+  // A stand-in that cannot be denied fails the check, as a real secret that cannot be denied stops an attempt; the
+  // check still reports what it found.
+  let denyError = null;
+  if (secretsDeniable)
+    try {
+      denySecret([secret]);
+    } catch (error) {
+      denyError = error.message;
+    }
   const probe = path.join(output, 'probe.mjs');
   fs.writeFileSync(
     probe,
@@ -35,7 +54,9 @@ fs.writeFileSync('inside.txt', ${JSON.stringify(insideText)});
 const inputReadable = fs.readFileSync('../inputs/accepted.txt', 'utf8') === ${JSON.stringify(inputText)};
 const outsideWriteDenied = denied('../outside.txt');
 const inputWriteDenied = denied('../inputs/accepted.txt');
-console.log(JSON.stringify({insideWrite: true, inputReadable, outsideWriteDenied, inputWriteDenied}));
+let secretReadable = false;
+try { secretReadable = fs.readFileSync('../secret-stand-in.txt', 'utf8') === ${JSON.stringify(secretText)}; } catch {}
+console.log(JSON.stringify({insideWrite: true, inputReadable, outsideWriteDenied, inputWriteDenied, secretReadable}));
 if (!inputReadable || !outsideWriteDenied || !inputWriteDenied) process.exitCode = 1;
 `,
   );
@@ -77,10 +98,17 @@ if (!inputReadable || !outsideWriteDenied || !inputWriteDenied) process.exitCode
     reported.inputWriteDenied === true &&
     insideMatches &&
     !outsideExists &&
-    inputUnchanged;
+    inputUnchanged &&
+    // Where the secrets can be denied, a stand-in that could not be denied, or was read, fails the check.
+    !(secretsDeniable && (denyError || reported.secretReadable !== false));
   return {
     passed,
     implementation: implementation || 'platform default',
+    secretsDenied: !denyError && reported?.secretReadable === false,
+    ...(denyError ? { denyError } : {}),
+    ...(reported?.secretReadable && !secretsDeniable
+      ? { warning: "Codex's sandbox can read the director's secrets in this mode." }
+      : {}),
     directory,
     exitCode: result.status,
     error: result.error?.code,
@@ -93,7 +121,7 @@ if (!inputReadable || !outsideWriteDenied || !inputWriteDenied) process.exitCode
   };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntryPoint(import.meta)) {
   try {
     if (process.argv.length > 3) throw new Error('Usage: node scripts/check-codex-sandbox.mjs [elevated|mxc]');
     const result = checkCodexSandbox({ implementation: process.argv[2] });

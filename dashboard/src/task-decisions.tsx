@@ -1,20 +1,21 @@
-// What the director can decide about a task: the current dashboard's task actions (app-dialogs.js
-// renderTaskModal, proposedWorkActions, closeStartedAction and the source story's decisions), under the same
-// conditions, as the story page's "Where it stands" shows them (v1.0 item 23). Each button asks the controller for
-// one recorded step; the change it records refreshes the page. A note or a reason is asked for in a dialog.
-import { useMutation } from '@tanstack/react-query';
+// What the director can decide about a task, as the story page's "Where it stands" shows it (v1.0 item 23): one
+// button for each action the controller serves with the task's read (TaskPage.actions, public/task-actions.js), in
+// its order, with the closing ones behind More actions and Bring back to each older line under them. Each button asks
+// the controller for one recorded step, sent to the route the action names with the values it carries; a note or a
+// reason is asked for in a dialog first. The change it records refreshes the page.
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Fragment, useEffect, useId, useRef, useState } from 'react';
-import { send, type Task } from './api';
-import { BringBack } from './bring-back';
-import { decisionState, fileRequest } from './decisions';
+import { getJSON, send, type AttemptSummary, type Task, type TaskAction } from './api';
+import { named, type BringBackTarget, type BringBackTargets } from './bring-back';
+import { decisionState, fileRequest, sendIdeaLimit, storyIdea } from './decisions';
 import { Icon } from './design/icons';
+import { Modal } from './dialog';
 import { NoteDialog, overReview } from './note-dialog';
-import { waitingQuestion } from './questions';
 import { reviewWait, storyFacts } from './stands';
-import { attemptsUsed, storyPeople } from './story';
+import { storyPeople } from './story';
 import { useToast } from './toast';
-import { integrationAction, statusLabels, type StudioState } from './studio-runs';
+import { bringBackable, statusLabels, taskActions, type StudioState } from './studio-runs';
 import { WholeTestRecord } from './test-record';
 import { TryButtons, TryNotes, useTry } from './try-actions';
 
@@ -40,18 +41,15 @@ function useRequest(projectId: string) {
   });
 }
 
-type Emphasis = 'primary' | 'default' | 'quiet';
+type Emphasis = TaskAction['emphasis'];
 interface Action {
   key: string;
   label: string;
   emphasis: Emphasis;
   onClick?: () => void;
-  // A link to another task instead of a step.
-  taskId?: string;
   // A closing action's line of what it does, under it in the More actions menu.
   does?: string;
 }
-const order: Record<Emphasis, number> = { primary: 0, default: 1, quiet: 2 };
 const buttonClass = (emphasis: Emphasis, small = false) =>
   `sd-btn${emphasis === 'primary' ? ' sd-btn--primary' : emphasis === 'quiet' ? ' sd-btn--ghost' : ''}${small ? ' sd-btn--sm' : ''}`;
 
@@ -66,12 +64,41 @@ interface Asking {
   send: (note: string) => void;
 }
 
-// The decisions "Where it stands" offers, on their own row, primary first as the design orders them; the closing
-// actions behind More actions, each saying what it does; and Try it in its own strip under them.
+// The checks a result's own report failed, each named once, as the controller's acceptAttempt finds them.
+const failedChecks = (attempt: AttemptSummary) => [
+  ...new Set((attempt.result?.checks ?? []).filter(check => check.status === 'fail').map(check => check.name)),
+];
+
+// The actions the page offers on a task: the ones its read served. A page the records of a command placed carries
+// none (the controller's command answer holds each task's page without them) until the task is read again; until
+// then it lists what the controller's own rules (public/task-actions.js, the ones the read runs) give for those
+// records, so a decision shows its outcome at once, as before.
+export const offeredActions = (served: TaskAction[] | undefined, task: Task, studio: StudioState) =>
+  served ?? taskActions(task, studio);
+
+// The values an action carries, as the body the controller takes for it.
+const valuesOf = (action: TaskAction) =>
+  Object.fromEntries(
+    action.fields.filter(field => field.value !== undefined).map(field => [field.name, field.value] as const),
+  );
+// The value an action carries for one field.
+const valueOf = (action: TaskAction, name: string) => action.fields.find(field => field.name === name)?.value;
+
+// The words each kind of Deny asks with.
+const denials: Record<string, { title: string; label?: string }> = {
+  'deny-Deny work': { title: 'Deny this work?' },
+  'deny-Withdraw approval and deny': { title: 'Withdraw the approval and deny this work?' },
+  'deny-Close this step': { title: 'Close this step?', label: 'Note (optional)' },
+};
+
+// The decisions "Where it stands" offers, on their own row in the order the controller serves them; the closing
+// actions behind More actions, each saying what it does; Try it in its own strip under them; and Bring back to each
+// older line the controller serves.
 export function TaskDecisions({
   projectId,
   task,
   studio,
+  actions: served,
   direction,
   onEditFiles,
   onRevised,
@@ -79,6 +106,8 @@ export function TaskDecisions({
   projectId: string;
   task: Task;
   studio: StudioState;
+  // The actions the controller serves for the task (offeredActions), drawn in its order.
+  actions: TaskAction[];
   // The direction the page shows, its unsaved draft or the recorded one, which a revision request's note, or the
   // note of a Start past the attempt limit, starts from.
   direction: string;
@@ -89,184 +118,154 @@ export function TaskDecisions({
   onRevised?: () => void;
 }) {
   const request = useRequest(projectId),
+    client = useQueryClient(),
+    toast = useToast(),
     [asking, setAsking] = useState<Asking | null>(null),
+    // The run of the new idea a story was sent in as, which the page links to once the controller started it.
+    [sentRun, setSentRun] = useState<string | null>(null),
     // Trying the story yourself, once its tests passed (try-actions.tsx).
     tryIt = useTry(projectId, task, studio),
     // The More actions menu's, and the Try it strip's, element ids.
     domId = useId();
   const id = encodeURIComponent(task.id),
-    act = (step: string, body?: Record<string, unknown>, done?: Request['done']) =>
-      request.mutate({ path: `/api/tasks/${id}/${step}`, body, done }),
     busy = request.isPending;
-  // The conditions are shared with Today's calls (decisions.ts), so both offer the same decisions.
-  const {
-      live,
-      explanation,
-      latest,
-      current,
-      approval,
-      awaited,
-      closed,
-      unsettled,
-      closable,
-      review,
-      journal,
-      reviewItem,
-      integrable,
-      stage,
-      returnable,
-      landed,
-      mergeable,
-      plan,
-      proposal,
-    } = decisionState(task, studio),
+  // The records the dialogs and messages speak of; which buttons show is the controller's.
+  const { latest, review, landed, mergeable, outdated } = decisionState(task, studio),
     { editor, reviewer } = storyPeople(task, studio),
-    filesAsked = fileRequest(task, studio),
-    // An agent's question waiting for an answer, which the page's Answer box sends; Start runs the work without one.
-    asked = !!waitingQuestion(task, studio.attempts),
-    // Counted as the page's attempt counter counts them; the controller sets no limit for a task without one.
-    { used, allowed } = attemptsUsed(
-      task,
-      studio.attempts.filter(attempt => attempt.taskId === task.id),
-    ),
-    pastLimit = task.maxAttempts !== undefined && used >= allowed;
-  const deny = (label: string, title: string, noteLabel = 'Decision note (optional)'): Action => ({
-    key: `deny-${label}`,
-    label,
-    emphasis: 'default',
-    onClick: () =>
-      setAsking({
-        title,
-        text: 'It will not run. Your note is recorded with the decision.',
-        label: noteLabel,
-        submit: label,
-        send: note => act('deny-work', { reason: note }),
-      }),
-  });
-  const actions: Action[] = [];
-  if (approval?.status === 'pending' && !awaited)
-    actions.push(
-      { key: 'approve', label: 'Approve work', emphasis: 'primary', onClick: () => act('approve-work') },
-      deny('Deny work', 'Deny this work?'),
-    );
-  if (awaited) actions.push(deny('Deny work', 'Deny this work?'));
-  if (approval?.status === 'approved' && !task.lastAttemptId)
-    actions.push(deny('Withdraw approval and deny', 'Withdraw the approval and deny this work?'));
-  if (!approval && !task.lastAttemptId && ['ready', 'blocked'].includes(task.status))
-    actions.push({
-      ...deny('Close this step', 'Close this step?', 'Note (optional)'),
-      emphasis: 'quiet',
-      does: 'It will not run; a note you add is kept with the decision.',
+    filesAsked = fileRequest(task, studio);
+  // A story that landed reads where it can be brought back to: the lines each served Bring back reaches on the way,
+  // which its confirmation names, and the controller's reason where it can't go. Until the new answer is read, the
+  // last one stays on screen.
+  const backable = bringBackable(task, studio),
+    backUrl = `/api/tasks/${id}/bring-back?projectId=${encodeURIComponent(projectId)}`,
+    backKey = [projectId, 'bring-back', backUrl] as const,
+    { data: backData } = useQuery({
+      queryKey: [...backKey, review?.sourceCarries],
+      queryFn: ({ signal }) => getJSON<BringBackTargets>(backUrl, signal),
+      placeholderData: previous => previous,
+      enabled: backable,
+    }),
+    backRead = backable ? backData : undefined,
+    [bringing, setBringing] = useState<{ action: TaskAction; line: string; through: string[] } | null>(null),
+    bring = useMutation({
+      mutationFn: ({ action, line }: { action: TaskAction; line: string }) =>
+        send<Record<string, unknown>>(action.path, { projectId, ...valuesOf(action), line }, action.method),
+      onSuccess: result => {
+        setBringing(null);
+        toast(`Bringing the fix back to ${((result.lines as string[] | undefined) ?? []).join(', then ')}.`);
+        void client.invalidateQueries({ queryKey: backKey });
+      },
     });
-  // A blocked editor's file request, approved as asked in one step as Today approves it (MP-021).
-  if (filesAsked.request && filesAsked.requested) {
-    const { requested, offered, worked } = filesAsked;
-    actions.push({
-      key: 'allow-files',
-      label: 'Allow and continue',
-      emphasis: 'primary',
-      onClick: () =>
-        act(
-          'edit-scope',
-          { ...offered, reason: filesAsked.request!.reason, keepWork: worked, request: requested.id },
-          edited =>
-            (edited.start as { ok?: boolean; reason?: string } | undefined)?.ok === false
-              ? `Changed ${task.id}'s files. It did not start: ${(edited.start as { reason?: string }).reason}`
-              : `Changed ${task.id}'s files and sent it back to ${filesAsked.editor}.`,
-        ),
-    });
-    if (onEditFiles)
-      actions.push({ key: 'edit-files', label: 'Edit the file list', emphasis: 'default', onClick: onEditFiles });
-  }
-  // An interrupted attempt holds what it reserved until it is reconciled, and the controller refuses to start another
-  // before then, so Start comes back only once Reconcile interrupted attempt (below) has settled it.
-  if (
-    !live &&
-    !closed &&
-    !unsettled &&
-    explanation.kind !== 'fixed-limit' &&
-    ['ready', 'blocked', 'failed', 'cancelled'].includes(task.status)
-  ) {
-    const start = (body: Record<string, unknown> = {}, done?: () => void) =>
-      act('start', body, started => {
-        done?.();
-        return started?.queued
-          ? /^Waiting for /.test(String(started.reason ?? ''))
-            ? `Queued. ${started.reason} It starts by itself when it can.`
-            : 'Queued behind busy work. It starts by itself when its agent, resources and an execution slot are free.'
-          : 'Started.';
-      });
-    actions.push({
-      key: 'start',
-      label: 'Start assignment',
-      emphasis: approval?.status === 'pending' || filesAsked.request || asked ? 'default' : 'primary',
-      // Past its attempt limit, the director's Start runs it again and may point the next attempt at the fix.
-      onClick: () =>
-        pastLimit
-          ? setAsking({
-              title: 'Start it again?',
-              text: 'It runs past its attempt limit. The next attempt gets this note as its direction, along with everything the work did so far.',
-              label: 'Note for the next attempt (optional)',
-              submit: 'Start assignment',
-              initial: direction,
-              // The controller records a direction of up to 24000 characters, so a long one can still be edited here.
-              limit: 24000,
-              send: note => start({ direction: note }, onRevised),
-            })
-          : start(),
-    });
-  }
-  if (task.hold && !live && !closed && !['done', 'denied'].includes(task.status))
-    actions.push({
-      key: 'hold',
-      label: 'Release hold',
-      emphasis: 'default',
-      onClick: () => request.mutate({ path: `/api/tasks/${id}`, body: { hold: false }, method: 'PATCH' }),
-    });
-  if (explanation.kind === 'dispatch-paused')
-    actions.push({
-      key: 'dispatch',
-      label: 'Resume dispatch',
-      emphasis: 'default',
-      onClick: () => request.mutate({ path: '/api/control', body: { paused: false } }),
-    });
-  if (explanation.kind === 'pipeline-paused')
-    actions.push({
-      key: 'pipeline',
-      label: 'Resume pipeline',
-      emphasis: 'default',
-      onClick: () => request.mutate({ path: '/api/pipeline', body: { action: 'resume' } }),
-    });
-  if (live)
-    actions.push({
-      key: 'cancel',
-      label: 'Request cancellation',
-      emphasis: 'default',
-      onClick: () => act('cancel', {}, () => 'Cancellation requested.'),
-    });
-  if (task.status === 'review' && latest) {
-    actions.push(
-      plan
-        ? {
-            key: 'accept',
-            label: 'Accept planning result',
-            emphasis: 'primary',
-            onClick: () => act('accept-proposal', { attemptId: latest.id, proposalHash: plan.hash }),
-          }
-        : {
-            key: 'accept',
-            label: 'Accept result',
-            emphasis: 'primary',
-            onClick: () => act('accept', {}, () => 'Result accepted.'),
+  // Sends an action as served: its route, with the values it carries and the director's words from its dialog.
+  const sendAction = (action: TaskAction, words: Record<string, unknown> = {}, done?: Request['done']) =>
+    request.mutate({ path: action.path, method: action.method, body: { ...valuesOf(action), ...words }, done });
+  const ask = (action: TaskAction, question: Omit<Asking, 'send'>, field: string, done?: Request['done']) =>
+    setAsking({ ...question, send: note => sendAction(action, { [field]: note }, done) });
+  const sentBack = (sent: Record<string, unknown>, said: string) =>
+    (sent.start as { ok?: boolean; reason?: string } | undefined)?.ok === false
+      ? `Sent ${task.id} back. It did not start: ${(sent.start as { reason?: string }).reason}`
+      : said;
+  // What pressing each served action does, by its key: its dialog, confirmation and message, as the page always had.
+  // An action the page has no dialog for is sent as it is served.
+  const press = (action: TaskAction): (() => void) => {
+    const { key } = action;
+    if (key.startsWith('deny-')) {
+      const words = denials[key] ?? { title: `${action.label}?` };
+      return () =>
+        ask(
+          action,
+          {
+            title: words.title,
+            text: 'It will not run. Your note is recorded with the decision.',
+            label: words.label ?? 'Decision note (optional)',
+            submit: action.label,
           },
-    );
-    if (task.kind !== 'unreal-integration')
-      actions.push({
-        key: 'revise',
-        label: 'Request revision',
-        emphasis: 'default',
-        onClick: () =>
+          'reason',
+        );
+    }
+    if (key === 'allow-files')
+      return () =>
+        sendAction(action, {}, edited =>
+          (edited.start as { ok?: boolean; reason?: string } | undefined)?.ok === false
+            ? `Changed ${task.id}'s files. It did not start: ${(edited.start as { reason?: string }).reason}`
+            : `Changed ${task.id}'s files and sent it back to ${filesAsked.editor}.`,
+        );
+    // The code moved past the story's plan: its remaining work goes in as a new idea, whose text the director may
+    // edit first. Unchanged, the controller composes it itself, with the story's plain planned summary.
+    if (key === 'send-as-idea') {
+      const idea = storyIdea(task);
+      return () =>
+        setAsking({
+          title: 'Close and send as a new idea?',
+          text: 'The code moved on since this story was planned. It closes, and its remaining work goes in as a new idea on the same release, with fresh checks and a new plan.',
+          label: 'The new idea',
+          submit: 'Close and send as a new idea',
+          required: true,
+          initial: idea,
+          limit: sendIdeaLimit,
+          send: note =>
+            sendAction(action, note === idea.trim() ? {} : { idea: note }, sent => {
+              if (typeof sent.runId === 'string') setSentRun(sent.runId);
+              return `Closed “${task.title}” and sent its work as a new idea.`;
+            }),
+        });
+    }
+    if (key === 'start' || key === 'start-past-limit') {
+      const start = (words: Record<string, unknown> = {}, done?: () => void) =>
+        sendAction(action, words, started => {
+          done?.();
+          return started?.queued
+            ? /^Waiting for /.test(String(started.reason ?? ''))
+              ? `Queued. ${started.reason} It starts by itself when it can.`
+              : 'Queued behind busy work. It starts by itself when its agent, resources and an execution slot are free.'
+            : 'Started.';
+        });
+      // Past its attempt limit, the director's Start runs it again and may point the next attempt at the fix.
+      if (key === 'start-past-limit')
+        return () =>
           setAsking({
+            title: 'Start it again?',
+            text: 'It runs past its attempt limit. The next attempt gets this note as its direction, along with everything the work did so far.',
+            label: 'Note for the next attempt (optional)',
+            submit: 'Start assignment',
+            initial: direction,
+            // The controller records a direction of up to 24000 characters, so a long one can still be edited here.
+            limit: 24000,
+            send: note => start({ direction: note }, onRevised),
+          });
+      return () => start();
+    }
+    if (key === 'cancel') return () => sendAction(action, {}, () => 'Cancellation requested.');
+    if (key === 'accept') {
+      // A planning result is accepted with the proposal it returned.
+      if (action.path.endsWith('/accept-proposal')) return () => sendAction(action);
+      // A result whose own checks failed is accepted over them with the director's reason, where the controller
+      // requires one.
+      if (action.fields.some(field => field.name === 'overReason' && field.required)) {
+        const failed = latest ? failedChecks(latest) : [];
+        return () =>
+          ask(
+            action,
+            {
+              title: 'Accept over a failed check?',
+              text: `Its own ${failed.length === 1 ? 'check' : 'checks'} failed: ${failed.join(', ')}. Your reason is recorded with the acceptance.`,
+              label: 'Why accept it anyway',
+              submit: 'Accept over a failed check',
+              required: true,
+              // The controller records a reason of up to 2000 characters.
+              limit: 2000,
+            },
+            'overReason',
+            () => 'Accepted over a failed check.',
+          );
+      }
+      return () => sendAction(action, {}, () => 'Result accepted.');
+    }
+    if (key === 'revise')
+      return () =>
+        ask(
+          action,
+          {
             title: 'Request a revision?',
             text: 'The next attempt gets this note as its direction, along with everything the work did so far.',
             label: 'What to change',
@@ -275,37 +274,16 @@ export function TaskDecisions({
             initial: direction,
             // The controller records a direction of up to 24000 characters, so a long one can still be edited here.
             limit: 24000,
-            send: note =>
-              act('revise', { direction: note }, () => {
-                onRevised?.();
-                return 'Revision requested with your direction.';
-              }),
-          }),
-      });
-  }
-  // What the banner tells the director to do first, so it is the row's primary action; Start waits for it.
-  if (unsettled)
-    actions.push({
-      key: 'reconcile',
-      label: 'Reconcile interrupted attempt',
-      emphasis: 'primary',
-      onClick: () => act('reconcile'),
-    });
-  if (journal?.state && busyJournal.includes(journal.state))
-    actions.push({
-      key: 'restore',
-      label: 'Reconcile source integration',
-      emphasis: 'default',
-      onClick: () => act('restore-source'),
-    });
-  // Where Merge onto the current source is offered, integrating again as it is comes second: it fails the same way.
-  if (integrable && review && reviewItem)
-    actions.push({
-      key: 'integrate',
-      label: /again/.test(integrationAction(studio, task, review)) ? 'Integrate again' : 'Integrate',
-      emphasis: mergeable ? 'default' : 'primary',
-      onClick: () =>
-        act('integrate-source', { attemptId: review.id, reviewHash: reviewItem.hash }, result =>
+          },
+          'direction',
+          () => {
+            onRevised?.();
+            return 'Revision requested with your direction.';
+          },
+        );
+    if (key === 'integrate')
+      return () =>
+        sendAction(action, {}, result =>
           result.state === 'waiting'
             ? 'Integration approved. It runs when active work finishes.'
             : result.state === 'verifying'
@@ -313,193 +291,156 @@ export function TaskDecisions({
               : result.state === 'failed'
                 ? `Integration did not complete: ${String(result.error ?? '')}`
                 : 'Reviewed source integrated.',
-        ),
-    });
-  // A story whose integration stopped on a conflict (1.1 step 3), or that fails only merged onto what landed after it
-  // was tested (October 27), goes back to its editor with its change merged onto the current source; a fix
-  // integrated on an older line is carried to the next newer one, or marked not needed there (step 4), each through
-  // the controller.
-  if (mergeable)
-    actions.push({
-      key: 'merge',
-      label: 'Merge onto the current source',
-      emphasis: 'primary',
-      onClick: () =>
-        act(
-          'merge-source',
+        );
+    // A story whose integration stopped on a conflict (1.1 step 3), or that fails only merged onto what landed after
+    // it was tested (October 27), goes back to its editor with its change merged onto the current source.
+    if (key === 'merge')
+      return () =>
+        sendAction(
+          action,
           {},
           () => `${editor} merges the change onto the current source; then it is tested and reviewed again.`,
-        ),
-    });
-  // A fix brought back to an older line (`back`) goes through the same carry steps, in words of bringing it back.
-  const carry = review?.sourceCarries?.find(item => !['carried', 'skipped'].includes(item.state));
-  if (
-    carry &&
-    (['rejected', 'needs-reconciliation'].includes(carry.state) || (carry.state === 'waiting' && !carry.approved))
-  ) {
-    const again = carry.state === 'waiting' ? '' : ' again';
-    actions.push({
-      key: 'carry',
-      label: carry.back ? `Bring back to ${carry.line}${again}` : `Carry to ${carry.line}${again}`,
-      emphasis: 'primary',
-      onClick: () =>
-        act('carry', { line: carry.line }, () =>
-          carry.back ? `Bringing the fix back to ${carry.line}.` : `Carrying the fix to ${carry.line}.`,
-        ),
-    });
-  }
-  if (carry && ['waiting', 'rejected'].includes(carry.state))
-    actions.push({
-      key: 'carry-skip',
-      label: `Not needed on ${carry.line}…`,
-      emphasis: 'default',
-      onClick: () =>
-        setAsking({
-          title: `Not needed on ${carry.line}?`,
-          text: carry.back
-            ? `${carry.line} won't get the fix brought back. Your reason is kept with the story, and any older line it was going on to still gets it.`
-            : `${carry.line} won't get this fix. Your reason is kept with the story, and any newer line is still offered it.`,
-          label: 'Why',
-          submit: 'Skip it',
-          required: true,
-          send: note =>
-            act('carry-skip', { line: carry.line, reason: note }, () =>
-              carry.back ? `Not bringing the fix back to ${carry.line}.` : `Not needed on ${carry.line}.`,
-            ),
-        }),
-    });
-  // A story that landed may be brought back to an older line, at the director's word; a carry story brings back the
-  // fix it carries instead, so it offers nothing.
-  const backable = task.kind === 'studio-development:change' && !task.carryOf && journal?.state === 'integrated';
-  // The director may overrule a review that passed (the canvas's Story board, the director's yes on October 23).
-  // A pass has no blocking findings by definition, but its summary and notes go back with the story, and the next
-  // attempt reads the whole history; the director's note is needed only when the review noted nothing.
-  const passNotes = (review?.candidateReviewNotes as unknown[] | undefined)?.length ?? 0;
-  if (integrable && stage?.review?.verdict === 'pass')
-    actions.push({
-      key: 'send-back-passed',
-      label: `Send back to ${editor}`,
-      emphasis: 'default',
-      onClick: () =>
-        setAsking({
-          title: `Send it back to ${editor}?`,
-          text: `${editor} starts another attempt with ${reviewer}'s passing review${passNotes ? ` and its ${passNotes} ${passNotes === 1 ? 'note' : 'notes'}` : ''}, everything the story did so far and your note. Nothing is integrated.`,
-          label: passNotes ? 'Your note (optional)' : `What ${editor} should change`,
-          submit: `Send back to ${editor}`,
-          required: !passNotes,
-          send: note =>
-            act('send-back', { note }, sent =>
-              (sent.start as { ok?: boolean; reason?: string } | undefined)?.ok === false
-                ? `Sent ${task.id} back. It did not start: ${(sent.start as { reason?: string }).reason}`
-                : `Sent ${task.id} back to ${editor}.`,
-            ),
-        }),
-    });
-  if (returnable && stage?.review)
-    actions.push(
-      {
-        key: 'send-back',
-        label: `Send back to ${editor}`,
-        emphasis: 'primary',
-        onClick: () =>
-          setAsking({
+        );
+    // A fix integrated on an older line is carried to the next newer one, or marked not needed there (1.1 step 4); a
+    // fix brought back to an older line (`back`) goes through the same steps, in words of bringing it back.
+    if (key === 'carry' || key === 'carry-skip') {
+      const line = String(valueOf(action, 'line') ?? ''),
+        back = !!review?.sourceCarries?.find(item => item.line === line)?.back;
+      if (key === 'carry')
+        return () =>
+          sendAction(action, {}, () => (back ? `Bringing the fix back to ${line}.` : `Carrying the fix to ${line}.`));
+      return () =>
+        ask(
+          action,
+          {
+            title: `Not needed on ${line}?`,
+            text: back
+              ? `${line} won't get the fix brought back. Your reason is kept with the story, and any older line it was going on to still gets it.`
+              : `${line} won't get this fix. Your reason is kept with the story, and any newer line is still offered it.`,
+            label: 'Why',
+            submit: 'Skip it',
+            required: true,
+          },
+          'reason',
+          () => (back ? `Not bringing the fix back to ${line}.` : `Not needed on ${line}.`),
+        );
+    }
+    // The director may overrule a review that passed (the canvas's Story board, the director's yes on October 23).
+    // A pass has no blocking findings by definition, but its summary and notes go back with the story, and the next
+    // attempt reads the whole history; the director's note is needed where the controller requires one.
+    if (key === 'send-back-passed') {
+      const passNotes = (review?.candidateReviewNotes as unknown[] | undefined)?.length ?? 0,
+        required = !!action.fields.find(field => field.name === 'note')?.required;
+      return () =>
+        ask(
+          action,
+          {
+            title: `Send it back to ${editor}?`,
+            text: `${editor} starts another attempt with ${reviewer}'s passing review${passNotes ? ` and its ${passNotes} ${passNotes === 1 ? 'note' : 'notes'}` : ''}, everything the story did so far and your note. Nothing is integrated.`,
+            label: required ? `What ${editor} should change` : 'Your note (optional)',
+            submit: `Send back to ${editor}`,
+            required,
+          },
+          'note',
+          sent => sentBack(sent, `Sent ${task.id} back to ${editor}.`),
+        );
+    }
+    if (key === 'send-back')
+      return () =>
+        ask(
+          action,
+          {
             title: `Send it back to ${editor}?`,
             text: `${editor} gets ${reviewer}'s findings and starts another attempt. Add a note if you want to say more.`,
             label: 'Your note (optional)',
             submit: `Send back to ${editor}`,
-            send: note =>
-              act('send-back', { note }, sent =>
-                (sent.start as { ok?: boolean; reason?: string } | undefined)?.ok === false
-                  ? `Sent ${task.id} back. It did not start: ${(sent.start as { reason?: string }).reason}`
-                  : `Sent ${task.id} back to ${editor} with ${reviewer}'s findings.`,
-              ),
-          }),
-      },
-      {
-        key: 'over',
-        label: 'Integrate over the review',
-        emphasis: 'default',
-        onClick: () =>
-          setAsking({
-            ...overReview(reviewer),
-            send: reason =>
-              act('integrate-source', {
-                attemptId: stage.review?.attemptId,
-                reviewHash: stage.review?.hash,
-                overrideReason: reason,
-              }),
-          }),
-      },
-    );
-  if (proposal && current)
-    actions.push({
-      key: 'propose',
-      label: 'Show proposed tasks in Planned',
-      emphasis: 'default',
-      onClick: () =>
-        act(
-          'propose-work',
-          { attemptId: current.id, proposalHash: proposal.hash },
-          () => 'Proposed work is in Planned. Approve each task you want done.',
-        ),
-    });
-  if (closable)
-    actions.push({
-      key: 'close',
-      label:
-        task.status === 'done'
-          ? 'Close without integrating'
-          : task.status === 'review'
-            ? 'Close without accepting'
-            : 'Close',
-      emphasis: 'quiet',
-      does:
-        task.status === 'done'
-          ? 'Keeps its attempts and frees the source for the next story; it cannot run again.'
-          : task.status === 'review'
-            ? 'Keeps its attempts without accepting a result; it cannot run again.'
-            : 'Keeps its attempts; it cannot run again.',
-      onClick: () => {
+          },
+          'note',
+          sent => sentBack(sent, `Sent ${task.id} back to ${editor} with ${reviewer}'s findings.`),
+        );
+    if (key === 'over') return () => ask(action, overReview(reviewer), 'overrideReason');
+    if (key === 'propose')
+      return () => sendAction(action, {}, () => 'Proposed work is in Planned. Approve each task you want done.');
+    if (key === 'close')
+      return () => {
         const done = task.status === 'done';
         if (
           confirm(
             `Close ${task.id} without ${done ? 'integrating it' : 'accepting a result'}? Its recorded attempts are kept${done ? ', and the source is free for the next story' : ''}. It cannot run again.`,
           )
         )
-          act(
-            'close',
+          sendAction(
+            action,
             { reason: done ? 'Closed without integrating.' : 'Closed without accepting a result.' },
             () => `Closed ${task.id}.`,
           );
-      },
+      };
+    return () => sendAction(action);
+  };
+  // What a closing action does, under it in the More actions menu.
+  const doesOf = (action: TaskAction) =>
+    action.key.startsWith('deny-')
+      ? 'It will not run; a note you add is kept with the decision.'
+      : action.key === 'close'
+        ? task.status === 'done'
+          ? 'Keeps its attempts and frees the source for the next story; it cannot run again.'
+          : task.status === 'review'
+            ? 'Keeps its attempts without accepting a result; it cannot run again.'
+            : 'Keeps its attempts; it cannot run again.'
+        : undefined;
+  // The question card's send button and the Allow commands form are drawn where the page shows them; Bring back's
+  // lines under the decisions.
+  const elsewhere = (action: TaskAction) =>
+    ['answer', 'allow-commands'].includes(action.key) || action.key.startsWith('bring-back');
+  const listed: Action[] = [];
+  for (const action of served.filter(item => !elsewhere(item))) {
+    listed.push({
+      key: action.key,
+      label: action.label,
+      emphasis: action.emphasis,
+      onClick: press(action),
+      ...(action.closing ? { does: doesOf(action) ?? '' } : {}),
     });
-  // The decisions keep their row, primary first; the closing actions go behind More actions. While a candidate that
-  // passed its tests is reviewed, the row says when Integrate and Send back come.
-  const sorted = actions.filter(action => !action.does).sort((a, b) => order[a.emphasis] - order[b.emphasis]),
-    closing = actions.filter(action => action.does),
+    // A blocked editor's file request may be changed in the story's file form before it is approved (MP-021).
+    if (action.key === 'allow-files' && onEditFiles)
+      listed.push({ key: 'edit-files', label: 'Edit the file list', emphasis: 'default', onClick: onEditFiles });
+  }
+  // Each served Bring back, to the line it carries or, for one served without a line, to each line the bring-back read
+  // can reach; a line the read no longer reaches is not offered, and the read's reasons stay in their place.
+  const reaching = (backRead?.lines ?? []).filter(
+      (target): target is Extract<BringBackTarget, { through: string[] }> => 'through' in target,
+    ),
+    bringBacks = served
+      .filter(action => action.key.startsWith('bring-back'))
+      .flatMap(action => {
+        const line = valueOf(action, 'line');
+        return (typeof line === 'string' ? reaching.filter(target => target.line === line) : reaching).map(target => ({
+          action,
+          line: target.line,
+          through: target.through,
+          label: typeof line === 'string' ? action.label : `Bring back to ${target.line}`,
+        }));
+      }),
+    backReasons = (backRead?.lines ?? []).filter(
+      (target): target is Extract<BringBackTarget, { reason: string }> => !('through' in target),
+    );
+  // The decisions keep their row in the served order; the closing actions go behind More actions. While a candidate
+  // that passed its tests is reviewed, the row says when Integrate and Send back come.
+  const sorted = listed.filter(action => action.does === undefined),
+    closing = listed.filter(action => action.does !== undefined),
     waiting = reviewWait(storyFacts(task, studio)),
     menu = `${domId}-more`;
-  const decision = (action: Action) =>
-    action.taskId ? (
-      <Link
-        key={action.key}
-        className={buttonClass(action.emphasis)}
-        to="/p/$projectId/tasks/$taskId"
-        params={{ projectId, taskId: action.taskId }}
-      >
-        {action.label}
-      </Link>
-    ) : (
-      <button
-        key={action.key}
-        type="button"
-        className={buttonClass(action.emphasis)}
-        disabled={busy}
-        onClick={action.onClick}
-      >
-        {action.label}
-      </button>
-    );
+  const decision = (action: Action) => (
+    <button
+      key={action.key}
+      type="button"
+      className={buttonClass(action.emphasis)}
+      disabled={busy}
+      onClick={action.onClick}
+    >
+      {action.label}
+    </button>
+  );
   // What landed after the change was tested, as the controller names it (landedText): each story that landed, then
   // any commits made by hand.
   const byHand = landed ? landed.commits - landed.stories.length : 0,
@@ -515,6 +456,10 @@ export function TaskDecisions({
             : []),
         ]
       : [];
+  const closeBringing = () => {
+    setBringing(null);
+    bring.reset();
+  };
   return (
     <>
       {(sorted.length > 0 || closing.length > 0 || waiting) && (
@@ -559,6 +504,16 @@ export function TaskDecisions({
           </div>
         </div>
       )}
+      {filesAsked.problem && !outdated && (
+        <p className="sd-stands__detail" style={{ margin: 0, flex: '1 1 100%' }}>
+          {`The files ${filesAsked.editor || 'the agent'} asked for cannot be allowed as asked: ${filesAsked.problem}`}
+        </p>
+      )}
+      {sentRun && (
+        <Link className="sd-btn" to="/p/$projectId/runs/$runId" params={{ projectId, runId: sentRun }}>
+          Open the new idea's run
+        </Link>
+      )}
       {mergeable && landed && (
         <p className="sd-stands__detail" style={{ margin: 0, flex: '1 1 100%' }}>
           It passed on its own but fails together with what landed after it was tested
@@ -585,19 +540,66 @@ export function TaskDecisions({
           <TryNotes state={tryIt} />
         </section>
       )}
-      {backable && (
-        <BringBack
-          projectId={projectId}
-          url={`/api/tasks/${id}/bring-back?projectId=${encodeURIComponent(projectId)}`}
-          path={`/api/tasks/${id}/bring-back`}
-          watch={review?.sourceCarries}
-          label={line => `Bring back to ${line}`}
-          text={({ through }) =>
-            `An older release gets this change: the fix is applied to ${through.join(', then ')}, one line at a time when the project's source is free. A line where it conflicts gets a story of its own.`
-          }
-          done={result => `Bringing the fix back to ${((result.lines as string[] | undefined) ?? []).join(', then ')}.`}
-        />
+      {(bringBacks.length > 0 || backReasons.length > 0) && (
+        <ul
+          aria-label="Bring back"
+          style={{
+            listStyle: 'none',
+            margin: 0,
+            padding: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'var(--space-6)',
+          }}
+        >
+          {bringBacks.map(item => (
+            <BringBackLine
+              key={`${item.action.key} ${item.line}`}
+              label={item.label}
+              through={item.through.filter(line => line !== item.line)}
+              busy={bring.isPending}
+              onPick={() => setBringing(item)}
+            />
+          ))}
+          {backReasons.map(target => (
+            <li key={target.line} className="sd-meta">
+              {target.reason}
+            </li>
+          ))}
+        </ul>
       )}
+      <Modal
+        open={bringing !== null}
+        onClose={closeBringing}
+        closable={!bring.isPending}
+        title={bringing ? `Bring back to ${bringing.line}?` : ''}
+      >
+        {bringing && (
+          <>
+            <p style={{ margin: 0 }}>
+              {`An older release gets this change: the fix is applied to ${bringing.through.join(', then ')}, one line at a time when the project's source is free. A line where it conflicts gets a story of its own.`}
+            </p>
+            {bring.error && (
+              <p role="alert" className="sd-meta" style={{ margin: 0, color: 'var(--bad)' }}>
+                {bring.error.message}
+              </p>
+            )}
+            <div className="sd-dialog__actions">
+              <button
+                type="button"
+                className="sd-btn sd-btn--primary"
+                disabled={bring.isPending}
+                onClick={() => bring.mutate(bringing)}
+              >
+                {`Bring back to ${bringing.line}`}
+              </button>
+              <button type="button" className="sd-btn sd-btn--ghost" disabled={bring.isPending} onClick={closeBringing}>
+                Cancel
+              </button>
+            </div>
+          </>
+        )}
+      </Modal>
       <NoteDialog
         open={asking !== null}
         title={asking?.title ?? ''}
@@ -619,6 +621,39 @@ export function TaskDecisions({
         </p>
       )}
     </>
+  );
+}
+
+// One older line a served Bring back reaches: its button, with the lines in between it also reaches.
+function BringBackLine({
+  label,
+  through,
+  busy,
+  onPick,
+}: {
+  label: string;
+  through: string[];
+  busy: boolean;
+  onPick: () => void;
+}) {
+  const noteId = useId();
+  return (
+    <li style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-8)' }}>
+      <button
+        type="button"
+        className="sd-btn sd-btn--sm"
+        disabled={busy}
+        aria-describedby={through.length ? noteId : undefined}
+        onClick={onPick}
+      >
+        {label}
+      </button>
+      {through.length > 0 && (
+        <span id={noteId} className="sd-meta">
+          Also reaches {named(through)}, the {through.length === 1 ? 'line' : 'lines'} in between.
+        </span>
+      )}
+    </li>
   );
 }
 
@@ -758,8 +793,20 @@ export interface Journal {
   method?: string;
   approvedBy?: { type?: string; revision?: number };
   repository?: { commit?: string; branch?: string };
-  verification?: { totals?: { pass?: number; tests?: number }; formatter?: string };
+  verification?: {
+    totals?: { pass?: number; tests?: number };
+    formatter?: string;
+    outputs?: { install?: string; format?: string; build?: string; errors?: string };
+  };
 }
+
+// What each verification step printed, in the order they run, named in plain words.
+const printedOutputs = [
+  ['install', 'What the install printed'],
+  ['format', 'What the formatter printed'],
+  ['build', 'What the build printed'],
+  ['errors', 'What the test run printed as errors'],
+] as const;
 
 // A reviewed change's integration: who approved it, its commit and verification, and the full record, with the
 // merge's whole test record once it recorded a verification. `attemptId` is the attempt holding the journal.
@@ -773,7 +820,8 @@ export function IntegrationJournal({
   journal: Journal;
 }) {
   const commit = journal.repository?.commit,
-    totals = journal.verification?.totals;
+    totals = journal.verification?.totals,
+    outputs = journal.verification?.outputs;
   return (
     <>
       <p style={{ margin: 0, color: 'var(--ink-2)' }}>
@@ -792,6 +840,18 @@ export function IntegrationJournal({
             journal.verification?.formatter ? `formatting with ${journal.verification.formatter}` : 'the merge'
           }.`}
       </p>
+      {printedOutputs.map(([name, label]) =>
+        outputs?.[name] ? (
+          <details
+            key={name}
+            className="sd-disclosure"
+            open={name === 'errors' && journal.state === 'rejected' ? true : undefined}
+          >
+            <summary>{label}</summary>
+            <pre className="sd-code sd-code--block sd-code--wrap">{outputs[name]}</pre>
+          </details>
+        ) : null,
+      )}
       <details className="sd-disclosure">
         <summary>Recorded source integration{journal.method === 'merge' ? '' : ' and backups'}</summary>
         <pre className="sd-code sd-code--block">{JSON.stringify(journal, null, 2)}</pre>

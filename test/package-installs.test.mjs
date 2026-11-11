@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -13,7 +14,7 @@ import { createSourceWorktree, removeSourceWorktree } from '../src/connectors/so
 import { git } from '../src/connectors/source-integration.mjs';
 
 const temporary = t => {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-installs-')));
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-installs-')));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return directory;
 };

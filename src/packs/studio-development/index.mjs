@@ -36,6 +36,7 @@ import {
   maxScopePaths,
   storySituation,
   candidateSituation,
+  noteOutdated,
 } from '../../connectors/source-changes.mjs';
 import { sourceDiffLimit } from '../../connectors/source-diff.mjs';
 import { lineHead, projectLine, storyLine } from '../../connectors/source-lines.mjs';
@@ -49,7 +50,7 @@ import { visualSettings } from '../../connectors/visual-check.mjs';
 // How a story's scope and size are bounded, for the planners and editors that choose it (MP-016). The paths
 // follow the source profile the accepted check measured with, which is what the controller validates against.
 const scopeRules = profile =>
-  `files lists existing files to edit, newFiles files to create and deleteFiles existing files the controller deletes when it builds the candidate (update whatever uses them). ${storyPathScope(profile)} List each path once, at most ${maxScopePaths} in total. Prefer small stories: say why when a story lists many files (for example a mechanical update of every caller). The change's diff must stay within ${sourceDiffLimit / 1024} KiB, and complexity sets the time limit.`;
+  `files lists existing files to edit, newFiles files to create and deleteFiles existing files the controller deletes when it builds the candidate (update whatever uses them). ${storyPathScope(profile)} Before naming a story's files, search the tests (the source copy's test folder, or the measured file list when only that list is supplied) for what the story changes or removes: its functions, exports, routes, messages and page text. List every existing test file that asserts on them among the story's files, and say in the story's scope which tests check what. When a story changes how a page looks, also list the stylesheet that styles the changed part. List each path once, at most ${maxScopePaths} in total. Prefer small stories: say why when a story lists many files (for example a mechanical update of every caller). The change's diff must stay within ${sourceDiffLimit / 1024} KiB, and complexity sets the time limit.`;
 // The profile of the one accepted check a breakdown or review reads (its inputs are validated before an
 // attempt starts); Studio desk's when instructions are compiled without the store (the legacy fixture export).
 const checkedProfile = (store, task) => {
@@ -282,6 +283,7 @@ export const studioDevelopmentPack = {
   tasks: [
     {
       kind: 'studio-development:checks',
+      step: { kind: 'operation' },
       role: 'tester',
       produces: ['source-check-report-v1', 'source-context-v1'],
       version: 'source-check-report-v1',
@@ -351,6 +353,7 @@ export const studioDevelopmentPack = {
     },
     {
       kind: 'studio-development:review',
+      step: { kind: 'review' },
       role: 'reviewer',
       tier: 'standard',
       consumes: ['source-check-report-v1'],
@@ -487,6 +490,7 @@ export const studioDevelopmentPack = {
     },
     {
       kind: 'studio-development:change',
+      step: { kind: 'work', proposes: { library: false } },
       role: 'engineer',
       tier: 'deep',
       version: 'source-change-v1',
@@ -584,6 +588,10 @@ export const studioDevelopmentPack = {
       prepareAttempt: ({ store, task, runtime }) => ({
         sourceChange: changeScope(store, task, sourceRoot(store, task, runtime)),
       }),
+      // A Start or dispatch refused because the source moved past the story's plan (its scope above, in validateInputs
+      // or prepareAttempt) notes on the story that its plan is out of date (sourceStage.outdated); the refusal reads as
+      // before. The scheduler's readiness checks note nothing.
+      refused: ({ task, error }) => noteOutdated(task, error),
       // The editing adapter's delivery scope already says what an editor may change and what the controller owns.
       instructions: ({ store, task } = {}) => ({
         layers: [
@@ -652,6 +660,7 @@ export const studioDevelopmentPack = {
     },
     {
       kind: 'studio-development:change-review',
+      step: { kind: 'review' },
       role: 'reviewer',
       tier: 'standard',
       distinctFromInputs: true,
@@ -720,6 +729,7 @@ export const studioDevelopmentPack = {
     },
     {
       kind: 'studio-development:breakdown',
+      step: { kind: 'plan', proposes: { library: false } },
       executionAdapter: 'source-breakdown',
       role: 'product-owner',
       tier: 'deep',
@@ -828,6 +838,12 @@ export const studioDevelopmentPack = {
 
 // Intake is a fixed planning workflow, composed from current explicit project defaults.
 // Unlike setup defaults, missing configuration must never select a fallback employee.
+// An idea's checks run the whole suite. It took 98 to 127 s on October 20 and 21, and on November 3, with the suite
+// on half the computer's threads, about 300 s when quiet and past the old 420 s under load, so checks failed at
+// random. They get the most a workflow step may run (600 s; an idea's two steps fit its 1800 s budget with the
+// breakdown's two 600 s attempts). One ceiling for every kind of step is the graph engine's step contract work.
+export const checkSeconds = 600;
+
 export function intakeSteps(org, adapters) {
   for (const kind of ['checks', 'breakdown', 'change', 'change-review'].map(name => `studio-development:${name}`))
     if (!org.taskKinds?.includes(kind))
@@ -870,8 +886,7 @@ export function intakeSteps(org, adapters) {
         'Inspect the measured logs, source identities and test totals. Accept this exact report as planning evidence.',
       dependencies: [],
       resources: [],
-      // The full suite took 98 to 127 s on October 20 and 21 and grows with every story.
-      maxSeconds: 420,
+      maxSeconds: checkSeconds,
       maxAttempts: 1,
     },
     {
@@ -915,7 +930,7 @@ export function developmentSteps(org) {
       acceptance: 'Inspect logs, source hashes and test totals. Accept the report as evidence.',
       dependencies: [],
       resources: [],
-      maxSeconds: 420,
+      maxSeconds: checkSeconds,
       maxAttempts: 1,
     },
     {

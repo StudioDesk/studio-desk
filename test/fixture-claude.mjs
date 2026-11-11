@@ -3,6 +3,7 @@
 // workspace mode checks that the administrator's setup is left on and works on disk.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import path from 'node:path';
 import { layoutExample, hash } from '../src/contracts.mjs';
 import { simulatedPlan } from '../src/planning.mjs';
@@ -66,7 +67,7 @@ if (
       value('--disallowedTools') !== 'ScheduleWakeup' ||
       // By real path: macOS's temporary folder is reached through a link (/var is /private/var), and the
       // working folder is reported by its real path.
-      fs.realpathSync(path.resolve(value('--add-dir'))) !== fs.realpathSync(path.resolve('..')) ||
+      realPath(path.resolve(value('--add-dir'))) !== realPath(path.resolve('..')) ||
       !JSON.parse(value('--json-schema')).properties.taskId
 ) {
   console.error('The execution mode was not applied.');

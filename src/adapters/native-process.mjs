@@ -2,8 +2,29 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { command, subscriptionEnvironment, live } from './process.mjs';
+import { jobStartFailed, jobbedCommand, processJobsMissing, processJobsWork, readJobReport } from './process-job.mjs';
 import { usageReset, reportedReset } from '../core/usage-reset.mjs';
 import { flushSay } from '../core/attempt-trace.mjs';
+
+// Whether processes run in a job, asked of this computer once for the runtime, by whichever starts first: an agent's
+// attempt or Try it (connectors/try-copy.mjs). A value the configuration set (processJobs: false, as the tests do) is
+// kept and never asked. The runtime remembers when the check ran here on Windows and failed, so the first attempt can
+// say so however the value was found. `platform` and `run` are processJobsWork's.
+export function measureProcessJobs(runtime, { platform = process.platform, run } = {}) {
+  if (runtime.processJobs !== undefined) return runtime.processJobs;
+  runtime.processJobs = processJobsWork({ platform, run });
+  if (platform === 'win32' && !runtime.processJobs) runtime.processJobsFailed = true;
+  return runtime.processJobs;
+}
+
+// For an attempt: the log says the wrapper cannot run only when that check ran on this computer and failed, once per
+// runtime. A configuration that turned the wrapper off is not a failure and logs nothing.
+export function checkProcessJobs(runtime, attempt, options) {
+  measureProcessJobs(runtime, options);
+  if (!runtime.processJobsFailed || runtime.processJobsWarned) return;
+  runtime.processJobsWarned = true;
+  runtime.store.event('log', attempt.taskId, attempt.id, `controller: ${processJobsMissing}`);
+}
 
 export function runNative(
   entry,
@@ -20,9 +41,17 @@ export function runNative(
 ) {
   const { attempt: a, output } = entry;
   const [bin, argv] = command(binary, args);
-  const child = spawn(bin, argv, {
+  // On Windows the CLI runs in a job of its own, so whatever it starts ends with it: what its main process leaves
+  // running is ended and counted when it exits, and the whole tree ends with the controller (C-07). Asked of this
+  // computer once; where the wrapper cannot run, the CLI starts as before and the attempt's log says so.
+  checkProcessJobs(this, a);
+  const report = this.processJobs
+      ? path.join(entry.job || output, `process-job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`)
+      : '',
+    started = jobbedCommand(bin, argv, environment, { report, enabled: !!this.processJobs });
+  const child = spawn(started.file, started.args, {
     cwd,
-    env: environment,
+    env: started.environment,
     shell: false,
     detached: process.platform !== 'win32',
     windowsHide: true,
@@ -30,6 +59,14 @@ export function runNative(
   });
   entry.child = child;
   a.pid = child.pid || null;
+  // When it started, so a later process that is handed the same ID is not taken for it (adapters/process.mjs, live()):
+  // taken right after the spawn returns, so the process started at or before it.
+  if (a.pid) a.pidStartedAt = new Date().toISOString();
+  else delete a.pidStartedAt;
+  // Whether that process holds the whole tree: in a job, it ending, or the controller ending, ends everything the CLI
+  // started, so after a restart a recorded process that is gone means nothing of the attempt still runs.
+  if (this.processJobs) a.processJob = true;
+  else delete a.processJob;
   this.store.updateAttempt(a);
   child.stdin.on('error', () => {});
   child.stdin.end(prompt);
@@ -45,47 +82,102 @@ export function runNative(
     // its reservations wait for reconciliation, so this close records nothing.
     if (entry.abandoned) return;
     for (const ch of ['stdout', 'stderr']) if (entry.buffers[ch]) this.recordLine(entry, ch, entry.buffers[ch]);
-    if (live(a)) {
-      clearTimeout(entry.timer);
-      a.status = 'quarantined';
-      a.finishedAt = new Date().toISOString();
+    // What the CLI's main process left running was ended before the wrapper exited (the director's rule 2); the
+    // attempt records how many, so nothing of it still runs when its reservations are released.
+    const job = report ? readJobReport(report) : null;
+    if (job?.leftovers) {
+      a.leftoverProcesses = (a.leftoverProcesses || 0) + job.leftovers;
       this.store.updateAttempt(a);
-      const t = this.store.task(a.taskId);
-      t.status = 'blocked';
-      t.reason = 'CLI exited but its process group is still live. Reservations retained until reconciliation.';
-      this.store.putTask(t);
-      this.active.delete(a.id);
-      this.store.event('quarantined', a.taskId, a.id, t.reason);
-      return;
+      this.store.event(
+        'log',
+        a.taskId,
+        a.id,
+        `controller: The CLI's main process ended and left ${job.leftovers} process${job.leftovers === 1 ? '' : 'es'} running; ${job.leftovers === 1 ? 'it was' : 'they were'} ended.`,
+      );
     }
-    let result = null,
-      error = entry.spawnError || entry.nativeError,
-      // A failure the CLI reported: one it wrote (nativeFailure), or a failing exit with no other error.
-      reported = !!error && error === entry.reportedFailure;
-    if (!entry.cancelled && !error && (code === 0 || resultOnFailure)) {
-      try {
-        result = readResult(code, signal);
-      } catch (err) {
-        error = `CLI result rejected: ${err.message}`;
+    if (report && !job && code === jobStartFailed && !entry.cancelled)
+      entry.spawnError ??= 'The CLI could not be started in its job (src/adapters/windows-job.ps1). See recorded logs.';
+    // On macOS and Linux the CLI's whole process group was signalled with it, and its other members may still be ending
+    // when the main process closes. Under load that took long enough for a stopped attempt to be quarantined as if
+    // something of it still ran (found in the 1.2 release proof on Linux, November 4, 2026). So a group still live at
+    // the close is looked at again for a moment first. Nothing is released while it waits, and a group that keeps
+    // running is still quarantined.
+    const settle = () => {
+      if (entry.abandoned) return;
+      if (live(a)) {
+        clearTimeout(entry.timer);
+        const { status, finishedAt, requeue } = a;
+        // The attempt, its task and the event are saved in one step; a failure leaves both as they were. The task is
+        // written to the store directly, as before (not through the runner's stage view mapping).
+        try {
+          this.store.tx(() => {
+            const t = this.store.task(a.taskId);
+            a.status = 'quarantined';
+            a.finishedAt = new Date().toISOString();
+            // As at a restart: queued work leaves the queue until Reconcile puts it back (Runner.holdQueue).
+            this.holdQueue(a, t);
+            this.store.updateAttempt(a);
+            t.status = 'blocked';
+            t.reason = 'CLI exited but its process group is still live. Reservations retained until reconciliation.';
+            this.store.putTask(t);
+            this.store.event('quarantined', a.taskId, a.id, t.reason);
+          });
+        } catch (failure) {
+          a.status = status;
+          if (finishedAt === undefined) delete a.finishedAt;
+          else a.finishedAt = finishedAt;
+          if (requeue === undefined) delete a.requeue;
+          else a.requeue = requeue;
+          throw failure;
+        }
+        // The attempt's work stopped being observed here, whether or not the group was waited for: its enclosing phase
+        // ends now, once (RF-015). Nested work may still be alive, so only that phase is finished.
+        const phase = entry.phases?.find(item => item.payload.phaseId === 'attempt');
+        if (phase) this.store.finishPhase(phase, 'interrupted', { timing: 'process-group-unconfirmed' });
+        this.active.delete(a.id);
+        return;
       }
-    } else if (!entry.cancelled && !error) {
-      error = `CLI exited with code ${code}. See recorded logs.`;
-      reported = true;
-    }
-    // A limit reported as reached makes that failure the usage limit, whichever the CLI reported first,
-    // unless the attempt reported a sign-in, login or permission failure (nativeFailure).
-    if (reported && !entry.quota && limitHolds(entry)) this.nativeFailure(entry, error);
-    // Continue only after the process/group is confirmed stopped. Keep the
-    // attempt's original time budget and resource reservations between phases.
-    entry.buffers = {};
-    if (onComplete && !entry.cancelled && !error) {
-      try {
-        onComplete(result, code, signal);
-      } catch (err) {
-        this.finish(entry, null, err.message);
+      let result = null,
+        error = entry.spawnError || entry.nativeError,
+        // A failure the CLI reported: one it wrote (nativeFailure), or a failing exit with no other error.
+        reported = !!error && error === entry.reportedFailure;
+      if (!entry.cancelled && !error && (code === 0 || resultOnFailure)) {
+        try {
+          result = readResult(code, signal);
+        } catch (err) {
+          error = `CLI result rejected: ${err.message}`;
+        }
+      } else if (!entry.cancelled && !error) {
+        error = `CLI exited with code ${code}. See recorded logs.`;
+        reported = true;
       }
-    } else this.finish(entry, result, error);
+      // A limit reported as reached makes that failure the usage limit, whichever the CLI reported first,
+      // unless the attempt reported a sign-in, login or permission failure (nativeFailure).
+      if (reported && !entry.quota && limitHolds(entry)) this.nativeFailure(entry, error);
+      // Continue only after the process/group is confirmed stopped. Keep the
+      // attempt's original time budget and resource reservations between phases.
+      entry.buffers = {};
+      if (onComplete && !entry.cancelled && !error) {
+        try {
+          onComplete(result, code, signal);
+        } catch (err) {
+          this.finish(entry, null, err.message);
+        }
+      } else this.finish(entry, result, error);
+    };
+    if (process.platform !== 'win32' && live(a)) waitForGroup(() => live(a), entry, settle);
+    else settle();
   });
+}
+
+// How long a stopped CLI's process group may take to empty after its main process closes, and how often it is looked
+// at in the meantime. `isLive` answers whether the group still runs; `then` decides once it has emptied, the wait has
+// run out, or shutdown let go of the attempt.
+export const groupSettleMs = 3000;
+export const groupSettleStepMs = 100;
+export function waitForGroup(isLive, entry, then, until = Date.now() + groupSettleMs) {
+  if (entry.abandoned || !isLive() || Date.now() >= until) return then();
+  setTimeout(() => waitForGroup(isLive, entry, then, until), groupSettleStepMs);
 }
 // How much of an attempt's output becomes activity rows, how much its activity file keeps, and the
 // longest single line held in memory. Volume never stops the work; the time limit bounds it. A Claude
@@ -146,9 +238,10 @@ export function recordLine(entry, channel, line) {
       entry.adapter.recordEvent?.(this, entry, data);
       // The latest message the adapter noted, for Today's speech bubble, at most once every 10 seconds.
       flushSay.call(this, entry);
-      if (typeof data.model === 'string') {
+      // The model the CLI reports, written once when it changes; no task's readiness depends on it (C-19).
+      if (typeof data.model === 'string' && a.reportedModel !== data.model) {
         a.reportedModel = data.model;
-        this.store.updateAttempt(a);
+        this.store.updateAttempt(a, { trace: true });
       }
       if (data.type === 'error' || data.type === 'turn.failed')
         this.nativeFailure(entry, data.message || data.error?.message || 'CLI reported a failure.');

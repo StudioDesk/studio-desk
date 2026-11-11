@@ -13,7 +13,17 @@ export interface AttemptSummary {
   finishedAt?: string | null;
   acceptedAt?: string;
   error?: string;
-  result?: { outcome?: string; summary?: string; issues?: string[] };
+  // Why it ended, as the controller records it (src/core/attempt-cause.mjs): the work itself, the studio's environment
+  // (detail controller-stop, sandbox or random-test), a usage limit or a question. Only the work's own ending uses up
+  // one of the work's attempts. Records from before it have none.
+  endCause?: { cause: string; detail?: string | null };
+  // The result the agent returned, with its own checks: each one's name, pass, fail or not-run, and its evidence.
+  result?: {
+    outcome?: string;
+    summary?: string;
+    issues?: string[];
+    checks?: { name: string; status: string; evidence?: string }[];
+  };
   executionTiming?: { durationMs: number | null; activeStart: string | null };
   candidateReviewVerdict?: string;
   workReviewVerdict?: string;
@@ -22,7 +32,13 @@ export interface AttemptSummary {
   sourceIntegration?: {
     state?: string;
     error?: string;
-    verification?: { conflicts?: string[]; landedSince?: { commits: number; stories: string[] } };
+    verification?: {
+      conflicts?: string[];
+      landedSince?: { commits: number; stories: string[] };
+      // The end of what the merge's install, formatter, build and test run (its error output) printed, each only
+      // when that step ran and printed something.
+      outputs?: { install?: string; format?: string; build?: string; errors?: string };
+    };
   } | null;
   // A fix integrated on an older line, carried to each newer one (1.1 step 4), or brought back to older ones by the
   // director (`back`), with the stories whose carry to the same line it waits for (`after`).
@@ -51,6 +67,34 @@ export interface AttemptSummary {
   [field: string]: unknown;
 }
 
+// The controller's note on a source story whose plan the code moved past (an approved file is gone, a file it was to
+// create exists, or it lists a file outside the measured list): its plain reason, which the pages show, and when it
+// was noted. The refusal naming files stays in the controller's records.
+export interface OutdatedNote {
+  reason?: string;
+  at?: string;
+  [field: string]: unknown;
+}
+
+export interface SourceStage {
+  version?: string;
+  current?: string;
+  phase?: string;
+  outdated?: OutdatedNote | null;
+  [field: string]: unknown;
+}
+
+// A blocked editor's file request, with the problem the controller recorded when it found it would refuse the
+// request as asked; a request with a problem cannot be allowed as asked.
+export interface ScopeRequest {
+  files: string[];
+  newFiles: string[];
+  deleteFiles: string[];
+  reason?: string;
+  problem?: string;
+  [field: string]: unknown;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -72,16 +116,143 @@ export interface Task {
   controllerWait?: boolean;
   maxSeconds?: number;
   maxAttempts?: number;
+  // The automatic attempts its current stage used and allows, counted as the scheduler counts them (the controller's
+  // WorkflowRegistry.attemptCount): a flow's current round only, and none an attempt the work did not end. `allowed` is
+  // absent for a task without a limit; a record served without the registries has no attemptCount.
+  attemptCount?: { used: number; allowed?: number };
   complexity?: number | null;
-  sourceStage?: { version?: string; current?: string; phase?: string; [field: string]: unknown } | null;
+  sourceStage?: SourceStage | null;
   // The release a source story is for, once the director moved it (1.1); otherwise its idea's.
   release?: { milestoneId?: string; version: string; line?: string; by?: { type?: string } };
   [field: string]: unknown;
 }
 
+// One action the director may take on a task now, as the controller serves it with the task's read and its list of
+// calls (public/task-actions.js): the words on its button, which one stands out (primary, default or quiet), whether
+// it is a closing action shown behind More actions, the route it is sent to and the body fields that route takes, each
+// with the value the page sends from the records when it sends one.
+export interface TaskActionField {
+  name: string;
+  required: boolean;
+  kind: 'id' | 'hash' | 'text' | 'note' | 'reason' | 'boolean' | 'list' | 'number';
+  value?: unknown;
+}
+export interface TaskAction {
+  key: string;
+  label: string;
+  emphasis: 'primary' | 'default' | 'quiet';
+  closing: boolean;
+  method: 'POST' | 'PATCH';
+  path: string;
+  fields: TaskActionField[];
+}
+
 export interface TaskPage {
   task: Task;
   attempts: AttemptSummary[];
+  // The actions the director may take on the task now, as the controller lists them.
+  actions?: TaskAction[];
+}
+
+// What needs the director now in one project (GET /api/projects/<id>/calls, src/core/director-calls.mjs): a task's
+// call with its task's actions, a cleanup of a run's unstarted steps with its member task calls, a CLI's usage hold
+// with no known reset, the project's resume while a restart holds it, then a milestone's stopped release and a
+// story's turned-down or stopped carry, which only the director moves on.
+export interface DirectorTaskCall {
+  type: 'task';
+  taskId: string;
+  runId: string | null;
+  kind: string;
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  attemptId: string | null;
+  canClose: boolean;
+  actions: TaskAction[];
+}
+export interface DirectorCleanupCall {
+  type: 'cleanup';
+  runId: string;
+  taskIds: string[];
+  members: DirectorTaskCall[];
+}
+export interface DirectorHoldCall {
+  type: 'hold';
+  provider: string;
+  label: string;
+  taskIds: string[];
+  runId: null;
+  kind: 'subscription-hold';
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+}
+// The project's resume while a restart holds its queue, with the queued work that waits only for it. Its one action
+// is the resume step (POST /api/pipeline).
+export interface DirectorResumeCall {
+  type: 'resume';
+  projectId: string;
+  taskIds: string[];
+  runId: null;
+  kind: 'project-resume';
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+}
+// A milestone's release that stopped (turned down, or stopped part-way and needing reconciliation) once the test turn
+// it held is given back. Its one action is Release again, sending only the project's ID. Its taskIds name the
+// release's notes story, when it has one.
+export interface DirectorReleaseCall {
+  type: 'release';
+  projectId: string;
+  milestoneId: string;
+  version: string;
+  state: string;
+  taskIds: string[];
+  runId: null;
+  kind: 'release-stopped';
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+}
+// A story whose next carry (or bring-back, `back`) to a line was turned down or stopped part-way, with the story's
+// own Carry (or Bring back) again and Not needed actions.
+export interface DirectorCarryCall {
+  type: 'carry';
+  projectId: string;
+  taskId: string;
+  taskIds: string[];
+  title: string;
+  line: string;
+  back: boolean;
+  state: string;
+  runId: null;
+  kind: 'carry-stopped';
+  reason: string;
+  next: string;
+  action: string | null;
+  details: string[];
+  actions: TaskAction[];
+}
+export type DirectorCall =
+  | DirectorTaskCall
+  | DirectorCleanupCall
+  | DirectorHoldCall
+  | DirectorResumeCall
+  | DirectorReleaseCall
+  | DirectorCarryCall;
+export interface DirectorCalls {
+  projectId: string;
+  items: DirectorCall[];
+  count: number;
+  version: number;
 }
 
 export interface Project {
@@ -91,6 +262,8 @@ export interface Project {
   direction?: string;
   legacy?: boolean;
   dispatchPaused?: boolean;
+  // The pause a restart made (the Runner's constructor), which the director's Resume or Pause replaces.
+  restartPaused?: boolean;
   revision?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -247,6 +420,10 @@ export interface TaskKind {
   scopeRequestLabel?: string;
   integrationLabel?: string;
   proposesWork?: boolean;
+  // How a failed check meets acceptance, as the controller's acceptAttempt decides it: whether the type accepts its
+  // result plainly anyway, and whether its step contract lets the director accept over one with a reason.
+  acceptsFailedChecks?: boolean;
+  acceptOver?: boolean;
   requiredResources?: string[];
   operation?: {
     connector?: string;
@@ -300,6 +477,7 @@ export interface AutonomyPolicy {
   retries?: number;
   kinds?: Record<string, KindModes>;
   cycle?: { enabled?: boolean; [field: string]: unknown };
+  sendWaiting?: boolean;
 }
 
 // Model, effort and mode for each tier and CLI, over the employees' own settings.
@@ -458,12 +636,16 @@ export interface IdeaName {
 }
 
 // The live set: unsettled work, every task of a run with open work, their direct prerequisites, their
-// attempt summaries and those runs; a prerequisite from a finished idea names that idea.
+// attempt summaries and those runs; a prerequisite from a finished idea names that idea. The controller answers it a
+// page at a time in record order: `next` names the task the following page starts after, null on the last page, and
+// `version` is the change sequence the page reflects. The records hold every page read as one (records.ts readLive).
 export interface Live {
   tasks: Task[];
   attempts: AttemptSummary[];
   runs: RunRecord[];
   ideas?: IdeaName[];
+  next?: string | null;
+  version?: number;
 }
 
 // Finished runs, newest first, a page at a time; `next` names the run the following page starts after.
@@ -803,7 +985,8 @@ const projectPath = (projectId: string, page: string) => `/api/projects/${encode
 export const projectsUrl = '/api/projects';
 export const templatesUrl = '/api/templates';
 export const shellUrl = (projectId: string) => projectPath(projectId, 'shell');
-export const liveUrl = (projectId: string) => projectPath(projectId, 'live');
+export const liveUrl = (projectId: string, before: string | null = null) =>
+  `${projectPath(projectId, 'live')}${before ? `?before=${encodeURIComponent(before)}` : ''}`;
 export const finishedUrl = (projectId: string, before: string | null, limit = 10) =>
   `${projectPath(projectId, 'runs')}?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`;
 // An employee's or a team's page reads only its own settled work.
@@ -835,6 +1018,8 @@ export const tryUrl = (projectId: string) => projectPath(projectId, 'try');
 export const tryOutputUrl = (projectId: string) => projectPath(projectId, 'try/output');
 // The project's visual check view, and a story's pages to capture.
 export const visualUrl = (projectId: string) => projectPath(projectId, 'visual-check');
+// What needs the director now in the project, each task's call with its actions.
+export const callsUrl = (projectId: string) => projectPath(projectId, 'calls');
 export const storyPagesUrl = (projectId: string, taskId: string) =>
   `/api/tasks/${encodeURIComponent(taskId)}/pages?${project(projectId)}`;
 // The project's accepted files, what its work made, its library with an entry's readers and a revision's bytes, and
@@ -927,9 +1112,16 @@ async function readServedToken() {
   }
 }
 
-// The controller's answer to a command whose token is not this start's.
+// The controller's answer to a command whose token is not this start's (src/server.mjs), and the ones controllers
+// from before it told a missing token from an earlier one still give: the general refusal, and the one that also
+// named the director's key.
+const staleTokenErrors = [
+  "This command's X-Studio-Token is from an earlier start of the controller. Reload the page, or read the token from it again.",
+  'Invalid controller request.',
+  "This command needs the dashboard's request token (X-Studio-Token) or, from a local tool, the director's key (X-Studio-Key). If the dashboard was open across a restart, reload it.",
+];
 const staleToken = (response: Response, result: { error?: unknown } | null) =>
-  response.status === 403 && result?.error === 'Invalid controller request.';
+  response.status === 403 && staleTokenErrors.some(error => result?.error === error);
 const restarted = 'The controller restarted. Reload this page to continue.';
 
 export type RecordsListener = (records: CommandRecords) => void;
@@ -1013,6 +1205,11 @@ export interface MilestoneRelease {
   error?: string;
   interrupted?: string;
   pushed?: { remote: string; at: string };
+  // The branch the release was made on, and, on version lines, what became of shipping it to the branch releases ship
+  // to: the commit it moved to (a merge whose content is the release when `merged`), why it was skipped, or the error
+  // that stopped it.
+  repository?: { branch: string };
+  shipped?: { branch: string; commit?: string; merged?: boolean; skipped?: string; error?: string; at: string };
 }
 export interface Milestone {
   id: string;
@@ -1020,6 +1217,8 @@ export interface Milestone {
   line: string | null;
   goal: string;
   state: 'open' | 'released';
+  // The open milestone new work lands in when nobody picks one, as the controller names it.
+  next?: boolean;
   waiting: WaitingIdea[];
   release?: MilestoneRelease;
   ideas: ReleaseIdea[];
@@ -1031,6 +1230,9 @@ export interface ReleaseLine {
   state: string;
   newest: boolean;
   from?: string;
+  // On version lines, a line named release/x.y carries its version ('x.y') and whether x.y.0 is released.
+  version?: string;
+  released?: boolean;
   head: string | null;
   lastRelease: { name: string; version: string } | null;
   landed: {
@@ -1041,15 +1243,39 @@ export interface ReleaseLine {
   } | null;
   onRemote: { known: boolean; ahead?: number; behind?: number } | null;
 }
+// On version lines, the branch releases ship to, kept apart from the lines: its tip, the newest release it holds and
+// what the remote is known to have of it.
+export interface ShippingBranch {
+  branch: string;
+  head: string | null;
+  lastRelease: { name: string; version: string } | null;
+  onRemote: { known: boolean; ahead?: number; behind?: number } | null;
+}
+// What a project that is not on version lines yet still needs before it can switch, in order.
+export type VersionLinesNeed =
+  | { kind: 'next-version' }
+  | { kind: 'open-work'; count: number; tasks: { id: string; title: string }[] };
+export interface VersionLinesReadiness {
+  shipsTo: string | null;
+  ready: boolean;
+  needs: VersionLinesNeed[];
+}
 export interface ReleaseOverview {
   available: boolean;
   reason?: string;
   copy?: { branch: string | null; clean: boolean };
   remote?: { name: string; url: string } | null;
+  // Present once the project is on version lines; versionLines is present until then.
+  shipsTo?: ShippingBranch | null;
+  versionLines?: VersionLinesReadiness;
   lines?: ReleaseLine[];
   milestones?: Milestone[];
   tags?: string[];
+  // Who drafts the release notes: the project's enabled breakdown owner, or null when it has none.
+  planner?: { id: string; name: string } | null;
 }
 export const releasesUrl = (projectId: string) => projectPath(projectId, 'releases');
 export const milestonesUrl = (projectId: string) => projectPath(projectId, 'milestones');
 export const linesUrl = (projectId: string) => projectPath(projectId, 'lines');
+// POST { shipsTo }: give each version its own line, with releases shipping to shipsTo.
+export const versionLinesUrl = (projectId: string) => projectPath(projectId, 'version-lines');

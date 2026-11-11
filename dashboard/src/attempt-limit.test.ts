@@ -57,6 +57,52 @@ test('an attempt that used up none is named for what stopped it, so the next nev
   expect(attemptName(work, attempts.slice(0, 3), attempts[2]!)).toBe('Attempt 1 of 3');
 });
 
+test('an attempt past the limit is named as the attempts row’s limit line says it, never "attempt 4 of 3"', () => {
+  const story = {
+      id: 'T-1',
+      title: 'Story',
+      kind: 'studio-development:change',
+      maxAttempts: 3,
+      sourceStage: { version: 'source-story-stages-v1', current: 'implementing' },
+    } as Task,
+    attempts = [
+      attempt('a1', { status: 'failed' }),
+      attempt('a2', { status: 'failed' }),
+      // A usage limit's stop uses none, so the attempts after it keep their numbers.
+      attempt('a3', { status: 'blocked', subscriptionHold: 'claude' }),
+      attempt('a4', { status: 'revision_requested' }),
+      attempt('a5', { status: 'running' }),
+      attempt('r1', { status: 'accepted', assignment: { kind: 'studio-development:change-review' } }),
+    ];
+  expect(attempts.map(item => attemptName(story, attempts, item))).toEqual([
+    'Build, attempt 1 of 3',
+    'Build, attempt 2 of 3',
+    'Build, stopped by a usage limit, not counted',
+    'Build, attempt 3 of 3',
+    'Build, fourth attempt, started by you past the limit of 3',
+    'Review',
+  ]);
+  // Under the Attempts tab's Build heading and on Today's floor; within the limit it keeps its number.
+  expect(attemptName(story, attempts, attempts[4]!, true)).toBe('Fourth attempt, started by you past the limit of 3');
+  expect(attemptName(story, attempts, attempts[3]!, true)).toBe('Attempt 3 of 3');
+  // Other work says it the same way, without "Build, ".
+  const work = { id: 'T-2', title: 'Work', kind: 'general', maxAttempts: 3 } as Task,
+    tries = attempts.slice(0, 5).map(item => ({ ...item, assignment: { kind: 'general' } }));
+  expect(tries.map(item => attemptName(work, tries, item))).toEqual([
+    'Attempt 1 of 3',
+    'Attempt 2 of 3',
+    'Stopped by a usage limit, not counted',
+    'Attempt 3 of 3',
+    'Fourth attempt, started by you past the limit of 3',
+  ]);
+  // Past the limit by more than one, each is named by its own number.
+  const more = [...tries, attempt('a6', { status: 'running', assignment: { kind: 'general' } })];
+  expect(attemptName(work, more, more[5]!, true)).toBe('Fifth attempt, started by you past the limit of 3');
+  // With no limit recorded, nothing is past it.
+  const open = { id: 'T-3', title: 'Open', kind: 'general' } as Task;
+  expect(attemptName(open, tries, tries[4]!)).toBe('Attempt 4 of 4');
+});
+
 test('other work’s independent reviews are named as reviews, so its own attempts never read past its limit', () => {
   const work = {
       id: 'T-2',
@@ -98,4 +144,74 @@ test('only integrating the controller’s own source pauses and restarts it, nev
   expect(integratesController(own)).toBe(true);
   expect(integratesController(repository)).toBe(false);
   expect(integratesController({ ...own, autonomy: { selfHosted: false } })).toBe(false);
+});
+
+// The controller's served count (task.attemptCount) decides the numbers: a flow's second round starts again at 1
+// however many earlier rounds are on record, and an attempt the environment ended says why it was not counted.
+test('a flow story on its second round reads attempt 1 of 3, as the controller counts it', () => {
+  const work = {
+      id: 'T-1',
+      title: 'Work',
+      kind: 'general',
+      maxAttempts: 3,
+      attemptCount: { used: 1, allowed: 3 },
+    } as Task,
+    tries = [
+      attempt('a1', { assignment: { kind: 'general' } }),
+      attempt('a2', { status: 'accepted', assignment: { kind: 'general' } }),
+      attempt('a3', { status: 'running', assignment: { kind: 'general' } }),
+    ];
+  expect(attemptsUsed(work, tries)).toEqual({ used: 1, allowed: 3, left: 2 });
+  expect(tries.map(item => attemptName(work, tries, item, true))).toEqual([
+    'From an earlier round',
+    'From an earlier round',
+    'Attempt 1 of 3',
+  ]);
+});
+
+test('an attempt the environment ended is named for why, and the next reads attempt 1 of 2', () => {
+  const story = {
+      id: 'T-1',
+      title: 'Story',
+      kind: 'studio-development:change',
+      maxAttempts: 2,
+      attemptCount: { used: 1, allowed: 2 },
+      sourceStage: { version: 'source-story-stages-v1', phase: 'implementing' },
+    } as Task,
+    attempts = [
+      attempt('a1', { status: 'cancelled', endCause: { cause: 'environment', detail: 'controller-stop' } }),
+      attempt('a2', { status: 'running' }),
+    ];
+  expect(countsTowardLimit(attempts[0]!)).toBe(false);
+  expect(attemptName(story, attempts, attempts[0]!, true)).toBe('The controller stopped, not counted');
+  expect(attemptName(story, attempts, attempts[1]!)).toBe('Build, attempt 1 of 2');
+  const named = (endCause: AttemptSummary['endCause']) =>
+    attemptName(story, attempts, attempt('a0', { status: 'failed', endCause }), true);
+  expect(named({ cause: 'environment', detail: 'sandbox' })).toBe('The test sandbox could not start, not counted');
+  expect(named({ cause: 'environment', detail: 'random-test' })).toBe(
+    'A test that fails at random failed, not counted',
+  );
+  expect(named({ cause: 'usage-limit' })).toBe('Stopped by a usage limit, not counted');
+  expect(named({ cause: 'question' })).toBe('Asked you a question, not counted');
+  // The work's own ending counts, even on an attempt the old rules would have left out.
+  expect(
+    countsTowardLimit(
+      attempt('a5', { status: 'interrupted', reconciledAt: '2026-10-24T09:06:00Z', endCause: { cause: 'work' } }),
+    ),
+  ).toBe(true);
+});
+
+test('while a code story is reviewed, the served count is its review’s, so its builds are counted as before', () => {
+  const story = {
+      id: 'T-1',
+      title: 'Story',
+      kind: 'studio-development:change',
+      maxAttempts: 3,
+      attemptCount: { used: 0, allowed: 1 },
+      sourceStage: { version: 'source-story-stages-v1', phase: 'candidate-review' },
+    } as Task,
+    attempts = [attempt('a1', {}), attempt('a2', { status: 'accepted' })];
+  expect(attemptName(story, attempts, attempts[1]!)).toBe('Build, attempt 2 of 3');
+  // The actions read the stage's own count, which the controller's Start refuses past.
+  expect(attemptsUsed(story, attempts)).toEqual({ used: 0, allowed: 1, left: 1 });
 });

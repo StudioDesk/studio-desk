@@ -8,7 +8,6 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
-  lazyRouteComponent,
   type RouterHistory,
 } from '@tanstack/react-router';
 import { lazy, Suspense, type ComponentType } from 'react';
@@ -16,26 +15,44 @@ import { getJSON, projectsUrl, type Project } from './api';
 import { BoardPage } from './board-page';
 import { ProjectFrame, rememberedProject } from './frame';
 import { Heading } from './layout';
+import { lazyPage } from './lazy-page';
 import { ProjectLive } from './live-context';
 import type { TabId } from './task-page';
 import { TodayPage } from './today-page';
 import { TracePage } from './trace-page';
 
 // A task's page, the runs, Artifacts and Settings load when first opened, so Home's first load stays small.
-const TaskView = lazyRouteComponent(() => import('./task-page'), 'TaskView'),
-  RecordPage = lazyRouteComponent(() => import('./record-page'), 'RecordPage'),
-  RunsPage = lazyRouteComponent(() => import('./runs-page'), 'RunsPage'),
-  SettingsPage = lazyRouteComponent(() => import('./settings-page'), 'SettingsPage'),
-  PreviewsPage = lazyRouteComponent(() => import('./previews-page'), 'PreviewsPage'),
-  TeamsPage = lazyRouteComponent(() => import('./teams-page'), 'TeamsPage'),
-  TeamPage = lazyRouteComponent(() => import('./teams-page'), 'TeamPage'),
-  AgentsPage = lazyRouteComponent(() => import('./agents-page'), 'AgentsPage'),
-  InstructionsPage = lazyRouteComponent(() => import('./instructions-page'), 'InstructionsPage'),
-  ToldPage = lazyRouteComponent(() => import('./told-page'), 'ToldPage'),
-  ReleasesPage = lazyRouteComponent(() => import('./releases-page'), 'ReleasesPage'),
-  ArtifactsPage = lazyRouteComponent(() => import('./artifacts-page'), 'ArtifactsPage'),
-  ActivityLogPage = lazyRouteComponent(() => import('./activity-log-page'), 'ActivityLogPage'),
-  PlatformPage = lazyRouteComponent(() => import('./platform-page'), 'PlatformPage');
+const TaskView = lazyPage(() => import('./task-page'), 'TaskView'),
+  RecordPage = lazyPage(() => import('./record-page'), 'RecordPage'),
+  RunsPage = lazyPage(() => import('./runs-page'), 'RunsPage'),
+  SettingsPage = lazyPage(() => import('./settings-page'), 'SettingsPage'),
+  PreviewsPage = lazyPage(() => import('./previews-page'), 'PreviewsPage'),
+  TeamsPage = lazyPage(() => import('./teams-page'), 'TeamsPage'),
+  TeamPage = lazyPage(() => import('./teams-page'), 'TeamPage'),
+  AgentsPage = lazyPage(() => import('./agents-page'), 'AgentsPage'),
+  InstructionsPage = lazyPage(() => import('./instructions-page'), 'InstructionsPage'),
+  ToldPage = lazyPage(() => import('./told-page'), 'ToldPage'),
+  ReleasesPage = lazyPage(() => import('./releases-page'), 'ReleasesPage'),
+  ArtifactsPage = lazyPage(() => import('./artifacts-page'), 'ArtifactsPage'),
+  ActivityLogPage = lazyPage(() => import('./activity-log-page'), 'ActivityLogPage'),
+  PlatformPage = lazyPage(() => import('./platform-page'), 'PlatformPage');
+// Every page above, so the tests' setup can load them all before a test file runs (test-setup.ts).
+export const onDemandPages = [
+  TaskView,
+  RecordPage,
+  RunsPage,
+  SettingsPage,
+  PreviewsPage,
+  TeamsPage,
+  TeamPage,
+  AgentsPage,
+  InstructionsPage,
+  ToldPage,
+  ReleasesPage,
+  ArtifactsPage,
+  ActivityLogPage,
+  PlatformPage,
+];
 // No projects yet loads only when no project exists.
 const FirstRun = lazy(() => import('./first-run').then(module => ({ default: module.FirstRun })));
 

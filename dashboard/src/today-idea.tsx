@@ -12,7 +12,14 @@ import { Icon } from './design/icons';
 import { IdeaBox, type IdeaBoxFile } from './design/idea-box';
 import { added, drafts, encoded, fileSize, wording, type Draft, type IdeaIntake } from './idea-composer';
 import { newIdeaHandled, onNewIdea } from './new-idea';
-import { nextRelease, ReleaseChip, releaseChoices, useReleases, type ReleaseChoice } from './release-chip';
+import {
+  newestBranch,
+  nextRelease,
+  ReleaseChip,
+  releaseChoices,
+  useReleases,
+  type ReleaseChoice,
+} from './release-chip';
 import { useLiveStream, useStreamReady } from './stream-context';
 import { useToast } from './toast';
 
@@ -121,14 +128,17 @@ function LibraryLine({
   );
 }
 
-// Where a new idea lands (1.1 step 6): the director's pick, otherwise the current working release, the lowest open
-// milestone on the newest line. Neither its words nor the planner pick one (MP-032). Only the pick is sent; the
-// controller decides the rest again when the idea arrives, so the chip says what it will do.
+// Where a new idea lands (1.1 step 6): the director's pick, otherwise the next release, the open milestone the
+// controller marks next. Neither its words nor the planner pick one (MP-032). Only the pick is sent; the controller
+// decides the rest again when the idea arrives, so the chip says what it will do. The chip names a line only when it is
+// not the newest one.
 function useLandsIn(projectId: string, source: boolean) {
   const releases = useReleases(projectId, source),
     available = !!releases.data?.available,
     [picked, setPicked] = useState<ReleaseChoice | null>(null),
     next = nextRelease(releases.data?.milestones ?? []),
+    newest = newestBranch(releases.data),
+    older = (line: string | null) => (line && line !== newest ? line : null),
     auto: ReleaseChoice = {
       id: 'auto',
       version: 'The next release',
@@ -137,9 +147,9 @@ function useLandsIn(projectId: string, source: boolean) {
     },
     choices = [...releaseChoices(releases.data), auto],
     shown = picked
-      ? { version: picked.version, line: picked.line, reason: 'your pick' }
+      ? { version: picked.version, line: older(picked.line), reason: 'your pick' }
       : next
-        ? { version: next.version, line: null, reason: 'next release' }
+        ? { version: next.version, line: older(next.line), reason: 'next release' }
         : null;
   return {
     picked,

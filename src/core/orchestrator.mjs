@@ -1,15 +1,17 @@
+import { stepContract } from './step-contract.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { hash, resultSchema, validateResult } from './contracts.mjs';
 import { compileInstructions } from './instructions.mjs';
+import { directionWithNotes } from './messages.mjs';
 import { artifactPath, validateAcceptedReferences, validateProtectedFiles } from './artifacts.mjs';
 import { directorInputsFor, directorInputReferences, stageDirectorInputs } from './idea-inputs.mjs';
 import { libraryFor, stageLibrary } from './library.mjs';
 import { prepareOperation, validateOperationResult } from './operations.mjs';
 import { LEGACY_PROJECT, recordProject, assertProject, validateTaskProject, jobDirectory } from './projects.mjs';
-import { live } from '../adapters/process.mjs';
+import { live, processEnded } from '../adapters/process.mjs';
 import { prepareProposedWork, recordProposedWork } from './proposals.mjs';
 import { runMock } from '../adapters/simulator.mjs';
 import { runNative, parseOutput, recordLine, nativeFailure } from '../adapters/native-process.mjs';
@@ -23,9 +25,12 @@ import { applyTransform } from './transforms.mjs';
 import { captureContinuation, continuationFile } from './attempt-continuation.mjs';
 import { buildAttemptHistory, stageAttemptHistory } from './attempt-history.mjs';
 import { questionFile, questionReason, readQuestion } from './questions.mjs';
-import { measureAgain, measuringPass } from '../connectors/source-changes.mjs';
+import { controllerStopCause, finishedCause } from './attempt-cause.mjs';
+import { measureAgain, measuredMs, measuredStarts, measuringPass } from '../connectors/source-changes.mjs';
 import { endTryRuns, recoverTryRuns } from '../connectors/try-copy.mjs';
 import { attemptResource } from './store.mjs';
+import { testTurnResource } from './test-turn.mjs';
+import { advanceFlow, advanceOpenFlows, recoverFlows } from './flow-run.mjs';
 
 // Reasons that clear by themselves as other work finishes.
 const waiting = reason => /^Waiting for /.test(reason || '');
@@ -51,11 +56,47 @@ function resetTime(time) {
 // without one names no source.
 const resetSources = { report: ", from the CLI's own report", message: ", read from the CLI's message" };
 
+// Whether every process an interrupted attempt recorded is confirmed gone, so the computer's test turn it held is no
+// longer in use (Runner's constructor): its own process (a.pid with a.pidStartedAt, its CLI or its candidate tests'
+// current step, checked as reconciliation checks it, live(), which counts it over without a check when its job ended
+// with the previous controller, a.processJobEndedAt) and its agent's run of the whole suite (a.employeeTestPid
+// with a.employeeTestStartedAt, connectors/employee-tests.mjs, checked by the shared processEnded() as the one process
+// it is on every platform, since it is started without a group of its own and outside the attempt's job). Both use the
+// shared identity check (adapters/process.mjs): a recorded start time lets an ID that a later process now holds count as gone; an attempt
+// recorded without one keeps the ID-only answer. The one check, so containing each run (C-07) strengthens it: a run in
+// a job of its own ended whole with the controller; for any other run a gone root process is the evidence used, and
+// the processes it started are not checked; on Windows they can outlive it.
+export function recordedProcessesEnded(a) {
+  return (
+    !live({ pid: a.pid, pidStartedAt: a.pidStartedAt, processJobEndedAt: a.processJobEndedAt }) &&
+    processEnded(a.employeeTestPid, a.employeeTestStartedAt)
+  );
+}
+// Puts back fields of an in-memory record that a rolled-back transaction changed, so it matches what is saved.
+function restoreFields(record, fields) {
+  for (const [key, value] of Object.entries(fields))
+    if (value === undefined) delete record[key];
+    else record[key] = value;
+}
+const turnFreedOnRestart =
+  "The test turn was freed: the run that held it had ended when the controller started again. Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";
+// For an attempt whose own process ran in a job of its own: the job ended with the controller, so nothing it started
+// runs. Its agent's run of the whole suite runs outside that job, so when one was recorded the text says only its own
+// process was checked.
+const turnFreedWithJob = a =>
+  'The test turn was freed: the run that held it ran in a job of its own, which ended with the controller, so nothing it started still runs.' +
+  (a.employeeTestPid
+    ? " Its agent's run of the whole suite ran outside that job: only that run's own process was checked; processes it started are not tracked yet and may outlive it."
+    : '');
+
 export class Runner {
   constructor(store, options = {}) {
     this.store = store;
     this.active = new Map();
     this.fixtureProcessTermination = options.fixtureProcessTermination; // trusted model-free test seam; never exposed by HTTP
+    // Whether attempts' processes run in a job of their own on Windows (C-07, src/adapters/process-job.mjs); undefined
+    // asks this computer at the first attempt. A trusted option of the code that starts the controller, like the above.
+    this.processJobs = options.processJobs;
     this.registries = options.registries;
     if (!this.registries) throw new Error('Explicit workflow and adapter registries are required.');
     this.workflows = this.registries.workflows;
@@ -81,6 +122,9 @@ export class Runner {
     this.closing = false;
     this.scheduled = null;
     this.quotaTimer = null;
+    // Projects held because the stop cut off a carry or release (holdInterrupted, src/connectors/source-carries.mjs):
+    // a planned restart does not lift their hold, the director's Resume does.
+    this.interruptedHolds = new Set();
     const org = store.organization();
     if (org.pipelineEnabled) {
       org.pipelineEnabled = false;
@@ -108,17 +152,41 @@ export class Runner {
     }
     // An unacknowledged process may still be alive. Retain its reservations until reconciled.
     for (const a of store.liveAttempts().filter(x => ['running', 'stopping'].includes(x.status))) {
+      // The adapter's hook changes only the attempt in memory, which the transaction below saves.
       this.adapters.find(a.contracts?.adapter?.id || a.provider)?.recover?.(this, a);
-      a.status = 'interrupted';
-      a.finishedAt = new Date().toISOString();
-      store.updateAttempt(a);
-      const t = store.task(a.taskId);
-      t.status = 'blocked';
-      t.queued = false;
-      t.reason = 'Controller restarted. Reconcile the previous attempt before retrying.';
-      if (t.autonomyNote) t.autonomyNote = t.reason;
-      this.putTask(t);
-      store.event('interrupted', t.id, a.id, t.reason);
+      // The attempt, its task, their event and the test turn are saved in one step, so a crash between them never
+      // leaves an interrupted attempt whose task still reads running; the next start finds both as they were.
+      store.tx(() => {
+        const t = store.task(a.taskId);
+        a.status = 'interrupted';
+        a.finishedAt = new Date().toISOString();
+        // Its process ran in a job of its own (C-07), whose only handle the previous controller's wrapper held: the
+        // job, and everything in it, ended with that controller. Recorded only here, so live() need not ask about an ID
+        // that may now be another program's; an attempt this controller quarantines keeps its process check.
+        if (a.processJob) a.processJobEndedAt = a.finishedAt;
+        // Queued work leaves the queue until it is reconciled; the attempt records that it was queued, so Reconcile
+        // puts it back (holdQueue, restoreQueue).
+        this.holdQueue(a, t);
+        // The controller's stop ended it, not its work, so it does not count toward the attempt limit; it still waits
+        // to be reconciled before its story starts again, and keeps its reservations until then.
+        a.endCause = controllerStopCause();
+        store.updateAttempt(a);
+        t.status = 'blocked';
+        t.reason = 'Controller restarted. Reconcile the previous attempt before retrying.';
+        if (t.autonomyNote) t.autonomyNote = t.reason;
+        this.putTask(t);
+        store.event('interrupted', t.id, a.id, t.reason);
+        // The computer's one test turn is the exception: every other suite waits for it, so a turn whose run has
+        // ended is given back now. The attempt stays interrupted with its other leases, and nothing is started again.
+        // A run that may still be going keeps the turn until it is reconciled.
+        if (
+          store.leases().some(lease => lease.resource === testTurnResource && lease.attemptId === a.id) &&
+          recordedProcessesEnded(a)
+        ) {
+          store.releaseResource(testTurnResource, a.id);
+          store.event('test_turn', t.id, a.id, a.processJobEndedAt ? turnFreedWithJob(a) : turnFreedOnRestart);
+        }
+      });
       // Unknown operation endings stay unmatched. This is an observation of interruption,
       // not evidence that the old process stopped or that any mutation completed.
       this.interruptPhases(a);
@@ -127,6 +195,10 @@ export class Runner {
     this.integration.recover(this);
     // An app the director ran in a story's try copy ended with the controller that ran it (1.2 step 7).
     recoverTryRuns(store);
+    // Open flows are reconciled with their tasks once, now that the attempts a stop cut off are interrupted (1.2): a
+    // settled task its flow missed is followed, interrupted work waits for Reconcile, and nothing is started or decided
+    // again. A studio without a flow reads one empty list; tasks without a flow reference are never read.
+    recoverFlows(store, this.registries);
     this.autonomy = new Autonomy(this, { integrate: options.integrate, restart: options.restart });
     // A reset time that passed while the controller was stopped clears its hold now.
     this.clearPassedHolds();
@@ -205,6 +277,7 @@ export class Runner {
     const project = this.store.project(projectId);
     project.dispatchPaused = false;
     delete project.restartPaused;
+    this.interruptedHolds?.delete(projectId);
     this.store.putProject(project);
     const org = this.store.organization();
     org.pipelineEnabled = true;
@@ -261,6 +334,7 @@ export class Runner {
       project.dispatchPaused = action === 'pause';
       // The director's pause or resume replaces a pause the controller made at restart.
       delete project.restartPaused;
+      this.interruptedHolds?.delete(projectId);
       store.putProject(project);
       org.pipelineEnabled = store
         .tasks()
@@ -280,7 +354,12 @@ export class Runner {
       // Resuming also asks for the integration of a story whose review passed and that waits, as a settled
       // integration would: after a restart nothing else may come to ask for it (November 2, 2026, the live proof of
       // 1.1, where a story accepted before the restart waited for the director).
-      if (action === 'resume') this.autonomy.integrateWaiting();
+      // A carry or release that waited for the resume, one the restart cut off among them, runs once on its own.
+      if (action === 'resume') {
+        this.autonomy.integrateWaiting();
+        this.autonomy.tryCarries();
+        this.autonomy.tryReleases();
+      }
     } else if (action === 'remove') {
       if (!Array.isArray(taskIds) || taskIds.length !== 1)
         throw new Error('Choose one assignment to remove from the queue.');
@@ -301,29 +380,91 @@ export class Runner {
     return { ok: true };
   }
   schedule() {
+    // A pass asked for while the sources are measured for the next one runs once that one has.
+    if (this.measuringSources && !this.closing) this.dispatchAgain = true;
     if (this.closing || this.scheduled || this.dispatching || !this.store.organization().pipelineEnabled) return;
     this.scheduled = setImmediate(() => {
       this.scheduled = null;
       this.dispatchQueued();
     });
   }
+  // A dispatch pass first measures, in a process of its own, the sources its waiting source stories' checks read
+  // (measureSources), so the controller keeps answering while their whole source is hashed; the pass then runs on those
+  // measurements. A pass with nothing to measure runs at once, as before. Returns the measured pass while it waits.
   dispatchQueued() {
     if (this.closing || this.dispatching || !this.store.organization().pipelineEnabled) return;
-    this.dispatching = true;
+    let measuring = null;
     try {
-      // The pass measures each live source once for all its checks, and again after each start (measuringPass).
+      measuring = this.measureSources();
+    } catch {} // The pass measures on the thread, as before.
+    if (!measuring) return this.dispatchPass();
+    this.dispatching = this.measuringSources = true;
+    this.dispatchAgain = false;
+    const starts = measuredStarts();
+    return measuring
+      .catch(() => null) // A measuring process that failed as a whole leaves the pass to measure as before.
+      .then(measured => {
+        this.dispatching = this.measuringSources = false;
+        if (this.closing || !this.store.organization().pipelineEnabled) return;
+        // A start since the measuring began, or a line that moved meanwhile (an integration), may have made it stale:
+        // the next pass measures again.
+        if (measured?.stale || measuredStarts() !== starts) return this.schedule();
+        this.dispatchPass(measured);
+        if (this.dispatchAgain) this.schedule();
+      });
+  }
+  // What the work this pass checks with its sources measured reads (refreshEach's waiting work that has a slot and its
+  // resources), measured by the adapters that measure sources, combined; null when no adapter measures any.
+  measureSources() {
+    const store = this.store;
+    if (store.liveAttempts().length >= store.organization().maxParallel) return null;
+    const leases = store.leases(),
+      byAdapter = new Map();
+    for (const t of store.tasksWithStatus('ready', 'blocked').filter(t => t.status === 'ready' || t.controllerWait)) {
+      let view, adapter;
+      try {
+        view = this.workflows.stageView(t);
+        const { resources } = this.workflows.requirements(view, { store });
+        if (leases.some(l => resources.includes(l.resource)) || projectOrganization(store, recordProject(t)).paused)
+          continue;
+        adapter = this.adapterFor(t);
+      } catch {
+        continue;
+      }
+      if (typeof adapter?.measureSources !== 'function') continue;
+      if (!byAdapter.has(adapter)) byAdapter.set(adapter, []);
+      byAdapter.get(adapter).push(view);
+    }
+    const measuring = [...byAdapter].map(([adapter, tasks]) => adapter.measureSources(this, tasks)).filter(Boolean);
+    if (!measuring.length) return null;
+    return Promise.all(measuring).then(seeds => ({
+      stale: seeds.some(seed => seed.stale),
+      lines: seeds.flatMap(seed => seed.lines),
+      ms: Math.max(...seeds.map(seed => seed.ms || 0)),
+    }));
+  }
+  dispatchPass(measured = null) {
+    this.dispatching = true;
+    const began = performance.now();
+    let again = false;
+    try {
+      // The pass measures each live source once for all its checks, and again after each start (measuringPass). A pass
+      // whose sources were measured in their own process starts at most one task: the start makes the measurements
+      // stale, so the next pass measures again there rather than here.
       measuringPass(() => {
         this.refreshReadiness();
         for (const task of this.store
-          .tasks()
-          .filter(
-            task => task.queued && task.status === 'ready' && !this.store.project(recordProject(task)).dispatchPaused,
-          )) {
+          .queuedTasks()
+          .filter(task => task.status === 'ready' && !this.store.project(recordProject(task)).dispatchPaused)) {
           // Refresh after each claim, so later jobs observe the same slots and leases.
           this.refreshReadiness();
           if (this.store.task(task.id).status !== 'ready') continue;
           try {
             this.start(task.id, { director: !!this.store.task(task.id).directorStart });
+            if (measured) {
+              again = true;
+              break;
+            }
           } catch (error) {
             const current = this.store.task(task.id);
             if (!current.controllerWait || current.status === 'ready') {
@@ -338,16 +479,19 @@ export class Runner {
             }
           }
         }
-        if (!this.store.tasks().some(task => task.queued)) {
+        if (!this.store.anyQueued()) {
           const org = this.store.organization();
           org.pipelineEnabled = false;
           this.store.setOrganization(org);
           this.store.event('pipeline_finished', null, null, 'The selected pipeline has no queued work remaining.');
         }
-      });
+      }, measured);
     } finally {
       this.dispatching = false;
+      // Each pass's time, for the controller's own measures (C-18).
+      this.loadMeasures?.pass(performance.now() - began);
     }
+    if (again) this.schedule();
   }
   // The tier a task requests: its own, else its task type's default.
   tierOf(task) {
@@ -362,7 +506,8 @@ export class Runner {
     );
   }
   // `quick` when the work cannot start yet anyway: its inputs' validators may then skip measuring its source.
-  blockReason(task, verifyAuth = false, { quick = false } = {}) {
+  // `refused` receives the error its inputs' validators refused it with, for a start to note on the work (noteRefusal).
+  blockReason(task, verifyAuth = false, { quick = false, refused } = {}) {
     task = this.workflows.stageView(task);
     const org = projectOrganization(this.store, recordProject(task)),
       w = this.effectiveWorker(org, task);
@@ -436,6 +581,7 @@ export class Runner {
       });
       if (validation?.then) throw new Error('Workflow input validators must complete synchronously.');
     } catch (error) {
+      refused?.(error);
       return error.message;
     }
     if (verifyAuth && task.acceptedInputs && !stageView)
@@ -537,6 +683,7 @@ export class Runner {
   ) {
     return compileInstructions(org, worker, task, attemptId, workspace, inputs, {
       ...this.instructionContext(org, worker, task),
+      libraryProposals: stepContract(this.workflows.find(task.kind)).proposes.library,
       directorInputReferences: directorReferences,
       ...(library ? { library } : {}),
       ...(history ? { history: { reference: history.reference, attempts: history.attempts } } : {}),
@@ -553,19 +700,30 @@ export class Runner {
   // (`quick`): a story's scope took six git calls, and twenty waiting stories held the controller for seconds on each
   // pass (October 29).
   refreshReadiness() {
+    this.advanceFlows();
     measuringPass(() => this.refreshEach());
   }
+  // Open flows follow edges that wait for a milestone after acceptance, or for work denied or cancelled outside an
+  // attempt (1.2). Only flow records and their tasks are read; a studio without a flow reads one empty list. A flow
+  // that cannot advance now never stops readiness: it is tried again on the next pass.
+  advanceFlows() {
+    try {
+      advanceOpenFlows(this.store, this.registries);
+    } catch {}
+  }
   refreshEach() {
+    // What every waiting task is weighed against, read once for the pass (C-19): weighing a task writes only that task,
+    // never an attempt or a lease.
+    const slotsTaken = this.store.liveAttempts().length >= this.store.organization().maxParallel,
+      leases = this.store.leases();
     for (const t of this.store
-      .tasks()
-      .filter(t => t.status === 'ready' || (t.status === 'blocked' && t.controllerWait))) {
-      // The live attempts only, through the status index: this runs for every waiting task on every pass.
-      const slotsTaken = this.store.liveAttempts().length >= this.store.organization().maxParallel;
+      .tasksWithStatus('ready', 'blocked')
+      .filter(t => t.status === 'ready' || t.controllerWait)) {
       let resources = null;
       try {
         resources = this.workflows.requirements(this.workflows.stageView(t), { store: this.store }).resources;
       } catch {} // blockReason says why
-      const taken = slotsTaken || (!!resources && this.store.leases().some(l => resources.includes(l.resource)));
+      const taken = slotsTaken || (!!resources && leases.some(l => resources.includes(l.resource)));
       let reason = this.blockReason(t, false, { quick: taken }),
         conflict;
       // Queued work whose own prerequisites are met waits for the director to resume its project,
@@ -576,7 +734,7 @@ export class Runner {
         // An agent is not reserved (MP-033): it runs as many attempts at once as the limits allow, so only the
         // work's own resources can make it wait.
         const execution = this.workflows.stageView(t);
-        const held = this.store.leases().find(l => resources?.includes(l.resource));
+        const held = leases.find(l => resources?.includes(l.resource));
         if (held) {
           conflict = this.store.resourceConflict(held.resource, held.attemptId);
           reason = conflict.reason;
@@ -615,6 +773,7 @@ export class Runner {
         const current = this.store.task(taskId);
         delete current.autonomyNote;
         this.putTask(current);
+        this.afterReconcile(taskId);
         return result;
       };
       const result = adapter.reconcile(this, taskId);
@@ -625,20 +784,71 @@ export class Runner {
       .filter(a => ['interrupted', 'quarantined'].includes(a.status) && !a.reconciledAt);
     if (['running', 'stopping', 'review', 'done'].includes(task.status) || !unsettled.length)
       throw new Error('Only an interrupted or quarantined assignment can be reconciled.');
+    // Check every owner before checkpointing anything or releasing any reservation.
+    this.assertReconcilable(unsettled);
+    // The checkpoint of retained work is on disk and cannot be rolled back, so it comes first; it records only its
+    // own evidence.
+    for (const a of unsettled) {
+      a.status = 'interrupted';
+      this.checkpoint(a);
+    }
+    // The attempts, their reservations, the task and the event are saved in one step: a failure part-way leaves every
+    // attempt unreconciled with its leases held, and Reconcile can be asked again.
+    this.store.tx(() => {
+      for (const a of unsettled) {
+        this.store.release(a.id);
+        a.reconciledAt = new Date().toISOString();
+        this.store.updateAttempt(a);
+      }
+      task.status = 'ready';
+      task.reason = '';
+      delete task.autonomyNote;
+      this.restoreQueue(task, unsettled);
+      this.putTask(task);
+      this.store.event('reconciled', taskId, null, 'Previous process is no longer live; reservations released.');
+    });
+    this.afterReconcile(taskId);
+  }
+  // Reconcile refuses while anything an unsettled attempt recorded may still run (both Reconciles, the default one and
+  // an adapter's): an attempt this controller still runs, its own process or group, or its agent's run of the whole
+  // suite (recordedProcessesEnded). The message names which one.
+  assertReconcilable(unsettled) {
     for (const a of unsettled) {
       if (this.active.has(a.id) || live(a))
         throw new Error(`Attempt ${a.id} still has a live process/group. Stop it in your terminal before reconciling.`);
-      a.status = 'interrupted';
-      this.checkpoint(a);
-      this.store.release(a.id);
-      a.reconciledAt = new Date().toISOString();
-      this.store.updateAttempt(a);
+      if (!recordedProcessesEnded(a))
+        throw new Error(
+          `Attempt ${a.id} still has a live process: its agent's run of the whole test suite (process ${a.employeeTestPid}). Stop it in your terminal before reconciling.`,
+        );
     }
-    task.status = 'ready';
-    task.reason = '';
-    delete task.autonomyNote;
-    this.putTask(task);
-    this.store.event('reconciled', taskId, null, 'Previous process is no longer live; reservations released.');
+  }
+  // A restart or quarantine takes queued work out of the queue until it is reconciled, so dispatch never weighs it; the
+  // cut-off attempt records that its task was queued, with the director Start it ran (a.directorStart) if any.
+  holdQueue(a, task) {
+    if (!task.queued) return;
+    a.requeue = a.directorStart ? { directorStart: a.directorStart } : {};
+    task.queued = false;
+  }
+  // Inside the transaction that makes a reconciled task ready (both Reconciles): work an attempt recorded as queued is
+  // queued again, as a queued Start leaves it, with the director's Start it ran; its project's pipeline is enabled
+  // unless the project is paused (the director's pause, or the restart's, which lifts on Resume).
+  restoreQueue(task, unsettled) {
+    const held = unsettled.filter(a => a.requeue);
+    if (!held.length) return;
+    task.queued = true;
+    task.controllerWait = true;
+    const directorStart = held.map(a => a.requeue.directorStart).findLast(Boolean);
+    if (directorStart) task.directorStart = directorStart;
+    const projectId = recordProject(task);
+    if (!this.store.project(projectId).dispatchPaused) this.enablePipeline(projectId);
+  }
+  // After a Reconcile's transaction (both Reconciles): the house rules act on the ready task as after approval, then
+  // dispatch runs. Queued work in a paused project says why it waits.
+  afterReconcile(taskId) {
+    this.autonomy.reconciled(taskId);
+    const task = this.store.task(taskId);
+    if (task.queued && this.store.project(recordProject(task)).dispatchPaused) this.refreshReadiness();
+    this.schedule();
   }
   // A director Start is always accepted when the work is only waiting (MP-012): for its
   // prerequisites, a slot, its employee or a resource. It is queued and starts when free.
@@ -667,6 +877,13 @@ export class Runner {
   start(taskId, options = {}) {
     return this.setUpAttempt(measuringPass(() => this.claimAttempt(taskId, options)));
   }
+  // A start or dispatch that was refused lets the work's task type note on it why, when only a new plan can fix that
+  // (a task type's refused hook: a source story whose plan the source moved past). The scheduler's own readiness checks
+  // never note anything. Returns whether the task changed.
+  noteRefusal(task, error) {
+    const refused = this.workflows.find(task.kind)?.refused;
+    return !!error && typeof refused === 'function' && refused({ store: this.store, task, error }) === true;
+  }
   // Checks the work and prepares its attempt, then claims its slot, employee and resources and records it.
   claimAttempt(taskId, { director = false } = {}) {
     const store = this.store,
@@ -681,14 +898,17 @@ export class Runner {
       throw new Error('Reconcile the interrupted attempt before starting another.');
     // Measuring the work's scope (these checks and the attempt's prepared fields below) runs before the attempt
     // exists; its time is recorded as the attempt's setup.scope phase once it does.
-    let scopeStarted = performance.now();
-    const reason = this.blockReason(task, true);
-    let scopeMs = performance.now() - scopeStarted;
+    let scopeStarted = performance.now(),
+      refusal = null;
+    const reason = this.blockReason(task, true, { refused: error => (refusal = error) });
+    // A dispatch pass whose sources were measured in their own process adds that measuring time, from its start.
+    let scopeMs = performance.now() - scopeStarted + measuredMs();
     if (reason) {
       task.status = 'blocked';
       task.reason = reason;
       if (task.autonomyNote) task.autonomyNote = reason;
       task.controllerWait = !reason.includes('subscription login');
+      this.noteRefusal(task, refusal);
       this.putTask(task);
       store.event('blocked', task.id, null, reason);
       throw new Error(reason);
@@ -765,11 +985,19 @@ export class Runner {
     // Earlier attempts on this work, as bounded unaccepted reference data (never inputs).
     const history = buildAttemptHistory(store, task, { attemptId: id });
     // The project's library (1.2 step 6): its index and the files that fit beside the work, recorded by hash.
-    const library = libraryFor(store, { ...task, projectId }, references);
+    const library = libraryFor(store, { ...task, projectId }, references, {
+      delivery: stepContract(this.workflows.find(task.kind)).receives.library,
+    });
+    // The director's notes left on the story's thread while it could not take them reach this attempt after its
+    // direction, in its instructions and recorded assignment only: the task keeps its own direction. A note waits until
+    // an attempt that received it hands back a result, so one whose receiving attempt ended without a result reaches
+    // this attempt again, and this attempt becomes its receivedBy; a refused start leaves them waiting.
+    const notes = store.waitingNotes(projectId, task.id),
+      delivered = notes.length ? { ...task, direction: directionWithNotes(task.direction, notes) } : task;
     const snapshot = this.compileInstructions(
       org,
       worker,
-      task,
+      delivered,
       id,
       output,
       inputs,
@@ -789,9 +1017,14 @@ export class Runner {
       requestedModel: adapter.requestedModel(worker, this),
       requestedEffort: worker.effort || '',
       ...(this.tierOf(task) ? { requestedTier: this.tierOf(task) } : {}),
+      // A flow's attempt records its round, whose attempts alone count toward the task's limit (1.2).
+      ...(task.flowReference ? { flowRound: task.flowReference.round ?? 1 } : {}),
       ...(previousAttempts >= task.maxAttempts
         ? { directorOverride: { attemptLimit: task.maxAttempts, attemptNumber: previousAttempts + 1 } }
         : {}),
+      // A queued director Start the attempt runs (task.directorStart, cleared from the task as it starts), so a restart
+      // or quarantine that cuts the attempt off can queue the work again with the director's override (restoreQueue).
+      ...(director && task.directorStart ? { directorStart: task.directorStart } : {}),
       reportedModel: null,
       status: 'running',
       startedAt: new Date().toISOString(),
@@ -802,7 +1035,7 @@ export class Runner {
       artifacts: [],
       configuration,
       assignment: {
-        ...structuredClone(task),
+        ...structuredClone(delivered),
         projectId,
         resources,
         directorInputs,
@@ -811,8 +1044,8 @@ export class Runner {
       inputReferences: inputs,
       directorInputs,
       directorInputReferences: directorReferences,
-      ...(library.references.length ? { libraryReferences: library.references } : {}),
-      ...(library.leftOut.length ? { libraryLeftOut: library.leftOut } : {}),
+      libraryReferences: library.references,
+      libraryLeftOut: library.leftOut,
       ...(join?.missing.length ? { joinMissing: [...join.missing] } : {}),
       ...(transformed ? { inputTransform: transformed.provenance } : {}),
       delivery: adapterText(adapter, 'delivery', worker, this),
@@ -828,15 +1061,21 @@ export class Runner {
       };
     if (operation) a.operation = operation;
     scopeStarted = performance.now();
-    const prepared = definition.prepareAttempt?.({
-      org,
-      task,
-      registries: this.registries,
-      project,
-      store,
-      runtime: this,
-      attemptId: id,
-    });
+    let prepared;
+    try {
+      prepared = definition.prepareAttempt?.({
+        org,
+        task,
+        registries: this.registries,
+        project,
+        store,
+        runtime: this,
+        attemptId: id,
+      });
+    } catch (error) {
+      if (this.noteRefusal(task, error)) this.putTask(task);
+      throw error;
+    }
     scopeMs += performance.now() - scopeStarted;
     this.applyMetadata(a, definition, prepared);
     try {
@@ -852,6 +1091,8 @@ export class Runner {
           throw Object.assign(error, { wait: true });
         }
         store.insertAttempt(a, snapshot);
+        // Each delivered note records this attempt with it, or neither is recorded.
+        for (const note of notes) store.setMessageOutcome(note.id, { ...note.outcome, receivedBy: id });
         task.status = 'running';
         task.reason = '';
         delete task.autonomyNote;
@@ -969,17 +1210,22 @@ export class Runner {
   // An agent's own test runs (connectors/employee-tests.mjs) do not count against its time limit. The director,
   // October 29: "The agent is what costs so docking it for long running tests seems like the wrong method." The
   // limit stops while a run goes on and starts again with the time that was left, for up to limitHoldMs of runs in
-  // all per attempt (attempt.limitHeldMs); past that, runs count again, so a loop of runs still ends.
-  holdTimeLimit(entry) {
-    if (!entry.timer || !entry.limitEndsAt || (entry.attempt.limitHeldMs || 0) >= limitHoldMs) return null;
+  // all per attempt (attempt.limitHeldMs); past that, runs count again, so a loop of runs still ends. A run of the
+  // whole suite may first wait for the computer's test turn (core/test-turn.mjs waitForTurn): that wait counts
+  // neither against the limit nor toward limitHeldMs. A run's hold leaves it out (hold.waitedMs), and a run that no
+  // longer holds the limit holds it for its wait alone ({ waiting: true }), whatever the hour has left.
+  holdTimeLimit(entry, { waiting = false } = {}) {
+    if (!entry.timer || !entry.limitEndsAt) return null;
+    if (!waiting && (entry.attempt.limitHeldMs || 0) >= limitHoldMs) return null;
     clearTimeout(entry.timer);
     entry.timer = null;
-    return { left: Math.max(0, entry.limitEndsAt - Date.now()), at: Date.now() };
+    return { left: Math.max(0, entry.limitEndsAt - Date.now()), at: Date.now(), ...(waiting ? { waiting } : {}) };
   }
   resumeTimeLimit(entry, hold) {
     if (!hold || entry.timer || entry.cancelled || this.active.get(entry.attempt.id) !== entry) return;
+    if (hold.waiting) return this.setTimeLimit(entry, hold.left);
     const a = entry.attempt;
-    a.limitHeldMs = (a.limitHeldMs || 0) + (Date.now() - hold.at);
+    a.limitHeldMs = (a.limitHeldMs || 0) + Math.max(0, Date.now() - hold.at - (hold.waitedMs || 0));
     this.store.updateAttempt(a);
     this.setTimeLimit(entry, Math.max(0, hold.left - Math.max(0, a.limitHeldMs - limitHoldMs)));
   }
@@ -1050,16 +1296,10 @@ export class Runner {
   runMock(entry) {
     return runMock.call(this, entry);
   }
+  // A run set aside because its process group is still live finishes its attempt phase where it is quarantined
+  // (runNative's settle), at once or after the settling wait.
   runNative(...args) {
-    const result = runNative.call(this, ...args),
-      entry = args[0];
-    entry.child.once('close', () => {
-      if (entry.attempt.status === 'quarantined') {
-        const phase = entry.phases?.find(item => item.payload.phaseId === 'attempt');
-        if (phase) this.store.finishPhase(phase, 'interrupted', { timing: 'process-group-unconfirmed' });
-      }
-    });
-    return result;
+    return runNative.call(this, ...args);
   }
   parseOutput(...args) {
     return parseOutput.call(this, ...args);
@@ -1100,13 +1340,24 @@ export class Runner {
       const a = entry.attempt,
         task = this.store.task(a.taskId);
       entry.nativeError ||= error || 'Adapter tried to finish before its process/group was confirmed stopped.';
-      a.status = 'quarantined';
-      a.finishedAt = new Date().toISOString();
-      task.status = 'blocked';
-      task.reason = 'Process/group is still live or unknown. Reservations retained until reconciliation.';
-      this.store.updateAttempt(a);
-      this.putTask(task);
-      this.store.event('quarantined', a.taskId, a.id, task.reason);
+      const { status, finishedAt, requeue } = a;
+      // The attempt, its task and the event are saved in one step; a failure leaves both as they were.
+      try {
+        this.store.tx(() => {
+          a.status = 'quarantined';
+          a.finishedAt = new Date().toISOString();
+          // As at a restart: queued work leaves the queue until Reconcile puts it back.
+          this.holdQueue(a, task);
+          task.status = 'blocked';
+          task.reason = 'Process/group is still live or unknown. Reservations retained until reconciliation.';
+          this.store.updateAttempt(a);
+          this.putTask(task);
+          this.store.event('quarantined', a.taskId, a.id, task.reason);
+        });
+      } catch (failure) {
+        restoreFields(a, { status, finishedAt, requeue });
+        throw failure;
+      }
       return;
     }
     clearTimeout(entry.timer);
@@ -1114,6 +1365,12 @@ export class Runner {
     clearTimeout(entry.killTimer);
     const a = entry.attempt,
       task = this.store.task(a.taskId);
+    // A quarantined attempt this controller then sees end settles as any attempt does: its task is in the queue it was
+    // in before the quarantine, and nothing is left for Reconcile to put back.
+    if (a.requeue) {
+      task.queued = true;
+      delete a.requeue;
+    }
     // Observe adapter-owned evidence before persisting the terminal attempt. A cancelled
     // native process never invokes its result callback, but its TAP may still be useful.
     const phaseEvidence = new Map();
@@ -1200,6 +1457,16 @@ export class Runner {
       a.subscriptionHold = entry.quota;
       if (entry.quotaReset) a.subscriptionReset = entry.quotaReset;
     }
+    // Why it ended (core/attempt-cause.mjs): only the work's own endings count toward the attempt limit. An attempt the
+    // controller's shutdown cancelled ended with the controller; an adapter may name an environment cause it observed
+    // (entry.endCause), or one for a process of its that could not start at all (entry.startFailureCause).
+    a.endCause = finishedCause({
+      attempt: a,
+      cancelled: a.status === 'cancelled',
+      timedOut: !!entry.timedOut,
+      shutdown: !!entry.shutdownStop,
+      observed: entry.endCause ?? (error && error === entry.spawnError ? entry.startFailureCause : null),
+    });
     task.status = a.status;
     task.reason =
       a.error ||
@@ -1227,6 +1494,10 @@ export class Runner {
       if (a.status === 'review' && proposedWork) recordProposedWork(this.store, task, proposedWork);
       this.store.release(a.id);
       if (resumes && !this.store.project(recordProject(task)).dispatchPaused) this.enablePipeline(recordProject(task));
+      // A flow's task that failed with no attempts left, or was cancelled, settles its node in the same transaction:
+      // the flow skips what waited for it (1.2). advanceFlow leaves a task with attempts left alone.
+      if (task.flowReference && ['failed', 'cancelled'].includes(task.status))
+        advanceFlow(this.store, this.registries, task);
     });
     this.active.delete(a.id);
     // Negative reports remain reviewable evidence; phase outcomes describe their measured
@@ -1280,6 +1551,13 @@ export class Runner {
   stop(id) {
     const entry = this.active.get(id);
     if (!entry) throw new Error('No live attempt to cancel.');
+    // The first cause of a stop is the attempt's cause. A time limit (each sets timedOut, then asks for the stop) that
+    // falls due while a Cancel (or another requested stop) is ending the process does not turn it into a time limit; a
+    // Cancel after a time limit leaves the time limit's cause.
+    const firstStop = !entry.stopCause;
+    if (firstStop) entry.stopCause = entry.timedOut ? 'time-limit' : 'requested';
+    else if (entry.stopCause !== 'time-limit') entry.timedOut = false;
+    let stopContextRecorded = false;
     if (entry.timedOut && !entry.attempt.stopContext) {
       const a = entry.attempt,
         phase = [...(entry.phases || [])]
@@ -1312,27 +1590,48 @@ export class Runner {
         phaseFinished: phase?.closed || false,
         ...(phase?.payload.phaseId === 'test' && evidence ? { testEvidence: evidence } : {}),
       };
-      this.store.updateAttempt(a);
+      stopContextRecorded = true;
     }
+    // A stop context is saved alone only when this call changes nothing else; otherwise it is saved with the
+    // attempt's stopping status below.
+    if (stopContextRecorded && (entry.cancelled || entry.adapter.stop)) this.store.updateAttempt(entry.attempt);
     if (entry.cancelled) return;
     if (entry.adapter.stop) {
       entry.adapter.stop(this, entry);
+      clearTimeout(entry.timer);
+      entry.timer = null;
       return;
     }
+    const previous = entry.attempt.status;
     entry.cancelled = true;
-    entry.attempt.status = 'stopping';
-    this.store.updateAttempt(entry.attempt);
-    const t = this.store.task(entry.attempt.taskId);
-    t.status = 'stopping';
-    this.putTask(t);
-    this.store.event(
-      'stopping',
-      t.id,
-      id,
-      entry.timedOut
-        ? 'Time limit reached; stopping the process.'
-        : 'Cancellation requested. Reservations remain until the process closes.',
-    );
+    // The attempt (with any stop context recorded above), its task and the event are saved in one step; a failure
+    // leaves both as they were, and the attempt is not taken as cancelled.
+    try {
+      this.store.tx(() => {
+        entry.attempt.status = 'stopping';
+        this.store.updateAttempt(entry.attempt);
+        const t = this.store.task(entry.attempt.taskId);
+        t.status = 'stopping';
+        this.putTask(t);
+        this.store.event(
+          'stopping',
+          t.id,
+          id,
+          entry.timedOut
+            ? 'Time limit reached; stopping the process.'
+            : 'Cancellation requested. Reservations remain until the process closes.',
+        );
+      });
+    } catch (failure) {
+      entry.cancelled = false;
+      entry.attempt.status = previous;
+      if (stopContextRecorded) delete entry.attempt.stopContext;
+      if (firstStop) delete entry.stopCause;
+      throw failure;
+    }
+    // The stop is recorded, so the time limit has nothing left to stop.
+    clearTimeout(entry.timer);
+    entry.timer = null;
     if (!entry.child) {
       this.finish(entry, null);
       return;
@@ -1340,19 +1639,24 @@ export class Runner {
     this.terminate(entry, false);
     entry.killTimer = setTimeout(() => this.terminate(entry, true), stopGrace);
   }
-  // Ends the attempt's current process and its tree, asked or forced.
+  // Ends the attempt's current process and its tree, asked or forced. The forced end comes a grace period after the
+  // asked one. On Windows a process that has exited by then is passed over: taskkill finds a tree by its root's ID,
+  // which may belong to another process by then (C-41). Elsewhere the process group outlives its first process, and
+  // its ID is not reused while any of it runs, so what is left of the tree is still ended.
   terminate(entry, force) {
     try {
       if (this.fixtureProcessTermination) {
         this.fixtureProcessTermination(entry, force);
         return;
       }
-      if (process.platform === 'win32')
-        spawnSync('taskkill', ['/PID', String(entry.child.pid), '/T', ...(force ? ['/F'] : [])], {
+      const child = entry.child;
+      if (process.platform === 'win32') {
+        if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+        spawnSync('taskkill', ['/PID', String(child.pid), '/T', ...(force ? ['/F'] : [])], {
           windowsHide: true,
           timeout: 3000,
         });
-      else process.kill(-entry.child.pid, force ? 'SIGKILL' : 'SIGTERM');
+      } else process.kill(-child.pid, force ? 'SIGKILL' : 'SIGTERM');
     } catch {}
   }
   // Stops every active attempt and waits, within a bound, for each to leave: a process still running after
@@ -1365,7 +1669,12 @@ export class Runner {
     clearTimeout(this.quotaTimer);
     this.quotaTimer = null;
     const entries = [...this.active.values()];
-    for (const entry of entries) this.stop(entry.attempt.id);
+    // An attempt this stop cancels ended with the controller, not with its work; one already stopping (the director's
+    // Stop, a time limit) keeps its own cause.
+    for (const entry of entries) {
+      if (!entry.cancelled && !entry.timedOut) entry.shutdownStop = true;
+      this.stop(entry.attempt.id);
+    }
     this.integration.stop(this);
     endTryRuns(this);
     for (const adapter of this.adapters.list()) adapter.shutdown?.(this);

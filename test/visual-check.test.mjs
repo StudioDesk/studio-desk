@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setup } from './source-story-setup.mjs';
 import { reviewedImages, reviewVisualProblems, validateStoryPages } from '../src/connectors/story-pages.mjs';
+import { proposedStory } from '../src/connectors/source-changes.mjs';
 import {
   findBrowser,
   imageName,
@@ -101,8 +102,9 @@ test('the settings take widths, themes and an optional browser, and the browser 
 });
 
 // A studio whose project checks its pages, with a story that names two and a start command, and the capture's stand-in.
-async function checking(t, { browser = 'C:/fixture/msedge.exe', pages = true } = {}) {
-  const c = await setup(t),
+// `proposal` gives the pages the story's own proposal names, as the planner wrote them.
+async function checking(t, { browser = 'C:/fixture/msedge.exe', pages = true, proposal } = {}) {
+  const c = await setup(t, 'pass', proposal ? { files: ['src/core/workflows.mjs'], pages: proposal } : undefined),
     { store, runner } = c.app,
     project = store.project('project-legacy');
   project.visualCheck = validateVisualSettings({ enabled: true, widths: [1440, 390], themes: ['light'] });
@@ -148,6 +150,43 @@ test('a passing candidate whose story names pages is captured in the sandbox, an
   );
   assert.ok(store.events().some(event => event.kind === 'visual_check' && event.attempt_id === a.id));
   assert.ok(store.phaseEvents(a.id).some(event => event.payload.phaseId === 'visual'));
+});
+
+// The planner's pages are kept as it wrote them; the check reads them with each page's steps list, so a page that names
+// no steps is pictured as it opens and the others as before.
+test("a page the story's own proposal names without steps is pictured as it opens, beside a page with a step", async t => {
+  const c = await checking(t, {
+      pages: false,
+      proposal: [
+        { name: 'Board', path: '/' },
+        { name: 'Settings', path: '/settings', steps: [{ click: 'Repository' }] },
+      ],
+    }),
+    store = c.app.store,
+    listed = [
+      { name: 'Board', path: '/', steps: [] },
+      { name: 'Settings', path: '/settings', steps: [{ click: 'Repository' }] },
+    ];
+  assert.equal(store.task(c.taskId).pages, undefined, "The director's pages are not set.");
+  assert.deepEqual(storyPages(store, store.task(c.taskId)), listed);
+  const proposed = proposedStory(store, store.task(c.taskId)).pages;
+  assert.equal(proposed[0].steps, undefined, 'The proposal is read, not changed.');
+  await c.start();
+  const a = await c.wait(c.taskId);
+  assert.deepEqual(
+    a.artifacts.filter(item => item.kind === 'visual-capture').map(item => item.path),
+    [
+      'visual/01-board-1440-light.png',
+      'visual/01-board-390-light.png',
+      'visual/02-settings-1440-light.png',
+      'visual/02-settings-390-light.png',
+    ],
+  );
+  const check = a.result.checks.find(item => item.name === 'Visual check');
+  assert.equal(check.status, 'pass', check.evidence);
+  assert.match(check.evidence, /^4 images with msedge\.exe at http:\/\/127\.0\.0\.1:5999\/\.$/);
+  const plan = JSON.parse(fs.readFileSync(path.join(a.outputFolder, '..', 'visual-plan-seen.json'), 'utf8'));
+  assert.deepEqual(plan.pages, listed);
 });
 
 // Two stories of a project build at once, so two captures could meet at one address: one app is photographed at a time.

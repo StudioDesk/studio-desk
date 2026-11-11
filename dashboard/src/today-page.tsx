@@ -1,11 +1,20 @@
 // Today (the canvas's Today and Today on a phone, v1.0 item 23): the page's sentence, the New idea box, the calls
 // only the director can make with their evidence and the real actions, what moves without them, who is on the
 // floor and what shipped today. Every action asks the controller for the same recorded step the task page would.
-import { notifyManager, useMutation } from '@tanstack/react-query';
+import { notifyManager, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
-import { send, type AttemptSummary, type Task, type Worker } from './api';
-import { askedPaths, commandRequest, decisionState, fileRequest } from './decisions';
+import {
+  onRecords,
+  send,
+  type AttemptSummary,
+  type CommandRecords,
+  type DirectorCall,
+  type Task,
+  type TaskAction,
+  type Worker,
+} from './api';
+import { askedPaths, commandRequest, decisionState, fileRequest, sendIdeaLimit, storyIdea } from './decisions';
 import { plural, took, totalsOf, diffStatOf, sandboxed, openPhaseOf, testingPhases } from './evidence';
 import { AgentAvatar } from './design/avatar';
 import type { AgentLook, AgentState } from './design/agent-kit.js';
@@ -18,18 +27,24 @@ import { workerName } from './names';
 import { NoteDialog, overReview } from './note-dialog';
 import { AnswerBox, QuestionCard } from './question-card';
 import { changeableAnswer, type Answer } from './questions';
-import { finishedState, useFinished, useStudio } from './records';
+import { callKey, finishedState, queryKeys, servedItems, useCalls, useFinished, useStudio } from './records';
 import {
   active,
   integrationAction,
+  isCarry,
   isCleanup,
   isHold,
+  isRelease,
+  isResume,
   liveSummary,
   runStories,
+  type CarryItem,
   type CleanupItem,
   type HoldItem,
   type HomeItem,
   type NeedsItem,
+  type ReleaseItem,
+  type ResumeItem,
   type RunStory,
   type StudioState,
 } from './studio-runs';
@@ -53,13 +68,24 @@ import { useNow } from './use-now';
 
 const minutes = (ms: number) => Math.max(1, Math.round(ms / 60000));
 
-// One recorded step at a time, with the controller's answer as a toast.
+// One recorded step at a time, with the controller's answer as a toast. The controller's list of calls is read again
+// after each step: here when the answer carried no records, and by the page's listener (TodayPage) when it did.
 function useAct(projectId: string) {
-  const toast = useToast();
+  const toast = useToast(),
+    client = useQueryClient();
   const request = useMutation({
-    mutationFn: ({ path, body = {} }: { path: string; body?: Record<string, unknown>; done?: Done }) =>
-      send<Record<string, unknown>>(path, { projectId, ...body }),
+    mutationFn: ({
+      path,
+      body = {},
+      method = 'POST',
+    }: {
+      path: string;
+      body?: Record<string, unknown>;
+      method?: TaskAction['method'];
+      done?: Done;
+    }) => send<Record<string, unknown>>(path, { projectId, ...body }, method),
     onSuccess: (result, { done }) => {
+      if (!result?.records) void client.invalidateQueries({ queryKey: queryKeys.calls(projectId) });
       const message = done?.(result);
       // With the records the answer carried (records.ts), which the page hears on the query client's next notice.
       if (message) notifyManager.schedule(() => toast(message));
@@ -69,10 +95,17 @@ function useAct(projectId: string) {
   return {
     busy: request.isPending,
     act: (path: string, body?: Record<string, unknown>, done?: Done) => request.mutate({ path, body, done }),
+    // A served action (api.ts TaskAction), sent exactly as served: its method and path, with its fields' values and
+    // the words the director gave (a required reason).
+    sendAction: (action: TaskAction, words: Record<string, unknown> = {}, done?: Done) =>
+      request.mutate({ path: action.path, method: action.method, body: { ...valuesOf(action), ...words }, done }),
   };
 }
 type Done = (result: Record<string, unknown>) => string | void;
 const taskPath = (task: Task, step: string) => `/api/tasks/${encodeURIComponent(task.id)}/${step}`;
+// The values a served action carries for its fields (the project's ID, a carry's line).
+const valuesOf = (action: TaskAction) =>
+  Object.fromEntries(action.fields.filter(field => 'value' in field).map(field => [field.name, field.value]));
 
 interface Action {
   label: string;
@@ -81,6 +114,8 @@ interface Action {
   emphasis: 'primary' | 'default' | 'quiet';
   onClick?: () => void;
   task?: string;
+  // A link to the project's Releases page.
+  releases?: boolean;
 }
 
 // The quieter choices behind "More choices" on a phone; on a wider screen they show in the row.
@@ -121,6 +156,12 @@ function ActionButton({ action, projectId, menu }: { action: Action; projectId: 
   if (action.task)
     return (
       <Link className={className} to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: action.task }}>
+        {words}
+      </Link>
+    );
+  if (action.releases)
+    return (
+      <Link className={className} to="/p/$projectId/releases" params={{ projectId }}>
         {words}
       </Link>
     );
@@ -261,7 +302,8 @@ function closeAction(task: Task, act: ReturnType<typeof useAct>['act'], label: s
 
 // A story with a passing review, ready to integrate: the change, its tests and the review. One whose integration
 // stopped on a conflict, or failed only with what landed after it was tested, offers Merge onto the current source
-// first, as the story page does; integrating again as it is fails the same way, so it comes second.
+// first, as the story page does; integrating again as it is fails the same way, so it comes second. Any other
+// integration that was tried and stopped reads Integration stopped and says why above the same buttons.
 function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & { task: Task }) {
   const { act, busy } = useAct(projectId),
     decision = decisionState(task, state),
@@ -277,7 +319,20 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
     reviewer = workerName(state, review.workerId),
     editor = workerName(state, candidate?.workerId ?? task.workerId),
     notes = (review.candidateReviewNotes as string[] | undefined)?.length ?? 0,
-    again = /again/.test(integrationAction(state, task, review)),
+    approval = integrationAction(state, task, review),
+    again = /again/.test(approval),
+    integrateLabel = again ? 'Integrate again' : 'Integrate',
+    // An integration that was tried and stopped, other than the conflict and landed-since cases above, says why in the
+    // shared rules' own words. Their next step names the story page's approval button; here it is Integrate again.
+    stopped =
+      !mergeable &&
+      (['rejected', 'abandoned'].includes(decision.journal?.state ?? '') ||
+        (decision.stage?.phase === 'integration' && decision.stage.current === 'failed')),
+    stopText = stopped
+      ? [decision.explanation.reason, decision.explanation.next.split(approval).join(integrateLabel)]
+          .filter(Boolean)
+          .join(' ')
+      : '',
     built = took(candidate),
     reviewed = took(review);
   const changeShare = stat && stat.added + stat.removed ? (stat.added / (stat.added + stat.removed)) * 100 : 100;
@@ -303,11 +358,13 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
               landed ? 'Fails with what landed since' : 'Conflicts with the current source',
               <Icon name="merge" size={14} weight={2.4} />,
             )
-          : chip(
-              'brand',
-              again ? 'Ready to integrate again' : 'Ready to integrate',
-              <Icon name="merge" size={14} weight={2.4} />,
-            )
+          : stopped
+            ? chip('you', 'Integration stopped', <Icon name="merge" size={14} weight={2.4} />)
+            : chip(
+                'brand',
+                again ? 'Ready to integrate again' : 'Ready to integrate',
+                <Icon name="merge" size={14} weight={2.4} />,
+              )
       }
       time={when(review.finishedAt)}
       title={task.title}
@@ -328,7 +385,7 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
             ]
           : []),
         {
-          label: again ? 'Integrate again' : 'Integrate',
+          label: integrateLabel,
           emphasis: mergeable ? 'default' : 'primary',
           onClick: () =>
             act(taskPath(task, 'integrate-source'), { attemptId: review.id, reviewHash: reviewItem.hash }, result =>
@@ -359,6 +416,7 @@ function IntegrateCall({ projectId, state, stories, looks, task }: CallProps & {
             : 'It passed on its own but conflicts with the current source.'}
         </p>
       )}
+      {stopText && <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>{stopText}</p>}
       <div className="sd-decision__tiles">
         <Link className="sd-tile" to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: task.id }}>
           <span className="sd-eyebrow">Change</span>
@@ -522,6 +580,51 @@ function ChangesCall({ projectId, state, stories, looks, task }: CallProps & { t
   );
 }
 
+// The code moved past the story's plan: neither Start nor Allow and continue can work, so the card reads the plain
+// reason and offers Close and send as a new idea, whose text the director may edit first, as the story page does.
+// Unchanged, the controller composes the idea itself, with the story's plain planned summary.
+function OutdatedCall({ projectId, stories, task, item }: CallProps & { task: Task; item: NeedsItem }) {
+  const { act, busy } = useAct(projectId),
+    [asking, setAsking] = useState(false),
+    idea = storyIdea(task);
+  return (
+    <Decision
+      projectId={projectId}
+      busy={busy}
+      chip={chip('you', 'The code moved on')}
+      time={when(String(task.updatedAt ?? task.createdAt ?? ''))}
+      title={task.title}
+      origin={<Origin projectId={projectId} place={placeIn(stories, task)} />}
+      actions={[
+        { label: 'Close and send as a new idea', emphasis: 'primary', onClick: () => setAsking(true) },
+        { label: 'Open the story', emphasis: 'default', task: task.id },
+      ]}
+      note="Its remaining work gets fresh checks and a new plan."
+    >
+      <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>{item.reason}</p>
+      <NoteDialog
+        open={asking}
+        title="Close and send as a new idea?"
+        text="The code moved on since this story was planned. It closes, and its remaining work goes in as a new idea on the same release, with fresh checks and a new plan."
+        label="The new idea"
+        submit="Close and send as a new idea"
+        required
+        initial={idea}
+        limit={sendIdeaLimit}
+        onClose={() => setAsking(false)}
+        onSubmit={note => {
+          setAsking(false);
+          act(
+            taskPath(task, 'send-as-idea'),
+            note === idea.trim() ? {} : { idea: note },
+            () => `Closed “${task.title}” and sent its work as a new idea.`,
+          );
+        }}
+      />
+    </Decision>
+  );
+}
+
 // The editor stopped for files its story does not have: approve them as asked, or edit the list on the story.
 function FileRequestCall({
   projectId,
@@ -532,8 +635,17 @@ function FileRequestCall({
   item,
 }: CallProps & { task: Task; item: NeedsItem }) {
   const { act, busy } = useAct(projectId),
-    { requested, request, offered, worked, editor } = fileRequest(task, state);
-  if (!request || !requested) return <GenericCall {...{ projectId, state, stories, looks, task, item }} />;
+    { requested, request, problem, offered, worked, editor } = fileRequest(task, state);
+  // A request the controller found it would refuse as asked says why, with no Allow and continue.
+  if (!request || !requested)
+    return (
+      <GenericCall
+        {...{ projectId, state, stories, looks, task, item }}
+        detail={
+          problem ? `The files ${editor || 'the agent'} asked for cannot be allowed as asked: ${problem}` : undefined
+        }
+      />
+    );
   const asked = askedPaths(task, request);
   return (
     <Decision
@@ -732,7 +844,13 @@ function AcceptCall({ projectId, state, stories, looks, task }: CallProps & { ta
 // Any other call: what happened and what to do, with the way to the story where the action is. Start assignment,
 // which is all a step waiting for the director needs when every step waits for them (the recovery drill, October
 // 24), is a button of its own.
-function GenericCall({ projectId, stories, task, item }: CallProps & { task: Task; item: NeedsItem }) {
+function GenericCall({
+  projectId,
+  stories,
+  task,
+  item,
+  detail,
+}: CallProps & { task: Task; item: NeedsItem; detail?: string }) {
   const { act, busy } = useAct(projectId),
     start: Action[] =
       item.action === 'Start assignment'
@@ -763,7 +881,9 @@ function GenericCall({ projectId, stories, task, item }: CallProps & { task: Tas
           ? start
           : [
               {
-                label: item.action ? `Open to use ${item.action}` : 'Open the story',
+                // Open the story is itself the way there.
+                label:
+                  item.action && item.action !== 'Open the story' ? `Open to use ${item.action}` : 'Open the story',
                 emphasis: 'primary',
                 task: task.id,
               },
@@ -773,6 +893,7 @@ function GenericCall({ projectId, stories, task, item }: CallProps & { task: Tas
       <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
         {item.reason} {item.next}
       </p>
+      {detail && <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>{detail}</p>}
     </Decision>
   );
 }
@@ -808,6 +929,137 @@ function HoldCall({ projectId, state, item }: { projectId: string; state: Studio
           ))}
         </ul>
       )}
+    </Decision>
+  );
+}
+
+// The project held after a restart: one card to resume it, with the stories that wait only for that.
+function ResumeCall({ projectId, state, item }: { projectId: string; state: StudioState; item: ResumeItem }) {
+  const { act, busy } = useAct(projectId);
+  return (
+    <Decision
+      projectId={projectId}
+      busy={busy}
+      chip={chip('wait', 'Held after restart')}
+      time=""
+      title="This project is held after a restart"
+      actions={[
+        {
+          label: 'Resume this project',
+          emphasis: 'primary',
+          onClick: () => act('/api/pipeline', { action: 'resume' }, () => 'Project resumed.'),
+        },
+      ]}
+    >
+      <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
+        {item.reason} {item.next}
+      </p>
+      {item.taskIds.length > 0 && (
+        <ul className="sd-fold__list" style={{ margin: 0 }} aria-label="Waiting for the resume">
+          {item.taskIds.map(id => (
+            <li key={id}>
+              <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: id }}>
+                {state.tasks.find(task => task.id === id)?.title ?? id}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Decision>
+  );
+}
+
+// A stopped release's or carry's words: what happened and what to do, then any recorded error its reason does not
+// already say.
+function StoppedWords({ item }: { item: ReleaseItem | CarryItem }) {
+  const more = item.details.filter(detail => !item.reason.includes(detail));
+  return (
+    <>
+      <p style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
+        {item.reason} {item.next}
+      </p>
+      {more.map(detail => (
+        <p key={detail} style={{ margin: 0, color: 'var(--ink-2)', textWrap: 'pretty' }}>
+          {detail}
+        </p>
+      ))}
+    </>
+  );
+}
+
+// A milestone's release that stopped: Release again, sent exactly as the controller serves it, and the way to the
+// Releases page.
+function ReleaseCall({ projectId, item }: { projectId: string; item: ReleaseItem }) {
+  const { sendAction, busy } = useAct(projectId);
+  return (
+    <Decision
+      projectId={projectId}
+      busy={busy}
+      chip={chip('you', 'Release stopped')}
+      time=""
+      title={`Release ${item.version} stopped`}
+      actions={[
+        ...item.actions.map(
+          (action): Action => ({
+            label: action.label,
+            emphasis: action.emphasis,
+            onClick: () => sendAction(action, {}, () => `Releasing ${item.version} again.`),
+          }),
+        ),
+        { label: 'Open releases', emphasis: 'default', releases: true },
+      ]}
+    >
+      <StoppedWords item={item} />
+    </Decision>
+  );
+}
+
+// A story whose carry or bring-back to a line was turned down or stopped part-way: the story's own Carry (or Bring
+// back) again and Not needed, sent exactly as served, Not needed after the reason it requires, and the way to the
+// story.
+function CarryCall({ projectId, item }: { projectId: string; item: CarryItem }) {
+  const { sendAction, busy } = useAct(projectId),
+    [asking, setAsking] = useState<TaskAction | null>(null),
+    { line, back } = item,
+    skipped = () => (back ? `Not bringing the fix back to ${line}.` : `Not needed on ${line}.`);
+  const actions: Action[] = item.actions.map(action => ({
+    label: action.label,
+    emphasis: action.emphasis,
+    onClick:
+      action.key === 'carry-skip'
+        ? () => setAsking(action)
+        : () =>
+            sendAction(action, {}, () => (back ? `Bringing the fix back to ${line}.` : `Carrying the fix to ${line}.`)),
+  }));
+  return (
+    <Decision
+      projectId={projectId}
+      busy={busy}
+      chip={chip('you', back ? 'Bring back stopped' : 'Carry stopped')}
+      time=""
+      title={item.title}
+      origin={back ? `Bringing the fix back to ${line}` : `Carrying the fix to ${line}`}
+      actions={[...actions, { label: 'Open the story', emphasis: 'default', task: item.taskId }]}
+    >
+      <StoppedWords item={item} />
+      <NoteDialog
+        open={!!asking}
+        title={`Not needed on ${line}?`}
+        text={
+          back
+            ? `${line} won't get the fix brought back. Your reason is kept with the story, and any older line it was going on to still gets it.`
+            : `${line} won't get this fix. Your reason is kept with the story, and any newer line is still offered it.`
+        }
+        label="Why"
+        submit="Skip it"
+        required
+        onClose={() => setAsking(null)}
+        onSubmit={reason => {
+          const action = asking;
+          setAsking(null);
+          if (action) sendAction(action, { reason }, skipped);
+        }}
+      />
     </Decision>
   );
 }
@@ -864,12 +1116,16 @@ function CleanupCall({ projectId, state, item }: { projectId: string; state: Stu
 function Call(props: CallProps & { item: HomeItem }) {
   const { item, state, projectId } = props;
   if (isHold(item)) return <HoldCall projectId={projectId} state={state} item={item} />;
+  if (isResume(item)) return <ResumeCall projectId={projectId} state={state} item={item} />;
+  if (isRelease(item)) return <ReleaseCall projectId={projectId} item={item} />;
+  if (isCarry(item)) return <CarryCall projectId={projectId} item={item} />;
   if (isCleanup(item)) return <CleanupCall projectId={projectId} state={state} item={item} />;
   const task = state.tasks.find(record => record.id === item.taskId);
   if (!task) return null;
   const decision = decisionState(task, state);
   if (decision.integrable && decision.review && decision.reviewItem) return <IntegrateCall {...props} task={task} />;
   if (decision.returnable && decision.stage?.review) return <ChangesCall {...props} task={task} />;
+  if (decision.sendable) return <OutdatedCall {...props} task={task} item={item} />;
   if (item.kind === 'scope-request') return <FileRequestCall {...props} task={task} item={item} />;
   if (item.kind === 'command-request') return <CommandCall {...props} task={task} item={item} />;
   if (item.kind === 'question') return <QuestionCall {...props} task={task} item={item} />;
@@ -1273,7 +1529,11 @@ function Moving({
   calls: HomeItem[];
 }) {
   const added = policyAddedToday(useLibraryIndex(projectId).data),
-    listed = new Set(calls.flatMap(call => (isHold(call) || isCleanup(call) ? call.taskIds : []))),
+    listed = new Set(
+      calls.flatMap(call =>
+        isHold(call) || isResume(call) || isCleanup(call) || isRelease(call) || isCarry(call) ? call.taskIds : [],
+      ),
+    ),
     answers = state.tasks.flatMap(task => {
       const answer = changeableAnswer(task),
         asking =
@@ -1283,7 +1543,13 @@ function Moving({
     answered = new Set(answers.map(({ task }) => task.id)),
     waits = items.filter(
       (item): item is NeedsItem & { run?: RunStory } =>
-        !isHold(item) && !isCleanup(item) && !listed.has(item.taskId) && !answered.has(item.taskId),
+        !isHold(item) &&
+        !isResume(item) &&
+        !isCleanup(item) &&
+        !isRelease(item) &&
+        !isCarry(item) &&
+        !listed.has(item.taskId) &&
+        !answered.has(item.taskId),
     ),
     count = answers.length + waits.length + added.length;
   if (!count) return null;
@@ -1314,7 +1580,10 @@ function Moving({
             <Link to="/p/$projectId/tasks/$taskId" params={{ projectId, taskId: item.taskId }}>
               {state.tasks.find(task => task.id === item.taskId)?.title ?? item.taskId}
             </Link>
-            <span className="sd-meta">{item.next.replace(/^Nothing is needed from you\.\s*/, '')}</span>
+            <span className="sd-meta">
+              {/* A story waiting its integration turn names the story ahead of it, which only its reason says. */}
+              {`${item.kind === 'integration-queued' ? `${item.reason} ` : ''}${item.next.replace(/^Nothing is needed from you\.\s*/, '')}`}
+            </span>
           </li>
         ))}
         {added.map(proposal => (
@@ -1333,8 +1602,30 @@ function Moving({
   );
 }
 
+// The tasks a command's answer names: those it changed and those whose pages it carried.
+const answeredTasks = (records: CommandRecords) => [
+  ...(records.tasks ?? []).map(page => page.task.id),
+  ...(records.changes ?? []).flatMap(change => {
+    const id = change.type === 'task' && change.id !== undefined ? change.id : change.taskId;
+    return id === undefined || id === null ? [] : [String(id)];
+  }),
+];
+
+// The tasks a served call stands for: its task, a cleanup's steps, the work waiting on a hold or a resume, a stopped
+// release's notes story or a stopped carry's story.
+const callTasks = (call: DirectorCall) => (call.type === 'task' ? [call.taskId] : call.taskIds);
+
 export function TodayPage({ projectId }: { projectId: string }) {
-  const { state, error, shell } = useStudio(projectId),
+  const studio = useStudio(projectId),
+    { state, shell } = studio,
+    // What needs the director now, as the controller lists it: Your calls, its count and the title's.
+    served = useCalls(projectId),
+    error = studio.error ?? served.error,
+    client = useQueryClient(),
+    // How many times the list has been read, and the tasks commands' answers named since its last read: a call the
+    // director just made leaves at once, before the list is read again, once the page's own records drop it too.
+    read = client.getQueryState(queryKeys.calls(projectId))?.dataUpdateCount ?? 0,
+    [answered, setAnswered] = useState<{ read: number; ids: Set<string> }>({ read: -1, ids: new Set() }),
     finished = useFinished(projectId, 5),
     // Finished ideas come newest finished first. While the last one read finished today, the next page may hold more
     // that shipped today (November 2, 2026: Today counted three of the five that shipped).
@@ -1349,6 +1640,18 @@ export function TodayPage({ projectId }: { projectId: string }) {
     [shell, finished.data],
   );
   const finishedStories = useMemo(() => (earlier ? runStories(earlier) : []), [earlier]);
+  useEffect(
+    () =>
+      onRecords(records => {
+        if (records.projectId !== projectId) return;
+        const now = client.getQueryState(queryKeys.calls(projectId))?.dataUpdateCount ?? 0,
+          ids = answeredTasks(records);
+        setAnswered(before => ({ read: now, ids: new Set([...(before.read === now ? before.ids : []), ...ids]) }));
+        // A command the page sent: the list is read again at once, before the stream's message for the same change.
+        void client.invalidateQueries({ queryKey: queryKeys.calls(projectId) });
+      }),
+    [client, projectId],
+  );
   const looks = useMemo(() => (state ? agentLooks(projectId, state.workers) : new Map()), [projectId, state]);
   if (error)
     return (
@@ -1356,16 +1659,27 @@ export function TodayPage({ projectId }: { projectId: string }) {
         The project could not be loaded: {error.message}
       </p>
     );
-  if (!state)
+  if (!state || !served.data)
     return (
       <p role="status" className="sd-meta">
         Loading the project…
       </p>
     );
-  const { stories, items, decisions } = liveSummary(state),
-    calls = items.filter(item => item.requiresDirector),
+  const { stories, items } = liveSummary(state),
+    // The page's own records' calls, whose work the waits fold leaves out; Your calls lists the controller's.
+    own = items.filter(item => item.requiresDirector),
     waits = items.filter(item => !item.requiresDirector),
     allStories = [...stories, ...finishedStories],
+    ownKeys = new Set(own.map(callKey)),
+    left = served.data.items.filter(
+      call => answered.read === read && callTasks(call).some(id => answered.ids.has(id)) && !ownKeys.has(callKey(call)),
+    ),
+    calls = servedItems(
+      served.data.items.filter(call => !left.includes(call)),
+      state,
+      allStories,
+    ),
+    decisions = Math.max(0, served.data.count - left.length),
     shipped = shippedToday(allStories, [...state.attempts, ...(earlier?.attempts ?? [])]),
     agents = floorOf(state, looks),
     kinds = state.organizationConfiguration?.taskKinds ?? [],
@@ -1423,11 +1737,7 @@ export function TodayPage({ projectId }: { projectId: string }) {
             )}
           </div>
           {calls.map(item => (
-            <Call
-              key={isHold(item) ? `hold:${item.provider}` : isCleanup(item) ? `cleanup:${item.run.id}` : item.taskId}
-              {...props}
-              item={item}
-            />
+            <Call key={callKey(item)} {...props} item={item} />
           ))}
           {!calls.length && (
             <div className="sd-card sd-card--quiet" style={{ padding: 'var(--space-16) 18px', color: 'var(--ink-2)' }}>
@@ -1437,7 +1747,12 @@ export function TodayPage({ projectId }: { projectId: string }) {
                 : 'Send an idea, and the calls it needs appear here.'}
             </div>
           )}
-          <Moving projectId={projectId} state={state} items={waits} calls={calls} />
+          <Moving
+            projectId={projectId}
+            state={state}
+            items={waits}
+            calls={[...own, ...calls.filter(item => isRelease(item) || isCarry(item))]}
+          />
         </section>
         <aside className="sd-columns__side sd-wide-only" aria-label="On the floor">
           <h2 className="sd-section-title">On the floor</h2>

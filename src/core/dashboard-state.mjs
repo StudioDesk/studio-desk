@@ -104,6 +104,8 @@ export function dashboardAttempt(data, timing, openPhase = null) {
     'workReviewNotes',
   ]);
   summary.artifacts = references(data.artifacts);
+  // Why it ended (core/attempt-cause.mjs): the work, the environment, a usage limit or a question.
+  if (data.endCause) summary.endCause = fields(data.endCause, ['cause', 'detail']);
   if (data.assignment) {
     summary.assignment = fields(data.assignment, ['kind', 'stage']);
     if (data.assignment.stageState) summary.assignment.stageState = fields(data.assignment.stageState, ['current']);
@@ -200,6 +202,17 @@ export function dashboardAttempt(data, timing, openPhase = null) {
                 status: item.status,
                 evidence: shortText(item.evidence, 1000),
               })),
+            }
+          : {}),
+        // The end of what the install, formatter, build and test run (its error output) printed (1.2.0), each bounded
+        // as the merge recorded it.
+        ...(verification.outputs && typeof verification.outputs === 'object'
+          ? {
+              outputs: Object.fromEntries(
+                ['install', 'format', 'build', 'errors']
+                  .filter(name => typeof verification.outputs[name] === 'string' && verification.outputs[name])
+                  .map(name => [name, shortText(verification.outputs[name], 4000)]),
+              ),
             }
           : {}),
         // The files that conflicted, so the story offers Merge onto the current source (1.1 step 3).

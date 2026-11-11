@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { realPath } from '../src/core/real-path.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +19,7 @@ import {
   profileOf,
   recordedProfile,
   installsPackages,
+  measuringLimits,
 } from '../src/connectors/source-profile.mjs';
 import {
   sourcePlan,
@@ -53,10 +55,10 @@ const notesProfile = Object.freeze({
 });
 
 function repository(t) {
-  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-profile-'))),
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-profile-'))),
     root = path.join(directory, 'r');
   t.after(() => {
-    assert.ok(path.resolve(directory).startsWith(fs.realpathSync(os.tmpdir()) + path.sep));
+    assert.ok(path.resolve(directory).startsWith(realPath(os.tmpdir()) + path.sep));
     fs.rmSync(directory, { recursive: true, force: true });
   });
   ensureSourceDirectories(root, notesProfile);
@@ -215,8 +217,16 @@ test("Studio desk's second revision adds the new dashboard and TypeScript and pr
     // Outside the profile's folders or types.
     ['data/[slug]/page.mjs', false],
     ['src/app/[slug]/page.exe', false],
+    // The Windows job wrapper is PowerShell (November 8, 2026); other script types stay out.
+    ['src/adapters/windows-job.ps1', true],
+    ['src/adapters/windows-job.psm1', false],
+    ['scripts/setup.bat', false],
   ])
     assert.equal(storyPathAllowed(file, studioDeskProfile), allowed, file);
+  // The first revision, which earlier records were measured with, still refuses it.
+  assert.equal(storyPathAllowed('src/adapters/windows-job.ps1', studioDeskProfileRevision1), false);
+  // Integration passes over a changed file the formatter has no parser for instead of failing the merge.
+  assert.deepEqual(studioDeskProfile.formatter, { package: 'prettier@3.3.3', args: ['--write', '--ignore-unknown'] });
   assert.throws(
     () => validateStoryPaths({ files: [], newFiles: ['dashboard/eslint.config.js'] }, []),
     /never in a dot-folder or as AGENTS.md, CLAUDE.md, package.json, package-lock.json, npm-shrinkwrap.json, Prettier configuration, ESLint configuration, Vite configuration, Vitest configuration or TypeScript configuration/,
@@ -445,7 +455,7 @@ test('leftover worktrees are removed through the repository each belongs to', t 
     [second, 'left-b'],
   ])
     createSourceWorktree(root, parent, name, git(root, ['rev-parse', 'HEAD']), notesProfile);
-  assert.equal(worktreeRepository(path.join(parent, 'left-b')), fs.realpathSync(second.root));
+  assert.equal(worktreeRepository(path.join(parent, 'left-b')), realPath(second.root));
   assert.equal(worktreeRepository(first.root), null, 'A repository root is not a linked worktree.');
   cleanSourceWorktrees(
     {
@@ -509,4 +519,66 @@ test("a repository's listed top-level files are a story's to edit or delete, nev
   // Studio desk's root files change only by hand.
   assert.equal(storyPathAllowed('README.md', studioDeskProfile), false);
   assert.doesNotMatch(storyPathScope(studioDeskProfile), /top-level/);
+});
+
+// November 3, 2026: Studio desk's own source reached the 500 files its profile allowed, and every story that added a
+// file stopped at its merge with "Source snapshot exceeds its file limits", stories planned before the limit could
+// move included. Limits bound what measuring costs; they are not part of what a plan promised.
+test("a Studio desk record is measured with the larger of its own limits and today's, and keeps what it recorded", t => {
+  const directory = realPath(fs.mkdtempSync(path.join(os.tmpdir(), 'studio-limits-'))),
+    root = path.join(directory, 'r'),
+    destination = path.join(directory, 'copy');
+  t.after(() => {
+    assert.ok(path.resolve(directory).startsWith(realPath(os.tmpdir()) + path.sep));
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  for (const name of studioDeskProfile.files) {
+    fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true });
+    fs.writeFileSync(path.join(root, name), name.endsWith('.json') ? '{}\n' : '# ' + name + '\n');
+  }
+  fs.mkdirSync(path.join(root, 'test'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'test/a.test.mjs'), "import test from 'node:test';\ntest('a', () => {});\n");
+  for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(root, `src/part-${i}.mjs`), `export const part = ${i};\n`);
+  const measured = studioDeskProfile.files.length + 7;
+  // A record from before a limit was raised: its own limit is below what its source holds now.
+  const recorded = {
+    ...structuredClone(studioDeskProfile),
+    limits: { ...studioDeskProfile.limits, files: measured - 2 },
+  };
+  assert.equal(measuringLimits(recorded).files, studioDeskProfile.limits.files);
+  // A recorded limit above today's is kept: the larger of the two, never a cut.
+  const roomier = { ...recorded, limits: { ...recorded.limits, files: studioDeskProfile.limits.files + 1 } };
+  assert.equal(measuringLimits(roomier).files, studioDeskProfile.limits.files + 1);
+  assert.equal(measuringLimits(recorded).totalBytes, studioDeskProfile.limits.totalBytes);
+  const plan = sourcePlan(root, recorded);
+  assert.equal(plan.files.length, measured);
+  // The plan records the profile it was given, limit and all, so its identity is unchanged and a copy still verifies.
+  assert.deepEqual(plan.profile, recorded);
+  assert.equal(profileOf(plan).limits.files, measured - 2);
+  copySource(plan, destination);
+  assert.equal(fs.readFileSync(path.join(destination, 'src/part-5.mjs'), 'utf8'), 'export const part = 5;\n');
+  // A record of the first revision is measured the same way.
+  assert.equal(measuringLimits(studioDeskProfileRevision1).files, studioDeskProfile.limits.files);
+  assert.equal(studioDeskProfileRevision1.limits.files, 500, 'the first revision never changes');
+});
+
+test("another repository's profile keeps its own limits", t => {
+  const { root } = repository(t),
+    tight = { ...notesProfile, limits: { ...notesProfile.limits, files: 3 } };
+  assert.equal(measuringLimits(notesProfile), notesProfile.limits);
+  assert.equal(measuringLimits(tight).files, 3);
+  assert.throws(() => sourcePlan(root, tight), /Source snapshot exceeds its file limits/);
+});
+
+test("Studio desk's own source keeps room under its limits", () => {
+  // A tripwire, not a target. If it fails, the director raises the limit in src/connectors/source-profile.mjs by
+  // hand; an agent's story never changes it to make its tests pass.
+  const { files } = sourcePlan(),
+    bytes = files.reduce((total, file) => total + file.bytes, 0),
+    { limits } = studioDeskProfile;
+  const reason = what =>
+    `Studio desk's source is past half its ${what}. The director raises it by hand; a story must not change it.`;
+  assert.ok(files.length * 2 <= limits.files, reason(`file limit (${files.length} of ${limits.files} files)`));
+  assert.ok(bytes * 2 <= limits.totalBytes, reason(`size limit (${bytes} of ${limits.totalBytes} bytes)`));
 });

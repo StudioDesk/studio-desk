@@ -179,6 +179,13 @@ test('an idea lands on the release the director picks or the current working rel
   run = runOf(await send({ idea: 'Backport the parser fix.', line: 'release/1.0' }));
   assert.deepEqual(run.release, { milestoneId: patch.id, version: '1.0.1', by: { type: 'director' } });
   assert.equal(run.line, 'release/1.0');
+  // In the original mode, a null milestone line still belongs to the explicitly selected newest line.
+  sent = await send({ idea: 'Keep the parser fix on main.', line: 'main' });
+  run = runOf(sent);
+  assert.deepEqual(run.release, { milestoneId: next.id, version: '1.2.0', by: { type: 'director' } });
+  assert.deepEqual(sent.data.release, run.release);
+  assert.equal(run.line, 'main');
+  assert.equal(checksBase(c, sent.data.runId).branch, 'main');
   for (const [data, error] of [
     [{ milestone: '1.1.0' }, /1\.1\.0 is already released/],
     [{ milestone: 'milestone-none' }, /milestone-none is not a milestone of this project/],
@@ -188,6 +195,77 @@ test('an idea lands on the release the director picks or the current working rel
     assert.equal(refused.status, 400, JSON.stringify(data));
     assert.match(refused.data.error, error);
   }
+});
+
+test('line-only intake keeps the saved release, response and checks on the selected version line', async t => {
+  const c = await setup(t),
+    store = c.app.store,
+    project = await development(c),
+    make = async version => {
+      const made = await c.request(`/api/projects/${project}/milestones`, { projectId: project, version });
+      assert.equal(made.status, 201, JSON.stringify(made.data));
+      return made.data.milestone;
+    },
+    send = async (selection, line, milestone, by = 'director') => {
+      const sent = await c.request('/api/studio-development/intake', {
+        projectId: project,
+        idea: 'Keep the parser fix with its selected release.',
+        ...selection,
+      });
+      assert.equal(sent.status, 201, JSON.stringify(sent.data));
+      const run = store.run(sent.data.runId),
+        release = milestone ? { milestoneId: milestone.id, version: milestone.version, by: { type: by } } : undefined;
+      assert.equal(run.line, line);
+      assert.deepEqual(run.release, release);
+      assert.equal(sent.data.line, line);
+      assert.deepEqual(sent.data.release, release);
+      assert.deepEqual(checksBase(c, run.id), {
+        branch: line,
+        commit: git(c.root, ['rev-parse', `refs/heads/${line}`]),
+      });
+    };
+  git(c.root, ['tag', 'v1.0.0']);
+  const minor = await make('1.1.0'),
+    next = await make('1.2.0'),
+    switched = await c.request(`/api/projects/${project}/version-lines`, { projectId: project, shipsTo: 'main' });
+  assert.equal(switched.status, 200, JSON.stringify(switched.data));
+  await send({ line: 'release/1.2' }, 'release/1.2', next);
+  await send({ line: 'release/1.1' }, 'release/1.1', minor);
+  await send({}, 'release/1.1', minor, 'default');
+  await send({ line: 'release/1.2', milestone: next.id }, 'release/1.2', next);
+  const mismatch = await c.request('/api/studio-development/intake', {
+    projectId: project,
+    idea: 'Refused mismatched release.',
+    line: 'release/1.2',
+    milestone: minor.id,
+  });
+  assert.equal(mismatch.status, 400);
+  assert.match(mismatch.data.error, /lands on release\/1\.1, not release\/1\.2/);
+  // Recorded releases are fixture state; no release workflow, shipping or model runs here.
+  const close = ids => {
+    const all = projectMilestones(store, project);
+    for (const milestone of all) if (ids.includes(milestone.id)) milestone.state = 'released';
+    store.putSetting('milestones:' + project, all);
+  };
+  close([next.id]);
+  git(c.root, ['tag', 'v1.2.0']);
+  // Make these out of order so selection must use version order within the chosen line.
+  const later = await make('1.2.2'),
+    first = await make('1.2.1');
+  await send({ line: 'release/1.2' }, 'release/1.2', first);
+  close([first.id, later.id]);
+  const before = projectMilestones(store, project);
+  assert.equal(store.project(project).lines.find(line => line.branch === 'release/1.2').state, 'maintained');
+  await send({ line: 'release/1.2' }, 'release/1.2', undefined);
+  await send({}, 'release/1.1', minor, 'default');
+  const released = await c.request('/api/studio-development/intake', {
+    projectId: project,
+    idea: 'Refused released milestone.',
+    milestone: next.id,
+  });
+  assert.equal(released.status, 400);
+  assert.match(released.data.error, /1\.2\.0 is released/);
+  assert.deepEqual(projectMilestones(store, project), before, 'Intake never borrows or creates a milestone.');
 });
 
 test('a story moves to another release until it starts, and to another line only when no story of its idea is linked to it', async t => {

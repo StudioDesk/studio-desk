@@ -36,6 +36,11 @@ export interface Names {
 const rule = /autonomy policy revision \d+/i;
 // The policy's reason after its name: "Accepted by autonomy policy revision 6: Independent review passed."
 const reasonOf = (message: string) => message.replace(/^.*?autonomy policy revision \d+:?\s*/i, '').trim();
+// Your acceptance over failed checks: "Director accepted the recorded result over 2 failed checks (tests, lint):
+// REASON". The checks run to the first "): ", so a reason with parentheses stays whole.
+const overFailed = /^Director accepted the recorded result over\s*/,
+  overChecks =
+    /^Director accepted the recorded result over (a failed check|\d+ failed checks) \(([\s\S]*?)\): ([\s\S]*)$/;
 const pathLists: [string, 'file' | 'add' | 'del'][] = [
   ['Files', 'file'],
   ['New files', 'add'],
@@ -118,6 +123,21 @@ function fromEvent(event: LogEvent, names: Names): Omit<Part, 'key' | 'at'> | nu
     }
     case 'accepted': {
       const what = step === 'build' ? 'the build' : step === 'review' ? 'the review' : 'the result';
+      // Read before the house rule's wording, since your reason may name a policy revision.
+      if (overFailed.test(message)) {
+        const over = overChecks.exec(message);
+        if (over)
+          return {
+            by: 'you',
+            lead: `Accepted ${what} over ${over[1]}: ${over[2]}`,
+            words: over[3]!.trim() || undefined,
+          };
+        return {
+          by: 'you',
+          lead: `Accepted ${what} over a failed check`,
+          words: message.replace(overFailed, '').trim() || undefined,
+        };
+      }
       if (policy) return { by: 'rule', lead: `Accepted ${what}`, words: reasonOf(message) };
       return { by: 'you', lead: `Accepted ${what}` };
     }

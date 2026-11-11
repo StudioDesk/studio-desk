@@ -279,6 +279,39 @@ test('director-created Planned work is approved and denied one at a time without
   assert.equal(c.app.store.attempts(first.id).length, 0);
 });
 
+test('accept-proposal refuses a validated legacy plan with a failed worker check without staging or dispatch', async t => {
+  const c = await setup(t),
+    { store, runner } = c.app,
+    finish = runner.finish,
+    failed = { name: 'Worker plan check', status: 'fail', evidence: 'Model-free worker failure fixture.' };
+  // Supply a failed worker check before the registered legacy plan's controller validation.
+  t.mock.method(runner, 'finish', function (entry, result, error) {
+    if (entry.attempt.assignment.kind === 'plan' && result) result.checks.push(failed);
+    return finish.call(this, entry, result, error);
+  });
+  const created = await c.request('/api/plans', {
+    title: 'Failed worker proposal check',
+    brief: 'Propose bounded logical work.',
+    workerId: 'W-01',
+  });
+  assert.equal(created.status, 201);
+  const attempt = await c.wait(created.data.id),
+    before = store.tasks();
+  assert.equal(attempt.result.outcome, 'completed');
+  assert.ok(attempt.result.checks.some(check => check.name === failed.name && check.status === 'fail'));
+  assert.ok(
+    attempt.controllerChecks.some(check => check.name === 'Controller plan validation' && check.status === 'pass'),
+  );
+  const response = await c.request(`/api/tasks/${created.data.id}/accept-proposal`, {
+    attemptId: attempt.id,
+    proposalHash: attempt.artifacts.find(item => item.path === 'plan.json').hash,
+  });
+  assert.equal(response.status, 400);
+  assert.match(response.data.error, /Failed work cannot propose executable tasks/);
+  assert.deepEqual(store.tasks(), before, 'No result accepted, assignments created or work queued.');
+  assert.deepEqual(store.attempt(attempt.id), attempt);
+});
+
 test('producer plan evidence can be accepted into Planned without dispatch, while legacy bulk approval reuses draft identities', async t => {
   const c = await setup(t);
   const create = async () => {
@@ -297,7 +330,10 @@ test('producer plan evidence can be accepted into Planned without dispatch, whil
   assert.equal(staged.status, 200, JSON.stringify(staged.data));
   assert.equal(c.app.store.task(first.id).status, 'done');
   assert.ok(staged.data.taskIds.every(id => c.app.store.task(id).status === 'backlog' && !c.app.store.task(id).queued));
-  assert.equal(c.app.store.attempts(staged.data.taskIds[0]).length, 0);
+  for (const id of staged.data.taskIds) assert.equal(c.app.store.attempts(id).length, 0);
+  const count = c.app.store.tasks().length;
+  assert.deepEqual((await c.request(`/api/tasks/${first.id}/accept-proposal`, body)).data.taskIds, staged.data.taskIds);
+  assert.equal(c.app.store.tasks().length, count, 'Accepting the same clean proposal reuses its Planned work.');
   const second = await create(),
     drafts = await c.request(`/api/tasks/${second.id}/propose-work`, {
       attemptId: second.attemptId,

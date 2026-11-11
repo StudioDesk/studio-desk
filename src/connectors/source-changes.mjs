@@ -9,12 +9,20 @@ import { projectOrganization } from '../core/project-organization.mjs';
 import { isRoleId } from '../core/staffing.mjs';
 import { readContinuation } from '../core/attempt-continuation.mjs';
 import { sourcePlan, testsSentence, validateCheckReport } from './source-checks.mjs';
-import { profileOf, recordedProfile, storyPathAllowed, storyPathRule, studioDeskProfile } from './source-profile.mjs';
+import {
+  measuringLimits,
+  profileOf,
+  recordedProfile,
+  storyPathAllowed,
+  storyPathRule,
+  studioDeskProfile,
+} from './source-profile.mjs';
 import { reviewedImages, reviewVisualProblems, validateStoryPages } from './story-pages.mjs';
 import { sourceResources, sourceRoot, studioDeskSourceResources } from './source-projects.mjs';
 import { sourceDiffFormat, sourceDiffLimit, verifySourceDiff } from './source-diff.mjs';
 import { codexSandboxRecord, sandboxRecord, testSandboxOf } from '../adapters/source-test-sandbox.mjs';
 import { builtInSandboxRunner } from '../adapters/built-in-sandbox.mjs';
+import { holdsTestTurn, testRunEnded, testTurnResource } from '../core/test-turn.mjs';
 import {
   commitIntegration,
   committedIntegration,
@@ -32,6 +40,10 @@ import {
   lineFiles,
   lineReached,
   lineRepository,
+  lineTip,
+  knownMeasurements,
+  measuredError,
+  measuredLine,
   measureLine,
   moveLine,
   projectLine,
@@ -52,23 +64,131 @@ const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // Where a release line that is not checked out is measured, in a worktree removed at once (src/connectors/source-lines.mjs).
 const measureParent = store => path.join(store.directory, 'wt');
 // The measurements of the open measuring pass, by root, line and profile, or null outside one.
-let pass = null;
+let pass = null,
+  // How long the measuring process took for the open pass's measurements, until a start ends their reuse.
+  passMeasuredMs = 0,
+  // How many starts have ended a pass's reuse, so measurements made before one are known to be stale.
+  starts = 0;
 // Runs fn as one measuring pass (a scheduler pass, a readiness refresh, or a director's start): every story checked in
 // it reuses the first measurement of the same root, line and profile, which of the same files are committed, ignored or
 // deleted, and the commit a story would start from, instead of reading and hashing the whole live source and asking git
-// again for each check. A pass opened inside one joins it. Outside a pass every check measures.
-export function measuringPass(fn) {
+// again for each check. A pass opened inside one joins it. Outside a pass every check measures. A dispatch pass starts
+// with the measurements its measuring process made (`measured`, from measureStorySources), so its checks measure
+// nothing on the controller's thread; a measurement that failed there fails each check with its message.
+export function measuringPass(fn, measured = null) {
   if (pass) return fn();
   pass = new Map();
+  passMeasuredMs = 0;
+  if (measured) seedPass(measured);
   try {
     return fn();
   } finally {
     pass = null;
+    passMeasuredMs = 0;
   }
 }
 // An attempt that claimed a line ends the reuse: the checks after it in the pass measure again.
 export function measureAgain() {
   pass?.clear();
+  passMeasuredMs = 0;
+  starts++;
+}
+// The measuring process's time for the open pass, which a start records in its scope's time (setup.scope).
+export const measuredMs = () => passMeasuredMs;
+// The starts so far, to compare before and after a measurement.
+export const measuredStarts = () => starts;
+function seedPass({ lines, ms = 0 }) {
+  passMeasuredMs = ms;
+  for (const { root, line, profile, parent, measurement } of lines) {
+    let measuredLineFiles;
+    try {
+      measuredLineFiles = passMeasurement(measuredLine(root, line, profile, parent, measurement));
+    } catch (error) {
+      measuredLineFiles = { error };
+    }
+    pass.set(JSON.stringify([root, line ?? null, profile]), measuredLineFiles);
+    pass.set(
+      JSON.stringify(['base', root, line ?? null, profile]),
+      measurement.base.error ? { error: measuredError(measurement.base.error) } : { base: measurement.base.value },
+    );
+  }
+}
+// The lines a source story's scope check reads (storySource), each with the new files whose ignore rules it asks,
+// found from the story's records alone, measuring nothing: its breakdown's checks (breakdownEvidence) and its own line,
+// or its review's checks. None for work that is not a source story, or one that waits for another story to finish
+// building on its line, so its check measures nothing (validateInputs); a story whose records do not say returns none,
+// and its check then measures on the thread as before.
+export function storyMeasureRequests(store, task, root) {
+  try {
+    if (task.kind !== 'studio-development:change' || task.approval?.status !== 'approved' || !task.proposalReference)
+      return [];
+    if (sourceStoriesInFlight(store, task).length >= storiesPerLine(store)) return [];
+    const projectId = recordProject(task),
+      { newFiles } = storyPaths(task, proposedPaths(store, task)),
+      at = (root, sourceCheck, profile, release) => ({
+        root,
+        line: projectLine(store, projectId, release ?? sourceCheck.base?.branch),
+        profile,
+        newFiles,
+      });
+    if (task.proposalReference.path === 'source-breakdown.json') {
+      const pinned = store.attempt(task.proposalReference.attemptId).sourceBreakdown,
+        checked = store.attempt(pinned.attemptId).sourceCheck;
+      return [at(checked.root, checked, profileOf(checked)), at(root, checked, profileOf(pinned), task.release?.line)];
+    }
+    const review = store.attempt(store.task(task.dependencies[0]).acceptedAttemptId),
+      checked = store.attempts(review.sourceReview.taskId).find(a => a.id === review.sourceReview.attemptId);
+    return [at(root, checked.sourceCheck, profileOf(checked.sourceCheck), task.release?.line)];
+  } catch {
+    return [];
+  }
+}
+// The request for the measuring process (src/connectors/source-measure.mjs) for the lines these stories' checks read,
+// and how to seed a pass with its answer (measuringPass), or null when none reads a line. rootOf gives a story's source
+// root, and `hold` is the trusted test seam that holds the process. The seed is `stale` when a line moved since the
+// process began measuring it (lineTip), so the pass measures again rather than start a story from an older commit.
+export function measureStorySources(store, tasks, rootOf, { hold = null } = {}) {
+  const lines = new Map(),
+    parent = measureParent(store);
+  for (const task of tasks) {
+    let root;
+    try {
+      root = rootOf(task);
+    } catch {
+      continue;
+    }
+    for (const request of storyMeasureRequests(store, task, root)) {
+      const key = JSON.stringify([request.root, request.line ?? null, request.profile]);
+      if (!lines.has(key)) lines.set(key, { ...request, ignored: new Map() });
+      lines.get(key).ignored.set(JSON.stringify(request.newFiles), request.newFiles);
+    }
+  }
+  if (!lines.size) return null;
+  const measured = [...lines.values()];
+  return {
+    request: {
+      lines: measured.map(item => ({
+        root: item.root,
+        ...(item.line === undefined ? {} : { line: item.line }),
+        ...recordedProfile(item.profile),
+        ignored: [...item.ignored.values()],
+      })),
+      parent,
+      known: knownMeasurements(),
+      hold,
+    },
+    seed: (measurements, ms) => ({
+      stale: measured.some((item, i) => measurements[i]?.tip !== lineTip(item.root, item.line)),
+      lines: measured.map((item, i) => ({
+        root: item.root,
+        line: item.line,
+        profile: item.profile,
+        parent,
+        measurement: measurements[i],
+      })),
+      ms,
+    }),
+  };
 }
 // One measurement of a line for the rest of the pass, asking git once for each list of files whose commits, ignore
 // rules or deletions it checks.
@@ -110,7 +230,9 @@ function storySource(store, projectId, root, sourceCheck, profile, task) {
   if (!pass) return { line, ...measure() };
   const key = JSON.stringify([root, line ?? null, profile]);
   if (!pass.has(key)) pass.set(key, passMeasurement(measure()));
-  const { current, files } = pass.get(key);
+  const { current, files, error } = pass.get(key);
+  // A measurement that failed in the measuring process fails every check that reads it, as measuring here would.
+  if (error) throw Object.assign(new Error(error.message), error);
   return { line, current: structuredClone(current), files };
 }
 function closedFields(value, allowed, name) {
@@ -238,6 +360,31 @@ export const maxScopePaths = 100;
 // Studio desk: instruction files, the package manifest and formatter configuration) and dot-paths
 // can never be created, changed or deleted by a story.
 const scopePaths = ({ files, newFiles = [], deleteFiles = [] }) => ({ files, newFiles, deleteFiles });
+// A scope refusal only a new breakdown can fix, since the source moved past the story's plan (error.outdated, with the
+// files involved): an approved file that no longer exists, a file to create that now exists or collides and no
+// prerequisite in the chain created, or a listed file the source holds that its measured list lacks. Uncommitted
+// edits, git-ignored paths and edit counts are refusals the director can fix in place, and carry no marker.
+const outdatedError = (message, files) => Object.assign(new Error(message), { outdated: { files: [...files] } });
+// What a story whose plan the source moved past says to the director, in plain words (sourceStage.outdated).
+export const outdatedReason =
+  'The code moved on since this story was planned: another story has since created or changed files it was planned to create or change. Close it and send its remaining work as a new idea.';
+// Notes on a story that its plan is out of date when error is such a refusal: { reason, files, at }, the files of every
+// such refusal so far and when the latest was seen. It is never cleared, since editing the story cannot fix it. Returns
+// whether it noted anything; a story from before stages (with a separate review task) gains no stage.
+export function noteOutdated(task, error) {
+  if (task?.kind !== 'studio-development:change' || !error?.outdated?.files?.length) return false;
+  if (!task.sourceStage && task.proposedTaskIds?.length) return false;
+  task.sourceStage ||= newSourceStage();
+  const files = [...new Set([...(task.sourceStage.outdated?.files || []), ...error.outdated.files])];
+  task.sourceStage.outdated = { reason: outdatedReason, files, at: new Date().toISOString() };
+  return true;
+}
+// Notes it on the recorded story, for a refusal outside a start (an edit, or the check of a file request).
+function recordOutdated(store, taskId, error) {
+  if (!error?.outdated) return;
+  const task = store.task(taskId);
+  if (noteOutdated(task, error)) store.putTask(task);
+}
 // New files must not exist, ignoring case (Windows), nor sit where a file or folder already is.
 function newPathProblem(file, taken) {
   const lower = file.toLowerCase(),
@@ -266,11 +413,18 @@ export function validateStoryPaths(paths, manifest = [], name = 'The story', pro
     );
   if (new Set(all).size !== all.length)
     throw new Error(`${name} must list each source path once, in only one of files, newFiles and deleteFiles.`);
+  const recorded = file => manifest.some(item => item.path === file);
   for (const file of [...files, ...deleteFiles])
-    if (!storyPathAllowed(file, profile) || !manifest.some(item => item.path === file))
-      throw new Error(
-        `${name} lists unsupported or unrecorded source file ${String(file)}; choose an allowed existing path from the measured manifest.`,
-      );
+    if (!storyPathAllowed(file, profile) || !recorded(file)) {
+      const message = `${name} lists unsupported or unrecorded source file ${String(file)}; choose an allowed existing path from the measured manifest.`;
+      // An allowed path the measured list lacks may be one the source gained since it was measured (verifyStoryScope).
+      throw storyPathAllowed(file, profile)
+        ? outdatedError(
+            message,
+            [...files, ...deleteFiles].filter(other => storyPathAllowed(other, profile) && !recorded(other)),
+          )
+        : new Error(message);
+    }
   const taken = takenPaths(manifest);
   for (const file of newFiles) {
     const problem = storyPathAllowed(file, profile) ? newPathProblem(file, taken) : storyPathRule(profile);
@@ -449,7 +603,15 @@ function verifyStoryScope(
   } = {},
   stale = staleBreakdown,
 ) {
-  validateStoryPaths(paths, original, undefined, profileOf(current));
+  try {
+    validateStoryPaths(paths, original, undefined, profileOf(current));
+  } catch (error) {
+    // Only a listed file the source holds now is one it gained since the plan; another is a path that never was.
+    const gained = (error.outdated?.files || []).filter(file => current.files.some(item => item.path === file));
+    if (gained.length) error.outdated.files = gained;
+    else delete error.outdated;
+    throw error;
+  }
   const { files, newFiles, deleteFiles } = scopePaths(paths),
     now = file => current.files.find(item => item.path === file),
     created = newFiles.filter(file => createdByChain(file, current, prerequisites)),
@@ -466,15 +628,23 @@ function verifyStoryScope(
     }),
     committed = line.committed(drifted),
     uncommitted = drifted.filter(file => !committed.includes(file));
-  if (missing.length) throw new Error(`Approved source files no longer exist: ${named(missing)}. ${stale.action}`);
+  if (missing.length) {
+    const message = `Approved source files no longer exist: ${named(missing)}. ${stale.action}`,
+      // A deletion committed on the line moved the source past the plan; an uncommitted one can still be restored.
+      deleted = line.gone(missing);
+    throw deleted.length ? outdatedError(message, deleted) : new Error(message);
+  }
   if (uncommitted.length)
     throw new Error(
       `Approved source files changed since ${stale.since}, and the changes are not committed: ${named(uncommitted)}. Commit or discard them in the development copy, then try again.`,
     );
-  const taken = takenPaths(current.files);
-  for (const file of absent)
-    if (newPathProblem(file, taken))
-      throw new Error(`${file} now exists or collides with an existing path, so it cannot be created. ${stale.action}`);
+  const taken = takenPaths(current.files),
+    collided = absent.filter(file => newPathProblem(file, taken));
+  if (collided.length)
+    throw outdatedError(
+      `${collided[0]} now exists or collides with an existing path, so it cannot be created. ${stale.action}`,
+      collided,
+    );
   const ignored = line.ignored(absent);
   if (ignored.length)
     throw new Error(`git ignores ${ignored.join(', ')}, so a story cannot create it. Choose another path.`);
@@ -682,8 +852,8 @@ export function mergeSourceStory(store, registries, task, by = { type: 'director
     };
     stage.merges = (stage.merges || 0) + 1;
     story.direction = conflicts.length
-      ? `Independent review ${review.id} passed your change, but work integrated since it started conflicts with it in ${named}. The controller merged your change onto the current source: the files under changes/ hold it, and ${named} hold conflict markers between the current source (<<<<<<<) and your change (>>>>>>>). Resolve each conflict so that both changes work, remove every marker, and keep the rest of your change. Its tests and an independent review follow.`
-      : `Independent review ${review.id} passed your change, and it passed its own tests, but ${landedText(store, landed)} landed since it started, and merged onto that, ${failing}. The controller merged your change onto the current source, with no conflicts: the files under changes/ hold it. Make your change work with what landed so the tests pass, without undoing any of what landed, and keep the rest of your change. Its tests and an independent review follow.`;
+      ? `The independent review passed your change, but work integrated since it started conflicts with it in ${named}. The controller merged your change onto the current source: the files under changes/ hold it, and ${named} hold conflict markers between the current source (<<<<<<<) and your change (>>>>>>>). Resolve each conflict so that both changes work, remove every marker, and keep the rest of your change. Its tests and an independent review follow.`
+      : `The independent review passed your change, and it passed its own tests, but ${landedText(store, landed)} landed since it started, and merged onto that, ${failing}. The controller merged your change onto the current source, with no conflicts: the files under changes/ hold it. Make your change work with what landed so the tests pass, without undoing any of what landed, and keep the rest of your change. Its tests and an independent review follow.`;
     delete story.autonomyNote;
     Object.assign(story, { status: 'ready', queued: false, reason: '', controllerWait: false });
     registries.workflows.stageProgress(store, story);
@@ -699,7 +869,7 @@ export function mergeSourceStory(store, registries, task, by = { type: 'director
     return { ok: true, direction: story.direction };
   });
 }
-function breakdownChangeScope(store, task, root, dryRun) {
+function breakdownChangeScope(store, task, root, dryRun, extras) {
   const reference = task.proposalReference,
     ref = acceptedReference(store, reference.taskId, reference.attemptId, recordProject(task)),
     attempt = store.attempt(ref.attemptId),
@@ -782,7 +952,7 @@ function breakdownChangeScope(store, task, root, dryRun) {
     ...(dryRun ? {} : { base: passBase(root, line, profile) }),
     ...paths,
     acceptedInputs: [ref, checkedReference, ...siblingInputs],
-    ...storyScopeExtras(store, task, paths, current),
+    ...(extras ? storyScopeExtras(store, task, paths, current) : {}),
   };
 }
 // A story reaches the integrated milestone once its reviewed candidate is committed.
@@ -880,6 +1050,42 @@ const proposedPaths = (store, task) => scopePaths(proposedStory(store, task));
 const pathLists = ['files', 'newFiles', 'deleteFiles'],
   pathLabels = { files: 'Files', newFiles: 'New files', deleteFiles: 'Delete' },
   maxScopeEdits = 20;
+// The rules an edit of a story's paths meets, whoever sends it: the director's edit and the policy's approval of a file
+// request (editSourceStory), and the check of a blocked editor's file request as Allow and continue would send it
+// (checkScopeRequest). The edit gives a reason, names its paths as lists that change the story's, and stays within the
+// story's edit count. Returns its paths and those it replaces.
+function editPaths(store, task, edit) {
+  boundedText(edit.reason, 2000, 'The reason for the edit');
+  if (edit.note !== undefined && (typeof edit.note !== 'string' || edit.note.length > 4000))
+    throw new Error('The note for the next attempt must be bounded text.');
+  if (edit.keepWork !== undefined && typeof edit.keepWork !== 'boolean')
+    throw new Error('keepWork must be true or false.');
+  const paths = scopePaths({
+      files: edit.files,
+      newFiles: edit.newFiles ?? [],
+      deleteFiles: edit.deleteFiles ?? [],
+    }),
+    previous = storyPaths(task, proposedPaths(store, task)),
+    sorted = list => [...list].sort();
+  if (!pathLists.every(list => Array.isArray(paths[list]) && paths[list].every(file => typeof file === 'string')))
+    throw new Error('A story edit lists files, newFiles and deleteFiles as arrays of source paths.');
+  if (pathLists.every(list => equal(sorted(paths[list]), sorted(previous[list]))))
+    throw new Error("The edit does not change the story's files.");
+  if ((task.scopeEdits?.length || 0) >= maxScopeEdits)
+    throw new Error(`A story keeps at most ${maxScopeEdits} edits; close it and plan the work again.`);
+  return { paths, previous };
+}
+// Every rule a dispatch applies to the story as an edit would leave it (edited), except the clean development copy a
+// start needs, and with extras false the earlier work its next attempt continues from, which an attempt still running
+// cannot be judged by. Nothing is written but, when the source moved past the story's plan, its out-of-date note.
+function checkEditedScope(store, edited, root, { extras = true } = {}) {
+  try {
+    return changeScope(store, edited, root, { dryRun: true, extras });
+  } catch (error) {
+    recordOutdated(store, edited.id, error);
+    throw error;
+  }
+}
 // The director edits a stopped story's approved paths and sends it back to implementation,
 // keeping the work its last attempt staged (the director's direction, October 20, 2026). The
 // paths follow the same rules and drift checks as at dispatch, and each edit is recorded with its
@@ -909,25 +1115,8 @@ export function editSourceStory(store, task, edit, root, { by = { type: 'directo
     throw new Error(
       'Edit a story while its implementation is stopped, or after its independent review requested changes.',
     );
-  boundedText(edit.reason, 2000, 'The reason for the edit');
-  if (edit.note !== undefined && (typeof edit.note !== 'string' || edit.note.length > 4000))
-    throw new Error('The note for the next attempt must be bounded text.');
-  if (edit.keepWork !== undefined && typeof edit.keepWork !== 'boolean')
-    throw new Error('keepWork must be true or false.');
-  const paths = scopePaths({
-      files: edit.files,
-      newFiles: edit.newFiles ?? [],
-      deleteFiles: edit.deleteFiles ?? [],
-    }),
-    previous = storyPaths(task, proposedPaths(store, task)),
-    sorted = list => [...list].sort();
-  if (!pathLists.every(list => Array.isArray(paths[list]) && paths[list].every(file => typeof file === 'string')))
-    throw new Error('A story edit lists files, newFiles and deleteFiles as arrays of source paths.');
-  if (pathLists.every(list => equal(sorted(paths[list]), sorted(previous[list]))))
-    throw new Error("The edit does not change the story's files.");
-  if ((task.scopeEdits?.length || 0) >= maxScopeEdits)
-    throw new Error(`A story keeps at most ${maxScopeEdits} edits; close it and plan the work again.`);
-  const at = new Date().toISOString(),
+  const { paths, previous } = editPaths(store, task, edit),
+    at = new Date().toISOString(),
     implementations = implementationAttempts(store, task),
     // The latest attempt that recorded staged work; a cancelled attempt records none.
     worked = [...implementations]
@@ -967,7 +1156,7 @@ export function editSourceStory(store, task, edit, root, { by = { type: 'directo
     };
   else delete edited.sourceStage.continueFrom;
   // Every rule a dispatch applies, except the clean development copy a start needs.
-  const scope = changeScope(store, edited, root, { dryRun: true }),
+  const scope = checkEditedScope(store, edited, root),
     reported = worked || implementations.at(-1),
     changed = pathLists
       .map(list => {
@@ -1095,13 +1284,53 @@ function createdInChain(store, task, root, files) {
     created = integratedChanges(store, task.dependencies);
   return unmeasured.filter(file => createdByChain(file, current, created));
 }
+// A blocked editor's file request (scopeRequest), checked before it is recorded as the edit Allow and continue would
+// send: the story's paths plus the requested ones, with a requested file to edit that an earlier story in the chain
+// created listed as one to create (createdInChain), and the request records its paths that way, so the edit offered is
+// the edit checked. Every rule of editSourceStory's edit applies but the story's own state, since its attempt is still
+// running; nothing is written but the story's out-of-date note when the source moved past its plan. When the edit
+// would be refused, the request keeps its paths and reason and records the refusal as its problem.
+export function checkScopeRequest(store, task, request, root) {
+  if (!request || request.problem) return request;
+  return measuringPass(() => {
+    let checked = request;
+    try {
+      const created = createdInChain(store, task, root, request.files);
+      if (created.length)
+        checked = {
+          ...request,
+          files: request.files.filter(file => !created.includes(file)),
+          newFiles: [...request.newFiles, ...created],
+        };
+      const current = storyPaths(task, proposedPaths(store, task)),
+        join = list => [...new Set([...current[list], ...checked[list]])],
+        { paths, previous } = editPaths(store, task, {
+          files: join('files'),
+          newFiles: join('newFiles'),
+          deleteFiles: join('deleteFiles'),
+          reason: checked.reason,
+        }),
+        edited = structuredClone(task);
+      edited.scopeEdits = [
+        ...(task.scopeEdits || []),
+        { ...paths, reason: checked.reason, at: new Date().toISOString(), by: { type: 'director' }, previous },
+      ];
+      checkEditedScope(store, edited, root, { extras: false });
+      return checked;
+    } catch (error) {
+      return { ...checked, problem: error.message };
+    }
+  });
+}
 // The scope a story's next implementation attempt receives. A dry run checks it without fixing
-// the base commit, which needs a clean development copy only when the attempt starts.
-export function changeScope(store, task, root, { dryRun = false } = {}) {
+// the base commit, which needs a clean development copy only when the attempt starts; with extras false it leaves out
+// the director's edits and the earlier work the attempt would continue from (checkEditedScope).
+export function changeScope(store, task, root, { dryRun = false, extras = true } = {}) {
   if (task.approval?.status !== 'approved' || !task.proposalReference)
     throw new Error('Source editing requires approved work from one exact accepted source review.');
   validateAcceptedReferences(store, task.acceptedInputs, recordProject(task));
-  if (task.proposalReference.path === 'source-breakdown.json') return breakdownChangeScope(store, task, root, dryRun);
+  if (task.proposalReference.path === 'source-breakdown.json')
+    return breakdownChangeScope(store, task, root, dryRun, extras);
   if (task.dependencies.length !== 1)
     throw new Error('Source editing requires approved work from one exact accepted source review.');
   const ref = acceptedReference(store, task.dependencies[0], undefined, recordProject(task)),
@@ -1156,7 +1385,7 @@ export function changeScope(store, task, root, { dryRun = false } = {}) {
     source,
     ...(dryRun ? {} : { base: passBase(root, line, profile) }),
     ...paths,
-    ...storyScopeExtras(store, task, paths, source),
+    ...(extras ? storyScopeExtras(store, task, paths, source) : {}),
   };
 }
 // The approved scope the employee and the reviewer read (source-scope.json). Scopes from before
@@ -1197,8 +1426,9 @@ export const scopeDocument = scope => ({
 // An editor that needs paths outside the approved ones stops as blocked and names them in
 // scope-request.json (MP-021). The controller records the request on the attempt when it names
 // only paths the story does not have, which together with the approved ones pass the path rules
-// against the snapshot the editor read, or records the problem instead. A request never changes
-// the story: the director approves it by editing the story's files (editSourceStory).
+// against the snapshot the editor read, or records the problem instead. A request that passes is then checked as the
+// edit approving it would be (checkScopeRequest). A request never changes the story: the director approves it by
+// editing the story's files (editSourceStory).
 export const scopeRequestFile = 'scope-request.json';
 const maxScopeRequestBytes = 64 * 1024;
 export function scopeRequest(scope, result, read) {
@@ -1293,7 +1523,7 @@ export function stagedChanges(scope, result, read) {
       );
     seen.set(file, index);
     const contents = read(artifact.path),
-      { fileBytes } = profileOf(scope.source).limits;
+      { fileBytes } = measuringLimits(profileOf(scope.source));
     if (contents.length > fileBytes || contents.includes(0) || !Buffer.from(contents.toString('utf8')).equals(contents))
       throw new Error(
         `Source changes must be UTF-8 text files of at most ${fileBytes % (1024 * 1024) ? `${Math.ceil(fileBytes / 1024)} KiB` : `${fileBytes / 1024 / 1024} MiB`}.`,
@@ -1578,8 +1808,8 @@ export function sourceStoryReturnable(store, task) {
     return {
       findings: [
         checks
-          ? `Independent review ${attempt.id} passed, but its checks failed, so the change goes back for another attempt.`
-          : `Independent review ${attempt.id} passed, and the director sent the change back for another attempt.`,
+          ? 'The independent review passed, but its checks failed, so the change goes back for another attempt.'
+          : 'The independent review passed, and the director sent the change back for another attempt.',
         `- ${summary}`,
         ...failed.map(check => `- ${check.name} failed: ${check.evidence}`),
         ...(notes.length ? ['Its notes, which did not block it:', ...notes.map(note => `- ${note}`)] : []),
@@ -1588,11 +1818,26 @@ export function sourceStoryReturnable(store, task) {
       needsNote: !checks && !notes.length,
     };
   }
-  if (stage.current !== 'failed' || review.verdict !== 'needs-work') return null;
+  if (review.verdict !== 'needs-work') return null;
+  // The director may have integrated over the review (MP-019): while that merge is recorded and not settled as stopped,
+  // the story is not sent back, so its journal and the repository it holds wait for Reconcile source integration.
+  // A merge reconciled as stopped before it landed leaves the story waiting for integration; it may go back then too.
+  const journal = attempt.sourceIntegration;
+  if (journal && !['rejected', 'abandoned'].includes(journal.state)) return null;
+  // A story an integration request moved to wait for integration while nothing integrates it: no journal, no
+  // integration of this review on its stage and no request waiting for its turn (an Over refused after the request
+  // moved it, before refusals were checked first, left it so).
+  const stranded =
+    !journal &&
+    stage.phase === 'integration' &&
+    stage.current === 'waiting-for-integration' &&
+    stage.integration?.attemptId !== review.attemptId &&
+    store.setting('autonomy-integration')?.taskId !== task.id;
+  if (stage.current !== 'failed' && !(journal && stage.current === 'waiting-for-integration') && !stranded) return null;
   const { summary, findings } = report();
   return {
     findings: [
-      `Independent review ${attempt.id} requested changes. Address these findings:`,
+      'The independent review requested changes. Address these findings:',
       `- ${summary}`,
       ...findings.map(finding => `- ${finding}`),
     ].join('\n'),
@@ -1729,7 +1974,17 @@ export function sourceIntegrationTarget(store, task, attemptId, reviewHash, { ov
   const review = store.attempt(ref.attemptId);
   if (!equal(review.candidateReview, acceptedCandidate(store, review.assignment)))
     throw new Error('Accepted candidate identity changed.');
+  // The candidate's own tests are checked here too, before an integration request records anything or moves the
+  // story: a refused Over once left a story that asked for changes waiting for an integration that never came, with
+  // only Close to press. integrateSource keeps the same check.
+  if (!candidateTestsPassed(store, store.attempt(review.candidateReview.attemptId)))
+    throw new Error('Integration requires all candidate tests to pass without skips.');
   return { ...task, kind: 'studio-development:change-review' };
+}
+// The candidate's measured tests passed without skips and none of its own checks failed, as integration requires.
+function candidateTestsPassed(store, candidate) {
+  const { report } = validateSourceChange(candidate, name => fs.readFileSync(artifactPath(store, candidate, name)));
+  return report.passed && !candidate.result.checks.some(check => check.status === 'fail');
 }
 // The story's current independent review when the autonomy policy may request its integration
 // (MP-023): accepted, passing with no blocking findings, and not yet tried. A review that requested
@@ -1902,6 +2157,13 @@ function integrationApproval(by = { type: 'director' }, override) {
     throw new Error('Only the director, or the autonomy policy after a passing review, approves integration.');
   return { type: 'policy', revision: by.revision, reason: by.reason };
 }
+// What the director's reason covered, in words: the review's verdict when it requested changes, and the names of
+// its failed checks.
+function overriddenReview(verdict, checks) {
+  const named = checks.length ? `failed check${checks.length === 1 ? '' : 's'} ${checks.join(', ')}` : '';
+  if (verdict === 'pass' && named) return `the review's ${named}`;
+  return `the review's ${verdict} verdict${named ? ` and its ${named}` : ''}`;
+}
 // Integration runs in two parts (MP-016). The synchronous part validates the exact reviewed
 // candidate and its commit, and records a journal holding the source reservations. The
 // controller then merges that commit onto the current tip of the development copy's branch in
@@ -1922,10 +2184,14 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
   )
     throw new Error('Select the exact accepted candidate review for integration.');
   const verdict = validateChangeReview(review, name => fs.readFileSync(artifactPath(store, review, name)));
-  // The director's override covers the review's verdict and its own failed checks, never the candidate's tests.
-  if (!override && (verdict.verdict !== 'pass' || review.result.checks.some(check => check.status === 'fail')))
+  // The director's override covers the review's verdict and its failed checks, its own and the controller's (as the
+  // story's stage and the autonomy policy count them), never the candidate's tests.
+  const failedChecks = [...review.result.checks, ...(review.controllerChecks || [])]
+    .filter(check => check.status === 'fail')
+    .map(check => String(check.name || 'Unnamed check'));
+  if (!override && (verdict.verdict !== 'pass' || failedChecks.length))
     throw new Error(
-      'Integration requires a passing independent review, or your reason to integrate over a review that requested changes.',
+      'Integration requires a passing independent review whose checks passed, or your reason to integrate over it.',
     );
   const candidateRef = acceptedCandidate(store, review.assignment),
     candidate = store.attempt(candidateRef.attemptId);
@@ -1980,6 +2246,7 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
     changes: manifest.changes,
     repository,
     worktree: path.join(sourceWorktreeRoot(runtime), 'i-' + worktreeName(review.id)),
+    ...testFloorOf(store, root, repository.branch, report.totals?.tests),
     startedAt: new Date().toISOString(),
     approvedBy: approval,
     ...(override
@@ -1987,6 +2254,7 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
           reviewOverride: {
             by: { type: 'director' },
             verdict: verdict.verdict,
+            ...(failedChecks.length ? { checks: failedChecks } : {}),
             reason: override.reason,
             at: new Date().toISOString(),
           },
@@ -2005,7 +2273,7 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
     'source_verifying',
     task.id,
     review.id,
-    `Integration approved${override ? ` over the review's ${verdict.verdict} verdict, by the director: ${override.reason}` : approval.type === 'policy' ? ` by autonomy policy revision ${approval.revision} after the independent review passed` : ' by the director'}. The controller is merging the reviewed change onto ${journal.repository.branch} at ${journal.repository.head.slice(0, 7)} in its own worktree, then formatting and testing it; ${journal.repository.live === false ? journal.repository.branch : 'the development copy'} is unchanged until it passes.`,
+    `Integration approved${override ? ` over ${overriddenReview(verdict.verdict, failedChecks)}, by the director: ${override.reason}` : approval.type === 'policy' ? ` by autonomy policy revision ${approval.revision} after the independent review passed` : ' by the director'}. The controller is merging the reviewed change onto ${journal.repository.branch} at ${journal.repository.head.slice(0, 7)} in its own worktree, then formatting and testing it; ${journal.repository.live === false ? journal.repository.branch : 'the development copy'} is unchanged until it passes.`,
   );
   sourceIntegrationProgress(runtime, task, journal);
   const promise = finishIntegration(runtime, task, review, candidate)
@@ -2020,6 +2288,36 @@ export function integrateSource(runtime, task, attemptId, reviewHash, onSettled 
     });
   runtime.sourceIntegrationRun = { id: journal.id, promise };
   return structuredClone(journal);
+}
+// The fewest tests a story's merge may report (testFloor): the count the newest integrated story on the same repository
+// and branch passed with, named by that story's task ID, lowered to the change's own measured count, since a reviewed
+// change may remove tests on purpose. With no integrated story on the line there is no floor.
+function testFloorOf(store, root, branch, candidateTests) {
+  let newest = null;
+  for (const { sourceIntegration: journal } of store.integrationJournals('integrated'))
+    if (
+      journal.root === root &&
+      journal.repository?.branch === branch &&
+      Number.isInteger(journal.verification?.totals?.tests) &&
+      (!newest || String(journal.finishedAt) >= String(newest.finishedAt))
+    )
+      newest = journal;
+  if (!newest) return {};
+  let taskId = newest.reviewTaskId;
+  try {
+    taskId = store.attempt(newest.candidateAttemptId).taskId || taskId;
+  } catch {}
+  const lineTests = newest.verification.totals.tests,
+    measured = Number.isInteger(candidateTests) ? candidateTests : null;
+  return {
+    testFloor: {
+      tests: measured === null ? lineTests : Math.min(lineTests, measured),
+      lineTests,
+      candidateTests: measured,
+      taskId,
+      integrationId: newest.id,
+    },
+  };
 }
 function settle(store, review, journal, state, fields = {}) {
   Object.assign(journal, fields, { state, finishedAt: new Date().toISOString() });
@@ -2165,7 +2463,7 @@ function commitMessage(store, review, candidate, journal) {
     `Proposal: ${proposal.taskId} (${proposal.attemptId})`,
     `Change: ${change.id} (${candidate.id}), candidate ${journal.candidateHash}`,
     journal.reviewOverride
-      ? `Candidate review: ${review.taskId} (${review.id}), verdict ${journal.reviewOverride.verdict}; integrated over it by the director: ${journal.reviewOverride.reason}`
+      ? `Candidate review: ${review.taskId} (${review.id}), verdict ${journal.reviewOverride.verdict}${journal.reviewOverride.checks?.length ? `, failed checks: ${journal.reviewOverride.checks.join(', ')}` : ''}; integrated over it by the director: ${journal.reviewOverride.reason}`
       : `Candidate review: ${review.taskId} (${review.id}), verdict pass`,
     formatter === 'none'
       ? `Verification: no formatter in the source profile; ${testsSentence(totals)} on the merged source${fixture ? ' (protocol fixture)' : ''}.`
@@ -2181,6 +2479,18 @@ function commitMessage(store, review, candidate, journal) {
 // When the controller starts, no integration of its own is running yet, so each such journal becomes uncertain and
 // waits for Reconcile source integration, keeping the state it had reached (`interrupted`): reconciling one cut off
 // in verification, which never writes the development copy, asks nothing about local edits.
+//
+// The computer's one test turn is the exception, as it is for an interrupted attempt (core/orchestrator.mjs): every
+// other full suite waits for it, so a journal that holds it gives back that one lease when the process of the step it
+// recorded running under the turn (testProcess, source-integration.mjs) is confirmed gone, by the process identity
+// every caller shares (testRunEnded, core/test-turn.mjs: its ID with when it started, so a later process handed the ID
+// is not taken for it). The journal stays needs-reconciliation with its other leases. One whose recorded process may
+// still run, or that recorded none (a journal from before it recorded one), keeps the turn until it is reconciled. So
+// does one the stop marked helpersUnconfirmed (stopIntegrationProcess, source-integration.mjs: its launcher had exited
+// before its close came): only the launcher's own process can be checked, and a process it started may still run, so
+// the director reconciles it (restoreSourceIntegration, which frees the turn once that launcher is gone).
+const turnFreedOnRestart =
+  "The test turn was freed: the integration's test run that held it had ended when the controller started again. Only the run's own process was checked; processes it started are not tracked yet and may outlive it.";
 export function interruptedSourceIntegrations(runtime) {
   const store = runtime.store;
   for (const review of store.allAttempts()) {
@@ -2196,8 +2506,14 @@ export function interruptedSourceIntegrations(runtime) {
       review.id,
       `Source integration stopped part-way when the controller stopped (during ${journal.interrupted}); reservations retained. Use Reconcile source integration.`,
     );
+    if (holdsTestTurn(store, journal.id) && testRunEnded(journal) && !journal.testProcess.helpersUnconfirmed)
+      store.tx(() => {
+        store.releaseResource(testTurnResource, journal.id);
+        store.event('test_turn', review.taskId, review.id, turnFreedOnRestart);
+      });
   }
-  // Carries and releases cut off the same way (1.1 steps 4 and 5) are reconciled at once from git history.
+  // Carries and releases cut off the same way (1.1 steps 4 and 5) are reconciled at once from git history; one that
+  // held the test turn keeps it only while its recorded test run may still go on (keepStoppedTurn, source-carries.mjs).
   interruptedCarries(runtime);
   interruptedReleases(runtime);
 }
@@ -2252,8 +2568,19 @@ function reconcileMerge(runtime, task, review, journal) {
   return result;
 }
 export function restoreSourceIntegration(runtime, task) {
-  const store = runtime.store;
-  task = sourceIntegrationTarget(store, task, task.acceptedAttemptId, task.sourceStage?.review?.hash);
+  const store = runtime.store,
+    ref = task.sourceStage?.review,
+    // A merge the director approved over the review that requested changes is checked with the reason its journal
+    // recorded, so it can be reconciled too; any other journal is checked exactly as before.
+    recorded =
+      task.kind === 'studio-development:change' && ref?.attemptId && ref.attemptId === task.acceptedAttemptId
+        ? store.attempt(ref.attemptId)?.sourceIntegration
+        : undefined,
+    override =
+      recorded?.reviewOverride && recorded.reviewHash === ref.hash
+        ? { reason: recorded.reviewOverride.reason }
+        : undefined;
+  task = sourceIntegrationTarget(store, task, task.acceptedAttemptId, ref?.hash, { override });
   const review = store.attempt(task.acceptedAttemptId),
     journal = review.sourceIntegration;
   if (
@@ -2265,6 +2592,14 @@ export function restoreSourceIntegration(runtime, task) {
     runtime.sourceIntegrationRun?.id === journal.id
   )
     throw new Error('Choose an uncertain source integration to reconcile.');
+  // Reconciling gives the test turn back with the journal's other leases (settle), so it waits while the test run the
+  // journal recorded under the turn may still go on (testRunEnded: its launcher's own process, by its ID with when it
+  // started), as Reconcile waits for an attempt's recorded processes (Runner.assertReconcilable). A helpersUnconfirmed
+  // mark alone does not stop it: that launcher is gone and the restart left the turn for the director to free.
+  if (holdsTestTurn(store, journal.id) && journal.testProcess?.pid && !testRunEnded(journal))
+    throw new Error(
+      `The integration's test run (process ${journal.testProcess.pid}) may still be running and holds the computer's test turn. Reconcile again once it has ended.`,
+    );
   if (journal.method === 'merge') return reconcileMerge(runtime, task, review, journal);
   if (runtime.active.size || !store.organization().paused)
     throw new Error('Pause dispatch and choose an uncertain source integration to restore.');

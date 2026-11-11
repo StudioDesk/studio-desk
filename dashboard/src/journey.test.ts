@@ -157,14 +157,62 @@ test("an idea ends when its outcome's state integrated, finished, stopped, was c
   for (const name of ['in-progress', 'needs-you', 'idle'] as const)
     expect(ended({ state: name, tone: 'muted', label: 'Finished', text: '' }), name).toBe(false);
 
-  // The head's chip shows an ended idea's own words, however they read, and an open one's story in progress.
+  // The head's chip shows an ended idea's own words, however they read, and an open one's count of its stories.
   const reworded: RunStory = {
     ...run,
     outcome: { state: 'finished', tone: 'muted', label: 'All wrapped up', text: '' },
   };
   expect(journeyChip(reworded, state)).toEqual({ tone: 'wait', label: 'All wrapped up' });
   const open: RunStory = { ...run, outcome: { state: 'in-progress', tone: 'busy', label: 'Finished', text: '' } };
-  expect(journeyChip(open, state)).toEqual({ tone: 'live', label: 'Building · story 2 of 2' });
+  expect(journeyChip(open, state)).toEqual({ tone: 'live', label: '1 of 2 integrated · 1 building' });
+});
+
+// Several stories run at once, so the head's chip counts what is accepted and what is working, in the words the
+// idea's row counts in, rather than naming the first story not done yet.
+test("an open idea's chip counts its accepted and working stories, not one story", () => {
+  const states = ['done', 'done', 'done', 'done', 'running', 'running', 'ready', 'ready'] as const,
+    works = states.map((status, index) =>
+      task(`T-w${index + 1}`, 'general:work', {
+        status,
+        ...(status === 'ready' ? {} : { lastAttemptId: `a-w${index + 1}` }),
+        ...(status === 'done' ? { acceptedAttemptId: `a-w${index + 1}` } : {}),
+      }),
+    ),
+    general = {
+      ...run,
+      taskIds: works.map(item => item.id),
+      graph: {
+        ...run.graph,
+        stages: works.map(item => [{ taskId: item.id, title: item.title, kind: item.kind, status: item.status }]),
+      },
+    } as RunStory,
+    records = (tasks: Task[]) =>
+      ({
+        ...state,
+        tasks,
+        attempts: tasks
+          .filter(item => item.lastAttemptId)
+          .map((item, index) =>
+            attempt(item.lastAttemptId!, item.id, index, item.status === 'running' ? null : index + 1, {
+              assignment: { kind: 'general:work' },
+            }),
+          ),
+      }) as unknown as StudioState,
+    chip = (tasks: Task[], fields: Partial<RunStory> = {}) => journeyChip({ ...general, ...fields }, records(tasks));
+  expect(chip(works)).toEqual({ tone: 'live', label: '4 of 8 accepted · 2 working' });
+  // Once nothing runs, the chip waits with its count.
+  const waiting = works.map(item => (item.status === 'running' ? { ...item, status: 'ready' as const } : item));
+  expect(chip(waiting)).toEqual({ tone: 'wait', label: '4 of 8 accepted' });
+  // The director's call counts the same stories.
+  const call = { needsYou: [{ requiresDirector: true }] } as unknown as Partial<RunStory>;
+  expect(chip(works, call)).toEqual({ tone: 'you', label: 'Your call · 4 of 8 accepted' });
+  // An ended idea keeps its outcome's words.
+  expect(chip(works, { outcome: { state: 'stopped', tone: 'bad', label: 'Stopped', text: '' } })).toEqual({
+    tone: 'bad',
+    label: 'Stopped',
+  });
+  for (const label of [chip(works), chip(waiting), chip(works, call), journeyChip(run, state)].map(item => item.label))
+    expect(label).not.toMatch(/story \d+ of \d+/);
 });
 
 test('each story says where it is: integrated with its commit, or the attempt running now', () => {
@@ -208,6 +256,36 @@ test('what happened is told in plain sentences, with its stops and decisions mar
     'Attempt 2 started',
     'Eli is working on it now.',
   ]);
+});
+
+test("the plan's quote names the roles its planner wrote as IDs, and leaves other words as written", () => {
+  const planned = (summary: string, studio: Partial<StudioState> = {}) =>
+    happened(run, {
+      ...state,
+      ...studio,
+      attempts: attempts.map(item => (item.id === 'a-plan' ? { ...item, result: { summary } } : item)),
+    } as StudioState)[0]!.entries.find(entry => entry.lead.startsWith('Mara planned it'))!.quote;
+  const roles = {
+    roles: [
+      { id: 'markets-researcher', label: 'Markets researcher' },
+      { id: 'engineer', label: 'Software engineer' },
+    ],
+    // A role an agent holds with no label in the studio's roles reads as its ID in words.
+    workers: [...state.workers, { id: 'W-5', displayName: 'Kit', roles: ['data_analyst'] }],
+  } as Partial<StudioState>;
+  expect(
+    planned(
+      'The markets-researcher compares prices for the data_analyst. The engineer checks a well-known shop, ' +
+        'T-markets-researcher and the markets-researchers list (markets-researcher).',
+      roles,
+    ),
+  ).toBe(
+    'The markets researcher compares prices for the data analyst. The engineer checks a well-known shop, ' +
+      'T-markets-researcher and the markets-researchers list (markets researcher).',
+  );
+  // Without role IDs, or without roles the studio knows, the summary reads as recorded.
+  expect(planned('The engineer checks a well-known shop.', roles)).toBe('The engineer checks a well-known shop.');
+  expect(planned('The markets-researcher compares prices.')).toBe('The markets-researcher compares prices.');
 });
 
 // Graph test 0a (October 25): a review of other work that asked for changes read "passed the review with no

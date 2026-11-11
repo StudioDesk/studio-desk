@@ -1,12 +1,14 @@
 // How each change reaches the records a project's pages hold (records.ts): one task's change fetches that task
 // alone and patches it in; the live set reloads only when work joins or settles; finished runs reload when a run
 // leaves the live set; nothing is fetched for a task no page holds. A command's answer puts the tasks it supplies in
-// at once, without reading them, and starts the confirming reads right away.
+// at once, without reading them, and starts the confirming reads right away. The live set is read a page at a time and
+// held as one.
 import { InfiniteQueryObserver, QueryClient, QueryClientProvider, QueryObserver } from '@tanstack/react-query';
 import { render } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import {
+  callsUrl,
   finishedUrl,
   getJSON,
   liveUrl,
@@ -16,16 +18,24 @@ import {
   type Change,
   type ChangeMessage,
   type CommandRecords,
+  type DirectorCall,
+  type DirectorCalls,
+  type DirectorCarryCall,
+  type DirectorReleaseCall,
+  type DirectorTaskCall,
   type FinishedPage,
   type Live,
   type ReleaseOverview,
+  type RunRecord,
   type Task,
+  type TaskAction,
   type TaskPage,
 } from './api';
 import { ProjectLive } from './live-context';
-import { RecordSync, queryKeys } from './records';
+import { RecordSync, callKey, queryKeys, readLive, servedItems } from './records';
 import { StreamFactoryContext } from './stream-context';
-import { createStream, fakeController, taskFixture, type Controller } from './test-controller';
+import { isCarry, isRelease, runStories, type StudioState } from './studio-runs';
+import { createStream, fakeController, shellFixture, taskFixture, type Controller } from './test-controller';
 
 let controller: Controller, client: QueryClient, sync: RecordSync;
 const unsubscribe: (() => void)[] = [];
@@ -41,7 +51,10 @@ beforeEach(() => {
   sync = new RecordSync(client, 'project-x');
 });
 afterEach(() => {
+  // Optional, so these tests also run against a sync that holds no pending read to stop.
+  (sync as { stop?: () => void }).stop?.();
   unsubscribe.splice(0).forEach(stop => stop());
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -131,6 +144,81 @@ test('a task change during a reload reads the set once more rather than patching
   await Promise.all([reload, sync.apply(changeTo('T-1', 3))]);
   expect(live().tasks.find(task => task.id === 'T-1')?.title).toBe('Renamed during the reload');
   expect(controller.reads().filter(url => url.endsWith('/live'))).toHaveLength(2);
+});
+
+// A page holding the project's list of calls; time is fake from then on, moving only when the test passes it.
+const callsRead = '/api/projects/project-x/calls';
+const callsReads = () => controller.reads().filter(url => url === callsRead).length;
+async function holdCalls() {
+  const calls = new QueryObserver(client, {
+    queryKey: queryKeys.calls('project-x'),
+    queryFn: () => getJSON<DirectorCalls>(callsUrl('project-x')),
+  });
+  unsubscribe.push(calls.subscribe(() => {}));
+  await vi.waitFor(() => expect(client.getQueryData(queryKeys.calls('project-x'))).toBeDefined());
+  controller.requests.length = 0;
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+}
+const pass = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+const phase = (seq: number): Change => ({ seq, type: 'event', kind: 'phase', taskId: 'T-1', attemptId: 'attempt-1' });
+const message = (seq: number, changes: Change[]): ChangeMessage => ({ version: seq, start: 's', changes });
+
+test('messages of phase events alone never read the list of calls again', async () => {
+  await holdCalls();
+  for (let seq = 2; seq < 7; seq++) {
+    await sync.apply(message(seq, [phase(seq), { ...phase(seq), kind: 'log' }]));
+    await pass(300);
+  }
+  await pass(5000);
+  expect(callsReads()).toBe(0);
+});
+
+test('a burst of task changes reads the list of calls once at once and once more when the gap ends, and no more', async () => {
+  await holdCalls();
+  await sync.apply(changeTo('T-1', 2));
+  expect(callsReads()).toBe(1);
+  for (let seq = 3; seq < 7; seq++) {
+    await pass(100);
+    await sync.apply(changeTo('T-1', seq));
+  }
+  expect(callsReads()).toBe(1);
+  // The gap after the first read ends: the changes after it are read once.
+  await pass(600);
+  expect(callsReads()).toBe(2);
+  await pass(5000);
+  expect(callsReads()).toBe(2);
+});
+
+test('a task change after a quiet second reads the list of calls at once', async () => {
+  await holdCalls();
+  await sync.apply(changeTo('T-1', 2));
+  await sync.apply(changeTo('T-1', 3));
+  expect(callsReads()).toBe(1);
+  await pass(1000);
+  expect(callsReads()).toBe(2);
+  // A quiet second after that read: the next change is read at once.
+  await pass(1000);
+  await sync.apply(changeTo('T-1', 4));
+  expect(callsReads()).toBe(3);
+  await pass(5000);
+  expect(callsReads()).toBe(3);
+});
+
+test("a message with an attempt's change beside a phase event reads the list of calls", async () => {
+  await holdCalls();
+  await sync.apply(message(2, [phase(2)]));
+  expect(callsReads()).toBe(0);
+  await sync.apply(message(3, [phase(3), { seq: 3, type: 'attempt', id: 'attempt-1', taskId: 'T-1' }]));
+  expect(callsReads()).toBe(1);
+});
+
+test('a stopped sync reads nothing more when the gap ends', async () => {
+  await holdCalls();
+  await sync.apply(changeTo('T-1', 2));
+  await sync.apply(changeTo('T-1', 3));
+  sync.stop();
+  await pass(5000);
+  expect(callsReads()).toBe(1);
 });
 
 // A page holding one task's own record.
@@ -388,4 +476,310 @@ test('a milestone, a line, a run or a story they name changing reads the release
   controller.requests.length = 0;
   await sync.answer(answered([controller.tasks[0]!]));
   expect(controller.reads()).toEqual([]);
+});
+
+// The controller answers the live set a page at a time (page-read-limits): the records read the next page while one
+// says next, and hold every page's records as one set, as the board, Home and the rail read it.
+function livePages(pages: Record<string, Live>, refuse: (url: string) => boolean = () => false) {
+  const reads: string[] = [];
+  vi.stubGlobal('fetch', async (input: string) => {
+    const url = String(input);
+    reads.push(url);
+    const page = refuse(url) ? undefined : pages[url];
+    return page
+      ? { ok: true, status: 200, json: async () => page }
+      : { ok: false, status: 404, json: async () => ({ error: 'That page of open work no longer exists.' }) };
+  });
+  return reads;
+}
+async function holdPagedLive() {
+  const observer = new QueryObserver(client, {
+    queryKey: queryKeys.live('project-x'),
+    queryFn: ({ signal }) => readLive('project-x', signal),
+  });
+  unsubscribe.push(observer.subscribe(() => {}));
+  await vi.waitFor(() => expect(client.getQueryData(queryKeys.live('project-x'))).toBeDefined());
+}
+const first: Live = {
+    tasks: [taskFixture('T-1', { status: 'running' }), taskFixture('T-2', { status: 'done' })],
+    attempts: [{ id: 'attempt-1', taskId: 'T-1', status: 'running' }],
+    runs: [{ id: 'run-1', createdAt: '2026-10-21T12:00:00Z' }],
+    ideas: [{ id: 'idea-1', brief: 'An idea.', createdAt: '2026-10-20T12:00:00Z', taskIds: ['T-2'] }],
+    next: 'T-2',
+    version: 7,
+  },
+  second: Live = {
+    tasks: [taskFixture('T-3', { status: 'failed' })],
+    attempts: [{ id: 'attempt-3', taskId: 'T-3', status: 'failed' }],
+    runs: [
+      { id: 'run-2', createdAt: '2026-10-22T12:00:00Z' },
+      { id: 'run-1', createdAt: '2026-10-21T12:00:00Z' },
+    ],
+    ideas: [{ id: 'idea-1', brief: 'An idea.', createdAt: '2026-10-20T12:00:00Z', taskIds: ['T-3'] }],
+    next: null,
+    version: 8,
+  };
+
+test('a live answer that says next reads the following page, and the records hold every task of both pages', async () => {
+  const reads = livePages({ [liveUrl('project-x')]: first, [liveUrl('project-x', 'T-2')]: second });
+  await holdPagedLive();
+  expect(reads).toEqual(['/api/projects/project-x/live', '/api/projects/project-x/live?before=T-2']);
+  expect(live().tasks.map(task => task.id)).toEqual(['T-1', 'T-2', 'T-3']);
+  expect(live().attempts.map(attempt => attempt.id)).toEqual(['attempt-1', 'attempt-3']);
+  // Each open run once, newest first as the controller lists them; each idea once, with its tasks from both pages.
+  expect(live().runs.map(run => run.id)).toEqual(['run-2', 'run-1']);
+  expect(live().ideas).toEqual([{ ...first.ideas![0]!, taskIds: ['T-2', 'T-3'] }]);
+  // The set read whole has no next page, and resumes from the earliest change sequence its pages reflect.
+  expect(live().next).toBeNull();
+  expect(live().version).toBe(7);
+});
+
+test('a single-page live answer reads once and is held as it came', async () => {
+  const only: Live = { ...first, ideas: [], next: null, version: 3 },
+    reads = livePages({ [liveUrl('project-x')]: only });
+  await holdPagedLive();
+  expect(reads).toEqual(['/api/projects/project-x/live']);
+  expect(live()).toEqual(only);
+});
+
+test('a following page whose cursor settled out of the set reads the set again from its first page', async () => {
+  const pages = { [liveUrl('project-x')]: first, [liveUrl('project-x', 'T-2')]: second },
+    following = liveUrl('project-x', 'T-2');
+  // The cursor's page is refused once, as when its task settled between the two reads.
+  let refusals = 1;
+  const reads = livePages(pages, url => url === following && refusals-- > 0);
+  const whole = await readLive('project-x');
+  expect(reads).toEqual([
+    '/api/projects/project-x/live',
+    '/api/projects/project-x/live?before=T-2',
+    '/api/projects/project-x/live',
+    '/api/projects/project-x/live?before=T-2',
+  ]);
+  expect(whole.tasks.map(task => task.id)).toEqual(['T-1', 'T-2', 'T-3']);
+  // A set that keeps refusing its pages fails after its third try rather than reading forever.
+  const always = livePages(pages, url => url === following);
+  await expect(readLive('project-x')).rejects.toThrow('That page of open work no longer exists.');
+  expect(always).toHaveLength(6);
+});
+
+// The served calls as the pages draw them (records.ts callKey and servedItems): a stopped release and a stopped carry
+// each get a key of their own and an item with their served actions, and a task's, cleanup's, hold's and resume's
+// call is drawn as before.
+test('callKey and servedItems give a stopped release and a stopped carry their own key and item, and the others as before', () => {
+  const action = (key: string, label: string, path: string, fields: TaskAction['fields']): TaskAction => ({
+    key,
+    label,
+    emphasis: 'primary',
+    closing: false,
+    method: 'POST',
+    path,
+    fields: [{ name: 'projectId', required: true, kind: 'id', value: 'project-x' }, ...fields],
+  });
+  const release: DirectorReleaseCall = {
+      type: 'release',
+      projectId: 'project-x',
+      milestoneId: 'm-120',
+      version: '1.2.0',
+      state: 'needs-reconciliation',
+      taskIds: ['T-notes'],
+      runId: null,
+      kind: 'release-stopped',
+      reason: 'The release of 1.2.0 stopped part-way: The controller stopped.',
+      next: 'Release it again; it is tagged once.',
+      action: 'Release again',
+      details: ['The controller stopped.'],
+      actions: [action('release-again', 'Release again', '/api/projects/project-x/milestones/m-120/release/again', [])],
+    },
+    carry: DirectorCarryCall = {
+      type: 'carry',
+      projectId: 'project-x',
+      taskId: 'T-fix',
+      taskIds: ['T-fix'],
+      title: 'Keep the board',
+      line: 'main',
+      back: false,
+      state: 'rejected',
+      runId: null,
+      kind: 'carry-stopped',
+      reason: 'Carrying this fix to main was turned down.',
+      next: 'Carry it again, or say it is not needed there.',
+      action: 'Carry to main again',
+      details: [],
+      actions: [
+        action('carry', 'Carry to main again', '/api/tasks/T-fix/carry', [
+          { name: 'line', required: true, kind: 'text', value: 'main' },
+        ]),
+      ],
+    },
+    task: DirectorTaskCall = {
+      type: 'task',
+      taskId: 'T-1',
+      runId: null,
+      kind: 'ready',
+      reason: 'Ready.',
+      next: 'Start it.',
+      action: 'Start assignment',
+      details: [],
+      attemptId: null,
+      canClose: true,
+      actions: [],
+    },
+    cleanupCall: DirectorCall = {
+      type: 'cleanup',
+      runId: 'run-1',
+      taskIds: ['T-next'],
+      members: [{ ...task, taskId: 'T-next', runId: 'run-1', reason: 'Waits on stopped work.' }],
+    },
+    hold: DirectorCall = {
+      type: 'hold',
+      provider: 'claude',
+      label: 'Claude Code',
+      taskIds: ['T-1'],
+      runId: null,
+      kind: 'subscription-hold',
+      reason: 'Held.',
+      next: 'Clear it.',
+      action: null,
+      details: [],
+      actions: [],
+    },
+    resume: DirectorCall = {
+      type: 'resume',
+      projectId: 'project-x',
+      taskIds: ['T-1'],
+      runId: null,
+      kind: 'project-resume',
+      reason: 'Restarted.',
+      next: 'Resume it.',
+      action: 'Resume this project',
+      details: [],
+      actions: [],
+    };
+  const tasks = [
+      taskFixture('T-1'),
+      taskFixture('T-next', { workflowReference: { runId: 'run-1', key: 'run-1', id: 'workflow-1', name: 'Flow' } }),
+    ],
+    run: RunRecord = {
+      id: 'run-1',
+      createdAt: '2026-10-29T09:00:00.000Z',
+      brief: 'An idea',
+      workflow: { id: 'workflow-1', name: 'Flow', version: 1 },
+      revisions: [{ revision: 1, at: '2026-10-29T09:00:00.000Z', reason: 'created' }],
+      nodes: [
+        {
+          taskId: 'T-next',
+          key: 'T-next',
+          kind: 'general',
+          title: 'T-next',
+          workerId: 'W-1',
+          dependencies: [],
+          revision: 1,
+        },
+      ],
+    },
+    state: StudioState = { ...shellFixture(), tasks, attempts: [], runs: [run] },
+    stories = runStories(state),
+    served = [task, cleanupCall, hold, resume, release, carry];
+  expect(served.map(callKey)).toEqual([
+    'T-1',
+    'cleanup:run-1',
+    'hold:claude',
+    'resume:project-x',
+    'release:m-120',
+    'carry:T-fix',
+  ]);
+  const items = servedItems(served, state, stories);
+  // Each item keeps its call's key.
+  expect(items.map(callKey)).toEqual(served.map(callKey));
+  expect(items.map(item => [isRelease(item), isCarry(item)])).toEqual([
+    [false, false],
+    [false, false],
+    [false, false],
+    [false, false],
+    [true, false],
+    [false, true],
+  ]);
+  expect(items[4]).toEqual({
+    kind: 'release-stopped',
+    projectId: 'project-x',
+    milestoneId: 'm-120',
+    version: '1.2.0',
+    state: 'needs-reconciliation',
+    taskIds: ['T-notes'],
+    reason: release.reason,
+    next: release.next,
+    action: 'Release again',
+    details: ['The controller stopped.'],
+    actions: release.actions,
+    requiresDirector: true,
+  });
+  expect(items[5]).toEqual({
+    kind: 'carry-stopped',
+    projectId: 'project-x',
+    taskId: 'T-fix',
+    taskIds: ['T-fix'],
+    title: 'Keep the board',
+    line: 'main',
+    back: false,
+    state: 'rejected',
+    reason: carry.reason,
+    next: carry.next,
+    action: 'Carry to main again',
+    details: [],
+    actions: carry.actions,
+    requiresDirector: true,
+  });
+  // The task's, cleanup's, hold's and resume's items as they were drawn before.
+  expect(items[0]).toEqual({
+    taskId: 'T-1',
+    kind: 'ready',
+    reason: 'Ready.',
+    details: [],
+    next: 'Start it.',
+    action: 'Start assignment',
+    requiresDirector: true,
+    text: 'Ready.',
+    cleanup: false,
+    canClose: true,
+  });
+  expect(items[1]).toEqual({
+    run: stories[0],
+    members: [
+      {
+        taskId: 'T-next',
+        kind: 'ready',
+        reason: 'Waits on stopped work.',
+        details: [],
+        next: 'Start it.',
+        action: 'Start assignment',
+        requiresDirector: true,
+        text: 'Waits on stopped work.',
+        cleanup: true,
+        canClose: true,
+      },
+    ],
+    taskIds: ['T-next'],
+    requiresDirector: true,
+  });
+  expect(items[2]).toEqual({
+    kind: 'subscription-hold',
+    provider: 'claude',
+    label: 'Claude Code',
+    resetAt: null,
+    resetTime: null,
+    taskIds: ['T-1'],
+    reason: 'Held.',
+    next: 'Clear it.',
+    action: null,
+    requiresDirector: true,
+  });
+  expect(items[3]).toEqual({
+    kind: 'project-resume',
+    projectId: 'project-x',
+    taskIds: ['T-1'],
+    reason: 'Restarted.',
+    next: 'Resume it.',
+    action: 'Resume this project',
+    requiresDirector: true,
+  });
 });

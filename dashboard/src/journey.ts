@@ -3,7 +3,7 @@
 // the run's own tasks and attempts. Nothing here sends anything.
 import type { AttemptSummary, Task } from './api';
 import { plural, reviewOf, spoken, totalsOf } from './evidence';
-import { workerName } from './names';
+import { namingRoles, workerName } from './names';
 import { changeableAnswer, exchange, waitingQuestion } from './questions';
 import { cliName, isSourceStory, standing, storySteps } from './story';
 import { active, type GraphNode, type Outcome, type RunStory, type StudioState } from './studio-runs';
@@ -382,7 +382,8 @@ export function happened(run: RunStory, state: StudioState): HappenedGroup[] {
           tone: 'ok',
           lead: `${who} planned it as ${stories.length} ${plural(stories.length, 'story', 'stories')}`,
           text: `${stories.length > 1 && serial ? 'that run one after another, ' : ''}in ${time}.`,
-          quote: attempt.result?.summary ? clip(attempt.result.summary, 320) : undefined,
+          // The planner's summary, with the role IDs it names in words.
+          quote: attempt.result?.summary ? clip(namingRoles(state, attempt.result.summary), 320) : undefined,
           taskId: task.id,
         });
       } else
@@ -682,21 +683,22 @@ export function whoWorked(run: RunStory, state: StudioState): Worked[] {
 const endedStates: readonly Outcome['state'][] = ['integrated', 'finished', 'stopped', 'cancelled', 'closed'];
 export const ideaEnded = (run: Pick<RunStory, 'outcome'>) => endedStates.includes(run.outcome.state);
 
-// The head's chip: what the idea is doing now.
+// The head's chip: what the idea is doing now, counted over its stories, in the words its row's count uses: how many
+// are accepted (a code idea's, integrated) and, while any runs, how many are working (building).
 export function journeyChip(run: RunStory, state: StudioState): { tone: Tone; label: string } {
-  const stories = journeyStories(run, state),
-    current = stories.find(story => story.current);
+  const stories = journeyStories(run, state);
   if (ideaEnded(run))
     return {
       tone: run.outcome.tone === 'ok' ? 'ok' : run.outcome.tone === 'bad' ? 'bad' : 'wait',
       label: run.outcome.label,
     };
+  const source = stories.some(story => isSourceStory(story.task)),
+    done = stories.filter(story => story.chip.tone === 'ok').length,
+    live = stories.filter(story => story.chip.tone === 'live').length,
+    count = `${done} of ${stories.length} ${source ? 'integrated' : 'accepted'}`;
   if (run.needsYou.some(item => item.requiresDirector))
-    return { tone: 'you', label: current ? `Your call · story ${current.number} of ${stories.length}` : 'Your call' };
-  if (current)
-    return {
-      tone: current.chip.tone === 'live' ? 'live' : 'wait',
-      label: `${stories.some(story => isSourceStory(story.task)) ? 'Building' : 'Working'} · story ${current.number} of ${stories.length}`,
-    };
+    return { tone: 'you', label: stories.length ? `Your call · ${count}` : 'Your call' };
+  if (live) return { tone: 'live', label: `${count} · ${live} ${source ? 'building' : 'working'}` };
+  if (stories.some(story => story.current)) return { tone: 'wait', label: count };
   return { tone: run.outcome.tone === 'busy' ? 'live' : 'wait', label: run.outcome.label };
 }

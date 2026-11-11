@@ -1,0 +1,438 @@
+// The story page's task actions as shared rules (public/task-actions.js): in every decision state the page's own
+// tests open, the page offers exactly the actions the shared rules list, in the same order, apart from the page's own
+// controls named below; each listed action names a route the controller answers and the fields it takes.
+import { QueryClient } from '@tanstack/react-query';
+import { createMemoryHistory } from '@tanstack/react-router';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { createElement } from 'react';
+import { afterEach, expect, test, vi } from 'vitest';
+import type { Task } from './api';
+import { App } from './app';
+import { createAppRouter } from './router';
+import { taskActions, type StudioState, type TaskAction } from './studio-runs';
+import {
+  actionsOf,
+  callsOf,
+  createStream,
+  decisionStates,
+  fakeController,
+  taskFixture,
+  type Controller,
+} from './test-controller';
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+// The page's own controls, which open something rather than ask the controller for one recorded step: the More
+// actions menu (its items are compared in its place), Try it's strip, the file form and the link to the full account.
+const pageOnly = ['More actions', 'Try it', 'Edit the file list', 'Read why in Checks', 'Read why in Overview'];
+
+// What each state offers, as task-decisions.test.tsx shows it, so neither side can match the other by offering nothing.
+const expected: Record<string, string[]> = {
+  'ready work': ['Start assignment', 'Close this step'],
+  'a waiting question': ['Send to Eli', 'Start assignment', 'Close'],
+  'a stop without a question': ['Start assignment', 'Close'],
+  'an interrupted attempt': ['Reconcile interrupted attempt'],
+  'a quarantined attempt': ['Reconcile interrupted attempt'],
+  'an interrupted attempt after reconciling': ['Start assignment', 'Close'],
+  'a result in review': ['Accept result', 'Request revision', 'Close without accepting'],
+  'past the attempt limit': ['Start assignment', 'Close'],
+  'proposed work': ['Approve work', 'Deny work'],
+  'running work': ['Request cancellation'],
+  'a passing review': ['Integrate', 'Send back to Eli', 'Close without integrating'],
+  'a review in progress': ['Request cancellation'],
+  'a review that asked for changes': ['Send back to Eli', 'Integrate over the review', 'Close without integrating'],
+  // The controller refuses to integrate a change whose own tests failed, over the review or not.
+  'a review that asked for changes of a change whose tests failed': ['Send back to Eli', 'Close without integrating'],
+  // A refused integration left it waiting with nothing to run: it goes back with the review's findings.
+  'a review that asked for changes, left waiting by a refused integration': [
+    'Send back to Eli',
+    'Close without integrating',
+  ],
+  'a conflict': ['Merge onto the current source', 'Integrate again', 'Send back to Eli', 'Close without integrating'],
+  'landed since': ['Merge onto the current source', 'Integrate again', 'Send back to Eli', 'Close without integrating'],
+  'failed with nothing landed': ['Integrate again', 'Send back to Eli', 'Close without integrating'],
+  'a carry waiting': ['Carry to main', 'Not needed on main…'],
+  'a landed story with bring-back lines': ['Bring back to release/1.1', 'Bring back to release/1.0'],
+  'a landed story on a project with one line': [],
+  'a landed carry story': [],
+  'a stopped bring-back': ['Bring back to release/1.0 again', 'Not needed on release/1.0…'],
+  // The code moved past the story's plan: the one step that works, with plain Close behind More actions.
+  'a story the code moved past': ['Close and send as a new idea', 'Close'],
+  // A file request the controller would refuse as asked: no Allow and continue, nor its file form.
+  'a file request outside the measured list': ['Start assignment', 'Close'],
+  'a closed story': [],
+};
+
+// The story page for a task, as task-decisions.test.tsx opens it.
+const open = (controller: Controller, task: Task) => {
+  controller.tasks = [task, ...controller.tasks.filter(item => item.id !== task.id)];
+  render(
+    createElement(App, {
+      router: createAppRouter(createMemoryHistory({ initialEntries: [`/p/project-x/tasks/${task.id}`] })),
+      queryClient: new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } }),
+      createStream,
+    }),
+  );
+};
+// The records the page holds for the project: its shell and its live records.
+const studioOf = (controller: Controller): StudioState => ({
+  ...controller.shell,
+  tasks: controller.tasks,
+  attempts: controller.attempts,
+  runs: controller.runs,
+});
+
+// The labels the page offers, in its order: the question card's send button, then each button under "Where it
+// stands" (a command request's form, the decisions row, Try it and Bring back), with More actions standing for the
+// closing actions its menu lists. Buttons in a closed dialog are not offered.
+function offered() {
+  const asking = screen.queryByRole('article', { name: /'s question$/ }),
+    answer = asking
+      ? within(asking)
+          .getAllByRole('button')
+          .filter(button => (button as HTMLButtonElement).type === 'submit')
+          .map(button => button.textContent?.trim() ?? '')
+      : [],
+    region = screen.getByRole('region', { name: 'Where it stands' }),
+    closing = within(region)
+      .queryAllByRole('menuitem', { hidden: true })
+      .map(item => document.getElementById(item.getAttribute('aria-labelledby') ?? '')?.textContent ?? ''),
+    stands = within(region)
+      .queryAllByRole('button')
+      .flatMap(button => {
+        const name = button.getAttribute('aria-label') ?? button.textContent?.trim() ?? '';
+        return name === 'More actions' ? [name, ...closing] : [name];
+      });
+  return [...answer, ...stands];
+}
+const compared = (labels: string[]) => labels.filter(label => !pageOnly.includes(label));
+
+test.each(Object.keys(decisionStates))(
+  'in the state "%s", the page offers what the shared rules list, in order',
+  async name => {
+    const controller = fakeController(),
+      task = decisionStates[name]!(controller);
+    vi.stubGlobal('confirm', () => true);
+    open(controller, task);
+    await screen.findByRole('region', { name: 'Where it stands' });
+    const listed = () =>
+      taskActions(task, studioOf(controller), { bringBack: controller.bringBack[task.id] ?? { lines: [] } }).map(
+        action => action.label,
+      );
+    expect(listed()).toEqual(expected[name]);
+    // The page reads what it offers as it loads (Try it, Bring back's lines), so it is compared once it settles.
+    await waitFor(() => expect(compared(offered())).toEqual(listed()));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(compared(offered())).toEqual(listed());
+  },
+);
+
+// Every listed action names a route the controller answers for the task, or the pipeline, and the fields it takes,
+// the project among them.
+test('every listed action has a key, a label, a POST or PATCH, a route and fields with the project', () => {
+  const all: { task: Task; action: TaskAction }[] = [];
+  for (const setUp of Object.values(decisionStates)) {
+    const controller = fakeController(),
+      task = setUp(controller);
+    controller.tasks = [task, ...controller.tasks.filter(item => item.id !== task.id)];
+    const state = studioOf(controller);
+    // With and without the bring-back read, and a command request, so every kind of action is checked.
+    for (const reads of [{ bringBack: controller.bringBack[task.id] ?? { lines: [] } }, {}])
+      for (const action of taskActions(task, state, reads)) all.push({ task, action });
+  }
+  expect(all.length).toBeGreaterThan(30);
+  for (const { task, action } of all) {
+    expect(action.key).toBeTruthy();
+    expect(action.label).toBeTruthy();
+    expect(['primary', 'default', 'quiet']).toContain(action.emphasis);
+    expect(typeof action.closing).toBe('boolean');
+    expect(['POST', 'PATCH']).toContain(action.method);
+    const id = encodeURIComponent(task.id);
+    expect(
+      action.path === `/api/tasks/${id}` ||
+        action.path.startsWith(`/api/tasks/${id}/`) ||
+        action.path === '/api/pipeline',
+    ).toBe(true);
+    expect(action.fields.find(field => field.name === 'projectId')).toEqual({
+      name: 'projectId',
+      required: true,
+      kind: 'id',
+      value: 'project-x',
+    });
+    for (const field of action.fields) expect(typeof field.required).toBe('boolean');
+  }
+});
+
+// The routes and fields the page sends, as task-decisions.test.tsx records them.
+test('the listed routes and fields are the ones the page sends', () => {
+  const listed = (name: string, setUp?: (controller: Controller, task: Task) => Task) => {
+    const controller = fakeController();
+    let task = decisionStates[name]!(controller);
+    if (setUp) task = setUp(controller, task);
+    controller.tasks = [task, ...controller.tasks.filter(item => item.id !== task.id)];
+    return taskActions(task, studioOf(controller), { bringBack: controller.bringBack[task.id] ?? { lines: [] } });
+  };
+  const brief = (action?: TaskAction) =>
+    action && {
+      method: action.method,
+      path: action.path,
+      fields: Object.fromEntries(
+        action.fields.map(field => [field.name, field.value ?? (field.required ? 'needed' : 'may')]),
+      ),
+    };
+  expect(brief(listed('ready work').find(action => action.key === 'start'))).toEqual({
+    method: 'POST',
+    path: '/api/tasks/T-1/start',
+    fields: { projectId: 'project-x', direction: 'may' },
+  });
+  // Past the attempt limit, the same Start, whose note is the next attempt's direction.
+  expect(listed('past the attempt limit')[0]!.key).toBe('start-past-limit');
+  // The served count decides it (attemptCount): one the controller counts below its limit, such as a flow's next
+  // round with the earlier round's attempt on record, is an ordinary Start; one at its limit is past it.
+  expect(
+    listed('past the attempt limit', (_, task) => ({ ...task, attemptCount: { used: 0, allowed: 1 } }))[0]!.key,
+  ).toBe('start');
+  expect(listed('ready work', (_, task) => ({ ...task, attemptCount: { used: 3, allowed: 3 } }))[0]!.key).toBe(
+    'start-past-limit',
+  );
+  expect(brief(listed('a result in review').find(action => action.key === 'revise'))).toEqual({
+    method: 'POST',
+    path: '/api/tasks/T-1/revise',
+    fields: { projectId: 'project-x', direction: 'needed' },
+  });
+  // Accepting may carry a reason, to accept over a failed check.
+  expect(brief(listed('a result in review').find(action => action.key === 'accept'))?.fields).toEqual({
+    projectId: 'project-x',
+    overReason: 'may',
+  });
+  expect(brief(listed('a passing review').find(action => action.key === 'integrate'))).toEqual({
+    method: 'POST',
+    path: '/api/tasks/T-1/integrate-source',
+    fields: { projectId: 'project-x', attemptId: 'attempt-review', reviewHash: 'review-hash', overrideReason: 'may' },
+  });
+  // A pass that noted nothing needs the director's note; the review that asked for changes sent its findings.
+  expect(brief(listed('a passing review').find(action => action.key === 'send-back-passed'))?.fields.note).toBe(
+    'needed',
+  );
+  expect(brief(listed('a review that asked for changes').find(action => action.key === 'over'))?.fields).toEqual({
+    projectId: 'project-x',
+    attemptId: 'attempt-review',
+    reviewHash: 'review-hash',
+    overrideReason: 'needed',
+  });
+  expect(brief(listed('a stopped bring-back').find(action => action.key === 'carry-skip'))?.fields).toEqual({
+    projectId: 'project-x',
+    line: 'release/1.0',
+    reason: 'needed',
+  });
+  expect(brief(listed('a landed story with bring-back lines').at(-1))).toEqual({
+    method: 'POST',
+    path: '/api/tasks/T-1/bring-back',
+    fields: { projectId: 'project-x', line: 'release/1.0' },
+  });
+  expect(brief(listed('a waiting question')[0])).toEqual({
+    method: 'POST',
+    path: '/api/tasks/T-1/answer',
+    fields: { projectId: 'project-x', attemptId: 'attempt-1', option: 'may', text: 'may', autoMode: 'may' },
+  });
+  // Close and send as a new idea may carry the director's words for the idea.
+  expect(brief(listed('a story the code moved past')[0])).toEqual({
+    method: 'POST',
+    path: '/api/tasks/T-1/send-as-idea',
+    fields: { projectId: 'project-x', idea: 'may' },
+  });
+  // A held task's Release hold is a change to the task itself.
+  expect(
+    brief(listed('ready work', (_, task) => ({ ...task, hold: true })).find(action => action.key === 'hold')),
+  ).toEqual({ method: 'PATCH', path: '/api/tasks/T-1', fields: { projectId: 'project-x', hold: false } });
+  // A command request is allowed from the attempt that stopped, with the commands it asked for.
+  const commands = listed('a stop without a question', (controller, task) => {
+    controller.attempts[0]!.commandDenials = [{ tool: 'Bash', input: { command: 'npm run lint' } }];
+    return task;
+  });
+  // Shown only where the shared explanation says the stop is a command request.
+  for (const action of commands.filter(item => item.key === 'allow-commands'))
+    expect(brief(action)?.path).toBe('/api/tasks/T-1/allow-commands');
+});
+
+// The script needs nothing but the run rules before it: no imports, and it sets a frozen module.
+test('the shared script has no imports and runs after the run rules', async () => {
+  // The file's base kept apart, so Vite does not rewrite the script's URL as a browser asset's.
+  const base = import.meta.url,
+    { readFileSync } = await vi.importActual<{ readFileSync: (file: URL, encoding: 'utf8') => string }>('node:fs'),
+    read = (name: string) => readFileSync(new URL('../../public/' + name, base), 'utf8'),
+    script = read('task-actions.js');
+  expect(script).not.toMatch(/^\s*import\b|\brequire\(|\bimport\(/m);
+  const scope: { StudioRuns?: unknown; StudioTaskActions?: { taskActions: unknown } } = {};
+  new Function('globalThis', read('runs.js'))(scope);
+  new Function('globalThis', script)(scope);
+  expect(Object.isFrozen(scope.StudioTaskActions)).toBe(true);
+  expect(Object.keys(scope.StudioTaskActions ?? {})).toEqual(['taskActions', 'bringBackable']);
+  expect(typeof scope.StudioTaskActions?.taskActions).toBe('function');
+});
+
+// Each listed action keeps the emphasis the page gives its button and whether it sits behind More actions.
+test('each action carries its emphasis and whether it is a closing action', () => {
+  const listed = (name: string) => {
+    const controller = fakeController(),
+      task = decisionStates[name]!(controller);
+    controller.tasks = [task, ...controller.tasks.filter(item => item.id !== task.id)];
+    return taskActions(task, studioOf(controller), { bringBack: controller.bringBack[task.id] ?? { lines: [] } }).map(
+      action => [action.label, action.emphasis, action.closing],
+    );
+  };
+  expect(listed('ready work')).toEqual([
+    ['Start assignment', 'primary', false],
+    ['Close this step', 'quiet', true],
+  ]);
+  expect(listed('a waiting question')).toEqual([
+    ['Send to Eli', 'primary', false],
+    ['Start assignment', 'default', false],
+    ['Close', 'quiet', true],
+  ]);
+  expect(listed('a result in review')).toEqual([
+    ['Accept result', 'primary', false],
+    ['Request revision', 'default', false],
+    ['Close without accepting', 'quiet', true],
+  ]);
+  expect(listed('a review that asked for changes')).toEqual([
+    ['Send back to Eli', 'primary', false],
+    ['Integrate over the review', 'default', false],
+    ['Close without integrating', 'quiet', true],
+  ]);
+  expect(listed('a landed story with bring-back lines')).toEqual([
+    ['Bring back to release/1.1', 'default', false],
+    ['Bring back to release/1.0', 'default', false],
+  ]);
+});
+
+// A story whose integration over the review was approved and waits for its turn has the same stage as one a refused
+// integration left waiting, but it is not sent back: its request runs once the source is free.
+test('a review that asked for changes whose integration over it waits for its turn is not sent back', () => {
+  const controller = fakeController(),
+    story = decisionStates['a review that asked for changes, left waiting by a refused integration']!(controller);
+  controller.attempts[0]!.candidateReview = { passed: true };
+  controller.shell = {
+    ...controller.shell,
+    autonomy: { ...controller.shell.autonomy, pendingIntegration: { taskId: 'T-1' } },
+  };
+  controller.tasks = [story, ...controller.tasks.filter(item => item.id !== story.id)];
+  expect(taskActions(story, studioOf(controller), {}).map(action => action.label)).toEqual([]);
+  // Without the request, the same records go back with the findings, and may be integrated over the review.
+  controller.shell = { ...controller.shell, autonomy: { ...controller.shell.autonomy, pendingIntegration: null } };
+  expect(taskActions(story, studioOf(controller), {}).map(action => action.label)).toEqual([
+    'Send back to Eli',
+    'Integrate over the review',
+    'Close without integrating',
+  ]);
+});
+
+// Resume dispatch is a listed action, the studio's own switch, and the page offers it where the rules list it.
+test('Resume dispatch is listed with its route to the studio switch, and the page offers it in order', async () => {
+  const controller = fakeController();
+  controller.shell = { ...controller.shell, paused: true };
+  const task = taskFixture('T-1');
+  vi.stubGlobal('confirm', () => true);
+  open(controller, task);
+  await screen.findByRole('region', { name: 'Where it stands' });
+  const listed = taskActions(task, studioOf(controller), {});
+  expect(listed.map(action => action.label)).toEqual(['Start assignment', 'Resume dispatch', 'Close this step']);
+  expect(listed.find(action => action.key === 'dispatch')).toEqual({
+    key: 'dispatch',
+    label: 'Resume dispatch',
+    emphasis: 'default',
+    closing: false,
+    method: 'POST',
+    path: '/api/control',
+    fields: [{ name: 'paused', required: true, kind: 'boolean', value: false }],
+  });
+  await waitFor(() => expect(compared(offered())).toEqual(listed.map(action => action.label)));
+});
+
+// A result in review whose own check failed, its attempt's report naming the failed check.
+const failingReview = (controller: Controller) => {
+  const task = decisionStates['a result in review']!(controller);
+  controller.attempts[0]!.result = {
+    outcome: 'completed',
+    summary: 'Ready.',
+    checks: [{ name: 'unit tests', status: 'fail', evidence: 'One failed.' }],
+  } as never;
+  controller.tasks = [task, ...controller.tasks.filter(item => item.id !== task.id)];
+  return task;
+};
+
+// A result whose own checks failed is accepted over them with a reason, unless its type accepts failed checks.
+test('a result in review with a failed check lists Accept over a failed check… with its reason required', async () => {
+  const controller = fakeController(),
+    task = failingReview(controller),
+    listed = taskActions(task, studioOf(controller), {});
+  expect(listed.map(action => action.label)).toEqual([
+    'Accept over a failed check…',
+    'Request revision',
+    'Close without accepting',
+  ]);
+  expect(listed[0]!.path).toBe('/api/tasks/T-1/accept');
+  expect(listed[0]!.fields).toEqual([
+    { name: 'projectId', required: true, kind: 'id', value: 'project-x' },
+    { name: 'overReason', required: true, kind: 'reason' },
+  ]);
+  vi.stubGlobal('confirm', () => true);
+  open(controller, task);
+  await screen.findByRole('region', { name: 'Where it stands' });
+  await waitFor(() => expect(compared(offered())).toEqual(listed.map(action => action.label)));
+});
+
+test('a result with a failed check whose type accepts failed checks lists plain Accept result', () => {
+  const controller = fakeController(),
+    task = failingReview(controller);
+  controller.shell = {
+    ...controller.shell,
+    taskKinds: { general: { label: 'General task', cardLabel: 'Task', acceptsFailedChecks: true } },
+  };
+  const accept = taskActions(task, studioOf(controller), {})[0]!;
+  expect(accept.label).toBe('Accept result');
+  expect(accept.fields.find(field => field.name === 'overReason')?.required).toBe(false);
+  // A type whose contract takes no acceptance over a failed check keeps the plain Accept too.
+  controller.shell = {
+    ...controller.shell,
+    taskKinds: { general: { label: 'General task', cardLabel: 'Task', acceptOver: false } },
+  };
+  expect(taskActions(task, studioOf(controller), {})[0]!.label).toBe('Accept result');
+});
+
+// The stand-in answers as the controller does: each task read's actions and the list of calls are the shared rules'.
+test("the stand-in's task reads and calls answer the shared rules' actions for the same records", async () => {
+  for (const setUp of Object.values(decisionStates)) {
+    const controller = fakeController(),
+      task = setUp(controller);
+    controller.tasks = [task, ...controller.tasks.filter(item => item.id !== task.id)];
+    const state = studioOf(controller),
+      // The bring-back read counts only for a story that landed; the rules read it for no other task.
+      reads = (id: string) => ({ bringBack: controller.bringBack[id] ?? { lines: [] } });
+    const read = (await (await fetch(`/api/tasks/${task.id}?projectId=project-x`)).json()) as {
+      actions: TaskAction[];
+    };
+    expect(read.actions).toEqual(taskActions(task, state, reads(task.id)));
+    expect(read.actions).toEqual(actionsOf(controller, task));
+    const calls = (await (await fetch('/api/projects/project-x/calls')).json()) as ReturnType<typeof callsOf>;
+    expect(calls).toEqual(callsOf(controller, 'project-x'));
+    for (const item of calls.items)
+      for (const call of item.type === 'cleanup' ? item.members : item.type === 'task' ? [item] : [])
+        expect(call.actions).toEqual(
+          taskActions(controller.tasks.find(entry => entry.id === call.taskId)!, state, reads(call.taskId)),
+        );
+  }
+  // A waiting question needs the director: its call carries the task's actions, Send to Eli first.
+  const controller = fakeController(),
+    task = decisionStates['a waiting question']!(controller);
+  controller.tasks = [task];
+  const call = callsOf(controller, 'project-x').items.find(item => item.type === 'task' && item.taskId === 'T-1');
+  expect(call?.type === 'task' && call.actions.map(action => action.label)).toEqual([
+    'Send to Eli',
+    'Start assignment',
+    'Close',
+  ]);
+});

@@ -117,21 +117,28 @@ test('every write raises the version and notifies; a log line changes neither an
     calls.schedule++;
     schedule();
   };
-  const step = (label, write, changes) => {
+  // A change wakes the scheduler unless no task's readiness depends on it: an event row or an attempt's trace (C-19).
+  const step = (label, write, changes, scheduled = changes) => {
     const before = { version: store.version, change: calls.change, schedule: calls.schedule };
     write();
     assert.equal(store.version - before.version, changes, `${label} raises the version ${changes} time(s)`);
     assert.equal(calls.change - before.change, changes, `${label} notifies ${changes} time(s)`);
-    assert.equal(calls.schedule - before.schedule, changes, `${label} runs the scheduler ${changes} time(s)`);
+    assert.equal(calls.schedule - before.schedule, scheduled, `${label} runs the scheduler ${scheduled} time(s)`);
   };
   const task = store.tasks()[0];
   step('a setting', () => store.putSetting('change-stream-test', { value: 1 }), 1);
   step('a task', () => store.putTask(task), 1);
   step('the organization', () => store.setOrganization(store.organization()), 1);
   step('an attempt', () => store.updateAttempt(store.attempt('attempt-watch-a')), 1);
+  step(
+    "an attempt's speech bubble",
+    () => store.updateAttempt(store.attempt('attempt-watch-a'), { trace: true }),
+    1,
+    0,
+  );
   step('a claim', () => store.claim(['local:change-stream'], 'attempt-watch-a'), 1);
   step('a release', () => store.release('attempt-watch-a'), 1);
-  step('a recorded event', () => store.event('note', 'T-watch', 'attempt-watch-a', 'Something happened.'), 1);
+  step('a recorded event', () => store.event('note', 'T-watch', 'attempt-watch-a', 'Something happened.'), 1, 0);
   step('a log line', () => store.event('log', 'T-watch', 'attempt-watch-a', 'stdout: working'), 0);
   const versionBefore = store.version;
   store.release('attempt-watch-a');
@@ -153,6 +160,7 @@ test('every write raises the version and notifies; a log line changes neither an
       { type: 'task', id: task.id, projectId: 'project-legacy' },
       { type: 'organization' },
       { type: 'attempt', id: 'attempt-watch-a', taskId: 'T-watch', projectId: 'project-legacy' },
+      { type: 'attempt', id: 'attempt-watch-a', taskId: 'T-watch', projectId: 'project-legacy', trace: true },
       { type: 'leases' },
       { type: 'leases' },
       { type: 'event', id: noteSeq, kind: 'note', taskId: 'T-watch', attemptId: 'attempt-watch-a', projectId: null },
@@ -433,7 +441,10 @@ test('a command asked for its records answers with the changes it recorded and t
     { store, watch, until } = c;
   const [id, plain, unnamed] = [await assignment(c), await assignment(c), await assignment(c)];
   const stream = await watch();
-  await until(() => stream.named('change').length === 1, 'the connection change event');
+  // The three assignments' own throttled change event can reach the stream beside its connection event on a slow
+  // computer (GitHub's Windows runner, November 10, 2026: waiting for exactly one timed out), so the wait takes the
+  // first and lets more come; what the command recorded is told apart below by its sequence numbers.
+  await until(() => stream.named('change').length >= 1, 'the connection change event');
   const { start } = stream.named('change')[0].data,
     before = store.version,
     body = { projectId: 'project-legacy' };
@@ -453,7 +464,12 @@ test('a command asked for its records answers with the changes it recorded and t
     [id],
   );
   assert.equal(records.tasks[0].task.approval.status, 'approved');
-  assert.deepEqual(records.tasks[0], await page(c, id), 'The page is the one the task route answers.');
+  // The task route also lists the director's actions; a command's records leave them out, so its answer costs what
+  // it did.
+  const { actions, ...shown } = await page(c, id);
+  assert.ok(Array.isArray(actions), 'The task route lists the actions.');
+  assert.equal(Object.hasOwn(records.tasks[0], 'actions'), false, 'The records of a command carry no actions.');
+  assert.deepEqual(records.tasks[0], shown, 'The page is the one the task route answers, without its actions.');
   // A stream opened before the command still hears it, in the same shape.
   const heard = () =>
     stream

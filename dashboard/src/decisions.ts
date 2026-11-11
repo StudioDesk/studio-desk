@@ -1,7 +1,7 @@
 // What the director can decide about a task, worked out once for every page that offers it: the task page's
 // decisions and Today's calls (v1.0 item 23) read the same conditions, so a call never offers what the task page
 // would not. Nothing here sends anything; each page asks the controller for one recorded step.
-import type { AttemptSummary, Task } from './api';
+import type { AttemptSummary, ScopeRequest, Task } from './api';
 import { workerName } from './names';
 import { commandProblem, ruleFrom } from './permissions';
 import {
@@ -25,18 +25,31 @@ export interface StageRecord {
   current?: string;
   phase?: string;
   review?: { verdict?: string; attemptId?: string; hash?: string };
+  integration?: { attemptId?: string };
 }
 
 // A source story the director can send back over its accepted review, as the controller's sourceStoryReturnable
 // allows: a review that asked for changes, or one that passed while its own checks failed (November 1, 2026: a visual
-// check that captured an error page), which left the story failed at its review with nothing else to press.
-export function reviewReturnable(task: Task) {
+// check that captured an error page), which left the story failed at its review with nothing else to press. A review
+// that asked for changes also goes back from waiting for an integration nothing will run, where a refused request left
+// it: no integration of this review on its stage and, with the project's records, no integration journal on the
+// review and no request of its own waiting for its turn.
+export function reviewReturnable(task: Task, studio?: Pick<StudioState, 'attempts' | 'autonomy'>) {
   const stage = task.sourceStage as StageRecord | null | undefined;
+  if (task.status !== 'done' || !stage?.review || task.acceptedAttemptId !== stage.review.attemptId) return false;
+  if (stage.current === 'failed')
+    return (
+      stage.review.verdict === 'needs-work' || (stage.review.verdict === 'pass' && stage.phase === 'candidate-review')
+    );
+  const review = studio?.attempts.find(attempt => attempt.id === stage.review?.attemptId),
+    pending = studio?.autonomy?.pendingIntegration as { taskId?: string } | null | undefined;
   return (
-    task.status === 'done' &&
-    stage?.current === 'failed' &&
-    task.acceptedAttemptId === stage.review?.attemptId &&
-    (stage.review?.verdict === 'needs-work' || (stage.review?.verdict === 'pass' && stage.phase === 'candidate-review'))
+    stage.review.verdict === 'needs-work' &&
+    stage.phase === 'integration' &&
+    stage.current === 'waiting-for-integration' &&
+    stage.integration?.attemptId !== stage.review.attemptId &&
+    !review?.sourceIntegration &&
+    pending?.taskId !== task.id
   );
 }
 
@@ -89,7 +102,7 @@ export function decisionState(task: Task, studio: StudioState) {
   // The independent review asked for changes, or passed while its checks failed: send the story back, or integrate over
   // the review with a reason.
   const stage = task.sourceStage as StageRecord | null | undefined,
-    returnable = reviewReturnable(task);
+    returnable = reviewReturnable(task, studio);
   // An integration that stopped on a conflict (1.1 step 3), or failed only merged onto work that landed after the
   // change was tested (October 27): the story goes back to its editor merged onto the current source.
   const landed = journal?.verification?.landedSince,
@@ -106,6 +119,15 @@ export function decisionState(task: Task, studio: StudioState) {
       ['review', 'done'].includes(task.status)
         ? artifact(current, item => ['source-review', 'plan'].includes(item.kind ?? ''))
         : undefined;
+  // The code moved past the story's plan (the controller's outdated note, public/task-actions.js): the controller
+  // refuses its Start and any edit of its files, and only Close and send as a new idea carries its work on. It takes
+  // what Close takes, and a story that never started, as Deny does.
+  const outdated = task.kind === 'studio-development:change' && !!task.sourceStage?.outdated,
+    neverStarted =
+      approval?.status === 'approved' &&
+      !attempts.length &&
+      !['running', 'stopping', 'review', 'done', 'denied', 'backlog'].includes(task.status),
+    sendable = outdated && !closed && task.status !== 'denied' && (closable || neverStarted);
   return {
     attempts,
     live,
@@ -128,7 +150,19 @@ export function decisionState(task: Task, studio: StudioState) {
     mergeable,
     plan,
     proposal,
+    outdated,
+    sendable,
   };
+}
+
+// What Close and send as a new idea sends when the director does not change it: the story's title, its plain
+// summary when the page has one, and that it continues work the code moved past, as the controller composes it; never
+// its files, scope or identifiers. The controller takes in an idea of up to sendIdeaLimit characters.
+export const sendIdeaLimit = 4000;
+export const sentIdeaContinues = 'It continues work an earlier story planned, which the code has since moved past.';
+export function storyIdea(task: Task) {
+  const summary = typeof task.summary === 'string' ? task.summary.trim() : '';
+  return [task.title.trim(), summary, sentIdeaContinues].filter(Boolean).join('\n\n');
 }
 
 export interface Paths {
@@ -161,7 +195,7 @@ export function storyPaths(task: Task): Paths {
 export function fileRequest(task: Task, studio: StudioState) {
   const latest = studio.attempts.find(attempt => attempt.id === task.lastAttemptId),
     edits = (task.scopeEdits as ScopeEdit[] | undefined) ?? [],
-    scope = latest?.scopeRequest as (Paths & { reason?: string; problem?: string }) | undefined,
+    scope = latest?.scopeRequest as ScopeRequest | undefined,
     requested =
       task.status === 'blocked' &&
       latest?.status === 'blocked' &&
@@ -170,7 +204,10 @@ export function fileRequest(task: Task, studio: StudioState) {
       !edits.some(edit => edit.at >= String(latest.finishedAt ?? ''))
         ? latest
         : null,
-    request = requested && scope?.reason ? scope : null,
+    // A request carrying a problem is one the controller found it would refuse as asked, so it is not usable; the
+    // page shows the problem instead of Allow and continue.
+    request = requested && scope?.reason && !scope.problem ? scope : null,
+    problem = requested && typeof scope?.problem === 'string' && scope.problem.trim() ? scope.problem.trim() : '',
     current = storyPaths(task),
     offered: Paths = {
       files: [...new Set([...current.files, ...(request?.files ?? [])])],
@@ -184,7 +221,7 @@ export function fileRequest(task: Task, studio: StudioState) {
         attempt.artifacts?.some(item => item.kind === 'source-file' && item.path.startsWith('changes/')),
     ),
     editor = requested ? workerName(studio, requested.workerId) : '';
-  return { requested, request, scope, offered, worked, editor };
+  return { requested, request, scope, problem, offered, worked, editor };
 }
 
 // Each path a file request adds to the story: a file to edit or create joins with +, a file to delete with −.

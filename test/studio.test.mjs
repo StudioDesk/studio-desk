@@ -5,7 +5,7 @@ import path from 'node:path';
 import http from 'node:http';
 import os from 'node:os';
 import { Readable } from 'node:stream';
-import { createStudio } from './model-free-studio.mjs';
+import { createStudio, directorCredentials } from './model-free-studio.mjs';
 import { Store } from '../src/store.mjs';
 import { Runner } from '../src/runner.mjs';
 import { fixture, setup } from './studio-setup.mjs';
@@ -1000,8 +1000,8 @@ test('idea files sent with an idea are kept byte for byte and served only as dow
         method: options.method || 'GET',
         headers: {
           host: '127.0.0.1:0',
-          // Requests reach the server directly, as the director's own tool would send them (C-01).
-          'x-studio-key': app.directorKey,
+          // Requests reach the server directly, as the dashboard or the director's own tool would send them (C-01).
+          ...directorCredentials(app.directorKey, options.headers, options.method),
           ...Object.fromEntries(
             Object.entries(options.headers || {}).map(([key, value]) => [key.toLowerCase(), value]),
           ),

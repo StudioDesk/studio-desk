@@ -3,7 +3,9 @@
 // controller allows (scripts/studio-tests.mjs), and the controller copies the story's source from the
 // attempt's worktree, applies the staged edits, and runs the project's test command on the copy where
 // candidate tests run (the attempt's recorded test sandbox). The request carries a token that exists only
-// while the editor runs, and nothing but the test command can be run; the candidate is tested again after.
+// while the editor runs, and nothing but the test command can be run; the candidate is tested again after. A run
+// of the whole suite takes the computer's one test turn (core/test-turn.mjs) as other full suites do, waiting for it
+// while its editor keeps running; a run of named test files takes none and starts at once.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
@@ -12,12 +14,14 @@ import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { subscriptionEnvironment, command as nativeCommand } from '../adapters/process.mjs';
 import { jobDirectory } from '../core/projects.mjs';
+import { realPath } from '../core/real-path.mjs';
 import { candidateTestCommand, sandboxLabel } from '../adapters/source-test-sandbox.mjs';
 import { failedTestReader, sourceTestArgs, testPhaseEvidence } from './source-checks.mjs';
 import { installsPackages, profileOf } from './source-profile.mjs';
 import { installStep } from './package-installs.mjs';
 import { installTimeoutMs, testTimeoutMs } from './source-integration.mjs';
 import { makeTestCopy } from './test-copy.mjs';
+import { releaseTestTurn, waitForTestTurn } from '../core/test-turn.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/studio-tests.mjs', import.meta.url))
   .split(path.sep)
@@ -28,6 +32,19 @@ const outputLimit = 64 * 1024,
   errorLimit = 16 * 1024,
   MAX_FILES = 50,
   MAX_RUNS = 20;
+// How long a run of the whole suite waits for the computer's test turn before it answers without running: the agent
+// runs the command with a 600000 ms timeout, so it is answered well before that. The runtime may set a shorter one
+// (employeeTestTurnWaitMs, a test seam).
+export const employeeTurnWaitMs = 5 * 60 * 1000;
+
+// A wait in plain words: "4 seconds", "2 minutes 5 seconds".
+function duration(ms) {
+  const seconds = Math.max(1, Math.round(ms / 1000)),
+    minutes = Math.floor(seconds / 60),
+    rest = seconds % 60,
+    unit = (count, name) => `${count} ${name}${count === 1 ? '' : 's'}`;
+  return [minutes && unit(minutes, 'minute'), (rest || !minutes) && unit(rest, 'second')].filter(Boolean).join(' ');
+}
 
 // Opens the attempt's test endpoint while its editor runs; returns the variables its CLI passes to commands.
 export function openEmployeeTests(runtime, entry) {
@@ -39,7 +56,8 @@ export function openEmployeeTests(runtime, entry) {
   };
 }
 
-// Closes it when the editor stops, stopping a run still in progress.
+// Closes it when the editor stops, stopping a run still in progress, or its wait for the test turn. A run that holds
+// the turn gives it back once its process has closed, before the attempt's candidate tests can take it.
 export function closeEmployeeTests(entry) {
   const tests = entry.employeeTests;
   if (!tests) return;
@@ -151,11 +169,31 @@ export async function savedTestRun(store, attempt, number, name) {
   return file;
 }
 
-function run(executable, args, { cwd, environment, timeoutMs, tests, reader, saved }) {
+// A process of a run that holds the computer's test turn is recorded on the attempt (employeeTestPid, with when it
+// started, employeeTestStartedAt, so a later process handed the same ID is not taken for it) until it closes,
+// so a controller that stops meanwhile gives the turn back when it starts again only once that process is gone
+// (core/orchestrator.mjs, recordedProcessesEnded). A write the closed store refuses keeps the last record.
+function recordTurnProcess(turn, pid) {
+  if (!turn) return;
+  const a = turn.attempt;
+  if (pid) {
+    a.employeeTestPid = pid;
+    a.employeeTestStartedAt = new Date().toISOString();
+  } else {
+    delete a.employeeTestPid;
+    delete a.employeeTestStartedAt;
+  }
+  try {
+    turn.store.updateAttempt(a);
+  } catch {}
+}
+
+function run(executable, args, { cwd, environment, timeoutMs, tests, reader, saved, turn = null }) {
   return new Promise(resolve => {
     const [bin, argv] = nativeCommand(executable, args);
     const child = spawn(bin, argv, { cwd, env: environment, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     tests.child = child;
+    if (child.pid) recordTurnProcess(turn, child.pid);
     let stdout = '',
       stderr = '',
       timedOut = false;
@@ -186,6 +224,7 @@ function run(executable, args, { cwd, environment, timeoutMs, tests, reader, sav
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       tests.child = null;
+      if (child.pid) recordTurnProcess(turn, null);
       const rest = decoder.end();
       if (rest) read(rest);
       resolve({ code, signal, stdout, stderr, timedOut });
@@ -209,13 +248,14 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
   const directory = path.join(runtime.store.directory, 'tests', a.id.slice(-8)),
     // The run, its copy and its install leave the editor's time limit out (Runner.holdTimeLimit).
     hold = runtime.holdTimeLimit?.(entry) ?? null;
+  let turn = false;
   try {
     // The copy is made in a process of its own, so the controller keeps answering while it is made.
     const scope = a.sourceChange,
       plan = await makeTestCopy(
         {
           source: scope.source,
-          worktree: fs.realpathSync(a.sourceWorktree.path),
+          worktree: realPath(a.sourceWorktree.path),
           output: entry.output,
           directory,
           allowedFiles: scope.allowedFiles,
@@ -234,10 +274,33 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
         ),
         { status: 400 },
       );
+    // The whole suite waits for the computer's one test turn; named test files start at once.
+    let waited = null;
+    if (!wanted.length) {
+      waited = await waitForSuiteTurn(runtime, entry, tests, hold);
+      turn = waited.taken;
+      if (!turn) {
+        if (!waited.bounded)
+          return { exitCode: 1, summary: 'The run stopped before it had the test turn.', output: '', errors: '' };
+        const summary = boundedSummary(waited, scope, suite);
+        runtime.store.event(
+          'employee_tests',
+          a.taskId,
+          a.id,
+          `The employee's run of the whole suite did not start: ${summary}`,
+        );
+        return { exitCode: 1, summary, output: '', errors: '' };
+      }
+      // The editor stopped as the turn came; the turn is given back below.
+      if (entry.employeeTests !== tests)
+        return { exitCode: 1, summary: 'The run stopped before its tests started.', output: '', errors: '' };
+    }
     const environment = subscriptionEnvironment();
     for (const key of Object.keys(environment)) if (/^STUDIO_/i.test(key)) delete environment[key];
     // As for candidate tests: only the copied test harness reads this marker.
     environment.STUDIO_MODEL_FREE_LEAF_FIXTURES = '1';
+    // Holding the turn, the run's processes are recorded on the attempt while they run (recordTurnProcess).
+    const held = turn ? { store: runtime.store, attempt: a } : null;
     const install = installStep(runtime, directory, installsPackages(profileOf(a.sourceChange.source)));
     if (install) {
       const installed = await run(install.executable, install.args, {
@@ -245,6 +308,7 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
         environment,
         timeoutMs: installTimeoutMs,
         tests,
+        turn: held,
       });
       if (installed.code !== 0)
         return {
@@ -254,7 +318,11 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
           errors: installed.stderr.slice(-errorLimit),
         };
     }
-    const focused = { ...plan, command: { ...plan.command, args: sourceTestArgs(wanted.length ? wanted : suite) } },
+    const focused = {
+        ...plan,
+        data: runtime.store.directory,
+        command: { ...plan.command, args: sourceTestArgs(wanted.length ? wanted : suite) },
+      },
       command = runtime.sourceCheckCommand || candidateTestCommand(focused, a.configuration);
     // A run's number increases across the attempt and stays its own when the oldest runs are dropped.
     const reader = failedTestReader(),
@@ -270,6 +338,7 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
         tests,
         reader,
         saved,
+        turn: held,
       });
     } finally {
       // A run stopped early (its time limit, the editor stopping, the client leaving) keeps what it printed.
@@ -279,11 +348,15 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
     const { totals } = testPhaseEvidence(result.stdout),
       failedTests = reader.finish(),
       where = runtime.sourceCheckCommand ? 'as a protocol fixture' : sandboxLabel(a.configuration),
-      summary = result.timedOut
-        ? `The tests ran past their ${testTimeoutMs / 60000}-minute limit and were stopped.`
-        : totals
-          ? `${totals.pass}/${totals.tests} tests passed${totals.fail ? `, ${totals.fail} failed` : ''} on your edits, ${where}.`
-          : `The tests stopped with exit code ${result.code} before reporting totals, ${where}.`;
+      waitedFor = waited?.waitedMs
+        ? ` The run waited ${duration(waited.waitedMs)} for this computer's one test turn.`
+        : '',
+      summary =
+        (result.timedOut
+          ? `The tests ran past their ${testTimeoutMs / 60000}-minute limit and were stopped.`
+          : totals
+            ? `${totals.pass}/${totals.tests} tests passed${totals.fail ? `, ${totals.fail} failed` : ''} on your edits, ${where}.`
+            : `The tests stopped with exit code ${result.code} before reporting totals, ${where}.`) + waitedFor;
     (a.employeeTestRuns ||= []).push({
       number,
       startedAt: started,
@@ -315,10 +388,46 @@ export async function runEmployeeTests(runtime, entry, { files = [] } = {}) {
       errors: result.stderr.slice(-errorLimit),
     };
   } finally {
+    // Every process of the run has closed by now (passed, failed, its limit, the client leaving, the editor stopping).
+    if (turn)
+      try {
+        releaseTestTurn(runtime.store, a.id);
+      } catch {} // The store closed with the controller; a restart reconciles the attempt and its lease.
     // A stopped run's files may still be held for a moment on Windows; the next run clears them first. Removed
     // in the background, so the controller keeps answering, and before the next run may start.
     await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {});
     tests.busy = false;
     runtime.resumeTimeLimit?.(entry, hold);
   }
+}
+
+// Waits for the computer's test turn while the editor keeps running. The wait stands in for the run's process
+// (tests.child), so the client leaving and the editor stopping (closeEmployeeTests) take it out of the queue as they
+// stop a process. Its time counts neither against the editor's limit nor toward its allowance for test runs
+// (Runner.holdTimeLimit): the run's own hold leaves it out, and a run that no longer holds the limit holds it for the
+// wait alone.
+async function waitForSuiteTurn(runtime, entry, tests, hold) {
+  const stop = new AbortController(),
+    waiting = { kill: () => stop.abort() },
+    waitHold = hold ? null : (runtime.holdTimeLimit?.(entry, { waiting: true }) ?? null);
+  tests.child = waiting;
+  try {
+    const waited = await waitForTestTurn(runtime, entry, {
+      boundMs: runtime.employeeTestTurnWaitMs ?? employeeTurnWaitMs,
+      signal: stop.signal,
+    });
+    if (hold) hold.waitedMs = (hold.waitedMs || 0) + waited.waitedMs;
+    return waited;
+  } finally {
+    if (tests.child === waiting) tests.child = null;
+    runtime.resumeTimeLimit?.(entry, waitHold);
+  }
+}
+
+// What a run answers when the turn stayed taken past the bound: whose suite holds it, and to name test files instead.
+function boundedSummary(waited, scope, suite) {
+  const holder = /^Waiting for (.+) to finish: /.exec(waited.reason || '')?.[1] || 'another full test suite',
+    touched = [...scope.allowedFiles, ...(scope.newFiles || [])].filter(file => suite.includes(file)),
+    example = `${employeeTestsCommand} ${touched.length ? touched.slice(0, 3).join(' ') : 'test/<file>.test.mjs'}`;
+  return `No tests ran: after ${duration(waited.waitedMs)}, ${holder} still had this computer's one test turn (it runs one full test suite at a time). Run the test files your edits touch by name instead, which start at once, for example: ${example}`;
 }
